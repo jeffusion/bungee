@@ -25,6 +25,7 @@ export interface RuntimeUpstream extends Endpoint {
 }
 
 export interface RequestSnapshot {
+  bodySource?: import("./request/body-source").BodySource;
   method: string;
   url: string;
   headers: Record<string, string>;

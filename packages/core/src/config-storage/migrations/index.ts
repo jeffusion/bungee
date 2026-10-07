@@ -19,9 +19,13 @@ import { CONFIG_MIGRATION_V12 } from './v12';
 import { CONFIG_MIGRATION_V13 } from './v13';
 import { CONFIG_MIGRATION_V14 } from './v14';
 
+import { CONFIG_MIGRATION_V15 } from './v15';
+import type { DirectionalMigrationWarning } from '../directional-migration';
+import { logger } from '../../logger';
+
 type TableRow = { readonly name: string };
 type MigrationRow = { readonly version: number; readonly name: string };
-const CONFIG_MIGRATIONS = [
+export const CONFIG_MIGRATIONS = [
   CONFIG_MIGRATION_V1,
   CONFIG_MIGRATION_V2,
   CONFIG_MIGRATION_V3,
@@ -36,6 +40,7 @@ const CONFIG_MIGRATIONS = [
   CONFIG_MIGRATION_V12,
   CONFIG_MIGRATION_V13,
   CONFIG_MIGRATION_V14,
+  CONFIG_MIGRATION_V15,
 ] as const;
 
 const REQUIRED_TABLES_BEFORE_V5 = [
@@ -139,6 +144,7 @@ export function migrateConfigurationDatabase(
   faultInjection?: (stage: 'during_v11_after_materialization' | 'during_v12_after_schema_change') => void,
 ): void {
   let transactionStarted = false;
+  const ignoredRules: DirectionalMigrationWarning[] = [];
   try {
     db.run('BEGIN IMMEDIATE');
     transactionStarted = true;
@@ -154,7 +160,13 @@ export function migrateConfigurationDatabase(
         if (before !== undefined && after === before + 1) unpublishedMigrationRevision = after;
       } else if (migration.version === 12) migration.up(db,
         faultInjection === undefined ? undefined : () => faultInjection('during_v12_after_schema_change'));
-      else if (migration.version === 13) migration.up(db, workerCount, unpublishedMigrationRevision);
+      else if (migration.version === 13 || migration.version === 15) {
+        const before = sqliteGet<{active_revision:number}, []>(db, 'SELECT active_revision FROM configuration_state WHERE id=1')?.active_revision;
+        if (migration.version === 15) migration.up(db, workerCount, unpublishedMigrationRevision, ignoredRules);
+        else migration.up(db, workerCount, unpublishedMigrationRevision);
+        const after = sqliteGet<{active_revision:number}, []>(db, 'SELECT active_revision FROM configuration_state WHERE id=1')?.active_revision;
+        if (before !== undefined && after === before + 1) unpublishedMigrationRevision = after;
+      }
       else migration.up(db);
     };
     if (count === 0) {
@@ -177,4 +189,6 @@ export function migrateConfigurationDatabase(
     if (isSqliteBusyError(error)) throw repositoryFailure('configuration migration was blocked by SQLite', error);
     throw new ConfigRepositoryError('migration_failed', 'configuration migration failed', error);
   }
+  // Report only committed changes; rollback and a later reopen produce no misleading summary.
+  if (ignoredRules.length) logger.warn({ version: 15, ignored_rules: ignoredRules }, 'Incompatible configuration modification rules were ignored during upgrade');
 }

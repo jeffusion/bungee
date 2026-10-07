@@ -3,7 +3,7 @@ import { parsePluginManifestText } from '../../src/plugin-manifest-catalog';
 
 function manifest(configSchema: readonly Record<string, unknown>[]): Record<string, unknown> {
   return {
-    name: 'hardening-plugin', version: '1.0.0', schemaVersion: 2,
+    name: 'hardening-plugin', version: '1.0.0', schemaVersion: 3,
     artifactKind: 'runtime-plugin', main: 'server/index.ts',
     capabilities: ['hooks', 'dynamicRuntimeLoad'], uiExtensionMode: 'none',
     engines: { bungee: '^4.2.0 || ^5.0.0' }, configSchema,

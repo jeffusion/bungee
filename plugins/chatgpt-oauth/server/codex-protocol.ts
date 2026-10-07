@@ -1,3 +1,4 @@
+import type { SSEEnvelope } from '../../../packages/core/src/plugin.types';
 import type { RawResponseError } from '../../../packages/core/src/plugin-control/contracts';
 import { upstreamErrorDiagnostic } from './error-diagnostics';
 
@@ -273,9 +274,11 @@ export function normalizeCodexResponsesRequest(input: JsonObject): JsonObject {
 }
 
 export interface CodexSSEEvent {
+  /** Codex payload discriminator, independent of the SSE event field. */
   type?: string;
   data: JsonObject;
   id?: string;
+  envelope?: SSEEnvelope;
 }
 
 export type SSESource = string | AsyncIterable<Uint8Array | string> | ReadableStream<Uint8Array>;
@@ -355,37 +358,49 @@ export async function* parseCodexSSE(source: SSESource, options: CodexSSEOptions
   let lineParts: string[] = [];
   let lineBytes = 0;
   let skipLF = false;
-  let event = '';
+  let event: string | undefined;
   let eventId: string | undefined;
+  let retry: string | undefined;
+  let comments: string[] = [];
   let data: string[] = [];
   const dispatch = async function* (): AsyncGenerator<CodexSSEEvent> {
     const currentData = data;
     const currentId = eventId;
-    event = '';
+    const metadata = {
+      ...(event !== undefined ? { event } : {}),
+      ...(eventId !== undefined ? { id: eventId } : {}),
+      ...(retry !== undefined ? { retry } : {}),
+      ...(comments.length ? { comments } : {}),
+    };
+    event = undefined;
     eventId = undefined;
+    retry = undefined;
+    comments = [];
     data = [];
     if (currentData.length === 0) return;
     const raw = currentData.join('\n');
+    const envelope = Object.keys(metadata).length ? { envelope: { data: raw, ...metadata } } : {};
     const payload = raw.trim();
     if (payload === '[DONE]') {
-      yield { type: 'done', data: {}, ...(currentId ? { id: currentId } : {}) };
+      yield { type: 'done', data: {}, ...(currentId !== undefined ? { id: currentId } : {}), ...envelope };
     } else {
       let parsed: unknown;
       try { parsed = JSON.parse(payload); } catch { throw new CodexProtocolError('invalid_sse', 'Codex response contained invalid SSE JSON'); }
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new CodexProtocolError('invalid_sse', 'Codex SSE event was not an object');
       const object = parsed as JsonObject;
       if (typeof object.type !== 'string' || !object.type) throw new CodexProtocolError('invalid_sse', 'Codex SSE event has no type');
-      yield { type: object.type, data: object, ...(currentId ? { id: currentId } : {}) };
+      yield { type: object.type, data: object, ...(currentId !== undefined ? { id: currentId } : {}), ...envelope };
     }
   };
   const consumeLine = async function* (line: string): AsyncGenerator<CodexSSEEvent> {
-    if (line.startsWith(':')) return;
+    if (line.startsWith(':')) { comments.push(line.slice(1)); return; }
     if (!line) { yield* dispatch(); return; }
     const colon = line.indexOf(':');
     const field = colon < 0 ? line : line.slice(0, colon);
     const value = (colon < 0 ? '' : line.slice(colon + 1)).replace(/^ /, '');
     if (field === 'event') event = value;
-    else if (field === 'id') eventId = value;
+    else if (field === 'id' && !value.includes('\0')) eventId = value;
+    else if (field === 'retry' && /^\d+$/.test(value)) retry = value;
     else if (field === 'data') {
       data.push(value);
     }

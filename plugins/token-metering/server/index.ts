@@ -272,7 +272,12 @@ export const TokenMeteringPlugin = definePlugin(
       });
       context.services.publish(TOKEN_METERING_SERVICE_ID, TOKEN_METERING_CONTRACT_VERSION, service);
     }
-    register(hooks: PluginHooks): void {
+    bodyRequirements(context: import('../../../packages/core/src/plugin.types').PluginBodyRequirementContext): import('../../../packages/core/src/plugin.types').PluginBodyRequirements {
+      const subscribed = this.requests.get(context.requestId) ?? [...this.subscriptions].filter(s => !s.requestId || s.requestId === context.requestId);
+      return subscribed.length ? { request: 'none', observe: { request: true, response: true, sse: true } } : { request: 'none' };
+    }
+
+  register(hooks: PluginHooks): void {
       // Demand is captured before attempt selection; raw observation remains a framework hook.
       hooks.onRequestInit.tapPromise('token-metering-demand', async event => this.prepareRequest(event.requestId));
       hooks.onAttemptObservation.tapPromise('token-metering', async event => this.handleAttemptObservation(event));
@@ -362,7 +367,7 @@ export const TokenMeteringPlugin = definePlugin(
         attempt.responseSeen = true;
         const body = event.body;
         attempt.responseFailed ||= event.status >= 400 || body.error !== undefined;
-        const provider = attempt.provider === 'unknown' ? classifyResponse(body, attempt.llm) : attempt.provider;
+        const provider = attempt.provider === 'unknown' ? classifyResponse(body, attempt.llm, event.envelope?.event) : attempt.provider;
         if (!provider) return;
         if (!attempt.llm) {
           attempt.model = detectModel(body) ?? (isRecord(body.response) ? detectModel(body.response) : undefined);
@@ -379,7 +384,7 @@ export const TokenMeteringPlugin = definePlugin(
           this.parsedResponses++;
           const parsed = event.protocol === 'json'
             ? session.consumeResponse({ body })
-            : session.consumeStreamChunk({ chunk: body });
+            : session.consumeStreamChunk({ chunk: body, event: event.envelope?.event });
           if (!parsed) return;
           assertCanonicalTokenAccountingEventV2(parsed);
           const merged = mergeOfficialUsage(parsed, attempt.latestEvent);
@@ -429,7 +434,7 @@ export const TokenMeteringPlugin = definePlugin(
           responseFailed: attempt.responseFailed,
           observationIncomplete: attempt.observationIncomplete,
         };
-        this.deliver(finalizeAttempt(taskInput), !attempt.llm);
+        this.deliver(finalizeAttempt(taskInput), !attempt.llm && !attempt.observationIncomplete);
       }
     }
 

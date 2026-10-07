@@ -8,7 +8,7 @@ const record = {
   manifest: {
     name: 'sandbox-plugin',
     version: '1.0.0',
-    schemaVersion: 2,
+    schemaVersion: 3,
     artifactKind: 'runtime-plugin',
     main: 'server/index.ts',
     capabilities: ['hooks', 'dynamicRuntimeLoad', 'sandboxUiExtension', 'controlPlane'],

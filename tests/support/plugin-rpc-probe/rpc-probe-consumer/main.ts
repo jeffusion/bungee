@@ -197,6 +197,8 @@ export class RpcProbeConsumer {
     }
   }
 
+  bodyRequirements() { return { request: 'none' as const }; }
+
   register(): void {}
   async onDestroy(): Promise<void> { backgroundStopped = true; crashClient = null; clearInterval(crashTimer); }
 }

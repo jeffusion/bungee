@@ -1,990 +1,169 @@
-/**
- * Response processor module
- * Handles response modification and streaming
- */
-
-import { logger } from '../../logger';
 import type { RequestLogger } from '../../logger/request-logger';
-import type { AppConfig, ModificationRules } from '@jeffusion/bungee-types';
-import type { ExpressionContext } from '../../expression-engine';
+import type { AppConfig, ModificationRules, ResponseModificationRules } from '@jeffusion/bungee-types';
+import { processDynamicValue, type ExpressionContext } from '../../expression-engine';
+import { analyzeExpressionDependencies, hasBodyModification } from '../../utils/expression-dependencies';
 import type { PluginHooks, RequestContext } from '../../hooks';
 import type { InboundChain } from '../../scoped-plugin-registry';
-import { isStreamingResponse } from './streaming-response';
+import type { SSEEnvelope } from '../../plugin.types';
 import { applyBodyRules } from '../rules/modifier';
-import {
-  createPluginTransformStream,
-  createSSEParserStream,
-  createSSESerializerStream
-} from '../../stream-executor';
-
-const SSE_IDLE_HEARTBEAT_MS = 4_000;
+import { BodySource, BodyBufferLease, BodyProcessingError, decodeStream, isJsonMediaType, isObjectBody, readBodyChunk, reconcileEntityHeaders } from '../request/body-source';
+import { parseBodyParserLimit } from '../../config-storage/global-scalars';
+import type { RawResponseCompletion } from '../../plugin-control/contracts';
+import { logger } from '../../logger';
 
 export interface StreamCompletionState {
   interrupted: boolean;
   cancelled: boolean;
   clientCancelled?: boolean;
-  completion?: Promise<import('../../plugin-control/contracts').RawResponseCompletion>;
-  complete?: (completion: import('../../plugin-control/contracts').RawResponseCompletion) => void;
-  /** Single idempotent promise for transport reader/pipe teardown. */
+  completion?: Promise<RawResponseCompletion>;
+  complete?: (completion: RawResponseCompletion) => void;
   teardown?: Promise<void>;
-  /** Starts the same teardown represented by `teardown`; safe to call repeatedly. */
   teardownNow?: (reason?: unknown) => Promise<void>;
-  /** Completion of the converted client body, distinct from raw upstream completion. */
-  finalCompletion?: Promise<import('../../plugin-control/contracts').RawResponseCompletion>;
+  finalCompletion?: Promise<RawResponseCompletion>;
+}
+function headerRecord(headers: Headers): Record<string,string> { const result: Record<string,string> = {}; headers.forEach((value,key)=>{result[key]=value;}); return result; }
+export interface PrepareResponseResult { headers: Headers; body: BodyInit | null }
+
+export function applyHeaderRules(headers: Headers, rules: ModificationRules['headers'], context: ExpressionContext): void {
+  if (!rules) return;
+  const set = (key: string, value: unknown, action: string) => {
+    try { const result = processDynamicValue(value, context); if (result !== undefined) headers.set(key, String(result)); }
+    catch { logger.warn({ field: key, action, code: 'header_expression_failed' }, 'Header modification was skipped'); }
+  };
+  for (const [key, value] of Object.entries(rules.add ?? {})) set(key, value, 'add');
+  for (const [key, value] of Object.entries(rules.replace ?? {})) if (headers.has(key)) set(key, value, 'replace');
+  for (const [key, value] of Object.entries((rules as typeof rules & {default?:Record<string,string>}).default ?? {})) if (!headers.has(key)) set(key, value, 'default');
+  for (const key of rules.remove ?? []) if (!(key in (rules.add ?? {})) && !(key in (rules.replace ?? {}))) headers.delete(key);
+}
+/** Completion follows the consumer, including ordinary binary responses. */
+export function completionStream(source: ReadableStream<Uint8Array>, state?: StreamCompletionState, signal?: AbortSignal): ReadableStream<Uint8Array> {
+  const reader = source.getReader(); let closed = false;
+  let teardownResolve!: () => void;
+  const teardown = new Promise<void>(resolve => { teardownResolve = resolve; });
+  if (state) state.teardown = teardown;
+  const settle = (outcome: RawResponseCompletion) => { if (closed) return; closed = true; state?.complete?.(outcome); teardownResolve(); };
+  const cancel = async (reason?: unknown) => { settle({status: 'cancelled'}); await reader.cancel(reason).catch(() => undefined); };
+  if (state) state.teardownNow = cancel;
+  return new ReadableStream({
+    async pull(controller) {
+      try { const part = await readBodyChunk(reader, signal);
+        if (part.done) { settle({status:'completed'}); controller.close(); return; } controller.enqueue(part.value);
+      } catch (error) { if (state) state.interrupted = !signal?.aborted; settle(signal?.aborted ? {status:'cancelled'} : {status:'failed',code:'stream_read_failed'});
+        void reader.cancel(error).catch(() => undefined); controller.error(error); }
+    },
+    async cancel(reason) { if (state) { state.cancelled = true; state.clientCancelled = true; } await cancel(reason); },
+  }, {highWaterMark:0});
 }
 
-function createInboundChainTransformStream(
-  inboundChain: InboundChain,
-  requestContext: RequestContext,
-  strict = false,
-): TransformStream<any, any> {
-  const streamState = new Map<string, any>();
-  let chunkIndex = 0;
-  let isFirstChunk = true;
-  let isLastChunk = false;
-  const ctx = {
-    ...requestContext,
-    chunkIndex,
-    isFirstChunk,
-    isLastChunk,
-    streamState,
-    request: requestContext,
-    strict,
+/** Parse only demanded SSE. Metadata stays separate from the JSON object. */
+export function createSSEEnvelopeTransform(
+  rules: ModificationRules['body'], requestContext: ExpressionContext, maxBytes: number,
+  chain?: InboundChain, hookContext?: RequestContext, bodyOwners?: Array<{dispose():void}>,
+): TransformStream<Uint8Array, Uint8Array> {
+  const decoder = new TextDecoder('utf-8', {fatal:true}); const encoder = new TextEncoder();
+  const lease=new BodyBufferLease();bodyOwners?.push(lease);
+  let pending = ''; let chunkIndex = 0; const streamState = new Map<string, any>();
+  const serialize = (envelope: SSEEnvelope): string => {
+    if (envelope.raw !== undefined && envelope.json === undefined) return envelope.raw;
+    const fields: string[] = (envelope.comments ?? []).map(comment => `:${comment}`);
+    for (const key of ['event','id','retry'] as const) if (envelope[key] !== undefined) fields.push(`${key}: ${envelope[key]}`);
+    const data = envelope.json === undefined ? envelope.data : JSON.stringify(envelope.json);
+    for (const line of data.split('\n')) fields.push(`data: ${line}`);
+    return `${fields.join('\n')}\n\n`;
   };
-
-  const updateContext = () => {
-    ctx.chunkIndex = chunkIndex;
-    ctx.isFirstChunk = isFirstChunk;
-    ctx.isLastChunk = isLastChunk;
+  const context = () => ({...hookContext, chunkIndex, isFirstChunk:chunkIndex===0, isLastChunk:false, streamState, request:hookContext, strict:true});
+  const frame = async (raw: string, controller: TransformStreamDefaultController<Uint8Array>) => {
+    const lines = raw.replace(/(?:\r\n|\r|\n){2}$/, '').split(/\r\n|\r|\n/);
+    const envelope: SSEEnvelope = {data:'',comments:[],raw}; const data: string[] = [];
+    for (const line of lines) {
+      if (line.startsWith(':')) { envelope.comments!.push(line.slice(1)); continue; }
+      const colon = line.indexOf(':'); const field = colon < 0 ? line : line.slice(0,colon); let value = colon < 0 ? '' : line.slice(colon+1); if (value.startsWith(' ')) value = value.slice(1);
+      if (field === 'data') data.push(value);
+      else if (field === 'event' || field === 'id' || field === 'retry') envelope[field] = value;
+    }
+    envelope.data = data.join('\n');
+    if (!data.length || envelope.data.trim() === '[DONE]') { controller.enqueue(encoder.encode(raw)); return; }
+    try { const json: unknown = JSON.parse(envelope.data); if (isObjectBody(json)) envelope.json = json; } catch { /* Non-JSON is a legal SSE event. */ }
+    if (envelope.json === undefined) { controller.enqueue(encoder.encode(raw)); return; }
+    const outputs = chain ? await chain.onStreamChunk(envelope, context()) : [envelope]; chunkIndex++;
+    for (const output of outputs) {
+      if (!output || typeof output.data !== 'string') throw new BodyProcessingError(502,'invalid_sse_plugin_envelope');
+      let final = output;
+      if (hasBodyModification(rules) && isObjectBody(output.json)) {
+        const bodyContext = {...requestContext, headers:requestContext.response?.headers ?? {}, body:output.json, response:{headers:requestContext.response?.headers ?? {},body:output.json}};
+        final = {...output, json:await applyBodyRules(output.json, rules, bodyContext, {})};
+      }
+      controller.enqueue(encoder.encode(serialize(final)));
+    }
   };
-
+  const consume = async (controller: TransformStreamDefaultController<Uint8Array>) => {
+    // A blank line can use any permitted SSE line ending, including CR split across chunks.
+    let match: RegExpExecArray | null;
+    while ((match = /(?:\r\n|\r(?!\n)|(?<!\r)\n){2}/.exec(pending))) {
+      if (match.index + match[0].length === pending.length && pending.endsWith('\r')) break;
+      const end = match.index + match[0].length; const raw = pending.slice(0,end); pending = pending.slice(end);
+      if (encoder.encode(raw).byteLength > maxBytes) throw new BodyProcessingError(502,'sse_event_too_large'); await frame(raw,controller);lease.release(encoder.encode(raw).byteLength);
+    }
+    if (encoder.encode(pending).byteLength > maxBytes) throw new BodyProcessingError(502,'sse_event_too_large');
+  };
   return new TransformStream({
-    async transform(chunk, controller) {
-      updateContext();
-      try {
-        const outputChunks = await inboundChain.onStreamChunk(chunk, ctx);
-        for (const outputChunk of outputChunks) {
-          controller.enqueue(outputChunk);
-        }
-      } catch (error) {
-        logger.error({ error, chunk }, 'Error in inbound stream chain');
-        if (strict) {
-          throw error;
-        }
-        controller.enqueue(chunk);
-      } finally {
-        chunkIndex++;
-        isFirstChunk = false;
-      }
-    },
-
+    async transform(bytes, controller) { try { lease.add(bytes.byteLength);pending += decoder.decode(bytes,{stream:true});await consume(controller); } catch(error) {lease.dispose();throw error instanceof BodyProcessingError ? error : new BodyProcessingError(502,'invalid_response_utf8');} },
     async flush(controller) {
-      isLastChunk = true;
-      updateContext();
-      try {
-        const bufferedChunks = await inboundChain.onFlushStream([], ctx);
-        for (const chunk of bufferedChunks) {
-          controller.enqueue(chunk);
-        }
-      } catch (error) {
-        logger.error({ error }, 'Error flushing inbound stream chain');
-        if (strict) {
-          throw error;
-        }
-      } finally {
-        streamState.clear();
-      }
-    }
+      try { pending += decoder.decode(); } catch { throw new BodyProcessingError(502,'invalid_response_utf8'); }
+      await consume(controller); if (pending) controller.enqueue(encoder.encode(pending));
+      if (chain) for (const output of await chain.onFlushStream([], {...context(),isLastChunk:true})) controller.enqueue(encoder.encode(serialize(output)));
+      streamState.clear();lease.dispose();
+    },
   });
 }
 
-interface LoggedSSEMessage {
-  index: number;
-  event?: string;
-  done?: boolean;
-  dataText: string;
-  data?: unknown;
-}
-
-interface LoggedSSEPayload {
-  kind: 'sse_messages';
-  totalMessages: number;
-  capturedMessages: number;
-  droppedMessages: number;
-  messages: LoggedSSEMessage[];
-  interrupted?: boolean;
-}
-
-function createSSECaptureTapStream(
-  source: ReadableStream<Uint8Array>,
-  requestLog: any,
-  reqLogger: RequestLogger
-): ReadableStream<Uint8Array> {
-  const reader = source.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let currentEvent: string | null = null;
-  let currentDataLines: string[] = [];
-  const messages: LoggedSSEMessage[] = [];
-  let totalMessages = 0;
-
-  const resetCurrentMessage = () => {
-    currentEvent = null;
-    currentDataLines = [];
-  };
-
-  const parseDataIfJson = (fullDataText: string): unknown | undefined => {
-    if (!fullDataText) {
-      return undefined;
-    }
-
-    try {
-      return JSON.parse(fullDataText);
-    } catch {
-      return undefined;
-    }
-  };
-
-  const captureCurrentMessage = () => {
-    if (currentDataLines.length === 0) {
-      resetCurrentMessage();
-      return;
-    }
-
-    const fullDataText = currentDataLines.join('\n');
-    const isDone = fullDataText.trim() === '[DONE]';
-
-    messages.push({
-      index: totalMessages,
-      event: currentEvent || undefined,
-      done: isDone ? true : undefined,
-      dataText: fullDataText,
-      data: isDone ? undefined : parseDataIfJson(fullDataText),
-    });
-
-    totalMessages += 1;
-    resetCurrentMessage();
-  };
-
-  const consumeCompleteLines = (text: string) => {
-    buffer += text;
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-
-    for (const lineWithCR of lines) {
-      const line = lineWithCR.endsWith('\r') ? lineWithCR.slice(0, -1) : lineWithCR;
-
-      if (line.startsWith('event:')) {
-        currentEvent = line.slice(6).trim();
-      } else if (line.startsWith('data:')) {
-        currentDataLines.push(line.slice(5).trimStart());
-      } else if (line === '') {
-        captureCurrentMessage();
-      }
-    }
-  };
-
-  let persisted = false;
-  let cancelled = false;
-  const persist = async (interrupted = false): Promise<void> => {
-    if (persisted) return;
-    persisted = true;
-    const remainingText = `${buffer}${decoder.decode()}`;
-    if (remainingText.length > 0) {
-      const line = remainingText.endsWith('\r') ? remainingText.slice(0, -1) : remainingText;
-      if (line.startsWith('event:')) {
-        currentEvent = line.slice(6).trim();
-      } else if (line.startsWith('data:')) {
-        currentDataLines.push(line.slice(5).trimStart());
-      }
-    }
-
-    captureCurrentMessage();
-
-    if (totalMessages === 0 && !interrupted) {
-      return;
-    }
-
-    const requestId = reqLogger.getRequestId();
-    const payload: LoggedSSEPayload = {
-      kind: 'sse_messages',
-      totalMessages,
-      capturedMessages: totalMessages,
-      droppedMessages: 0,
-      messages,
-      interrupted: interrupted || undefined,
-    };
-
-    try {
-      const bodyId = await reqLogger.persistStreamResponseBody(payload);
-
-      if (!bodyId) {
-        logger.debug(
-          {
-            request: requestLog,
-            stream: {
-              requestId,
-              totalMessages,
-              capturedMessages: totalMessages,
-            },
-          },
-          'Skipped SSE message recording'
-        );
-        return;
-      }
-
-      reqLogger.updateStreamResponseBodyId(bodyId);
-      logger.debug(
-        {
-          request: requestLog,
-          stream: {
-            requestId,
-            totalMessages,
-            capturedMessages: totalMessages,
-            bodyId,
-          },
-        },
-        'Recorded SSE messages into request log'
-      );
-    } catch (error) {
-      logger.warn(
-        {
-          request: requestLog,
-          error,
-          stream: {
-            requestId,
-            totalMessages,
-            capturedMessages: totalMessages,
-          },
-        },
-        'Failed to record SSE messages into request log'
-      );
-    }
-  };
-
-  return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      try {
-        const { done, value } = await reader.read();
-        if (cancelled) return;
-        if (done) {
-          await persist();
-          if (!cancelled) controller.close();
-          return;
-        }
-        consumeCompleteLines(decoder.decode(value, { stream: true }));
-        controller.enqueue(value);
-      } catch (error) {
-        // TransformStream.flush does not run on errors. Keep the messages that
-        // arrived before interruption, even if the first event never arrived.
-        await persist(true);
-        if (!cancelled) controller.error(error);
-      }
-    },
-    async cancel(reason) {
-      cancelled = true;
-      await Promise.all([persist(true), reader.cancel(reason)]);
-    },
-  }, { highWaterMark: 0 });
-}
-
-function getRequestIdFromLog(requestLog: any): string {
-  return typeof requestLog?.requestId === 'string' ? requestLog.requestId : 'unknown';
-}
-
-function createSSEStageTapStream<T>(
-  stage: string,
-  requestLog: any,
-  options?: { includeBytes?: boolean }
-): TransformStream<T, T> {
-  const startAt = Date.now();
-  let chunkCount = 0;
-  let byteCount = 0;
-  let doneCount = 0;
-
-  return new TransformStream<T, T>({
-    transform(chunk, controller) {
-      chunkCount++;
-
-      if ((chunk as any)?.type === '[DONE]') {
-        doneCount++;
-      }
-
-      if (options?.includeBytes && chunk instanceof Uint8Array) {
-        byteCount += chunk.byteLength;
-      }
-
-      if (chunkCount === 1) {
-        logger.debug(
-          {
-            request: requestLog,
-            stream: {
-              stage,
-              firstChunkLatencyMs: Date.now() - startAt,
-              requestId: getRequestIdFromLog(requestLog)
-            }
-          },
-          'SSE stream stage received first chunk'
-        );
-      }
-
-      controller.enqueue(chunk);
-    },
-    flush() {
-      logger.debug(
-        {
-          request: requestLog,
-          stream: {
-            stage,
-            requestId: getRequestIdFromLog(requestLog),
-            chunks: chunkCount,
-            bytes: options?.includeBytes ? byteCount : undefined,
-            doneSignals: doneCount,
-            duration_ms: Date.now() - startAt
-          }
-        },
-        'SSE stream stage completed'
-      );
-    }
-  });
-}
-
-function createSSEIdleHeartbeatStream(
-  source: ReadableStream<Uint8Array>,
-  requestLog: any,
-  idleMs: number = SSE_IDLE_HEARTBEAT_MS,
-  streamCompletionState?: StreamCompletionState,
-  strict = false,
-  signal?: AbortSignal,
-): ReadableStream<Uint8Array> {
-  const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
-  const reader = source.getReader();
-  let closed = false;
-  let heartbeatCount = 0;
-  let lastOutboundAt = Date.now();
-  let sawAnthropicMessageStart = false;
-  let sawAnthropicMessageStop = false;
-  let sawDoneSignal = false;
-  let outboundEventCount = 0;
-  let recentSSEText = '';
-  let timer: ReturnType<typeof setInterval> | null = null;
-  let completionSettled = false;
-  let readerCancelPromise: Promise<void> | undefined;
-  let teardownResolved = false;
-  let resolveTeardown!: () => void;
-  const teardown = new Promise<void>((resolve) => { resolveTeardown = resolve; });
-  if (streamCompletionState) streamCompletionState.teardown = teardown;
-  const settleTeardown = () => {
-    if (teardownResolved) return;
-    teardownResolved = true;
-    resolveTeardown();
-  };
-  const previousTeardown = streamCompletionState?.teardownNow;
-  let teardownRequestPromise: Promise<void> | undefined;
-  const teardownNow = async (reason?: unknown): Promise<void> => {
-    if (teardownRequestPromise) return teardownRequestPromise;
-    teardownRequestPromise = (async () => {
-      await previousTeardown?.(reason);
-      await cancelReader(reason);
-      settle({ status: 'cancelled' });
-      settleTeardown();
-    })();
-    return teardownRequestPromise;
-  };
-  if (streamCompletionState) streamCompletionState.teardownNow = teardownNow;
-  const settle = (status: import('../../plugin-control/contracts').RawResponseCompletion): void => {
-    if (completionSettled) return;
-    completionSettled = true;
-    streamCompletionState?.complete?.(status);
-  };
-  const cancelReader = (reason?: unknown): Promise<void> => {
-    if (readerCancelPromise) return readerCancelPromise;
-    readerCancelPromise = (async () => {
-      try {
-        await Promise.race([
-          reader.cancel(reason),
-          new Promise<void>((resolve) => setTimeout(resolve, 1_000)),
-        ]);
-      } catch {
-        // Cancellation is bounded so a broken upstream cannot hang shutdown.
-      }
-    })();
-    return readerCancelPromise;
-  };
-
-  const TERMINAL_BUFFER_LIMIT = 4096;
-
-  const updateSSEStateFromChunk = (chunk: Uint8Array): void => {
-    const chunkText = decoder.decode(chunk, { stream: true });
-    if (!chunkText) {
-      return;
-    }
-
-    recentSSEText = `${recentSSEText}${chunkText}`;
-    if (recentSSEText.length > TERMINAL_BUFFER_LIMIT) {
-      recentSSEText = recentSSEText.slice(-TERMINAL_BUFFER_LIMIT);
-    }
-
-    if (recentSSEText.includes('event: message_start')) {
-      sawAnthropicMessageStart = true;
-    }
-    if (recentSSEText.includes('event: message_stop')) {
-      sawAnthropicMessageStop = true;
-    }
-    if (recentSSEText.includes('data: [DONE]')) {
-      sawDoneSignal = true;
-    }
-
-    const eventMatches = chunkText.match(/\nevent:/g);
-    if (eventMatches) {
-      outboundEventCount += eventMatches.length;
-    }
-    if (chunkText.startsWith('event:')) {
-      outboundEventCount += 1;
-    }
-  };
-
-  const emitAnthropicTerminalFallback = (controller: ReadableStreamDefaultController<Uint8Array>): void => {
-    if (!sawAnthropicMessageStart || sawAnthropicMessageStop || sawDoneSignal) {
-      return;
-    }
-
-    const fallbackPayload =
-      'event: message_delta\n' +
-      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":0,"output_tokens":0}}\n\n' +
-      'event: message_stop\n' +
-      'data: {"type":"message_stop"}\n\n';
-
-    try {
-      controller.enqueue(encoder.encode(fallbackPayload));
-      sawAnthropicMessageStop = true;
-      logger.warn(
-        {
-          request: requestLog,
-          stream: {
-            requestId: getRequestIdFromLog(requestLog),
-            outboundEventCount,
-            heartbeatCount
-          }
-        },
-        'Injected fallback Anthropic terminal SSE events after downstream stream error'
-      );
-    } catch (emitError) {
-      logger.warn(
-        {
-          request: requestLog,
-          error: emitError,
-          stream: {
-            requestId: getRequestIdFromLog(requestLog),
-            outboundEventCount,
-            heartbeatCount
-          }
-        },
-        'Failed to inject fallback Anthropic terminal SSE events'
-      );
-    }
-  };
-
-  const stopTimer = () => {
-    if (timer) {
-      clearInterval(timer);
-      timer = null;
-    }
-  };
-
-  return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      if (signal) {
-        const onAbort = async () => {
-          closed = true;
-          stopTimer();
-          await teardownNow(signal.reason);
-          controller.error(signal.reason ?? new DOMException('Aborted', 'AbortError'));
-        };
-        if (signal.aborted) await onAbort();
-        else signal.addEventListener('abort', onAbort, { once: true });
-      }
-      if (closed) return;
-      const tickMs = Math.max(1000, Math.floor(idleMs / 2));
-      timer = setInterval(() => {
-        if (closed) {
-          return;
-        }
-
-        const now = Date.now();
-        if (now - lastOutboundAt < idleMs) {
-          return;
-        }
-
-        try {
-          controller.enqueue(encoder.encode(': keep-alive\n\n'));
-          heartbeatCount++;
-          lastOutboundAt = now;
-
-          if (heartbeatCount === 1 || heartbeatCount % 20 === 0) {
-            logger.debug(
-              {
-                request: requestLog,
-                stream: {
-                  requestId: getRequestIdFromLog(requestLog),
-                  heartbeatCount,
-                  idleMs
-                }
-              },
-              'Sent SSE heartbeat to keep client connection alive'
-            );
-          }
-        } catch (error) {
-          logger.debug(
-            { request: requestLog, error },
-            'Failed to send SSE heartbeat, likely stream already closed'
-          );
-          closed = true;
-          stopTimer();
-        }
-      }, tickMs);
-    },
-    async pull(controller) {
-      if (closed) {
-        controller.close();
-        return;
-      }
-
-      try {
-        const { done, value } = await reader.read();
-        if (done) {
-          closed = true;
-          stopTimer();
-          controller.close();
-          settle(streamCompletionState?.cancelled
-            ? { status: 'cancelled' }
-            : streamCompletionState?.interrupted
-              ? { status: 'failed', code: 'stream_interrupted' }
-              : { status: 'completed' });
-          settleTeardown();
-          logger.info(
-            {
-              request: requestLog,
-              stream: {
-                requestId: getRequestIdFromLog(requestLog),
-                heartbeatCount
-              }
-            },
-            'SSE stream closed after heartbeat protection'
-          );
-          return;
-        }
-
-        controller.enqueue(value);
-        updateSSEStateFromChunk(value);
-        lastOutboundAt = Date.now();
-      } catch (error) {
-        closed = true;
-        stopTimer();
-        const cancelled = signal?.aborted || streamCompletionState?.clientCancelled;
-        if (streamCompletionState) {
-          if (streamCompletionState.clientCancelled) streamCompletionState.cancelled = true;
-          else streamCompletionState.interrupted = true;
-        }
-        settle(cancelled ? { status: 'cancelled' } : { status: 'failed', code: 'stream_read_failed' });
-        await teardownNow(error);
-        if (strict) {
-          settleTeardown();
-          controller.error(error);
-          return;
-        }
-        emitAnthropicTerminalFallback(controller);
-        logger.warn(
-          {
-            request: requestLog,
-            error,
-            stream: {
-              requestId: getRequestIdFromLog(requestLog),
-              sawAnthropicMessageStart,
-              sawAnthropicMessageStop,
-              sawDoneSignal,
-              outboundEventCount,
-              heartbeatCount
-            }
-          },
-          'SSE heartbeat wrapper read failed, closing stream'
-        );
-        controller.close();
-        settleTeardown();
-      }
-    },
-    async cancel(reason) {
-      closed = true;
-      stopTimer();
-      if (streamCompletionState) {
-        streamCompletionState.cancelled = true;
-        streamCompletionState.clientCancelled = true;
-      }
-      await teardownNow(reason);
-    }
-  });
-}
-
-function createResilientSSEInputStream(
-  source: ReadableStream<Uint8Array>,
-  requestLog: any,
-  streamCompletionState?: StreamCompletionState
-): ReadableStream<Uint8Array> {
-  const reader = source.getReader();
-  let closed = false;
-  let readerCancelPromise: Promise<void> | undefined;
-  const cancelReader = (reason?: unknown): Promise<void> => {
-    if (readerCancelPromise) return readerCancelPromise;
-    readerCancelPromise = (async () => {
-      try {
-        await Promise.race([
-          reader.cancel(reason),
-          new Promise<void>((resolve) => setTimeout(resolve, 1_000)),
-        ]);
-      } catch {
-        // Cancellation is bounded so a broken upstream cannot hang shutdown.
-      }
-    })();
-    return readerCancelPromise;
-  };
-  if (streamCompletionState) {
-    const previousTeardown = streamCompletionState.teardownNow;
-    let teardownRequestPromise: Promise<void> | undefined;
-    streamCompletionState.teardownNow = async (reason?: unknown) => {
-      if (teardownRequestPromise) return teardownRequestPromise;
-      teardownRequestPromise = (async () => {
-        await previousTeardown?.(reason);
-        await cancelReader(reason);
-      })();
-      return teardownRequestPromise;
-    };
-  }
-
-  return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      if (closed) {
-        controller.close();
-        return;
-      }
-
-      try {
-        const { done, value } = await reader.read();
-        if (done) {
-          closed = true;
-          controller.close();
-          return;
-        }
-
-        controller.enqueue(value);
-      } catch (error) {
-        logger.warn(
-          { request: requestLog, error },
-          'Upstream SSE stream aborted unexpectedly, closing stream gracefully'
-        );
-        if (streamCompletionState) {
-          streamCompletionState.interrupted = true;
-        }
-        closed = true;
-        controller.close();
-      }
-    },
-    async cancel(reason) {
-      closed = true;
-      await cancelReader(reason);
-    }
-  });
-}
-
-async function readResponseText(res: Response, signal?: AbortSignal): Promise<string> {
-  if (!res.body) return '';
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let text = '';
-  let done = false;
-  try {
-    while (true) {
-      const read = signal
-        ? await new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
-            if (signal.aborted) {
-              reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
-              return;
-            }
-            const onAbort = () => reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
-            signal.addEventListener('abort', onAbort, { once: true });
-            reader.read().then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
-          })
-        : await reader.read();
-      if (read.done) {
-        done = true;
-        return text + decoder.decode();
-      }
-      text += decoder.decode(read.value, { stream: true });
-    }
-  } finally {
-    if (!done) {
-      try {
-        await Promise.race([
-          reader.cancel(signal?.reason),
-          new Promise<void>((resolve) => setTimeout(resolve, 1_000)),
-        ]);
-      } catch {
-        // Cancellation is best effort and bounded so it cannot stall failover.
-      }
-    }
-  }
-}
-
-/**
- * Result type for response preparation
- */
-export interface PrepareResponseResult {
-  /** Modified response headers */
-  headers: Headers;
-  /** Modified response body (may be stream or buffered) */
-  body: BodyInit | null;
-}
-
-/**
- * Prepares the response for return to client
- *
- * Handles two types of responses:
- * 1. **Streaming responses** (SSE): Pipes through plugin transform streams
- * 2. **Buffered responses**: Applies body rules and modifications
- *
- * **Processing steps**:
- * - Removes chunked encoding headers (transfer-encoding, content-encoding)
- * - For streams: Applies plugin transformations if available
- * - For buffered: Parses, modifies, and re-serializes body
- * - Records response headers/body to request logger
- * - Calculates final Content-Length for buffered responses
- *
- * @param res - Response from upstream
- * @param rules - Modification rules to apply
- * @param requestContext - Expression context for dynamic values
- * @param requestLog - Request log for debugging
- * @param reqLogger - Request logger for recording
- * @param config - Application configuration
- * @param pluginHooks - Plugin hooks for stream processing (optional)
- * @param streamRequestContext - Request context for stream processing (optional)
- * @returns Modified headers and body
- *
- * @example
- * ```typescript
- * const { headers, body } = await prepareResponse(
- *   upstreamResponse,
- *   upstreamRules,
- *   expressionContext,
- *   requestLog,
- *   reqLogger,
- *   config,
- *   pluginExecutor.getHooks(),
- *   requestContext
- * );
- *
- * return new Response(body, { status: 200, headers });
- * ```
- */
 export async function prepareResponse(
-  res: Response,
-  rules: ModificationRules,
-  requestContext: ExpressionContext,
-  requestLog: any,
-  reqLogger?: RequestLogger,
-  config?: AppConfig,
-  pluginHooks?: PluginHooks,
-  streamRequestContext?: RequestContext,
-  streamCompletionState?: StreamCompletionState,
-  inboundChain?: InboundChain,
-  hasInboundStreamCallbacks?: boolean,
-  strictRawResponse = false,
-  signal?: AbortSignal,
+  res: Response, rules: ResponseModificationRules, requestContext: ExpressionContext, requestLog: any,
+  reqLogger?: RequestLogger, config?: AppConfig, _pluginHooks?: PluginHooks, streamRequestContext?: RequestContext,
+  state?: StreamCompletionState, inboundChain?: InboundChain, hasInboundStreamCallbacks = false,
+  _strictRawResponse = false, signal?: AbortSignal, bodyOwners?: Array<{dispose():void}>, cachedSource?: BodySource,
+  representationModified = false,
 ): Promise<PrepareResponseResult> {
   const headers = new Headers(res.headers);
-  const content_type = headers.get('content-type') || '';
-
-  // Since we are buffering the body, we MUST remove chunked encoding headers.
-  headers.delete('transfer-encoding');
-  headers.delete('content-encoding');
-
-  // ===== Streaming Response (SSE) =====
-  if (isStreamingResponse(res) && res.body) {
-    logger.info({ request: requestLog }, '--- Applying SSE Stream Transformation ---');
-    headers.delete('content-length');
-
-    if (reqLogger) {
-      const responseHeaders: Record<string, string> = {};
-      res.headers.forEach((value, key) => {
-        responseHeaders[key] = value;
-      });
-      reqLogger.setResponseHeaders(responseHeaders);
-    }
-
-    // For streams, we don't modify content-length here as the final length is unknown.
-    let streamBody: ReadableStream<Uint8Array>;
-    const upstreamSSEBody = strictRawResponse
-      ? res.body
-      : createResilientSSEInputStream(res.body, requestLog, streamCompletionState);
-
-    // Check if there are stream processing hooks registered
-    const hasStreamCallbacks = hasInboundStreamCallbacks ?? (pluginHooks?.onStreamChunk.hasCallbacks() ?? false);
-
-    if (hasStreamCallbacks && inboundChain && streamRequestContext) {
-      logger.info(
-        { request: requestLog },
-        'Using inbound chain for stream transformation'
-      );
-
-      streamBody = upstreamSSEBody
-        .pipeThrough(createSSEStageTapStream<Uint8Array>('upstream', requestLog, { includeBytes: true }))
-        .pipeThrough(createSSEParserStream())
-        .pipeThrough(createSSEStageTapStream<any>('parser', requestLog))
-        .pipeThrough(createInboundChainTransformStream(inboundChain, streamRequestContext, strictRawResponse))
-        .pipeThrough(createSSEStageTapStream<any>('transform', requestLog))
-        .pipeThrough(createSSESerializerStream())
-        .pipeThrough(createSSEStageTapStream<Uint8Array>('serializer', requestLog, { includeBytes: true }));
-    } else if (hasStreamCallbacks && pluginHooks && streamRequestContext) {
-      // Use Hook system for stream transformation
-      logger.info(
-        { request: requestLog },
-        'Using Hook system for stream transformation'
-      );
-
-      // 串联三个 TransformStream：
-      // 1. SSE 解析器：Uint8Array → JSON objects
-      // 2. Plugin 转换器：JSON objects → transformed JSON objects
-      // 3. SSE 序列化器：JSON objects → Uint8Array
-      streamBody = upstreamSSEBody
-        .pipeThrough(createSSEStageTapStream<Uint8Array>('upstream', requestLog, { includeBytes: true }))
-        .pipeThrough(createSSEParserStream())
-        .pipeThrough(createSSEStageTapStream<any>('parser', requestLog))
-        .pipeThrough(createPluginTransformStream(
-          pluginHooks,
-          { ...streamRequestContext, strict: strictRawResponse } as RequestContext,
-        ))
-        .pipeThrough(createSSEStageTapStream<any>('transform', requestLog))
-        .pipeThrough(createSSESerializerStream())
-        .pipeThrough(createSSEStageTapStream<Uint8Array>('serializer', requestLog, { includeBytes: true }));
-    } else {
-      // No stream plugins - pass through unchanged
-      logger.debug({ request: requestLog }, 'No stream plugins found, passing through unchanged');
-      streamBody = upstreamSSEBody.pipeThrough(
-        createSSEStageTapStream<Uint8Array>('upstream-pass-through', requestLog, { includeBytes: true })
-      );
-    }
-
-    const shouldCaptureSSEMessages = Boolean(reqLogger && config?.logging?.body?.enabled);
-    if (shouldCaptureSSEMessages && reqLogger) {
-      streamBody = createSSECaptureTapStream(streamBody, requestLog, reqLogger);
-    }
-
-    if (!strictRawResponse) {
-      streamBody = createResilientSSEInputStream(streamBody, requestLog, streamCompletionState);
-    }
-
-    streamBody = createSSEIdleHeartbeatStream(
-      streamBody,
-      requestLog,
-      SSE_IDLE_HEARTBEAT_MS,
-      streamCompletionState,
-      strictRawResponse,
-      signal,
-    );
-
-    return {
-      headers,
-      body: streamBody,
-    };
-  }
-
-  // ===== Buffered Response (Non-streaming) =====
-
-  // Safely read the body as text first to avoid consuming the stream more than once.
-  const rawBodyText = await readResponseText(res, signal);
-  logger.debug(
-    { request: requestLog, responseBytes: Buffer.byteLength(rawBodyText), contentType: content_type },
-    "Read raw response body from upstream"
-  );
-  let body: BodyInit | null = rawBodyText;
-
-  // Record original response headers and body from upstream
-  if (reqLogger) {
-    // Record original response headers
-    const responseHeaders: Record<string, string> = {};
-    res.headers.forEach((value, key) => {
-      responseHeaders[key] = value;
-    });
-    reqLogger.setResponseHeaders(responseHeaders);
-
-    // Record original response body
-    if (config?.logging?.body?.enabled && rawBodyText) {
-      const isErrorResponse = res.status >= 400;
-
-      if (isErrorResponse) {
-        // 错误响应：记录所有类型的 body，不仅限于 JSON
-        try {
-          // 尝试解析为 JSON
-          const parsedResponseBody = JSON.parse(rawBodyText);
-          reqLogger.setResponseBody(parsedResponseBody);
-        } catch {
-          // 如果不是 JSON，直接记录原始字符串
-          reqLogger.setResponseBody(rawBodyText);
-        }
-      } else if (content_type.includes('application/json')) {
-        // 成功响应：仅记录 JSON 类型
-        try {
-          const parsedResponseBody = JSON.parse(rawBodyText);
-          reqLogger.setResponseBody(parsedResponseBody);
-        } catch (err) {
-          logger.warn(
-            { request: requestLog, error: err },
-            'Failed to parse response body for recording'
-          );
-        }
-      }
-    }
-  }
-
-  // Apply body modification rules (if configured and JSON response)
-  if (rules.body && content_type.includes('application/json')) {
+  reqLogger?.setResponseHeaders(headerRecord(headers));
+  const media = headers.get('content-type') ?? ''; const max = parseBodyParserLimit(config?.body_parser_limit);
+  const formats = rules.body_formats ?? ['json','sse-json'];
+  const bodyRules = hasBodyModification(rules.body);
+  const dependencies = analyzeExpressionDependencies(rules.headers,'response');
+  const json = isJsonMediaType(media); const sse = /^text\/event-stream(?:\s*;|$)/i.test(media);
+  const responseContext: ExpressionContext = {...requestContext, headers:headerRecord(headers),body:undefined,
+    request:{headers:requestContext.headers,body:requestContext.body},response:{headers:headerRecord(headers),body:undefined}};
+  let body: BodyInit | null = res.body; let modified = representationModified;
+  if (!json && dependencies.responseBody && !sse) throw new BodyProcessingError(502,'response_format_unavailable');
+  if (sse && dependencies.responseBody) throw new BodyProcessingError(502,'sse_headers_require_response_body');
+  if (json && ((bodyRules && formats.includes('json')) || dependencies.responseBody)) {
+    const source = cachedSource ?? new BodySource(res.body,max,headers.get('content-encoding') ?? '',signal);
+    if (!bodyOwners?.includes(source)) bodyOwners?.push(source);
     try {
-      // Only parse and modify if there is a body.
-      if (rawBodyText) {
-        const parsedBody = JSON.parse(rawBodyText);
-        const { body: _, ...baseRequestContext } = requestContext;
-        const responseContext: ExpressionContext = {
-          ...baseRequestContext,
-          body: parsedBody
-        };
-        const modifiedBody = await applyBodyRules(
-          parsedBody,
-          rules.body,
-          responseContext,
-          requestLog
-        );
-        body = JSON.stringify(modifiedBody);
-      } else {
-        logger.debug(
-          { request: requestLog },
-          "Response body is empty, skipping modification."
-        );
+      let value = await source.json('response-json'); responseContext.body = value; responseContext.response!.body = value;
+      if (bodyRules && formats.includes('json')) {
+        if (!isObjectBody(value)) throw new BodyProcessingError(502,'response_body_must_be_object');
+        value = await applyBodyRules(value,rules.body,responseContext,requestLog); modified = true;
+        responseContext.body = value; responseContext.response!.body = value;
       }
-    } catch (err) {
-      logger.error(
-        { request: requestLog, error: err },
-        'Failed to parse or modify JSON response body. Returning original body.'
-      );
-      if (strictRawResponse) {
-        throw err;
-      }
-      // `body` already contains the original rawBodyText, so no action needed.
-    }
+      body = modified ? JSON.stringify(value) : source.take();
+      if(modified && bodyOwners){const lease=new BodyBufferLease();lease.add(Buffer.byteLength(body as string));bodyOwners.push(lease);}
+      if (config?.logging?.body?.enabled) reqLogger?.setResponseBody(value);
+    } catch (error) { if (error instanceof BodyProcessingError && error.status === 503) throw error; throw new BodyProcessingError(502,'invalid_response_body'); }
+    finally { if (!bodyOwners) source.dispose(); }
+  } else if (sse && res.body && ((bodyRules && formats.includes('sse-json')) || hasInboundStreamCallbacks)) {
+    try { body = decodeStream(res.body,headers.get('content-encoding') ?? '',max,signal)
+      .pipeThrough(createSSEEnvelopeTransform(bodyRules && formats.includes('sse-json') ? rules.body : undefined,responseContext,max,
+        hasInboundStreamCallbacks ? inboundChain : undefined,streamRequestContext,bodyOwners)); modified = true;
+    } catch (error) { if (error instanceof BodyProcessingError && error.status === 503) throw error; throw new BodyProcessingError(502,'invalid_response_body'); }
+  } else if (bodyRules) {
+    reqLogger?.addStep('response_body_rules_skipped',{reason:'media_type_not_selected',content_type:media});
   }
-
-  // Always calculate and set the final content-length as we have buffered the entire body.
-  const finalBody = (body as string) || '';
-  headers.set('Content-Length', String(Buffer.byteLength(finalBody)));
-
-  return { headers, body: finalBody };
+  if(config?.logging?.body?.enabled && body instanceof ReadableStream && !modified) reqLogger?.addStep('body_logging_incomplete',{direction:'response',reason:'opaque_body_not_observed',observer_incomplete:true});
+  reqLogger?.addStep('response_body_plan',{mode:modified ? (sse ? 'sse-json-write' : 'json-write') : dependencies.responseBody ? 'json-read' : 'opaque-stream',reasons:[...(bodyRules ? ['response-body-rules'] : []),...(dependencies.responseBody ? ['response-header-expression'] : []),...(hasInboundStreamCallbacks ? ['plugin-sse'] : [])],source:'wire'});
+  applyHeaderRules(headers,rules.headers,responseContext);
+  reconcileEntityHeaders(headers,body,modified);
+  if (body instanceof ReadableStream) body = completionStream(body,state,signal);
+  else state?.complete?.({status:'completed'});
+  return {headers,body};
 }

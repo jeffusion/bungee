@@ -95,7 +95,7 @@ async function main(): Promise<number> {
         const consumer = context.services!.rpc!.consume('provider', CONTRACT);
         bootstrapValue = await consumer.read('child-bootstrap');
         captured.client = consumer;
-        return { pluginName: name, config: {}, register() {}, async destroy() { /* nothing */ } };
+        return { bodyRequirements() { return { request: 'none' as const }; }, pluginName: name, config: {}, register() {}, async destroy() { /* nothing */ } };
       },
     };
     return pluginClass;

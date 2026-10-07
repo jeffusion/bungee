@@ -2,7 +2,7 @@
   "name": "token-metering",
   "version": "1.0.0",
   "author": "Bungee Team",
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "artifactKind": "runtime-plugin",
   "capabilities": [
     "hooks",

@@ -1,3 +1,4 @@
+import { analyzeExpressionDependencies } from '../utils/expression-dependencies';
 import { parse } from 'acorn';
 import type { Expression, ExpressionStatement } from 'acorn';
 import { isAllowedExpression } from './expression-ast';
@@ -30,5 +31,8 @@ export function validateExpressionSyntax(
   const expression = match ? parseExpression(match[1]) : undefined;
   if (!expression || !isAllowedExpression(expression)) {
     context.add('invalid_expression', path, 'Expression has invalid syntax or unsafe access');
+    return;
   }
+  try { analyzeExpressionDependencies(value, 'request'); }
+  catch (error) { context.add('invalid_expression', path, error instanceof Error ? error.message : String(error)); }
 }

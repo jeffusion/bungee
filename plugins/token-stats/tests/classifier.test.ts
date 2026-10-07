@@ -37,6 +37,11 @@ describe('LLM request classification', () => {
 });
 
 describe('LLM response classification', () => {
+  test('reads SSE metadata separately and does not treat payload _event as metadata', () => {
+    expect(classifyResponse({ delta: 'hello' }, false, 'response.output_text.delta')).toBe('openai');
+    expect(classifyResponse({ _event: 'response.output_text.delta', delta: 'hello' }, false)).toBeUndefined();
+  });
+
   test('usage fields, SSE, and generic choices do not prove a normal request is an LLM call', () => {
     for (const body of [
       { usage: { input_tokens: 1, output_tokens: 2 } },

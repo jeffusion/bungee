@@ -20,7 +20,7 @@ function plugin(rootPath: string, name: string, mode: 'sandbox-iframe' | 'native
   writeFileSync(join(directory, 'manifest.json'), JSON.stringify({
     name,
     version: '1.0.0',
-    schemaVersion: 2,
+    schemaVersion: 3,
     artifactKind: 'runtime-plugin',
     main: 'dist/index.js',
     capabilities: ['hooks', 'dynamicRuntimeLoad', ...(mode === 'sandbox-iframe' ? ['sandboxUiExtension'] : ['nativeWidgetsStatic'])],

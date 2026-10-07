@@ -51,8 +51,8 @@ export function classifyRequest(url: URL, body: JsonRecord): { llm: boolean; pro
 }
 
 /** Recognize generation envelopes, including custom relay paths and streaming responses. */
-export function classifyResponse(body: JsonRecord, knownLlmRequest: boolean): SupportedProvider | undefined {
-  const eventType = typeof body.type === 'string' ? body.type : typeof body._event === 'string' ? body._event : '';
+export function classifyResponse(body: JsonRecord, knownLlmRequest: boolean, event?: string): SupportedProvider | undefined {
+  const eventType = event ?? (typeof body.type === 'string' ? body.type : '');
   if (Array.isArray(body.candidates) && body.candidates.some((candidate) =>
     record(candidate) && record(candidate.content) && Array.isArray(candidate.content.parts))) return 'gemini';
   if (eventType === 'message' && body.role === 'assistant' && Array.isArray(body.content)) return 'anthropic';

@@ -32,6 +32,9 @@ class ModelMappingPluginImpl implements Plugin {
     if (catalog === null) return;
     this.knownProviderPrefixes = new Set(catalog.providers().map(provider => provider.provider));
   }
+  bodyRequirements(context: import('../../../packages/core/src/plugin.types').PluginBodyRequirementContext): import('../../../packages/core/src/plugin.types').PluginBodyRequirements {
+    return { request: this.modelMappingMap.size === 0 || /^(GET|HEAD)$/i.test(context.method) || this.extractModelFromUrlPath(context.url.pathname) ? 'none' : 'json-write' };
+  }
 
   register(hooks: PluginHooks): void {
     hooks.onBeforeRequest.tapPromise(
@@ -86,13 +89,14 @@ class ModelMappingPluginImpl implements Plugin {
   }
 
   private extractModelFromContext(ctx: MutableRequestContext): { model: string; source: 'body' | 'url' } | null {
+    const urlModel = this.extractModelFromUrlPath(ctx.url.pathname);
+    if (urlModel) return { model: urlModel, source: 'url' };
     if (ctx.body && typeof ctx.body === 'object') {
       const bodyModel = (ctx.body as Record<string, unknown>).model;
       if (typeof bodyModel === 'string' && bodyModel.trim()) return { model: bodyModel.trim(), source: 'body' };
     }
 
-    const urlModel = this.extractModelFromUrlPath(ctx.url.pathname);
-    return urlModel ? { model: urlModel, source: 'url' } : null;
+    return null;
   }
 
   private extractModelFromUrlPath(pathname: string): string | null {

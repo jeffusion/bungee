@@ -5,6 +5,7 @@ import {
   ConfigurationStaleError,
   ConfigurationOperationTimeoutError,
   importConfig,
+  validateImport,
   commitConfiguration,
   getConfigurationOperation,
   type ConfigurationSnapshot,
@@ -96,6 +97,16 @@ afterEach(() => {
 });
 
 describe('configuration snapshot import', () => {
+  test('previews the original sealed snapshot through the server without writing or mutating it', async () => {
+    const requests:RequestRecord[]=[];
+    const original=envelope(['current-token']), before=JSON.stringify(original);
+    const report={valid:true,errors:[],aggregate:activeAggregate,warnings:[{path:'logical_configuration.routes[0].body',reason:'invalid_modification'}]};
+    install(requests,[Response.json(report)]);
+    expect(await validateImport(original)).toEqual(report);
+    expect(requests).toHaveLength(1); expect(requests[0].url).toBe('/api/config/validate');
+    expect(JSON.parse(String(requests[0].init?.body))).toEqual({envelope:original});
+    expect(JSON.stringify(original)).toBe(before);
+  });
   test('posts only the frozen CAS wrapper and polls the exact client mutation until converged', async () => {
     // Given
     const requests: RequestRecord[] = [];

@@ -15,7 +15,7 @@ import { selectUpstream } from '../upstream/selector';
 import { FailoverCoordinator } from '../upstream/failover-coordinator';
 import { runtimeState, incrementActiveRequests, decrementActiveRequests, releaseHalfOpenSlot } from '../state/runtime-state';
 import { getScopedPluginRegistry, type AttemptObservationOwner, type PrecompiledHooks } from '../../scoped-plugin-registry';
-import { createRequestSnapshot, ensureSnapshotCloned, RequestBodyTooLargeError } from './snapshot';
+import { createRequestSnapshot, readSnapshotJson, ensureSnapshotCloned, RequestBodyTooLargeError } from './snapshot';
 import {
   AttemptCleanupError,
   isUpstreamNetworkError,
@@ -33,6 +33,7 @@ import {
   buildFinalUpstreamFinallyContext,
   buildRequestLevelFinallyContext,
   cloneMutableRequestContext,
+  rebaseToUpstream,
   type MutableRequestContext,
 } from './context';
 import type { MutableRequestContext as HookMutableRequestContext } from '../../hooks';
@@ -43,8 +44,13 @@ import {
   getWorkerRateLimitClient,
   reportWorkerRateLimitFailure,
 } from '../../config-worker/rate-limit-provider';
-import { isStreamingResponse } from '../response/streaming-response';
-import { SSETerminalOutcome } from '../response/sse-terminal-outcome';
+import { isStreamingResponse as isSSEResponse } from '../response/streaming-response';
+import { BodyProcessingError, isJsonMediaType, type BodySource } from './body-source';
+import { analyzeExpressionDependencies, hasBodyModification } from '../../utils/expression-dependencies';
+import { collectPluginBodyRequirements } from '../../scoped-plugin-registry';
+// Every HTTP body participates in completion/drain; SSE terminal inference is separate.
+function isStreamingResponse(response: Response): boolean { return response.body !== null; }
+
 import type { RawResponseCompletion } from '../../plugin-control/contracts';
 
 export interface HandleRequestRuntimeContext {
@@ -350,7 +356,7 @@ function createPhaseContext(
     originalUrl,
     url: new URL(requestSnapshot.url),
     headers: { ...requestSnapshot.headers },
-    body: requestSnapshot.is_json_body && requestSnapshot.body ? structuredClone(requestSnapshot.body) : {},
+    body: requestSnapshot.is_json_body ? structuredClone(requestSnapshot.body) : undefined,
     clientIP: requestSnapshot.headers['x-forwarded-for'] || requestSnapshot.headers['x-real-ip'] || 'unknown',
     requestId,
     routeId,
@@ -552,14 +558,14 @@ export async function handleRequest(
     readonly owners: readonly AttemptObservationOwner[];
     readonly identity: Pick<AttemptObservationEvent, 'requestId' | 'routeId' | 'attemptId' | 'upstreamId' | 'keyId'>;
     disabled: boolean;
-    incompleteNotified: boolean;
+    incompleteReasons: Set<Extract<AttemptObservationEvent,{phase:'incomplete'}>['reason']>;
   }>();
   const observationTimeoutMs = 250;
 
   const dispatchObserver = async (owner: AttemptObservationOwner, event: AttemptObservationEvent): Promise<{ failed: boolean; timedOut: boolean; error?: unknown }> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let active = true;
-    const leasedEvent: AttemptObservationEvent = Object.freeze({ ...event, keyId, isActive: () => active });
+    const leasedEvent: AttemptObservationEvent = Object.freeze({ ...event, keyId, isActive: () => active && event.isActive() });
     try {
       return await Promise.race([
         owner.hooks.promise(leasedEvent).then(
@@ -578,13 +584,14 @@ export async function handleRequest(
 
   const notifyObservationIncomplete = async (
     attemptId: string,
-    reason: 'observer-timeout' | 'observer-error' | 'raw-response-incomplete',
+    reason: Extract<AttemptObservationEvent,{phase:'incomplete'}>['reason'],
     excludedOwners: ReadonlySet<string> = new Set(),
   ): Promise<void> => {
     const state = observationStates.get(attemptId);
-    if (!state || state.incompleteNotified) return;
+    if (!state || state.incompleteReasons.has(reason)) return;
     state.disabled = true;
-    state.incompleteNotified = true;
+    state.incompleteReasons.add(reason);
+    reqLogger.addStep('body_observer_incomplete',{source:'wire',observer_incomplete:true,reason});
     const event: AttemptObservationEvent = Object.freeze({ ...state.identity, phase: 'incomplete', reason, isActive: () => true });
     await Promise.all(state.owners.filter(owner => !excludedOwners.has(`${owner.pluginName}\0${owner.scopeKey}`)).map(async (owner) => {
       const result = await dispatchObserver(owner, event);
@@ -597,6 +604,7 @@ export async function handleRequest(
     owners: readonly AttemptObservationOwner[],
     event: AttemptObservationEvent,
   ): Promise<void> => {
+    if(event.phase === 'incomplete') return notifyObservationIncomplete(event.attemptId,event.reason);
     const state = observationStates.get(event.attemptId);
     if (state?.disabled && !['end', 'request-end', 'incomplete'].includes(event.phase)) return;
     const results = await Promise.all(owners.map(async (owner) => ({ owner, result: await dispatchObserver(owner, event) })));
@@ -605,13 +613,14 @@ export async function handleRequest(
       logger.error({ error: result.error, timeout: result.timedOut, pluginName: owner.pluginName,
         requestId: event.requestId, phase: event.phase }, 'Attempt observer failed or timed out');
     }
-    if (failed.length > 0 && event.phase !== 'incomplete') {
+    if (failed.length > 0) {
       await notifyObservationIncomplete(event.attemptId,
         failed.some(({ result }) => result.timedOut) ? 'observer-timeout' : 'observer-error');
     }
   };
 
   const finishAttemptObservation = async (result: ProxyRequestResult, outcome: AttemptObservationOutcome): Promise<void> => {
+    await result.observationCompletion;
     await attemptEndCallbacks.get(result)?.(outcome);
   };
 
@@ -645,6 +654,7 @@ export async function handleRequest(
     });
   };
 
+  let requestBodySource: BodySource | undefined;
   const finalizeRequest = async () => {
     if (finalized) {
       return;
@@ -750,6 +760,7 @@ export async function handleRequest(
     }
   }
     } finally {
+      requestBodySource?.dispose();
       await dataAdmission?.release();
       for (const release of leaseReleases.splice(0)) release();
     }
@@ -767,14 +778,14 @@ export async function handleRequest(
 
     deferFinallyToStream = true;
     const reader = response.body.getReader();
-    const terminalOutcome = new SSETerminalOutcome();
+    const resolveOutcome = (outcome: ProtocolOutcome) => outcome;
     let protocolCompletionOutcome: ProtocolOutcome | undefined;
-    void (result.streamCompletionState?.completion ?? result.completion).then(
+    void (result.protocolCompletion ?? result.streamCompletionState?.completion ?? result.completion).then(
       (outcome) => { protocolCompletionOutcome = outcome; },
       () => undefined,
     );
-    const cancellationOutcome = (): ProtocolOutcome => terminalOutcome.resolve(
-      protocolCompletionOutcome?.status === 'failed' || protocolCompletionOutcome?.status === 'incomplete'
+    const cancellationOutcome = (): ProtocolOutcome => resolveOutcome(
+      protocolCompletionOutcome?.status === 'failed' || protocolCompletionOutcome?.status === 'incomplete' || (result.protocolCompletion !== undefined && protocolCompletionOutcome?.status === 'completed')
         ? protocolCompletionOutcome
         : { status: 'cancelled' },
     );
@@ -829,20 +840,24 @@ export async function handleRequest(
           if (done) {
             const rawCompletion = result.streamCompletionState?.completion ?? result.completion;
             let completion = await awaitProtocolCompletion(rawCompletion, req.signal);
+            // Wire EOF depends only on transport/protocol proof. Side observers
+            // finish before accounting and lease cleanup, after the client closes.
+            if (result.observationCompletion) controller.close();
+            await result.observationCompletion;
             try {
               await cleanupAttempt(result, req.signal, false);
             } catch {
               completion = { status: 'failed', code: 'attempt_cleanup_failed' };
             }
             logger.info({ request: requestLog, httpStatus: response.status, protocolOutcome: completion.status, protocolCode: 'code' in completion ? completion.code : undefined }, 'Upstream response protocol settled');
-            await settleOutcome(terminalOutcome.resolve(completion));
-            controller.close();
+            await settleOutcome(resolveOutcome(completion));
+            if (!result.observationCompletion) controller.close();
             await finalizeRequest();
             return;
           }
 
           controller.enqueue(value);
-          terminalOutcome.push(value);
+
         } catch (error) {
           const aborted = req.signal.aborted;
           const rawCompletion = result.streamCompletionState?.completion ?? result.completion;
@@ -854,7 +869,7 @@ export async function handleRequest(
             : completedOutcome;
           await cancelReader(error);
           await cleanupAttempt(result, req.signal, false).catch(() => undefined);
-          await settleOutcome(terminalOutcome.resolve(streamOutcome));
+          await settleOutcome(resolveOutcome(streamOutcome));
           await finalizeRequest();
           controller.error(error);
         }
@@ -965,29 +980,6 @@ export async function handleRequest(
     }
 
 
-    // 创建请求快照（在任何 plugin 执行之前）
-    // This ensures each upstream retry gets a clean copy of the original request
-    const snapshotStart = performance.now();
-    const requestSnapshot = await createRequestSnapshot(req, config.body_parser_limit);
-    reqLogger.addStepWithDuration('request_snapshot_created', performance.now() - snapshotStart, {
-      method: requestSnapshot.method,
-      hasBody: !!requestSnapshot.body,
-      bodyType: requestSnapshot.is_json_body ? 'json' : 'binary'
-    });
-
-    if (requestSnapshot.body && requestSnapshot.is_json_body) {
-      reqLogger.setOriginalRequestBody(requestSnapshot.body);
-    }
-
-    // 构建表达式上下文（用于 upstream 条件过滤）
-    const expressionContext: ExpressionContext = {
-      headers: originalHeaders,
-      body: requestSnapshot.body && requestSnapshot.is_json_body ? requestSnapshot.body : {},
-      url: { pathname: url.pathname, search: url.search, host: url.hostname, protocol: url.protocol },
-      method: req.method,
-      env: process.env as Record<string, string>,
-    };
-
     const responseRule = findResponseRule(route, url.pathname);
     if (responseRule) {
       const response = createResponseRuleResponse(responseRule, req);
@@ -1019,6 +1011,52 @@ export async function handleRequest(
       return new Response(null, { status: 204, headers: corsHeaders(route.cors, req) });
     }
 
+    // 创建请求快照（在任何 plugin 执行之前）
+    // This ensures each upstream retry gets a clean copy of the original request
+    const snapshotStart = performance.now();
+    const processingDeadline = AbortSignal.timeout(effectiveRoute.timeouts?.request_ms ?? 30_000);
+    const processingSignal = AbortSignal.any([req.signal,processingDeadline]);
+    const requestSnapshot = await createRequestSnapshot(req, config.body_parser_limit,processingSignal);
+    requestBodySource = requestSnapshot.bodySource;
+    const demandHooks = requestRegistry?.getPrecompiledHooks(currentRouteId, undefined, routeServiceName);
+    const demandContext = createPhaseContext(requestSnapshot,requestId,currentRouteId,routeServiceName);
+    applyRoutePathRewriteToContext(demandContext,route,requestLog);
+    const routeDemand = collectPluginBodyRequirements([demandHooks?.routePhase,demandHooks?.servicePhase], {
+      requestId,method:req.method,url:demandContext.url,routeId:currentRouteId,serviceId:routeServiceName,stage:'route',
+    });
+    const selectionNeedsBody = analyzeExpressionDependencies({
+      conditions:endpoints.map(endpoint=>endpoint.condition),hash:effectiveRoute.load_balancing?.hash_policy?.expression,
+      rate:route.rate_limit?.key_expression,
+    },'request').requestBody;
+    const routeRequestDemand = isJsonMediaType(requestSnapshot.content_type) || requestBodySource?.mode === 'empty'
+      ? route.request : {headers:route.request?.headers,query:route.request?.query};
+    const routeNeedsBody = analyzeExpressionDependencies(routeRequestDemand,'request').requestBody
+      || analyzeExpressionDependencies(route.response,'response').requestBody;
+    if (routeDemand.replay || route.retry?.enabled || effectiveRoute.failover?.enabled) await requestBodySource?.buffer('configured-replay');
+    if (selectionNeedsBody || routeNeedsBody || routeDemand.request !== 'none') await readSnapshotJson(requestSnapshot,
+      selectionNeedsBody ? 'selection-expression' : routeDemand.request !== 'none' ? 'plugin-body-demand' : 'route-expression',
+      routeDemand.request === 'json-write' && !['GET','HEAD'].includes(req.method));
+    reqLogger.addStep('request_body_plan',{mode:requestBodySource?.mode,reasons:requestBodySource?.reasons ?? [],replay:requestBodySource?.replayable ?? false,source:'wire'});
+    reqLogger.addStepWithDuration('request_snapshot_created', performance.now() - snapshotStart, {
+      method: requestSnapshot.method,
+      hasBody: !!requestSnapshot.body,
+      bodyType: requestSnapshot.is_json_body ? 'json' : 'binary'
+    });
+
+    if (requestSnapshot.body !== undefined && requestSnapshot.is_json_body) {
+      reqLogger.setOriginalRequestBody(requestSnapshot.body);
+    }
+
+    // 构建表达式上下文（用于 upstream 条件过滤）
+    const expressionContext: ExpressionContext = {
+      headers: originalHeaders,
+      body: requestSnapshot.is_json_body ? requestSnapshot.body : undefined,
+      request: {headers:originalHeaders,body:requestSnapshot.is_json_body ? requestSnapshot.body : undefined},
+      url: { pathname: url.pathname, search: url.search, host: url.hostname, protocol: url.protocol },
+      method: req.method,
+      env: process.env as Record<string, string>,
+    };
+
     const rateLimit = await checkRateLimit(
       route,
       getTrustedWorkerPeer(req),
@@ -1048,6 +1086,8 @@ export async function handleRequest(
     const scopedRegistry = requestRegistry;
     const requestPhaseHooks = scopedRegistry?.getPrecompiledHooks(currentRouteId, undefined, routeServiceName) ?? null;
     const phaseContext = createPhaseContext(requestSnapshot, requestId, currentRouteId, routeServiceName);
+    phaseContext.bodyWrite = routeDemand.request === 'json-write';
+    phaseContext.bodyRequirements = routeDemand;
     applyRoutePathRewriteToContext(phaseContext, route, requestLog);
     const routePhaseResponse = await executePreFailoverPhase(requestPhaseHooks?.routePhase, phaseContext, {
       phaseName: 'route',
@@ -1076,6 +1116,10 @@ export async function handleRequest(
     }
 
     const phase1and2Context = cloneMutableRequestContext(phaseContext);
+    expressionContext.headers = phaseContext.headers;
+    expressionContext.body = phaseContext.body;
+    expressionContext.request = {headers:phaseContext.headers,body:phaseContext.body};
+    expressionContext.url = {pathname:phaseContext.url.pathname,search:phaseContext.url.search,host:phaseContext.url.hostname,protocol:phaseContext.url.protocol};
 
     const settleStreamHealth = (selected: RuntimeUpstream, protocolOk: boolean, status: number): void => {
       if (protocolOk && status < 400) {
@@ -1099,6 +1143,9 @@ export async function handleRequest(
       }
 
       selected.consecutive_successes = 0;
+      // An opaque HTTP error that reached EOF retains the status-only health
+      // policy. Protocol failures and retryable statuses are handled separately.
+      if (protocolOk && status >= 400 && selected.status !== 'HALF_OPEN') return;
       selected.consecutive_failures++;
       if (selected.status === 'HALF_OPEN') {
         selected.status = 'UNHEALTHY';
@@ -1167,12 +1214,13 @@ export async function handleRequest(
       const phaseAwareHooks = scopedRegistry?.getPrecompiledHooks(currentRouteId, selectedUpstream.upstream_id, routeServiceName) ?? null;
       const runAttempt = async (): Promise<ProxyRequestResult> => {
         const attemptId = crypto.randomUUID();
-        const owners = scopedRegistry?.getAttemptObservationOwners?.(currentRouteId, selectedUpstream.upstream_id, routeServiceName) ?? [];
+        const ownerUrl=new URL(phase1and2Context.url);rebaseToUpstream({url:ownerUrl} as MutableRequestContext,selectedUpstream);
+        const owners = scopedRegistry?.getAttemptObservationOwners?.(currentRouteId, selectedUpstream.upstream_id, routeServiceName,{requestId,method:req.method,url:ownerUrl,routeId:currentRouteId,serviceId:routeServiceName,upstreamId:selectedUpstream.upstream_id,stage:'selected'}) ?? [];
         for (const owner of owners) retainOwner(owner.pluginName, owner.scopeKey);
         for (const owner of scopedRegistry?.getBoundControlOwners?.(currentRouteId, selectedUpstream.upstream_id) ?? []) retainOwner(owner.pluginName, owner.scopeKey);
         let preparedAdmission: PreparedAdmissionAttempt[] = [];
         const identity = { requestId, keyId, routeId: currentRouteId, attemptId, upstreamId: selectedUpstream.upstream_id };
-        if (owners.length > 0) observationStates.set(attemptId, { owners, identity, disabled: false, incompleteNotified: false });
+        if (owners.length > 0) observationStates.set(attemptId, { owners, identity, disabled: false, incompleteReasons: new Set() });
         const selectedEvent: AttemptObservationEvent = Object.freeze({ ...identity, phase: 'selected', isActive: () => true });
         for (const owner of owners) {
           participatingObservationOwners.set(`${owner.pluginName}\0${owner.scopeKey}`, { owner, event: selectedEvent });
@@ -1202,16 +1250,17 @@ export async function handleRequest(
               servingRevision: runtimeContext?.servingRevision,
               attemptId,
               beforeSend: dataAdmission ? async (target) => {
-                preparedAdmission = await dataAdmission!.prepare({ ...target, attemptId, upstreamId: selectedUpstream.upstream_id }, req.signal);
+                preparedAdmission = await dataAdmission!.prepare({ ...target, attemptId, upstreamId: selectedUpstream.upstream_id }, req.signal, () => readSnapshotJson(requestSnapshot,'admission-body'));
               } : undefined,
               onRequestDispatch: () => { sent = true; },
-              observeRequest: owners.length > 0 ? async (rawEvent) => {
+              observeRequest: owners.some(owner=>owner.observe?.request) ? async (rawEvent) => {
                 const event = Object.freeze({ ...rawEvent, keyId });
                 for (const owner of owners) {
                   participatingObservationOwners.set(`${owner.pluginName}\0${owner.scopeKey}`, { owner, event });
                 }
                 await notifyObservationOwners(owners, event);
               } : undefined,
+              shouldObserveResponse: protocol => owners.some(owner=>protocol === 'sse' ? owner.observe?.sse : owner.observe?.response) || preparedAdmission.some(prepared=>prepared.observeResponse !== undefined),
               observeResponse: owners.length > 0 || dataAdmission ? async (rawEvent) => {
                 const event = Object.freeze({ ...rawEvent, keyId });
                 for (const owner of owners) {
@@ -1244,7 +1293,7 @@ export async function handleRequest(
       const retryConfig = route.retry;
       const retryOn = retryConfig?.retry_on ?? [];
 
-      if (!retryConfig?.enabled || result.response.ok || !retryOn.includes(result.response.status)) {
+      if (!requestSnapshot.bodySource?.replayable || !retryConfig?.enabled || result.response.ok || !retryOn.includes(result.response.status)) {
         return result;
       }
 
@@ -1253,7 +1302,12 @@ export async function handleRequest(
         try {
           if (req.signal.aborted) throw req.signal.reason ?? new DOMException('Aborted', 'AbortError');
           ensureSnapshotCloned(requestSnapshot);
+          if (previousAttempt.drainRetryObservation) {
+            await previousAttempt.drainRetryObservation();
+            await previousAttempt.observationCompletion;
+          }
           await cleanupAttempt(previousAttempt, req.signal);
+          await previousAttempt.observationCompletion;
           await finishFromCompletion(previousAttempt);
           const retryResponse = await runAttempt();
           result = retryResponse;
@@ -1302,7 +1356,7 @@ export async function handleRequest(
 
       // 记录原始请求头和请求体（转换前）
       attemptLogger.setOriginalRequestHeaders(redactRequestHeaders(originalHeaders));
-      if (requestSnapshot.body && requestSnapshot.is_json_body) {
+      if (requestSnapshot.body !== undefined && requestSnapshot.is_json_body) {
         attemptLogger.setOriginalRequestBody(requestSnapshot.body);
       }
 
@@ -1311,7 +1365,17 @@ export async function handleRequest(
       try {
         result = await proxyWithRouteRetry(selectedUpstream, attemptLogger);
       } catch (error) {
-        if (error instanceof DataAdmissionError) throw error;
+        if (error instanceof DataAdmissionError || error instanceof BodyProcessingError) {
+          if (error instanceof BodyProcessingError) {
+            const body = {error:error.code,code:error.code,message:error.code,
+              ...(error.limitBytes === undefined ? {} : {limit_bytes:error.limitBytes}),
+              ...(error.receivedBytes === undefined ? {} : {received_bytes:error.receivedBytes})};
+            attemptLogger.setResponseBody(body);attemptLogger.setResponseHeaders({'content-type':'application/json'});
+            attemptLogger.addStep(error.status === 413 ? 'request_body_rejected' : 'body_processing_rejected',body);
+          }
+          await completeAttempt(attemptLogger,error.status,{routePath,upstream:selectedUpstream.target,protocolOutcome:'failed',protocolCode:error.code,errorMessage:error.code,success:false});
+          throw error;
+        }
         const errorMessage = error instanceof Error ? error.message : String(error);
         if (error instanceof AttemptCleanupError) {
           success = false;
@@ -1449,6 +1513,7 @@ export async function handleRequest(
       lastAttemptedUpstreamId = selectedUpstream.upstream_id;
       // Lazy clone: deep clone headers and body when failover retry is needed
       if (attemptCount > 1) {
+        if (!requestSnapshot.bodySource?.replayable) break;
         ensureSnapshotCloned(requestSnapshot);
       }
 
@@ -1493,7 +1558,7 @@ export async function handleRequest(
 
       // 记录原始请求头和请求体（转换前）
       attemptLogger.setOriginalRequestHeaders(redactRequestHeaders(originalHeaders));
-      if (requestSnapshot.body && requestSnapshot.is_json_body) {
+      if (requestSnapshot.body !== undefined && requestSnapshot.is_json_body) {
         attemptLogger.setOriginalRequestBody(requestSnapshot.body);
       }
 
@@ -1730,7 +1795,12 @@ export async function handleRequest(
         }
 
         // Release the attempt before waiting for a streaming completion.
+        if (result.drainRetryObservation) {
+          await result.drainRetryObservation();
+          await result.observationCompletion;
+        }
         await cleanupAttempt(result, req.signal);
+        await result.observationCompletion;
         const outcome = await result.completion;
         await finishAttemptObservation(result, outcome.status === 'completed' ? 'completed' : outcome.status === 'cancelled' ? 'cancelled' : 'failed');
 
@@ -1759,7 +1829,17 @@ export async function handleRequest(
         continue;
 
       } catch (error) {
-        if (error instanceof DataAdmissionError) throw error;
+        if (error instanceof DataAdmissionError || error instanceof BodyProcessingError) {
+          if (error instanceof BodyProcessingError) {
+            const body = {error:error.code,code:error.code,message:error.code,
+              ...(error.limitBytes === undefined ? {} : {limit_bytes:error.limitBytes}),
+              ...(error.receivedBytes === undefined ? {} : {received_bytes:error.receivedBytes})};
+            attemptLogger.setResponseBody(body);attemptLogger.setResponseHeaders({'content-type':'application/json'});
+            attemptLogger.addStep(error.status === 413 ? 'request_body_rejected' : 'body_processing_rejected',body);
+          }
+          await completeAttempt(attemptLogger,error.status,{routePath,upstream:selectedUpstream.target,protocolOutcome:'failed',protocolCode:error.code,errorMessage:error.code,success:false});
+          throw error;
+        }
         if (observedResult) {
           await finishAttemptObservation(observedResult, req.signal.aborted && !isDeadlineFailure(error) ? 'cancelled' : 'failed');
         }
@@ -1916,6 +1996,17 @@ export async function handleRequest(
     if (error instanceof DataAdmissionError) {
       responseStatus = error.status;
       return Response.json({error:error.code},{status:error.status,headers:error.retryAfter === undefined ? {} : {'retry-after':String(error.retryAfter)}});
+    }
+    if (error instanceof BodyProcessingError && !(error instanceof RequestBodyTooLargeError)) {
+      responseStatus = error.status; rootProtocolOutcome = 'failed'; rootProtocolCode = error.code;
+      rootErrorMessage = error.message;
+      const body = {error:error.code, code:error.code, message:error.code,
+        ...(error.limitBytes === undefined ? {} : {limit_bytes:error.limitBytes}),
+        ...(error.receivedBytes === undefined ? {} : {received_bytes:error.receivedBytes})};
+      reqLogger.addStep(error.status === 413 ? 'request_body_rejected' : 'body_processing_rejected',body);
+      reqLogger.setResponseBody(body);
+      reqLogger.setResponseHeaders({'content-type':'application/json'});
+      return Response.json(body,{status:error.status});
     }
     if (error instanceof RequestBodyTooLargeError) {
       responseStatus = 413;

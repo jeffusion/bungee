@@ -297,7 +297,11 @@ export const AnthropicRequestSanitizerPlugin = definePlugin(
       this.shouldFilterOrphanToolResults = options?.filterOrphanToolResults === true;
     }
 
-    register(hooks: PluginHooks): void {
+    bodyRequirements(context: import('../../../packages/core/src/plugin.types').PluginBodyRequirementContext): import('../../../packages/core/src/plugin.types').PluginBodyRequirements {
+      return { request: ! /^(GET|HEAD)$/i.test(context.method) && (this.sanitizeMode !== 'none' || this.stripCacheControl || this.shouldFilterOrphanToolResults) ? 'json-write' : 'none' };
+    }
+
+  register(hooks: PluginHooks): void {
       hooks.onBeforeRequest.tap(
         { name: 'anthropic-request-sanitizer', stage: -20 },
         ctx => {

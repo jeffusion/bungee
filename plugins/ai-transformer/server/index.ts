@@ -1,3 +1,4 @@
+import { protocolSSEOutput } from '../../../packages/core/src/plugins/sse-envelope';
 /**
  * AI Transformer Plugin
  *
@@ -55,6 +56,7 @@ class AITransformerPluginImpl implements Plugin {
 
     converter: AIConverter;
     options: AITransformerOptions;
+    private readonly activeRequests = new Set<string>();
 
     constructor(options: MaybeAITransformerOptions) {
       const hasNoRouteDirection = !options || (!options.from && !options.to);
@@ -99,12 +101,21 @@ class AITransformerPluginImpl implements Plugin {
   /**
    * 注册插件 hooks
    */
+  bodyRequirements(context: import('../../../packages/core/src/plugin.types').PluginBodyRequirementContext): import('../../../packages/core/src/plugin.types').PluginBodyRequirements {
+      const path = context.url.pathname;
+      const matched = this.options.from === 'anthropic' ? (['/v1/messages', '/messages'].includes(path) || path.endsWith('/messages/count_tokens')) : this.options.from === 'openai' ? ['/v1/chat/completions', '/v1/responses'].includes(path) : this.options.from === 'gemini' ? /(?:generateContent|streamGenerateContent)$/.test(path) : false;
+      return this.options.from && this.options.to && this.options.from !== this.options.to && context.method.toUpperCase() === 'POST' && matched ? { request: 'json-write', response: ['json', 'sse-json'] } : { request: 'none' };
+    }
+
   register(hooks: PluginHooks): void {
+    hooks.onFinally.tap('ai-transformer-cleanup', ctx => { this.activeRequests.delete(ctx.requestId); });
     // 1. 请求前处理：转换请求格式
     if (this.converter.onBeforeRequest) {
       hooks.onBeforeRequest.tapPromise(
         { name: 'ai-transformer', stage: 0 },
         async (ctx) => {
+          if (this.bodyRequirements({ ...ctx, stage: 'selected' }).request === 'none') return ctx;
+          this.activeRequests.add(ctx.requestId);
           try {
             await this.converter.onBeforeRequest!(ctx);
             logger.debug(
@@ -128,6 +139,7 @@ class AITransformerPluginImpl implements Plugin {
       hooks.onResponse.tapPromise(
         { name: 'ai-transformer' },
         async (response, ctx) => {
+          if (!this.activeRequests.has(ctx.requestId)) return response;
           try {
             const result = await this.converter.onResponse!(ctx);
             if (result) {
@@ -153,10 +165,11 @@ class AITransformerPluginImpl implements Plugin {
     if (this.converter.processStreamChunk) {
       hooks.onStreamChunk.tapPromise(
         { name: 'ai-transformer', stage: 0 },
-        async (chunk, ctx) => {
+        async (envelope, ctx) => {
+          if (!this.activeRequests.has(ctx.requestId) || envelope.json === undefined) return null;
           try {
-            const result = await this.converter.processStreamChunk!(chunk, ctx);
-            return result;
+            const result = await this.converter.processStreamChunk!(envelope.json, { ...ctx, sseEvent: envelope });
+            return result ? protocolSSEOutput(result, this.options.from, envelope) : null;
           } catch (error) {
             logger.error(
               { error, from: this.options.from, to: this.options.to },
@@ -173,10 +186,11 @@ class AITransformerPluginImpl implements Plugin {
       hooks.onFlushStream.tapPromise(
         { name: 'ai-transformer' },
         async (chunks, ctx) => {
+          if (!this.activeRequests.has(ctx.requestId)) return chunks;
           try {
             const flushed = await this.converter.flushStream!(ctx);
             // 合并已有的 chunks 和新刷新的 chunks
-            return [...chunks, ...flushed];
+            return [...chunks, ...protocolSSEOutput(flushed, this.options.from)];
           } catch (error) {
             logger.error(
               { error, from: this.options.from, to: this.options.to },

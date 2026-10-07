@@ -50,19 +50,6 @@ export async function buildRequestContext(
   const url = new URL(req.url);
   let parsedBody: Record<string, any> = {};
 
-  // Parse JSON body if present
-  const content_type = req.headers.get('content-type') || '';
-  if (req.body && content_type.includes('application/json')) {
-    try {
-      parsedBody = await req.clone().json();
-    } catch (err) {
-      logger.warn(
-        { request: requestLog, error: err },
-        'Failed to parse JSON body for expression context'
-      );
-    }
-  }
-
   // Extract headers
   const headersObject: { [key: string]: string } = {};
   req.headers.forEach((value, key) => {
@@ -128,7 +115,7 @@ export function buildRequestContextFromSnapshot(
   const url = new URL(snapshot.url);
 
   // Deep clone the body to ensure isolation
-  const parsedBody = snapshot.is_json_body && snapshot.body
+  const parsedBody = snapshot.is_json_body
     ? structuredClone(snapshot.body)
     : {};
 
@@ -148,7 +135,7 @@ export function buildRequestContextFromSnapshot(
 
   return {
     context,
-    isStreamingRequest: !!parsedBody.stream,
+    isStreamingRequest: !!parsedBody?.stream,
     parsedBody
   };
 }

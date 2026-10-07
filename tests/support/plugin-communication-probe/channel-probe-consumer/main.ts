@@ -487,6 +487,8 @@ export class ChannelProbeConsumer {
     } catch (error) { await this.#report({ phase: 'snapshot-schema', ok: false, code: codeOf(error) }); }
   }
 
+  bodyRequirements() { return { request: 'none' as const }; }
+
   register(): void {}
   async onDestroy(): Promise<void> { this.#stopped = true; pumpStopped = true; }
 }

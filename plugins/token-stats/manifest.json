@@ -2,7 +2,7 @@
   "name": "token-stats",
   "version": "4.0.0",
   "author": "Bungee Team",
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "artifactKind": "runtime-plugin",
   "control": {
     "entry": "server/control.ts",

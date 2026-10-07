@@ -20,6 +20,5 @@ test('modal form has no root panel or body padding; standalone form retains both
 test('managed semantic card, protected binding and advanced section borders are retained', () => {
   expect(source).toContain('<PanelCard title={$_(\'upstream.managedTitle\')} tag="PLUGIN">');
   expect(source).toContain('protectedBindingIds={upstream.managedBy ? [upstream.managedBy.bindingId] : []}');
-  expect(source.match(/class="border border-carbon-600 bg-carbon-950\/60"/g)?.length).toBe(3);
-  for (const name of ['HeadersEditor', 'BodyEditor', 'QueryEditor']) expect(source).toContain(`<${name} bind:value={upstream.`);
+  expect(source).toContain('<DirectionalModificationEditor bind:policy={upstream} />');
 });

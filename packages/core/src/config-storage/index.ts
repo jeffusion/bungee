@@ -40,3 +40,6 @@ export type {
   ConfigurationErrorCode,
   ConfigurationResult,
 } from './validation';
+
+export { CONFIG_MIGRATIONS } from './migrations';
+export { migrateLegacyDirectionalAggregate } from './directional-migration';

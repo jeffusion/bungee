@@ -340,6 +340,18 @@ export type ConfigurationImportEnvelope = {
   readonly [key: string]: unknown;
 };
 
+export type ConfigurationImportPreview = {
+  readonly valid: true;
+  readonly errors: readonly [];
+  readonly aggregate: ConfigurationAggregateV2;
+  readonly warnings: readonly { readonly path: string; readonly reason: string }[];
+};
+
+/** Preview the same normalized configuration that the sealed import will commit. */
+export function validateImport(envelope: ConfigurationImportEnvelope): Promise<ConfigurationImportPreview> {
+  return api.post('/config/validate', { envelope });
+}
+
 type AcceptedImportOperation = ConfigurationOperationState & {
   readonly operation_id: string;
   readonly revision: number;

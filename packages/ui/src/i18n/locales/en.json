@@ -1,4 +1,20 @@
 {
+  "bodyPlan": {"title":"Saved body processing plan","help":"This plan describes committed configuration. Plugins and admission policies decide their needs per request; request logs show the final mode.","unavailable":"The processing plan is unavailable.","revision":"Configuration revision","route":"Route rules","opaque":"Byte stream forwarding","content":"Read or modify content as required","replay":"Replay buffering configured","plugins":"Plugins with per-request requirements"},
+  "directional": {
+    "invalidExpression": "Invalid expression, or a request rule references response before it is available.",
+    "invalidFormats": "Response formats must contain unique json or sse-json values.",
+    "sseHeaderDependency": "SSE response headers cannot reference response body. Use request.body or enable JSON only.",
+    "request": "Outgoing request",
+    "response": "Upstream response",
+    "direction": "Modification direction",
+    "field": "Modification field",
+    "requestHelp": "Merge Route → Endpoint; endpoint values take precedence. body / headers refer to the request, and request is the outgoing request.",
+    "responseHelp": "Merge Endpoint → Route; route values take precedence. body / headers refer to the response; request refers to the final outgoing request. Applies to upstream responses only; local responses and redirects remain separate.",
+    "formats": "Response body formats",
+    "json": "JSON response",
+    "sseJson": "SSE JSON data frames",
+    "formatsHelp": "Both formats are enabled by default. SSE response headers cannot reference response body; request.body is available. Empty rules do not require body parsing."
+  },
   "configurationSave": {
     "waitingStopped": "Stopped waiting. Backend publication was not cancelled or declared failed. Check its current state in Global Settings; do not save again.",
     "publishing": "Configuration saved. Applying changes; no need to save again.",
@@ -431,7 +447,7 @@
     "loadError": "Configuration could not be read. This does not undo a publication. Read it again.", "loading": "Loading global settings", "unknown": "Unknown", "detailsUnavailable": "Publication details are unavailable. This does not establish that nothing was committed.",
     "publicationDetails": "Publication details", "operationStages": "Validate → Commit revision → Switch new traffic → Request handoff → Drain start confirmation → Natural draining → Cleanup and exit → Converged", "committedRevision": "Committed revision", "resultStatus": "Result status", "workerReports": "Worker reports (not serving confirmation)", "recovery": "Recovery", "checkOperation": "Check this publication", "dashboardRecovery": "View recovery summary on Dashboard",
     "importPreview": "Snapshot preview · not submitted", "snapshotWarning": "A configuration snapshot is not a system backup and may contain tokens and plugin configuration. Keep it private. Import replaces configuration, not logs or plugin runtime data.",
-    "sourceRevision": "Snapshot source revision", "activations": "Plugin activations", "globalBindings": "Global bindings", "importImpact": "Includes all routes, services, scoped bindings and plugin activations. Only a safe summary is shown. Confirmation publishes a new revision; the server checks integrity again.", "cancelImport": "Cancel import", "invalidImport": "Invalid snapshot or preview limits exceeded (1 MiB, 16 levels, 500 items per collection). Nothing was submitted.", "exportError": "Snapshot export failed."
+    "sourceRevision": "Snapshot source revision", "activations": "Plugin activations", "globalBindings": "Global bindings", "importImpact": "Includes all routes, services, scoped bindings and plugin activations. Only a safe summary is shown. Confirmation publishes a new revision; the server checks integrity again.", "importIgnoredRules": "Automatically ignored {count} incompatible modification rules or rules superseded by the new format. Other valid rules are retained. No manual repair is required; details are recorded in service logs.", "cancelImport": "Cancel import", "invalidImport": "Invalid snapshot, server validation failed, or preview unavailable. Nothing was submitted.", "exportError": "Snapshot export failed."
   },
   "configuration": {
     "title": "Global Settings",

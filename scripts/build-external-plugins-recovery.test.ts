@@ -30,7 +30,7 @@ function fixture(): Readonly<{ root: string; source: string; output: string; old
   mkdirSync(join(plugin, 'server'), { recursive: true });
   writeFileSync(join(plugin, 'server/index.ts'), 'export default {};');
   writeFileSync(join(plugin, 'manifest.json'), JSON.stringify({
-    name: 'new-plugin', version: '1.0.0', schemaVersion: 2,
+    name: 'new-plugin', version: '1.0.0', schemaVersion: 3,
     artifactKind: 'runtime-plugin', main: 'server/index.ts',
     capabilities: ['hooks', 'dynamicRuntimeLoad'], uiExtensionMode: 'none',
     engines: { bungee: '^4.2.0 || ^5.0.0' }, configSchema: [],

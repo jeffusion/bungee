@@ -34,6 +34,8 @@ export default definePlugin(
       this.customHeaders = context.config.headers || {};
     }
 
+    bodyRequirements() { return Object.freeze({ request: 'none' }); }
+
     register(hooks: PluginHooks): void {
       hooks.onBeforeRequest.tap(
         { name: '${TEST_PLUGIN_NAME}', stage: -50 },

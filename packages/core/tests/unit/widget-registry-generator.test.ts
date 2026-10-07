@@ -20,7 +20,7 @@ describe('widget registry generator', () => {
     writeFileSync(join(pluginDir, 'server/index.ts'), 'export default {};');
     writeFileSync(join(pluginDir, 'ui/widget.svelte'), '<div />');
     writeFileSync(join(pluginDir, 'manifest.json'), JSON.stringify({
-      name: 'external-widget', version: '1.0.0', schemaVersion: 2,
+      name: 'external-widget', version: '1.0.0', schemaVersion: 3,
       artifactKind: 'runtime-plugin', main: 'server/index.ts', builtin: false,
       capabilities: ['hooks', 'dynamicRuntimeLoad', 'nativeWidgetsStatic'],
       uiExtensionMode: 'native-static', engines: { bungee: '^5.0.0' }, configSchema: [],
@@ -61,7 +61,7 @@ describe('widget registry generator', () => {
     writeFileSync(join(pluginDir, 'server/index.ts'), 'export default {};');
     writeFileSync(join(pluginDir, entry), '<div />');
     writeFileSync(join(pluginDir, 'manifest.json'), JSON.stringify({
-      name: 'bad-plugin', version: '1.0.0', schemaVersion: 2,
+      name: 'bad-plugin', version: '1.0.0', schemaVersion: 3,
       artifactKind: 'runtime-plugin', main: 'server/index.ts',
       capabilities: ['hooks', 'dynamicRuntimeLoad', 'nativeWidgetsStatic'],
       uiExtensionMode: 'native-static', engines: { bungee: '^4.2.0 || ^5.0.0' },
@@ -89,7 +89,7 @@ describe('widget registry generator', () => {
     writeFileSync(join(pluginDir, 'server/index.ts'), 'export default {};');
     writeFileSync(join(pluginDir, 'ui/widget.svelte'), '<div />');
     writeFileSync(join(pluginDir, 'manifest.json'), JSON.stringify({
-      name: 'bad-plugin', version: '1.0.0', schemaVersion: 2,
+      name: 'bad-plugin', version: '1.0.0', schemaVersion: 3,
       artifactKind: 'runtime-plugin', main: 'server/index.ts',
       capabilities: ['hooks', 'dynamicRuntimeLoad', 'nativeWidgetsStatic'],
       uiExtensionMode: 'native-static', engines: { bungee: '^4.2.0 || ^5.0.0' }, configSchema: [],

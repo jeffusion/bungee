@@ -4,7 +4,11 @@ import { logger } from './logger';
 // 表达式上下文接口
 export interface ExpressionContext {
   headers: Record<string, string>;
-  body: Record<string, any>;
+  body: any;
+  /** 最终出站请求；在响应求值期间保持请求方向。 */
+  request?: { headers: Record<string, string>; body?: any };
+  /** 仅在响应阶段提供。 */
+  response?: { headers: Record<string, string>; body?: any };
   url: {
     pathname: string;
     search: string;
@@ -141,6 +145,8 @@ class SafeEvaluator {
       const safeContext = {
         headers: this.context.headers,
         body: this.context.body,
+        request: this.context.request,
+        response: this.context.response,
         url: this.context.url,
         method: this.context.method,
         env: this.context.env,
@@ -195,7 +201,7 @@ export function processDynamicValue(value: any, context: ExpressionContext): any
   const _recursiveProcess = (currentValue: any): any => {
     if (typeof currentValue === 'string') {
       // 字符串：执行表达式替换
-      const expressionRegex = /\{\{(.+?)\}\}/g;
+      const expressionRegex = /\{\{([\s\S]+?)\}\}/g;
       const matches = Array.from(currentValue.matchAll(expressionRegex));
 
       if (matches.length === 0) {

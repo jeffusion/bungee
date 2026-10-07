@@ -1903,7 +1903,7 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
     }
   });
 
-  test('should close responses stream with anthropic terminal events when upstream aborts after progress', async () => {
+  test('should fail responses stream without fabricating terminal events after upstream abort', async () => {
     const originalApiMode = process.env.ANTHROPIC_TO_OPENAI_API_MODE;
     process.env.ANTHROPIC_TO_OPENAI_API_MODE = 'responses';
 
@@ -1958,18 +1958,21 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
       const decoder = new TextDecoder();
       let allData = '';
 
+      let failure: unknown;
       if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          allData += decoder.decode(value);
-        }
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            allData += decoder.decode(value);
+          }
+        } catch (error) { failure = error; }
       }
+      expect(failure).toBeDefined();
 
-      expect(allData).toContain('event: message_start');
-      expect(allData).toContain('event: message_delta');
-      expect(allData).toContain('"stop_reason":"end_turn"');
-      expect(allData).toContain('event: message_stop');
+      expect(allData).not.toContain('event: message_delta');
+      expect(allData).not.toContain('"stop_reason":"end_turn"');
+      expect(allData).not.toContain('event: message_stop');
       expect(allData).not.toContain('data: [DONE]');
     } finally {
       if (originalApiMode !== undefined) {

@@ -1357,7 +1357,7 @@ describe('openai-messages-to-chat plugin', () => {
     expect(usage).toEqual({ input_tokens: 0, output_tokens: 0 });
   });
 
-  test('fallback terminal message_delta includes usage when stream transport breaks', async () => {
+  test('stream transport failure does not fabricate successful terminal events', async () => {
     const req = new Request('http://localhost/v1/messages-compat/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1385,13 +1385,17 @@ describe('openai-messages-to-chat plugin', () => {
     const decoder = new TextDecoder();
     let allData = '';
 
+    let failure: unknown;
     if (reader) {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        allData += decoder.decode(value);
-      }
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          allData += decoder.decode(value);
+        }
+      } catch (error) { failure = error; }
     }
+    expect(failure).toBeDefined();
 
     const payloads = parseSSEJsonPayloads(allData);
     const messageDelta = payloads.find(
@@ -1400,11 +1404,7 @@ describe('openai-messages-to-chat plugin', () => {
         && payload.delta.stop_reason === 'end_turn'
     );
 
-    expect(allData).toContain('event: message_stop');
-    expect(messageDelta).toBeDefined();
-    const usage = messageDelta && isObject(messageDelta.usage)
-      ? messageDelta.usage
-      : null;
-    expect(usage).toEqual({ input_tokens: 0, output_tokens: 0 });
+    expect(allData).not.toContain('event: message_stop');
+    expect(messageDelta).toBeUndefined();
   });
 });

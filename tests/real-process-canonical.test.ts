@@ -102,7 +102,7 @@ async function makeFixture(root: string, name: string, credentialPort: number): 
       command: { deduplication: 'none', resultRetentionMs: null, quotaBytes: 65_536, maxResultBytes: 65_536 } },
   } };
   await writeFile(join(pluginPath, 'manifest.json'), JSON.stringify({
-    name: 'canonical-plugin', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin', main: 'index.js',
+    name: 'canonical-plugin', version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin', main: 'index.js',
     capabilities: ['hooks', 'api', 'controlPlane', 'dynamicRuntimeLoad'], uiExtensionMode: 'none', engines: { bungee: '^4.2.0 || ^5.0.0' },
     builtin: false, control: { entry: 'control.js', rpc: [{ name: 'getCredential', access: 'bound-attempt' }] },
     services: { provides: [{ id: credentialContract.id, version: 1, process: 'control', kind: 'rpc' }],
@@ -114,7 +114,7 @@ async function makeFixture(root: string, name: string, credentialPort: number): 
       allowedOrigins: [`https://127.0.0.1:${credentialPort}`], allowedRequests: [{ pathname: '/managed-proxy', methods: ['GET'] }], allowedHeaderNames: ['x-canonical-token'],
     } }] }, configSchema: [], metadata: { name: 'canonical-plugin', description: 'canonical', icon: 'test' },
   }));
-  await writeFile(join(pluginPath, 'index.js'), `export default class CanonicalPlugin { static name = 'canonical-plugin'; static version = '1.0.0'; static controlRpcContract = ${JSON.stringify(credentialContract)}; register() {} };`);
+  await writeFile(join(pluginPath, 'index.js'), `export default class CanonicalPlugin { static name = 'canonical-plugin'; static version = '1.0.0'; static controlRpcContract = ${JSON.stringify(credentialContract)}; bodyRequirements() { return { request: 'none' }; } register() {} };`);
   await writeFile(join(pluginPath, 'control.js'), `import { appendFileSync } from 'node:fs';
  const contract = ${JSON.stringify(credentialContract)};
  export default { createControl(context) {
@@ -1801,7 +1801,7 @@ describe.serial('B daemon', () => {
     const home = join(root, 'home'); const data = join(home, 'data'); const logs = join(home, 'logs'); const runtime = join(home, '.bungee', 'run');
     const plugins = join(data, 'plugins'); const plugin = join(plugins, 'canonical-plugin');
     await Promise.all([mkdir(plugin, { recursive: true }), mkdir(logs, { recursive: true }), mkdir(runtime, { recursive: true })]);
-    await Promise.all([writeFile(join(plugin, 'manifest.json'), JSON.stringify({ name: 'canonical-plugin', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin', main: 'index.js', capabilities: ['hooks', 'dynamicRuntimeLoad'], uiExtensionMode: 'none', engines: { bungee: '^4.2.0 || ^5.0.0' }, builtin: false, contributes: {}, configSchema: [], metadata: { name: 'canonical-plugin', description: 'canonical', icon: 'test' } })), writeFile(join(plugin, 'index.js'), "export default class CanonicalPlugin { static version = '1.0.0'; register() {} };")]);
+    await Promise.all([writeFile(join(plugin, 'manifest.json'), JSON.stringify({ name: 'canonical-plugin', version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin', main: 'index.js', capabilities: ['hooks', 'dynamicRuntimeLoad'], uiExtensionMode: 'none', engines: { bungee: '^4.2.0 || ^5.0.0' }, builtin: false, contributes: {}, configSchema: [], metadata: { name: 'canonical-plugin', description: 'canonical', icon: 'test' } })), writeFile(join(plugin, 'index.js'), "export default class CanonicalPlugin { static version = '1.0.0'; bodyRequirements() { return { request: 'none' }; } register() {} };")]);
     const daemon = await createDaemonHarness(root, lease, undefined, 1, {
       home, dataDirectory: data, logsDirectory: logs, pluginsPath: plugins, managementPort: lease.base + 1,
       pluginSecretsKey: Buffer.alloc(32, 7).toString('base64'),

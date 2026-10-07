@@ -30,7 +30,7 @@ function isRegexLiteral(expression: Expression): boolean {
 
 function isDataDerived(expression: Expression): boolean {
   switch (expression.type) {
-    case 'Identifier': return ['headers', 'body', 'url', 'method', 'env', 'stream'].includes(expression.name);
+    case 'Identifier': return ['headers', 'body', 'url', 'method', 'env', 'stream', 'request', 'response'].includes(expression.name);
     case 'Literal': return typeof expression.value === 'string';
     case 'ArrayExpression':
     case 'ObjectExpression': return true;
@@ -52,5 +52,8 @@ export function memberCallAllowed(member: MemberExpression): boolean {
     if (object.name === 'Date') return DATE_METHODS.has(name);
   }
   if (isRegexLiteral(object)) return name === 'test';
+  if (object.type === 'NewExpression' && object.callee.type === 'Identifier' && object.callee.name === 'Date') {
+    return ['toISOString', 'toUTCString', 'toJSON', 'toString', 'getTime', 'getFullYear', 'getUTCFullYear'].includes(name);
+  }
   return isDataDerived(object) && DATA_METHODS.has(name);
 }

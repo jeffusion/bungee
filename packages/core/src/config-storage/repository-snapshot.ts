@@ -1,7 +1,8 @@
 import type { Database } from 'bun:sqlite';
 import { hashConfigurationContent } from './content-hash';
 import { auditConfigurationTables, verifyActiveRequestIdentity } from './cross-table-audit';
-import { readActiveAggregate } from './read-materialization';
+import { readActiveAggregate, readRawActiveAggregate } from './read-materialization';
+import { validatePreDirectionalAggregate } from './directional-migration';
 import { verifySchemaFingerprint } from './schema-fingerprint';
 import type { RepositorySnapshot } from './repository-types';
 import { ConfigRepositoryError } from './repository-types';
@@ -30,7 +31,12 @@ export function readRepositorySnapshot(
       verifyIntegrity(db, allowActiveRecoveryDrift, schemaVersion);
       const audited = auditConfigurationTables(db);
       const revision = audited.activeRevisionRow;
-      const aggregate = readActiveAggregate(db);
+      // Explicit earlier-migration audits retain the old aggregate/hash. Normal reads
+      // and new workers always use the strict directional compiler.
+      const historical = schemaVersion !== undefined && schemaVersion < 15
+        ? validatePreDirectionalAggregate(readRawActiveAggregate(db)) : undefined;
+      if (historical && !historical.ok) throw new ConfigRepositoryError('schema_corrupt', 'historical configuration is invalid', historical.errors);
+      const aggregate = historical?.ok ? historical.value : readActiveAggregate(db);
       verifyActiveRequestIdentity(audited, aggregate);
       if (hashConfigurationContent(aggregate) !== revision.content_hash) {
         throw new ConfigRepositoryError('schema_corrupt', 'active configuration content hash does not match');

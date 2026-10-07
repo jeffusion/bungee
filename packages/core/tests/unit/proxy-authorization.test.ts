@@ -30,8 +30,8 @@ for (const principal of principals) {
         ? { replace: { aUtHoRiZaTiOn: 'Bearer UPSTREAM_SECRET' } }
         : { add: { aUtHoRiZaTiOn: source === 'expression' ? '{{headers.authorization}}' : 'Bearer UPSTREAM_SECRET' } };
     const config: AppConfig = {
-      services: [{ name: 'provider', endpoints: [{ id: 'endpoint-1', target: 'https://upstream.test', ...(source === 'service' ? { headers: rules } : {}) }] }],
-      routes: [{ path: '/v1', service: 'provider', ...(source !== 'none' && source !== 'service' ? { headers: rules } : {}) }],
+      services: [{ name: 'provider', endpoints: [{ id: 'endpoint-1', target: 'https://upstream.test', ...(source === 'service' ? { request: { headers: rules } } : {}) }] }],
+      routes: [{ path: '/v1', service: 'provider', ...(source !== 'none' && source !== 'service' ? { request: { headers: rules } } : {}) }],
     };
     const route: EffectiveRouteConfig = { ...config.routes[0], endpoints: resolveEffectiveRouteEndpoints(config.routes[0], config.services) };
     const upstream: RuntimeUpstream = {
@@ -49,7 +49,7 @@ for (const principal of principals) {
     restored.request.headers.forEach((value, name) => { restoredHeaders[name] = value; });
     const result = await proxyRequest({
       method: 'GET', url: restored.request.url, headers: restoredHeaders,
-      body: null, content_type: '', is_json_body: false,
+      body: undefined, content_type: '', is_json_body: false,
     }, route, upstream, { requestId: 'request-1' }, config, '/v1', undefined, undefined, undefined, undefined, {
       attemptId: 'attempt-1', beforeSend: async () => { admitted = true; },
     });

@@ -28,6 +28,7 @@ export interface ModificationRules {
   headers?: {
     add?: Record<string, string>;
     replace?: Record<string, string>;
+    default?: Record<string, string>;
     remove?: string[];
   };
   body?: {
@@ -84,7 +85,19 @@ export interface AuthConfig {
   tokens: string[];
 }
 
-export interface Endpoint extends ModificationRules {
+export type ResponseBodyFormat = 'json' | 'sse-json';
+
+export interface ResponseModificationRules extends Omit<ModificationRules, 'query'> {
+  /** 缺省同时支持 JSON 与 SSE 中的 JSON data 帧。 */
+  body_formats?: ResponseBodyFormat[];
+}
+
+export interface DirectionalModificationRules {
+  request?: ModificationRules;
+  response?: ResponseModificationRules;
+}
+
+export interface Endpoint extends DirectionalModificationRules {
   id?: string;
   target: string;
   weight?: number;
@@ -232,7 +245,7 @@ export interface RetryConfig {
   per_retry_timeout_ms?: number;
 }
 
-export interface RouteConfig extends ModificationRules {
+export interface RouteConfig extends DirectionalModificationRules {
   /** Stable logical route identity, present only in compiled runtime config. */
   id?: string;
   path: string;

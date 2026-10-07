@@ -10,6 +10,8 @@ export class ChannelProbeCross {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   constructor(_config: Record<string, unknown> = {}) {}
 
+  bodyRequirements() { return { request: 'none' as const }; }
+
   register(): void {}
   async onDestroy(): Promise<void> {}
 }

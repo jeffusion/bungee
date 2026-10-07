@@ -26,6 +26,7 @@ function fixture(legacyEnabled: boolean): { root: string; db: Database; pluginPa
     static version = '1.0.0';
     static async createHandler() { return {
       pluginName: '${pluginName}',
+      bodyRequirements() { return Object.freeze({ request: 'none' }); },
       register(hooks) {
         hooks.onBeforeRequest.tapPromise({ name: '${pluginName}' }, async (context) => {
           context.headers['x-activation-authority'] = 'executed';

@@ -51,9 +51,11 @@ function completeConfig(): Record<string, unknown> {
         is_disabled: false,
         description: 'primary endpoint',
         condition: '{{ body?.model ?? true }}',
+        request: {
         headers: { add: { authorization: 'token' }, replace: { accept: 'application/json' }, remove: ['x-old'] },
         body: { add: { temperature: 1 }, replace: { model: 'new' }, remove: ['old'], default: { stream: false } },
         query: { add: { key: 'value' }, replace: { old: 'new' }, remove: ['drop'], default: { page: '1' } },
+        },
       }],
     }],
     routes: [{
@@ -158,18 +160,20 @@ describe('configuration v2 domain policy validation', () => {
     Object.assign(endpoint, {
       description: 42,
       is_disabled: 'no',
+      request: {
       headers: { add: { bad: 1 }, replace: [], remove: ['ok', 2], extra: true },
       body: { remove: 'bad' },
       query: { default: { page: 1 } },
+      },
     });
 
     expect(errorPaths(config)).toEqual([
       'log_level', 'body_parser_limit', 'logging.body.extra', 'logging.body.enabled',
       'logging.body.max_size', 'logging.body.retention_days',
       'services[0].endpoints[0].description',
-      'services[0].endpoints[0].headers.extra', 'services[0].endpoints[0].headers.add.bad',
-      'services[0].endpoints[0].headers.replace', 'services[0].endpoints[0].headers.remove[1]',
-      'services[0].endpoints[0].body.remove', 'services[0].endpoints[0].query.default.page',
+      'services[0].endpoints[0].request.headers.extra', 'services[0].endpoints[0].request.headers.add.bad',
+      'services[0].endpoints[0].request.headers.replace', 'services[0].endpoints[0].request.headers.remove[1]',
+      'services[0].endpoints[0].request.body.remove', 'services[0].endpoints[0].request.query.default.page',
       'services[0].endpoints[0].is_disabled',
     ]);
   });

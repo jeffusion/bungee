@@ -173,6 +173,8 @@ export const TokenStatsPlugin = definePlugin(
       this.logger.info('TokenStatsPlugin initialized');
     }
 
+    bodyRequirements(): import('../../../packages/core/src/plugin.types').PluginBodyRequirements { return { request: 'none' }; }
+
     register(_hooks: PluginHooks): void {}
 
     async onDestroy(): Promise<void> {

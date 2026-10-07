@@ -12,6 +12,7 @@ function request(path = '/v1/responses', body: Record<string, unknown> = { model
 const rawContext = (context: MutableRequestContext): RawResponseContext => ({
   method: context.method, originalUrl: context.originalUrl, clientIP: context.clientIP,
   requestId: context.requestId, attemptId: 'test-attempt', signal: new AbortController().signal,
+  decodeResponseBody: response => response.body,
 });
 const completed = () => Promise.resolve({ status: 'completed' as const });
 const sse = [

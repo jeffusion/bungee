@@ -6,7 +6,7 @@ function manifest(capabilities: StrictPluginManifest['capabilities'], permission
   return {
     name: 'policy-plugin',
     version: '1.0.0',
-    schemaVersion: 2,
+    schemaVersion: 3,
     artifactKind: 'runtime-plugin',
     main: 'server/index.ts',
     capabilities,

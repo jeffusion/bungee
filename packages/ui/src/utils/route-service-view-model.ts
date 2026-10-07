@@ -82,9 +82,9 @@ function hasDirectResponseCapability(route: Partial<Route>): boolean {
 }
 
 function hasModificationRules(route: Partial<Route>): boolean {
-  return hasModificationContainer(route.headers)
-    || hasModificationContainer(route.body)
-    || hasModificationContainer(route.query)
+  return hasModificationContainer(route.request)
+    || hasModificationContainer(route.response?.headers)
+    || hasModificationContainer(route.response?.body)
     || hasModificationContainer(route.path_rewrite);
 }
 

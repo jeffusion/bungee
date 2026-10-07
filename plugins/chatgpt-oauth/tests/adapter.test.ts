@@ -65,6 +65,7 @@ function modelsRequest(): MutableRequestContext {
 function rawContext(context: MutableRequestContext, attemptId = 'attempt'): RawResponseContext {
   return {
     method: context.method, originalUrl: context.originalUrl, clientIP: context.clientIP,
+    decodeResponseBody: response => response.body,
     requestId: context.requestId, signal: new AbortController().signal, attemptId,
   };
 }

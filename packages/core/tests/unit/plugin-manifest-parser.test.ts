@@ -7,7 +7,7 @@ import { validateEngineRange } from '../../src/plugin-manifest-catalog/manifest-
 
 function manifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    name: 'strict-plugin', version: '1.0.0', builtin: true, schemaVersion: 2,
+    name: 'strict-plugin', version: '1.0.0', builtin: true, schemaVersion: 3,
     artifactKind: 'runtime-plugin', main: 'server/index.ts',
     capabilities: ['hooks', 'dynamicRuntimeLoad'], uiExtensionMode: 'none',
     engines: { bungee: '^4.2.0 || ^5.0.0' }, configSchema: [], ...overrides,

@@ -17,6 +17,8 @@ import { CONFIG_MIGRATION_V14 } from './migrations/v14';
 import { ConfigRepositoryError } from './repository-types';
 import { sqliteAll } from './sqlite-query';
 
+import { CONFIG_MIGRATION_V15 } from './migrations/v15';
+
 type SchemaRow = { readonly name: string; readonly sql: string | null };
 type TableListRow = { readonly name: string; readonly type: string; readonly ncol: number; readonly wr: number; readonly strict: number };
 type ColumnRow = {
@@ -97,6 +99,7 @@ const CONFIG_MIGRATIONS = [
   CONFIG_MIGRATION_V12,
   CONFIG_MIGRATION_V13,
   CONFIG_MIGRATION_V14,
+  CONFIG_MIGRATION_V15,
 ] as const;
 
 function getExpectedDescriptor(version: number): string {

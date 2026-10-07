@@ -90,9 +90,8 @@
         target: '',
         weight: 100,
         priority: (route.endpoints?.length ?? 0) + 1,
-        headers: { add: {}, remove: [], default: {} },
-        body: { add: {}, remove: [], replace: {}, default: {} },
-        query: { add: {}, remove: [], replace: {}, default: {} }
+        request: {},
+        response: {}
       };
     }
     showUpstreamModal = true;

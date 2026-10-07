@@ -3,6 +3,7 @@ export default class CatalogVersionProbe {
   static readonly name = 'catalog-version-probe';
   static readonly version = '1.0.0';
   private catalog: any;
+  bodyRequirements() { return { request: 'none' as const }; }
   async init(context: any): Promise<void> {
     this.catalog = context.services.consume('models-dev', 'models-dev.catalog.v1', 1);
   }

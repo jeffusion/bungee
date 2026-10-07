@@ -121,15 +121,6 @@ export async function applyBodyRules(
     }
   }
 
-  // Check for multi-event support
-  if (modifiedBody.__multi_events && Array.isArray(modifiedBody.__multi_events)) {
-    logger.debug(
-      { request: requestLog, eventCount: modifiedBody.__multi_events.length },
-      "Returning multiple events"
-    );
-    return modifiedBody.__multi_events;
-  }
-
   logger.debug(
     { request: requestLog, phase: 'after', body: modifiedBody },
     "Body after applying rules"

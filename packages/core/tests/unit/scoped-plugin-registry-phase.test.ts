@@ -64,6 +64,7 @@ export default class PhaseSharedPlugin {
     return {
       pluginName: ${JSON.stringify(PLUGIN_NAME)},
       config,
+      bodyRequirements() { return Object.freeze({ request: 'none' }); },
       register(hooks) {
         hooks.onBeforeRequest.tapPromise({ name: label }, async (ctx) => {
           ctx.headers['x-phase-order'] = ctx.headers['x-phase-order'] ? ctx.headers['x-phase-order'] + ',' + label : label;

@@ -100,7 +100,7 @@ describe('required plugin dependencies', () => {
       return {
         name, version: '1.0.0', createHandler: async (_options, context) => {
           events.push(`init:${name}:${context.scope?.type}`);
-          return { pluginName: name, config: {}, register() {}, async destroy() { events.push(`destroy:${name}`); } };
+          return { pluginName: name, config: {}, bodyRequirements() { return Object.freeze({ request: 'none' }); }, register() {}, async destroy() { events.push(`destroy:${name}`); } };
         },
       } satisfies PluginClass;
     };

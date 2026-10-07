@@ -161,7 +161,7 @@ async function extractErrorMessage(response: Response): Promise<string> {
     const clone = response.clone();
     const body = await clone.json();
     if (isRecord(body)) {
-      if (typeof body.error?.message === 'string') return body.error.message;
+      if (isRecord(body.error) && typeof body.error.message === 'string') return body.error.message;
       if (typeof body.message === 'string') return body.message;
     }
   } catch {
@@ -206,7 +206,11 @@ export const SignatureRepairPlugin = definePlugin(
       ];
     }
 
-    register(hooks: PluginHooks): void {
+    bodyRequirements(context: import('../../../packages/core/src/plugin.types').PluginBodyRequirementContext): import('../../../packages/core/src/plugin.types').PluginBodyRequirements {
+      return this.enabled && !/^(GET|HEAD)$/i.test(context.method) ? { request: 'json-read', response: ['json'], replay: true } : { request: 'none' };
+    }
+
+  register(hooks: PluginHooks): void {
       // Stage 10: run after ai-transformer (stage 0) so the body is already in upstream format
       hooks.onBeforeRequest.tap(
         { name: 'signature-repair', stage: 10 },
@@ -256,7 +260,10 @@ export const SignatureRepairPlugin = definePlugin(
           try {
             const retryResponse = await fetch(this.lastRequestState.url, {
               method: this.lastRequestState.method,
-              headers: this.lastRequestState.headers,
+              // The replay is a new JSON representation, never the retained compressed wire.
+              headers: Object.fromEntries(Object.entries(this.lastRequestState.headers).filter(([name]) =>
+                !['content-encoding', 'content-length', 'transfer-encoding', 'trailer', 'digest', 'content-digest', 'repr-digest', 'content-md5'].includes(name.toLowerCase())
+                && name.toLowerCase() !== 'content-type').concat([['content-type', 'application/json']])),
               body: JSON.stringify(sanitizedBody),
             });
 

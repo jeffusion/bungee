@@ -42,7 +42,7 @@ describe('Native Widget Static Contract', () => {
     const pluginDir = createPluginArtifact(root, 'native-widget-plugin', {
       name: 'native-widget-plugin',
       version: '1.0.0',
-      schemaVersion: 2,
+      schemaVersion: 3,
       artifactKind: 'runtime-plugin',
       main: 'dist/index.js',
       capabilities: ['nativeWidgetsStatic'],
@@ -67,7 +67,7 @@ describe('Native Widget Static Contract', () => {
     createPluginArtifact(root, 'native-widget-plugin', {
       name: 'native-widget-plugin',
       version: '1.0.0',
-      schemaVersion: 2,
+      schemaVersion: 3,
       artifactKind: 'runtime-plugin',
       main: 'dist/index.js',
       capabilities: ['nativeWidgetsStatic'],
@@ -94,7 +94,7 @@ describe('Native Widget Static Contract', () => {
     const pluginDir = createPluginArtifact(root, 'invalid-native-widget', {
       name: 'invalid-native-widget',
       version: '1.0.0',
-      schemaVersion: 2,
+      schemaVersion: 3,
       artifactKind: 'runtime-plugin',
       main: 'dist/index.js',
       capabilities: ['nativeWidgetsStatic'],

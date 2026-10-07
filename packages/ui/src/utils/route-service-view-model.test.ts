@@ -118,9 +118,11 @@ describe('route-service-view-model', () => {
       rate_limit: { enabled: true },
       retry: { enabled: true },
       plugins: [{ name: 'audit-log' }],
+      request: {
       headers: { add: {}, remove: [] },
       body: { add: {}, remove: [], replace: {}, default: {} },
       query: { add: {}, remove: [], replace: {}, default: {} },
+      },
     };
 
     const summary = getRouteTargetSummary(route);
@@ -139,16 +141,20 @@ describe('route-service-view-model', () => {
   test('emits modification only for real header/body/query/path rewrite changes', () => {
     const emptyDefaults: Route = {
       path: '/defaults',
+      request: {
       headers: { add: {}, remove: [] },
       body: { add: {}, remove: [], replace: {}, default: {} },
       query: { add: {}, remove: [], replace: {}, default: {} },
+      },
     };
 
     const realModifications: Route = {
       path: '/mods',
+      request: {
       headers: { add: { 'x-demo': '1' }, remove: ['x-old'] },
       body: { add: { foo: 'bar' }, remove: [], replace: {}, default: {} },
       query: { add: {}, remove: [], replace: { status: 'active' }, default: {} },
+      },
       path_rewrite: { '^/api/(.*)$': '/v1/$1' },
     };
 

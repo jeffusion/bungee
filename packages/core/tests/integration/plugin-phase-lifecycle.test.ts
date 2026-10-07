@@ -81,6 +81,7 @@ export default class PhaseLifecyclePlugin {
     return {
       pluginName: ${JSON.stringify(pluginName)},
       config: { ...config, instanceKey },
+      bodyRequirements() { return Object.freeze({ request: 'none' }); },
       register(hooks) {
         hooks.onRequestInit.tapPromise({ name: instanceKey }, async () => {
           getState().before.push('init:' + instanceKey);

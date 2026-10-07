@@ -20,6 +20,11 @@ export function utcDay(now: number): string { if (!Number.isFinite(now)) throw n
 export function utcMonth(now: number): string { return utcDay(now).slice(0,7); }
 export function utcWeek(now: number): string { const date = new Date(utcDay(now)+'T00:00:00Z'); date.setUTCDate(date.getUTCDate() - (date.getUTCDay()+6)%7); return utcDay(date.getTime()); }
 export function createIngress(): IngressPlugin { return {
+  bodyRequirements(target, value) {
+    if (target.principal.domain !== 'data') return { request: 'none' };
+    const policy = validatePolicy((value as any)?.byKey?.[target.principal.keyId]?.policy ?? null);
+    return { request: policy ? 'json-read' : 'none' };
+  },
   plan(target,value) {
     if (target.principal.domain === 'anonymous') return {snapshot: null};
     try {

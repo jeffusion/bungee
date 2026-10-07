@@ -349,8 +349,14 @@ async function readBoundedBody(response: Response, signal: AbortSignal): Promise
 }
 
 function serialize(event: CodexSSEEvent): string {
-  if (event.type === 'done') return 'data: [DONE]\n\n';
-  return `${event.type ? `event: ${event.type}\n` : ''}data: ${JSON.stringify(event.data)}\n\n`;
+  const envelope = event.envelope;
+  const lines = (envelope?.comments ?? []).map(comment => `:${comment}`);
+  if (envelope?.event !== undefined) lines.push(`event: ${envelope.event}`);
+  if (envelope?.id !== undefined) lines.push(`id: ${envelope.id}`);
+  if (envelope?.retry !== undefined) lines.push(`retry: ${envelope.retry}`);
+  const data = event.type === 'done' ? '[DONE]' : envelope?.data ?? JSON.stringify(event.data);
+  lines.push(...data.split('\n').map(line => `data: ${line}`));
+  return `${lines.join('\n')}\n\n`;
 }
 
 function protocolStreamBody(
@@ -385,6 +391,9 @@ function protocolStreamBody(
           terminalOutcome = final.terminal === 'completed'
             ? { status: 'completed' }
             : { status: 'incomplete', code: 'incomplete' };
+          // A complete, validated protocol terminal is proof even if the client
+          // closes the transport immediately after receiving this event.
+          settle(terminalOutcome);
         }
         if (target === 'responses') yield serialize(event);
         else for (const chunk of output) yield `data: ${JSON.stringify(chunk)}\n\n`;
@@ -542,6 +551,20 @@ export class ChatgptOauthAdapter {
       return { response, completion };
     };
 
+    // Raw hooks retain encoded wire by default. This adapter is an explicit
+    // protocol consumer and requests the host's bounded decoded stream.
+    const coding = result.response.headers.get('content-encoding')?.trim().toLowerCase();
+    if (coding && coding !== 'identity') {
+      const decoded = context.decodeResponseBody(result.response);
+      const headers = new Headers(result.response.headers);
+      headers.delete('content-encoding');
+      headers.delete('content-length');
+      headers.delete('transfer-encoding');
+      result = { ...result, response: new Response(decoded, {
+        status: result.response.status, statusText: result.response.statusText, headers,
+      }) };
+    }
+
     if (!result.response.ok) {
       const failure = await readHttpError(result.response, context);
       return errorResponse(result.response.status, joinCompletion(result.completion, Promise.resolve(failure), context.signal), 'error' in failure ? failure.error : undefined);
@@ -589,7 +612,13 @@ export class ChatgptOauthAdapter {
     }
     if (state.stream) {
       const converted = protocolStreamBody(result.response.body, state.target, state.includeUsage, context.signal, context.redactDiagnostic, state.siwc);
-      const streamCompletion = joinCompletion(result.completion, converted.completion, context.signal);
+      // A validated terminal is proof before transport EOF. An already failed
+      // upstream must still settle even if its body never reaches a terminal.
+      const streamCompletion = Promise.race([
+        converted.completion,
+        result.completion.then(upstream => upstream.status === 'failed' ? upstream : converted.completion,
+          () => ({ status: 'failed' as const, code: 'upstream_completion' })),
+      ]);
       void streamCompletion.then(cleanup, cleanup);
       return {
         response: mark(new Response(converted.body, { status: result.response.status, statusText: result.response.statusText, headers: responseHeaders(result.response, 'text/event-stream') })),

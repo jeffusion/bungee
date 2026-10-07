@@ -24,20 +24,32 @@ export function setWorkerAdmissionSession(value: WorkerAdmissionSession | null):
 export function hasWorkerAdmissionSession(): boolean { return session!==null; }
 export class WorkerRequestAdmission {
   private grant: AdmissionGrant | null = null;
+  private admittedBody: unknown;
   constructor(private readonly plugins: readonly WorkerAdmissionPlugin[], private readonly targetBase: Omit<AdmissionTarget,'attemptId'|'upstreamId'|'url'|'model'|'now'>, private readonly invokeBudget: (plugin: string, method: string, payload: unknown, target: AdmissionTarget) => Promise<unknown>) {}
-  async prepare(input: { attemptId: string; upstreamId: string; url: string; model: string | null; body: unknown },signal: AbortSignal): Promise<PreparedAdmissionAttempt[]> {
+  async prepare(input: { attemptId: string; upstreamId: string; url: string; model: string | null; body: unknown },signal: AbortSignal, loadBody?: () => Promise<unknown>): Promise<PreparedAdmissionAttempt[]> {
     if (!session) throw new DataAdmissionError(503,'admission_unavailable');
     const {body: _body,...targetInput}=input;
-    for (const plugin of this.plugins) if (plugin.resolveAdmissionModel) targetInput.model = plugin.resolveAdmissionModel(input);
-    const target=Object.freeze({...this.targetBase,...targetInput,now:Date.now()});
+    let body = input.body === undefined && this.grant ? this.admittedBody : input.body;
     for(let revisionAttempt=0;revisionAttempt<3;revisionAttempt++) {
+      let target = Object.freeze({...this.targetBase,...targetInput,now:Date.now()});
+      // Retry/drain attempts remain bound to the original grant's policy and
+      // identity. Only a new request inspects the current publication.
+      const inspected = this.grant ? {policyVersion:this.grant.version, requirements:{}}
+        : await session.admission('inspect',target,signal) as {policyVersion:number;requirements:Record<string,{request:'none'|'json-read'}>};
+      if (!inspected || !Number.isSafeInteger(inspected.policyVersion) || !inspected.requirements) throw new DataAdmissionError(503,'admission_inspect_failed');
+      if (Object.values(inspected.requirements).some(requirement=>requirement.request === 'json-read') && body === undefined) {
+        if (!loadBody) throw new DataAdmissionError(503,'admission_body_unavailable'); body = await loadBody();
+      }
+      for (const plugin of this.plugins) if (plugin.resolveAdmissionModel) targetInput.model = plugin.resolveAdmissionModel({...input,body});
+      target = Object.freeze({...this.targetBase,...targetInput,now:Date.now()});
       const snapshot=(this.grant ? await session.admission('attempt',target,signal) : await session.admission('preview',target,signal)) as AdmissionGrant;
+      if (!this.grant && snapshot.version !== inspected.policyVersion) continue;
       const prepared: PreparedAdmissionAttempt[]=[];
       try {
         const effectiveTarget = Object.freeze({...target, principal: snapshot.principal});
         for(const plugin of this.plugins) {
           if(!plugin.prepareAdmissionAttempt || !(plugin.pluginName in snapshot.snapshots)) continue;
-          const result=await plugin.prepareAdmissionAttempt({target: effectiveTarget,snapshot:snapshot.snapshots[plugin.pluginName]!,body:input.body,
+          const result=await plugin.prepareAdmissionAttempt({target: effectiveTarget,snapshot:snapshot.snapshots[plugin.pluginName]!,body,
             callBudget: (method,payload) => {
               return this.invokeBudget(plugin.pluginName, method, payload, effectiveTarget);
             }});
@@ -45,7 +57,10 @@ export class WorkerRequestAdmission {
           if(result.denial) throw new DataAdmissionError(result.denial.status,result.denial.error,result.denial.retryAfter);
         }
         if(signal.aborted) throw signal.reason;
-        if(!this.grant) this.grant=await session.admission('admit',{target,version:snapshot.version},signal) as AdmissionGrant;
+        if(!this.grant) {
+          this.grant=await session.admission('admit',{target,version:snapshot.version},signal) as AdmissionGrant;
+          this.admittedBody = body;
+        }
         return prepared;
       } catch(error) {
         await Promise.allSettled(prepared.map(p=>p.cancel?.()));

@@ -184,7 +184,8 @@ async function main(): Promise<void> {
           if (scenario === 'terminal-failover' && upstreamHits === 1) return new Response('retry', { status: 503 });
           return new Response(new ReadableStream<Uint8Array>({
           start(controller) {
-            // Split framing and UTF-8 across chunks, and keep the transport open after terminal.
+            // No protocolCompletion plugin: these terminal-shaped bytes remain opaque.
+            // Split framing and UTF-8 across chunks, keeping transport open until client cancellation.
             const bytes = new TextEncoder().encode(`: 中文\n\n${payload}`);
             controller.enqueue(bytes.slice(0, 3));
             setTimeout(() => {
@@ -240,7 +241,7 @@ async function main(): Promise<void> {
       const upstreamStats = await query.getUnifiedUpstreamStats(0, Date.now(), 'all');
       const { StatsHandler } = await import('../../src/api/handlers/stats');
       const dashboard = await (await new StatsHandler(query).getDashboard(new Request('http://localhost/api/stats/dashboard?range=1h'))).json();
-      console.log(`RESULT:${JSON.stringify({ status: response.status, stats, upstreamStats, upstreamHits, dashboard, readFailed })}`);
+      console.log(`RESULT:${JSON.stringify({ status: response.status, stats, upstreamStats, upstreamHits, dashboard, readFailed, payloadReceived: received.includes(payload) })}`);
       return;
     }
 

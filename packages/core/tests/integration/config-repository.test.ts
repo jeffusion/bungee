@@ -205,7 +205,7 @@ function richAggregate(): ConfigurationAggregateV2 {
           priority: 2,
           is_disabled: false,
           description: 'service owner',
-          headers: { add: { authorization: 'secret' } },
+          request: { headers: { add: { authorization: 'secret' } } },
           plugins: [{ id: IDS.upstreamBinding, position: 7, name: 'audit', options: { level: 'info' }, enabled: true }],
         }],
         plugins: [{ id: IDS.serviceBinding, position: 2, name: 'audit', options: { level: 'debug' }, enabled: true }],
@@ -264,7 +264,7 @@ function removeCommunicationSchema(db: Database): void {
     'plugin_communication_receipts', 'plugin_communication_records', 'plugin_communication_reservations']) {
     db.run(`DROP TABLE ${table}`);
   }
-  db.run('DELETE FROM schema_migrations WHERE version=14');
+  db.run('DELETE FROM schema_migrations WHERE version>=14');
 }
 
 function createV8Database(): string {
@@ -486,7 +486,7 @@ describe('configuration schema migration definition', () => {
 });
 
 describe('ConfigRepository initialization and migration', () => {
-  test('upgrades upstream v12 through v14 without changing publication, hashes, or serving history', () => {
+  test('upgrades upstream v12 through v15 without changing publication, hashes, or serving history', () => {
     const { repository, dbPath } = openRepository();
     const aggregate: ConfigurationAggregateV2 = {
       ...EMPTY_AGGREGATE,
@@ -501,7 +501,7 @@ describe('ConfigRepository initialization and migration', () => {
     db.run('DROP TABLE api_keys');
     db.run('DROP TABLE plugin_durable_records');
     db.run('DROP TABLE plugin_durable_commands');
-    db.run('DELETE FROM schema_migrations WHERE version=13');
+    db.run('DELETE FROM schema_migrations WHERE version>=13');
     expect(() => verifySchemaFingerprint(db, 12)).not.toThrow();
     const before = {
       revisions: db.query('SELECT * FROM configuration_revisions ORDER BY revision').all(),
@@ -524,6 +524,7 @@ describe('ConfigRepository initialization and migration', () => {
       { version: 12, name: 'add_publication_policy' },
       { version: 13, name: 'independent_credentials_and_plugin_durable_state' },
       { version: 14, name: 'plugin_communication_and_command_journal' },
+      { version: 15, name: 'directional_request_response_modifications' },
     ]);
     expect(upgradedDb.query('SELECT * FROM plugin_durable_records').all()).toEqual([]);
     expect(() => verifySchemaFingerprint(upgradedDb)).not.toThrow();
@@ -617,7 +618,7 @@ describe('ConfigRepository initialization and migration', () => {
     const tables = db.query<{ name: string }, []>(
       "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all();
     const before = new Map(tables.map(({ name }) => [name,
-      db.query(`SELECT * FROM "${name}"`).all()]));
+      db.query<Record<string, unknown>, []>(`SELECT * FROM "${name}"`).all()]));
     repository.close();
     repositories.splice(repositories.indexOf(repository), 1);
     const originalBytes = readFileSync(dbPath);
@@ -642,9 +643,9 @@ describe('ConfigRepository initialization and migration', () => {
     }).immediate();
     for (const { name } of tables) {
       if (name === 'schema_migrations') continue;
-      const rows = copy.query(`SELECT * FROM "${name}"`).all();
+      const rows = copy.query<Record<string, unknown>, []>(`SELECT * FROM "${name}"`).all();
       expect(name === 'settings' ? rows.map(({ publication_json: _publication, ...row }) => row) : rows)
-        .toEqual(before.get(name));
+        .toEqual(before.get(name)!);
     }
     copy.close(true);
     const upgraded = ConfigRepository.open(copyPath);
@@ -722,7 +723,7 @@ describe('ConfigRepository initialization and migration', () => {
       foreignKeys: 1,
       busyTimeout: 5000,
       revisions: 1,
-      migrations: 14,
+      migrations: 15,
       stateColumns: ['id', 'schema_version', 'active_revision', 'created_at', 'updated_at'],
     });
   });
@@ -776,7 +777,7 @@ describe('ConfigRepository initialization and migration', () => {
         id: number; schema_version: number; active_revision: number; migrations: number;
       }, []>(`SELECT id,schema_version,active_revision,
         (SELECT count(*) FROM schema_migrations) AS migrations FROM configuration_state WHERE id=1`).get();
-      expect(row).toEqual({ id: 1, schema_version: 4, active_revision: repository.getSnapshot().revision, migrations: 14 });
+      expect(row).toEqual({ id: 1, schema_version: 4, active_revision: repository.getSnapshot().revision, migrations: 15 });
     }
   });
 
@@ -821,6 +822,7 @@ describe('ConfigRepository initialization and migration', () => {
       { version: 12, name: 'add_publication_policy' },
       { version: 13, name: 'independent_credentials_and_plugin_durable_state' },
       { version: 14, name: 'plugin_communication_and_command_journal' },
+      { version: 15, name: 'directional_request_response_modifications' },
     ]);
   });
 
@@ -1069,7 +1071,7 @@ describe('ConfigRepository normalized commits', () => {
     });
     expect(rows).toEqual({ services: 1, routes: 2, upstreams: 2, bindings: 4, activations: 2 });
     expect(servicePolicy).toBe('{}');
-    expect(upstreamPolicy).toBe('{"description":"service owner","headers":{"add":{"authorization":"secret"}}}');
+    expect(upstreamPolicy).toBe('{"description":"service owner","request":{"headers":{"add":{"authorization":"secret"}}}}');
     expect(tableColumns).not.toContain('aggregate');
     expect(tableColumns).not.toContain('config_json');
   });
@@ -1459,7 +1461,7 @@ describe('ConfigRepository normalized commits', () => {
     expect(repository['db'].inTransaction).toBe(false);
   }, { timeout: 30_000 });
 
-  test('serializes two independent V8-to-V14 upgrades with one final schema', async () => {
+  test('serializes two independent V8-to-V15 upgrades with one final schema', async () => {
     const dbPath = createV8Database();
     const outcomes = await runConcurrentV8OpenChildren(dbPath);
     expect(outcomes).toEqual([{ event: 'done', revision: 1 }, { event: 'done', revision: 1 }]);
@@ -1482,6 +1484,7 @@ describe('ConfigRepository normalized commits', () => {
         { version: 12, name: 'add_publication_policy' },
         { version: 13, name: 'independent_credentials_and_plugin_durable_state' },
         { version: 14, name: 'plugin_communication_and_command_journal' },
+        { version: 15, name: 'directional_request_response_modifications' },
       ]);
     expect(inspector.query<{ revision: number; content_hash: string }, []>(
       'SELECT revision,content_hash FROM configuration_revisions',
@@ -1561,7 +1564,7 @@ describe('ConfigRepository normalized commits', () => {
     db.run('UPDATE configuration_state SET updated_at=1 WHERE id=1');
     migrateConfigurationDatabase(db);
     expect(db.inTransaction).toBe(false);
-    expect(db.query<{ version: number }, []>('SELECT version FROM schema_migrations ORDER BY version').all()).toHaveLength(14);
+    expect(db.query<{ version: number }, []>('SELECT version FROM schema_migrations ORDER BY version').all()).toHaveLength(15);
     expect(db.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version).toBe(0);
     db.close(true);
 
@@ -2164,8 +2167,8 @@ describe('ConfigRepository schema enforcement and corruption handling', () => {
       'PRAGMA foreign_keys=OFF; UPDATE configuration_state SET active_revision=99 WHERE id=1',
       "UPDATE configuration_revisions SET content_hash='sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' WHERE revision=1",
       "INSERT INTO configuration_revisions(revision,content_hash,kind,created_at) VALUES (2,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','config',1)",
-      "UPDATE schema_migrations SET version=15 WHERE version=14",
-      "INSERT INTO schema_migrations(version,name) VALUES (15,'future')",
+      "UPDATE schema_migrations SET version=16 WHERE version=15",
+      "INSERT INTO schema_migrations(version,name) VALUES (16,'future')",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=1",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=2",
       "UPDATE schema_migrations SET name='wrong-prefix' WHERE version=3",

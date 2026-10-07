@@ -6,7 +6,7 @@ import type {
 } from 'acorn';
 import { memberCallAllowed } from './expression-call-policy';
 
-const DATA_ROOTS = new Set(['headers', 'body', 'url', 'method', 'env', 'stream']);
+const DATA_ROOTS = new Set(['headers', 'body', 'url', 'method', 'env', 'stream', 'request', 'response']);
 const CALLABLE_ROOTS = new Set([
   'uuid', 'now', 'randomInt', 'base64encode', 'base64decode', 'md5', 'sha256',
   'parseJWT', 'jsonParse', 'jsonStringify', 'encrypt', 'first', 'last', 'length',
@@ -96,11 +96,14 @@ export function isAllowedExpression(expression: Expression): boolean {
     case 'TemplateLiteral': return expression.expressions.every(isAllowedExpression);
     case 'ChainExpression': return isAllowedExpression(expression.expression);
     case 'ParenthesizedExpression': return isAllowedExpression(expression.expression);
+    case 'NewExpression':
+      return expression.callee.type === 'Identifier' && expression.callee.name === 'Date'
+        && expression.arguments.length <= 7
+        && expression.arguments.every(argument => argument.type !== 'SpreadElement' && isAllowedExpression(argument));
     case 'ThisExpression':
     case 'FunctionExpression':
     case 'UpdateExpression':
     case 'AssignmentExpression':
-    case 'NewExpression':
     case 'SequenceExpression':
     case 'ArrowFunctionExpression':
     case 'YieldExpression':

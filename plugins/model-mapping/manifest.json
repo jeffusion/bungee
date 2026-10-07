@@ -3,7 +3,7 @@
   "version": "2.0.0",
   "author": "Bungee Team",
   "builtin": true,
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "artifactKind": "runtime-plugin",
   "main": "server/index.ts",
   "control": {

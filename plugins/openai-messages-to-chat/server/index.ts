@@ -1,3 +1,4 @@
+import { protocolSSEOutput } from '../../../packages/core/src/plugins/sse-envelope';
 import type { Plugin } from '../../../packages/core/src/plugin.types';
 import { definePlugin } from '../../../packages/core/src/plugin.types';
 import type {
@@ -96,7 +97,12 @@ class implements Plugin {
       this.messagesCompatibilityNormalizer = new OpenAIMessagesCompatibilityNormalizer(options);
     }
 
-    register(hooks: PluginHooks): void {
+    bodyRequirements(context: import('../../../packages/core/src/plugin.types').PluginBodyRequirementContext): import('../../../packages/core/src/plugin.types').PluginBodyRequirements {
+      const matched = this.messagesCompatibilityNormalizer.shouldHandleRequest(context) || this.shouldHandleResponsesRequest(context);
+      return matched ? { request: 'json-write', response: ['json', 'sse-json'] } : { request: 'none' };
+    }
+
+  register(hooks: PluginHooks): void {
       hooks.onBeforeRequest.tap(
         { name: 'openai-messages-to-chat', stage: -10 },
         (ctx) => {
@@ -228,7 +234,10 @@ class implements Plugin {
 
       hooks.onStreamChunk.tapPromise(
         { name: 'openai-messages-to-chat', stage: 10 },
-        async (chunk, ctx) => {
+        async (envelope, ctx) => {
+          const chunk = envelope.json;
+          if (chunk === undefined) return null;
+          const converterContext = { ...ctx, sseEvent: envelope };
           if (this.responsesAdaptedRequestIds.has(ctx.requestId)) {
             if (!this.messagesCompatibilityNormalizer.isOpenAIStreamChunk(chunk)) {
               return null;
@@ -238,7 +247,7 @@ class implements Plugin {
             if (converted.length > 0) {
               this.responsesStreamConversionRequestIds.add(ctx.requestId);
             }
-            return converted;
+            return protocolSSEOutput(converted, 'responses', envelope);
           }
 
           if (!this.adaptedRequestIds.has(ctx.requestId)) {
@@ -250,12 +259,12 @@ class implements Plugin {
           }
 
           this.streamConversionRequestIds.add(ctx.requestId);
-          const converted = await this.responseConverter.processStreamChunk?.(chunk, ctx);
+          const converted = await this.responseConverter.processStreamChunk?.(chunk, converterContext);
           if (!Array.isArray(converted)) {
             return converted ?? null;
           }
 
-          return this.protocolConversion.ensureMessagesStreamCompatibility(converted, ctx);
+          return protocolSSEOutput(this.protocolConversion.ensureMessagesStreamCompatibility(converted, ctx), 'anthropic', envelope);
         }
       );
 
@@ -266,7 +275,7 @@ class implements Plugin {
             this.responsesStreamConversionRequestIds.delete(ctx.requestId);
             const completionEvents = this.buildResponsesStreamCompletionEvents(ctx);
             this.persistResponsesStateFromStream(ctx);
-            return [...chunks, ...completionEvents];
+            return [...chunks, ...protocolSSEOutput(completionEvents, 'responses')];
           }
 
           if (!this.streamConversionRequestIds.has(ctx.requestId)) {
@@ -275,8 +284,8 @@ class implements Plugin {
 
           const flushed = await this.responseConverter.flushStream?.(ctx);
           this.streamConversionRequestIds.delete(ctx.requestId);
-          const merged = [...chunks, ...(flushed ?? [])];
-          return this.protocolConversion.ensureMessagesStreamCompatibility(merged, ctx);
+          const converted = this.protocolConversion.ensureMessagesStreamCompatibility(flushed ?? [], ctx);
+          return [...chunks, ...protocolSSEOutput(converted, 'anthropic')];
         }
       );
 

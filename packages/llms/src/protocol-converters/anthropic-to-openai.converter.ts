@@ -1629,7 +1629,7 @@ export class AnthropicToOpenAIConverter implements AIConverter {
    * 处理流式响应：OpenAI chunk → Anthropic SSE
    */
   async processStreamChunk(chunk: any, ctx: StreamChunkContext): Promise<any[] | null> {
-    if (this.isResponsesStreamChunk(chunk)) {
+    if (this.isResponsesStreamChunk(chunk, ctx)) {
       return this.processResponsesStreamChunk(chunk, ctx);
     }
 
@@ -1931,8 +1931,8 @@ export class AnthropicToOpenAIConverter implements AIConverter {
     return [];
   }
 
-  private isResponsesStreamChunk(chunk: any): boolean {
-    const eventType = typeof chunk?._event === 'string' ? chunk._event : '';
+  private isResponsesStreamChunk(chunk: any, ctx: StreamChunkContext): boolean {
+    const eventType = ctx.sseEvent?.event ?? '';
     const type = typeof chunk?.type === 'string' ? chunk.type : '';
     if (eventType.startsWith('response.')) return true;
     if (type.startsWith('response.')) return true;
@@ -1941,7 +1941,7 @@ export class AnthropicToOpenAIConverter implements AIConverter {
 
   private async processResponsesStreamChunk(chunk: any, ctx: StreamChunkContext): Promise<any[]> {
     const events: any[] = [];
-    const eventType = typeof chunk?._event === 'string' && chunk._event.length > 0 ? chunk._event : chunk.type;
+    const eventType = ctx.sseEvent?.event || chunk.type;
     const ensureMessageStarted = () => {
       if (!ctx.streamState.has('message_started')) {
         events.push({

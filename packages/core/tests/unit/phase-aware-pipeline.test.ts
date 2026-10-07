@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { gzipSync, zstdCompressSync } from 'node:zlib';
 import type { AppConfig, InterceptResult } from '@jeffusion/bungee-types';
 import { createPluginHooks, type FinallyContext, type MutableRequestContext, type RawResponseContext, type ResponseContext } from '../../src/hooks';
 import type { RawResponseResult } from '../../src/plugin-control/contracts';
@@ -18,6 +19,7 @@ let accessLogWriter: typeof import('../../src/logger/access-log-writer').accessL
 
 function createPrecompiledHooks(options: {
   label?: string;
+  responseDemand?: boolean;
   onBeforeRequest?: (ctx: MutableRequestContext) => MutableRequestContext | Promise<MutableRequestContext>;
   onInterceptRequest?: (ctx: MutableRequestContext) => InterceptResult | Promise<InterceptResult>;
   onResponse?: (response: Response, ctx: ResponseContext) => Response | Promise<Response>;
@@ -44,7 +46,9 @@ function createPrecompiledHooks(options: {
   }
 
   return {
-    handlers: [],
+    handlers: Object.values(options).some(value => typeof value === 'function')
+      ? [{ pluginName: label, config: {}, bodyRequirements: () => ({ request: 'none', response: options.responseDemand ? ['json','sse-json'] : options.onResponse ? ['json'] : [] }), register() {} }]
+      : [],
     hooks,
     hasInterceptCallbacks: hooks.onInterceptRequest.hasCallbacks(),
     hasResponseCallbacks: hooks.onResponse.hasCallbacks(),
@@ -74,12 +78,12 @@ function installPhaseHooks(factory: (upstreamId?: string) => Omit<PhaseAwareHook
 
 function createInboundChain(
   onResponse?: (response: Response) => Promise<Response> | Response,
-  onRawResponse?: (result: RawResponseResult) => Promise<RawResponseResult> | RawResponseResult,
+  onRawResponse?: (result: RawResponseResult, context: RawResponseContext) => Promise<RawResponseResult> | RawResponseResult,
   onError: () => Promise<void> = async () => {},
 ): PhaseAwareHooks['inbound'] {
   return {
     onResponse: async (response) => onResponse ? await onResponse(response) : response,
-    onRawResponse: async (result) => onRawResponse ? await onRawResponse(result) : result,
+    onRawResponse: async (result, context) => onRawResponse ? await onRawResponse(result, context) : result,
     onStreamChunk: async (chunk) => [chunk],
     onFlushStream: async (chunks) => chunks,
     onError,
@@ -269,10 +273,11 @@ describe('phase-aware request pipeline', () => {
 
     const requestCount = status === 400 ? 3 : 1;
     let response!: Response;
+    let body = '';
     for (let attempt = 0; attempt < requestCount; attempt++) {
       response = await handleRequest(new Request(`http://localhost${routePath}`), config, { logging });
+      body = await response.text();
     }
-    const body = await response.text();
     const logEntries = [...entries.values()].filter((entry) => entry.path === routePath);
 
     expect(response.status).toBe(status);
@@ -291,6 +296,42 @@ describe('phase-aware request pipeline', () => {
         path: routePath,
       }));
     }
+  });
+
+  test('finite body EOF retains the deadline for a pending strict raw proof', async () => {
+    const base=createFailoverConfig();const config:AppConfig={...base,routes:base.routes.map(route=>({...route,timeouts:{request_ms:30}}))};
+    initializeRuntimeState(config);
+    const raw=async(result:RawResponseResult):Promise<RawResponseResult>=>({...result,completion:new Promise(()=>{})});
+    installPhaseHooks(()=>({routePhase:createPrecompiledHooks({onRawResponse:raw}),servicePhase:null,upstreamPhase:createPrecompiledHooks(),inbound:createInboundChain(undefined,raw)}));
+    setFetchMock(async()=>new Response('finite'));
+    const {entries,logging}=createTestLogging();
+    const response=await handleRequest(new Request('http://proxy.test/api'),config,{logging});
+    const body=await Promise.race([response.text(),Bun.sleep(500).then(()=>{throw new Error('strict proof exceeded attempt deadline');})]);
+    expect(body).toBe('finite');
+    const entry=[...entries.values()].find(entry=>entry.isFailoverAttempt);
+    expect(entry?.protocolOutcome).toBe('failed');expect(entry?.protocolCode).toBe('request_timeout');
+    expect(getActiveRequestCount(config.services![0]!.name,'primary')).toBe(0);
+  });
+
+  test.each(['throw','locked-throw','deadline'] as const)('host releases abandoned raw decoder after %s',async(mode)=>{
+    const base=createFailoverConfig();const config:AppConfig={...base,services:base.services!.map(service=>({...service,failover:{enabled:false}})),routes:base.routes.map(route=>({...route,timeouts:{request_ms:30}}))};
+    initializeRuntimeState(config);let abandon=true;
+    const raw=async(result:RawResponseResult,context:RawResponseContext):Promise<RawResponseResult>=>{
+      const decoded=context.decodeResponseBody(result.response)!;
+      if(abandon){if(mode==='locked-throw')decoded.getReader();if(mode==='deadline')return new Promise(()=>{});throw new Error('raw decoder abandoned');}
+      const body=await new Response(decoded).text();return {...result,response:new Response(body,{headers:{'content-type':'text/event-stream'}})};
+    };
+    installPhaseHooks(()=>({routePhase:createPrecompiledHooks({onRawResponse:raw,responseDemand:true}),servicePhase:null,upstreamPhase:createPrecompiledHooks(),inbound:createInboundChain(undefined,raw)}));
+    let coding:'gzip'|'zstd'='gzip';
+    setFetchMock(async()=>new Response(new Uint8Array(coding==='gzip'?gzipSync(Buffer.from('data: {"x":1}\n\n')):zstdCompressSync(Buffer.from('data: {"x":1}\n\n'))),{headers:{'content-type':'text/event-stream','content-encoding':coding}}));
+    for(let i=0;i<2;i++){
+      const pending=handleRequest(new Request('http://proxy.test/api'),config);
+      if(mode==='deadline'){const response=await pending;expect(response.status).toBeGreaterThanOrEqual(400);await response.text();}
+      else await expect(pending).rejects.toThrow('raw decoder abandoned');
+    }
+    abandon=false;
+    for(coding of ['gzip','zstd'] as const){const response=await handleRequest(new Request('http://proxy.test/api'),config);expect(response.status).toBe(200);expect(await response.text()).toBe('data: {"x":1}\n\n');}
+    expect(getActiveRequestCount(config.services![0]!.name,'primary')).toBe(0);
   });
 
   test.each(['reject', 'hang'] as const)('cleanup failure (%s) after a request deadline prevents GET failover', async (mode) => {
@@ -505,6 +546,7 @@ describe('phase-aware request pipeline', () => {
     const response = await handleRequest(new Request('http://localhost/half-open-neutral'), config);
 
     expect(response.status).toBe(400);
+    await response.text();
     expect(selected).toMatchObject({
       status: 'HALF_OPEN',
       consecutive_failures: 2,
@@ -582,6 +624,7 @@ describe('phase-aware request pipeline', () => {
     const response = await handleRequest(new Request('http://localhost/legacy-completed-500'), config);
 
     expect(response.status).toBe(500);
+    await response.text();
     expect(selected).toMatchObject({ status: 'HEALTHY', consecutive_failures: 1, consecutive_successes: 0 });
   });
 
@@ -623,6 +666,7 @@ describe('phase-aware request pipeline', () => {
     for (let attempt = 0; attempt < 3; attempt++) {
       response = await handleRequest(new Request(`http://localhost${routePath}`), config);
       expect(response.status).toBe(status);
+      await response.text();
     }
     expect(fetched).toHaveLength(6);
     expect(runtimeState.get(serviceName)?.upstreams).toEqual(expect.arrayContaining([
@@ -786,8 +830,9 @@ describe('phase-aware request pipeline', () => {
 
   test('onFinally runs request-level once and final-upstream-level only for final upstream', async () => {
     const finallyRecords: string[] = [];
+    const finalized = Promise.withResolvers<void>();
     installPhaseHooks((upstreamId) => ({
-      routePhase: createPrecompiledHooks({ label: 'route', onFinally: async () => { finallyRecords.push('route'); } }),
+      routePhase: createPrecompiledHooks({ label: 'route', onFinally: async () => { finallyRecords.push('route'); finalized.resolve(); } }),
       servicePhase: createPrecompiledHooks({ label: 'service', onFinally: async () => { finallyRecords.push('service'); } }),
       upstreamPhase: createPrecompiledHooks({ label: `upstream:${upstreamId ?? 'none'}`, onFinally: async () => { finallyRecords.push(`upstream:${upstreamId}`); } }),
       inbound: createInboundChain(),
@@ -805,13 +850,16 @@ describe('phase-aware request pipeline', () => {
     const response = await handleRequest(new Request('http://localhost/api/test'), config);
 
     expect(response.status).toBe(200);
+  await response.text();
+  await finalized.promise;
   expect(finallyRecords).toEqual(['upstream:secondary', 'service', 'route']);
 });
 
 test('onFinally skips endpoint when all upstreams fail but still runs request-level', async () => {
   const finallyRecords: string[] = [];
+  const finalized = Promise.withResolvers<void>();
   installPhaseHooks((upstreamId) => ({
-    routePhase: createPrecompiledHooks({ label: 'route', onFinally: async () => { finallyRecords.push('route'); } }),
+    routePhase: createPrecompiledHooks({ label: 'route', onFinally: async () => { finallyRecords.push('route'); finalized.resolve(); } }),
     servicePhase: createPrecompiledHooks({ label: 'service', onFinally: async () => { finallyRecords.push('service'); } }),
     upstreamPhase: createPrecompiledHooks({ label: `upstream:${upstreamId ?? 'none'}`, onFinally: async () => { finallyRecords.push(`upstream:${upstreamId}`); } }),
     inbound: createInboundChain(),
@@ -823,6 +871,8 @@ test('onFinally skips endpoint when all upstreams fail but still runs request-le
   const response = await handleRequest(new Request('http://localhost/api/test'), config);
 
   expect(response.status).toBe(503);
+  await response.text();
+  await finalized.promise;
   expect(finallyRecords).toEqual(['service', 'route']);
   expect(finallyRecords).not.toContain(expect.stringContaining('upstream:'));
 });

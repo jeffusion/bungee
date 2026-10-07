@@ -7,10 +7,10 @@ import { auditConfigurationTables } from '../cross-table-audit';
 import { replaceActiveMaterialization } from '../materialize';
 import { readAllWorkers } from '../operation-records';
 import { verifyRecoveryIntegrity } from '../recovery-store';
-import { readActiveAggregate, readRawActiveAggregate } from '../read-materialization';
+import { readRawActiveAggregate } from '../read-materialization';
 import { ConfigRepositoryError } from '../repository-types';
 import { sqliteAll, sqliteGet } from '../sqlite-query';
-import { parseNormalizeCompileAggregate } from '../aggregate';
+import { validatePreDirectionalAggregate } from '../directional-migration';
 
 /** Historical credential schema only; active credentials belong to authentication plugins. */
 const LEGACY_API_KEY_SCHEMA_SQL = `
@@ -39,7 +39,7 @@ function withoutLegacyAuth(value: ConfigurationAggregateV2): ConfigurationAggreg
   const logical = value.logical_configuration;
   const {auth: _auth, ...rest} = logical;
   const routes = logical.routes.map(route => { const {auth: _routeAuth, ...clean} = route; return clean; });
-  const result = parseNormalizeCompileAggregate({...value, logical_configuration:{...rest,routes}});
+  const result = validatePreDirectionalAggregate({...value, logical_configuration:{...rest,routes}});
   if (!result.ok) throw new ConfigRepositoryError('schema_corrupt', 'configuration is invalid after removing legacy auth', result.errors);
   return result.value;
 }
@@ -99,7 +99,7 @@ export const CONFIG_MIGRATION_V13 = {
       db.run('UPDATE configuration_operations SET request_hash=? WHERE mutation_id=?', [
         hashConfigurationRequest({kind:active.kind, expected_revision:active.expected_revision, aggregate:newAggregate, target_worker_slots:oldSlots}),active.mutation_id]);
       db.run('INSERT INTO schema_migrations(version,name) VALUES (?,?)', [this.version, this.name]);
-      if (hashConfigurationContent(readActiveAggregate(db)) !== newHash) migrationError('merged migration materialization is invalid');
+      if (hashConfigurationContent(readRawActiveAggregate(db) as ConfigurationAggregateV2) !== newHash) migrationError('merged migration materialization is invalid');
       return;
     }
     replaceActiveMaterialization(db, newAggregate);
@@ -121,7 +121,7 @@ export const CONFIG_MIGRATION_V13 = {
       [nextRevision, now, audited.activeRevision]).changes !== 1) migrationError('active configuration revision update failed');
     db.run('INSERT INTO schema_migrations(version,name) VALUES (?,?)', [this.version, this.name]);
     // Validate this migration's materialization without requiring later schema versions.
-    const materialized = readActiveAggregate(db);
+    const materialized = readRawActiveAggregate(db) as ConfigurationAggregateV2;
     if (hashConfigurationContent(materialized) !== newHash) {
       migrationError('new configuration snapshot failed post-migration verification');
     }

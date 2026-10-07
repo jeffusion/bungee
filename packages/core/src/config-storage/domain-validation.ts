@@ -1,5 +1,5 @@
 import { validateExpressionSyntax } from './expression-syntax';
-import { validateModificationRules } from './modification-validation';
+import { validateDirectionalModificationRules } from './modification-validation';
 import { isObject } from './validation';
 import { objectField } from './policy-fields';
 import { validateRoutePolicies } from './route-policy-validation';
@@ -49,7 +49,7 @@ export function validateUpstreamDomain(object: JsonObject, path: string, context
   if (object.description !== undefined && typeof object.description !== 'string') {
     context.add('invalid_type', `${path}.description`, 'Expected a string');
   }
-  validateModificationRules(object, path, context);
+  validateDirectionalModificationRules(object, path, context);
   validateExpressionSyntax(object.condition, `${path}.condition`, context);
 }
 
@@ -73,7 +73,7 @@ export function validateRouteDomain(
   if (typeof object.path === 'string' && !object.path.startsWith('/')) {
     context.add('invalid_path', `${path}.path`, 'Route path must start with /');
   }
-  validateModificationRules(object, path, context);
+  validateDirectionalModificationRules(object, path, context);
   validateRoutePolicies(object, path, context);
   const direct = isObject(object.direct_response) && object.direct_response.enabled === true;
   const redirect = isObject(object.redirect) && object.redirect.enabled === true;

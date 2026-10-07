@@ -11,7 +11,7 @@ import { CODEX_MAX_SSE_LINE_BYTES } from '../../../../plugins/chatgpt-oauth/serv
 import { TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/config-worker-private-transport';
 import { localAdmissionSelector } from '../fixtures/public-listener';
 
-test('Codex large response and interrupted capture survive the real HTTP proxy pipeline', async () => {
+test('Codex large response and durable failure diagnostics survive with opaque capture marked incomplete', async () => {
   await ensureDataPlaneSchema();
   const [{ handleRequest }, runtime, { accessLogWriter }, { fileLogWriter }] = await Promise.all([
     import('../../src/worker/request/handler'),
@@ -90,17 +90,15 @@ test('Codex large response and interrupted capture survive the real HTTP proxy p
         await accessLogWriter.flush();
         const row = accessLogWriter.getDatabase().query('SELECT * FROM access_logs WHERE path=? ORDER BY id DESC LIMIT 1').get(routeId) as Record<string, any>;
         expect(row).toMatchObject({ status: 200, success: limited ? 0 : 1, protocol_outcome: limited ? 'failed' : 'completed' });
-        const capture = await bodyStorage.load(row.resp_body_id);
-        expect(capture).toMatchObject({ kind: 'sse_messages' });
+        expect(row.resp_body_id).toBeNull();
+        expect(JSON.parse(row.processing_steps)).toContainEqual(expect.objectContaining({ step: 'body_logging_incomplete', detail: expect.objectContaining({ observer_incomplete: true }) }));
         if (limited) {
           expect(row.error_message).toBe('Response stream failed (body_limit)');
-          expect(capture).toMatchObject({ interrupted: true, capturedMessages: 1 });
         } else {
           expect(row.original_req_body_id).toBeNull();
           expect(JSON.parse(row.processing_steps)).toContainEqual(expect.objectContaining({
             step: 'body_recording_skipped', detail: expect.objectContaining({ reason: 'size_limit', maxBytes: 5 * 1024 * 1024 }),
           }));
-          expect(capture.messages.some((message: any) => message.data?.type === 'response.completed')).toBe(true);
         }
         expect(runtime.getActiveRequestCount('response-replay', 'primary')).toBe(0);
       } finally {

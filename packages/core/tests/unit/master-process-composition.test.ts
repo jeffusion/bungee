@@ -336,7 +336,7 @@ describe('master process composition', () => {
     try {
       const handle = await startMasterComposition({ ...dependencies,
         createIngressController: (options) => {
-          const ingress = dependencies.createIngressController!(options);
+          const ingress = Reflect.apply(dependencies.createIngressController!, dependencies, [options]);
           ingress.status = async () => ({ registry: { active: { ...active, revision: active.revision + (changeMembership && reads > 0 ? 1 : 0) },
             prepared: null, retired: [], handoff: { retired_id: HASH, pending: 0, complete: true, remaining_ms: 3000 - ++reads } } }) as any;
           return ingress;

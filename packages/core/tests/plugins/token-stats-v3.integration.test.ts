@@ -30,6 +30,16 @@ const registries: ScopedPluginRegistry[] = [];
 const registryRoots: string[] = [];
 const storageKeys: string[] = [];
 const originalFetch = globalThis.fetch;
+
+// A fake upstream must consume the upload just like the real HTTP transport.
+function consumingUpstreamFetch(mockFetch: typeof fetch): typeof fetch {
+  return Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.hostname !== '127.0.0.1' && init?.body != null) await new Response(init.body).arrayBuffer();
+    return mockFetch(input, init);
+  }, { preconnect: () => undefined }) as typeof fetch;
+}
+
 const offlineFetch = Object.assign(
   async () => new Response('{}', { headers: { 'content-type': 'application/json' } }),
   { preconnect: () => undefined },
@@ -127,6 +137,7 @@ export default class TokenStatsBinding {
     await plugin.init({ ...initContext, storage: root[storageKey], services: services.createContext('token-stats', 'global', { 'token-metering': '^1.0.0' }) });
     return {
       pluginName: 'token-stats',
+      bodyRequirements(ctx) { return { ...provider.bodyRequirements(ctx), request: config.crossProviderFailover ? 'json-write' : 'none', response: config.splitChunks ? ['sse-json'] : [] }; },
       register(hooks) {
         provider.register(hooks);
         plugin.register(hooks);
@@ -186,7 +197,7 @@ export default class TokenStatsBinding {
 function requestToGateway(config: AppConfig, body: unknown = { model: 'gpt-4o-mini', input: 'hello' }): Promise<Response> {
   return handleRequest(new Request('http://localhost/token-stats', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...(typeof body === 'object' && body !== null && 'stream' in body && body.stream === true ? { accept: 'text/event-stream' } : {}) },
     body: JSON.stringify(body),
   }), config);
 }
@@ -203,20 +214,27 @@ async function waitForAttempts(db: Database, count: number, requestId?: string):
   throw new Error(`timed out waiting for ${count} attempt rows`);
 }
 
+async function waitForRequestEnd(events: AttemptObservationEvent[], count: number) {
+  const deadline = Date.now() + 1000;
+  while (events.filter(event => event.phase === 'request-end').length < count && Date.now() < deadline) await Bun.sleep(1);
+  expect(events.filter(event => event.phase === 'request-end')).toHaveLength(count);
+}
+
 describe('Token Stats SQLite metering integration', () => {
   test('worker emits only trusted API Key identity; spoofed headers and anonymous requests remain unattributed', async () => {
     const fixture = await createGatewayFixture();
-    globalThis.fetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
+    globalThis.fetch = consumingUpstreamFetch(Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : String(input);
       if (new URL(url).hostname === '127.0.0.1') return originalFetch(input,init);
       return Response.json({object:'response',status:'completed',output:[],usage:{input_tokens:7,output_tokens:2}});
-    }, {preconnect: () => undefined}) as typeof fetch;
+    }, {preconnect: () => undefined}) as typeof fetch);
     const request = new Request('http://localhost/token-stats', {method:'POST',headers:{
       'content-type':'application/json','x-api-key-id':'spoofed','x-bungee-key-id':'spoofed',
       [INTERNAL_DATA_IDENTITY_HEADER]:JSON.stringify({principal:{domain:'data',keyId:'spoofed',credentialVersion:1},requestId:crypto.randomUUID()}),
     },body:JSON.stringify({model:'gpt-4o-mini',input:'hello'})});
     const direct = await handleRequest(request,fixture.config); expect(direct.status).toBe(200); await direct.text();
     await waitForAttempts(fixture.db,1);
+    await waitForRequestEnd(fixture.observations,1);
     expect(fixture.db.query('SELECT key_id FROM token_stats_attempts').all()).toEqual([{key_id:null}]);
     expect(fixture.observations.every(event => event.keyId === null)).toBe(true);
     const stopAdmission = await startAnonymousAdmission();
@@ -234,6 +252,7 @@ describe('Token Stats SQLite metering integration', () => {
         expect(restored.ok).toBe(true); if (!restored.ok) throw Error('restore failed');
         const offset = fixture.observations.length;
         const response = await handleRequest(restored.request,fixture.config); expect(response.status).toBe(200); await response.text();
+        await waitForRequestEnd(fixture.observations,keyId === 'trusted-key' ? 2 : 3);
         expect(fixture.observations.slice(offset).length).toBeGreaterThan(0);
         expect(fixture.observations.slice(offset).every(event => event.keyId === keyId)).toBe(true);
       }
@@ -245,20 +264,37 @@ describe('Token Stats SQLite metering integration', () => {
     } finally { await stopAdmission(); }
   });
 
-  test('counts official SSE usage when a streaming upstream omits Content-Type', async () => {
+  test('counts official SSE usage for an explicitly declared upstream protocol', async () => {
     const fixture = await createGatewayFixture();
     const bytes = new TextEncoder().encode(
       'data: {"type":"response.output_text.delta","delta":"OK"}\n\n'
       + 'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":19,"output_tokens":5}}}\n\n',
     );
-    globalThis.fetch = Object.assign(async () => new Response(new ReadableStream<Uint8Array>({
+    globalThis.fetch = consumingUpstreamFetch(Object.assign(async () => new Response(new ReadableStream<Uint8Array>({
       start(controller) { controller.enqueue(bytes.slice(0, 13)); controller.enqueue(bytes.slice(13)); controller.close(); },
-    })), { preconnect: () => undefined }) satisfies typeof fetch;
+    }), { headers: { 'content-type': 'text/event-stream' } }), { preconnect: () => undefined }) satisfies typeof fetch);
     const response = await requestToGateway(fixture.config, { model: 'custom-model', input: 'hello', stream: true });
     expect(response.status).toBe(200);
     expect(await response.text()).toContain('response.completed');
     const rows = await waitForAttempts(fixture.db, 1);
     expect(rows[0]).toMatchObject({ outcome: 'completed', input_tokens: 19, output_tokens: 5, input_source: 'usage', output_source: 'usage' });
+  });
+
+  test('headerless SSE preserves wire bytes and records unknown optional usage', async () => {
+    const fixture = await createGatewayFixture();
+    const wire = 'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":19,"output_tokens":5}}}\n\n';
+    globalThis.fetch = consumingUpstreamFetch(Object.assign(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode(wire)); controller.close(); },
+    })), { preconnect: () => undefined }));
+    const response = await handleRequest(new Request('http://localhost/token-stats', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'custom-model', input: 'hello', stream: true }),
+    }), fixture.config);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(wire);
+    const [attempt] = await waitForAttempts(fixture.db, 1);
+    // A JSON field alone does not declare the wire protocol when Content-Type and Accept are absent.
+    expect(attempt).toMatchObject({ input_tokens: null, output_tokens: null, input_source: 'unknown', output_source: 'unknown', observation_incomplete: 1 });
   });
 
   test('real gateway retryable HTTP failover emits one row per attempt across scoped owners', async () => {
@@ -267,20 +303,21 @@ describe('Token Stats SQLite metering integration', () => {
     });
     const targets: string[] = [];
     let calls = 0;
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
+    globalThis.fetch = consumingUpstreamFetch((async (input: RequestInfo | URL) => {
       targets.push(new URL(String(input)).host);
       calls += 1;
       if (calls === 1) return new Response(null, { status: 500 });
-      return new Response(JSON.stringify({ usage: { input_tokens: 12, output_tokens: 7 } }), {
+      return new Response(JSON.stringify({ object: 'response', status: 'completed', output: [], usage: { input_tokens: 12, output_tokens: 7 } }), {
         headers: { 'content-type': 'application/json' },
       });
-    }) as unknown as typeof fetch;
+    }) as unknown as typeof fetch);
     const upstreamOwners = registry.getAttemptObservationOwners('/token-stats', 'upstream-a', 'token-stats-service');
     expect(upstreamOwners).toHaveLength(1);
     const gatewayResponse = await requestToGateway(config, { model: 'gpt-4o-mini', input: 'hello' });
     expect(gatewayResponse.status).toBe(200);
     await gatewayResponse.text();
     expect(targets).toEqual(['token-stats-a.test', 'token-stats-b.test']);
+    await waitForRequestEnd(observations, 2);
     expect(observations.map(({ phase }) => phase)).toEqual([
       'selected', 'request', 'end', 'selected', 'request', 'response', 'end', 'request-end', 'request-end',
     ]);
@@ -334,15 +371,15 @@ describe('Token Stats SQLite metering integration', () => {
     const { db, storage, config } = await createGatewayFixture({ retry: true });
     const targets: string[] = [];
     let calls = 0;
-    globalThis.fetch = (async (input) => {
+    globalThis.fetch = consumingUpstreamFetch((async (input) => {
       targets.push(String(input));
       calls += 1;
       const usage = calls === 1 ? { input_tokens: 4, output_tokens: 2 } : { input_tokens: 10, output_tokens: 3 };
-      return new Response(JSON.stringify({ usage }), {
+      return new Response(JSON.stringify({ object: 'response', status: 'completed', output: [], usage }), {
         status: calls === 1 ? 429 : 200,
         headers: { 'content-type': 'application/json' },
       });
-    }) as typeof fetch;
+    }) as typeof fetch);
 
     const response = await requestToGateway(config, { model: 'gpt-4o-mini', input: 'retry me' });
     expect(response.status).toBe(200);
@@ -368,9 +405,9 @@ describe('Token Stats SQLite metering integration', () => {
       'data: {"choices":[],"usage":{"prompt_tokens":13,"completion_tokens":4}}\n\n',
       'data: [DONE]\n\n',
     ].join('');
-    globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+    globalThis.fetch = consumingUpstreamFetch((async () => new Response(new ReadableStream<Uint8Array>({
       start(controller) { controller.enqueue(encoder.encode(frames)); controller.close(); },
-    }), { headers: { 'content-type': 'text/event-stream' } })) as unknown as typeof fetch;
+    }), { headers: { 'content-type': 'text/event-stream' } })) as unknown as typeof fetch);
 
     const response = await requestToGateway(config, {
       model: 'gpt-4o-mini', stream: true, stream_options: { include_usage: true },
@@ -386,10 +423,10 @@ describe('Token Stats SQLite metering integration', () => {
     const { db, config } = await createGatewayFixture();
     const encoder = new TextEncoder();
     let upstreamCancelled = false;
-    globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+    globalThis.fetch = consumingUpstreamFetch((async () => new Response(new ReadableStream<Uint8Array>({
       start(controller) { controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n')); },
       cancel() { upstreamCancelled = true; },
-    }), { headers: { 'content-type': 'text/event-stream' } })) as unknown as typeof fetch;
+    }), { headers: { 'content-type': 'text/event-stream' } })) as unknown as typeof fetch);
 
     const response = await requestToGateway(config, {
       model: 'gpt-4o-mini', stream: true, messages: [{ role: 'user', content: 'hello' }],
@@ -404,9 +441,10 @@ describe('Token Stats SQLite metering integration', () => {
 
   test('real gateway local interception creates no upstream attempt row', async () => {
     const { db, storage, config, observations } = await createGatewayFixture({ multiScope: true, intercept: true });
-    globalThis.fetch = (async () => { throw new Error('intercept must prevent network I/O'); }) as unknown as typeof fetch;
+    globalThis.fetch = consumingUpstreamFetch((async () => { throw new Error('intercept must prevent network I/O'); }) as unknown as typeof fetch);
     const response = await requestToGateway(config, { model: 'gpt-4o-mini', input: 'local only' });
     expect(await response.text()).toBe('local response');
+    await waitForRequestEnd(observations, 1);
     expect(observations.map(({ phase }) => phase)).toEqual(['selected', 'end', 'request-end']);
     await Bun.sleep(10);
     expect(db.query('SELECT attempt_id FROM token_stats_attempts').all()).toEqual([]);

@@ -69,7 +69,7 @@ test('revocation and expiry reject new admissions but existing grants survive, w
 });
 test('staged plans are atomic and uncertain state freezes only affected authenticated scope', async () => {
   let reject = true; const states: unknown[] = [];
-  const h = new DataAdmissionHost({authorizeWorker: () => 'active', catalogHash: () => catalogHash, loadPlugin: async entry => ({createIngress: () => entry === 'access' ? accessIngress() : entry === 'rate' ? {plan(_t, _p, state) {states.push(state); return {state: Number(state ?? 0)+1, snapshot: true};}} : {plan() {return reject ? {denial: {error: 'rejected', status: 403}} : {snapshot: null};}}})});
+  const h = new DataAdmissionHost({authorizeWorker: () => 'active', catalogHash: () => catalogHash, loadPlugin: async entry => ({createIngress: () => entry === 'access' ? accessIngress() : entry === 'rate' ? {bodyRequirements() { return Object.freeze({ request: 'none' }); }, plan(_t, _p, state) {states.push(state); return {state: Number(state ?? 0)+1, snapshot: true};}} : {bodyRequirements() { return Object.freeze({ request: 'none' }); }, plan() {return reject ? {denial: {error: 'rejected', status: 403}} : {snapshot: null};}}})});
   const plugins = [accessPlugin(), {name: 'rate', entry: 'rate', catalogHash, policy: null}, {name: 'gate', entry: 'gate', catalogHash, policy: null}];
   await h.publish({version: 1, plugins}); const t = target(); expect(() => h.admit(t, worker)).toThrow('rejected'); reject = false;
   h.admit(t, worker); expect(states).toEqual([null, null]);
@@ -97,7 +97,7 @@ test('signed anonymous and Key transport preserve Authorization and reject forge
 });
 test('worker prepare uses effective anonymous identity and publication changes cancel and retry before atomic debit', async () => {
   let plans = 0, prepared = 0, cancelled = 0;
-  const h = new DataAdmissionHost({authorizeWorker: () => 'active', catalogHash: () => catalogHash, loadPlugin: async () => ({createIngress: () => ({plan(_t, _p, state) {plans++; return {state: Number(state ?? 0)+1, snapshot: true};}})})});
+  const h = new DataAdmissionHost({authorizeWorker: () => 'active', catalogHash: () => catalogHash, loadPlugin: async () => ({createIngress: () => ({ bodyRequirements() { return Object.freeze({ request: 'none' }); },plan(_t, _p, state) {plans++; return {state: Number(state ?? 0)+1, snapshot: true};}})})});
   const plugins = [{name: 'test', entry: 'test', catalogHash, policy: null}]; await h.publish({version: 1, plugins});
   const secret = generateWorkerTransportSecret(), identity = {role: 'ingress' as const, process_instance_id: randomUUID(), boot_nonce: randomUUID()};
   const server = Bun.serve({hostname: '127.0.0.1', port: 0, fetch: createDataAdmissionRpcServer({host: h, transportSecret: secret, identity, authorizeWorker: () => 'active'})});
@@ -167,7 +167,7 @@ test('actual accepted stream continues after revocation while next protected req
 test('preview pins admission month while final protected credential expiration uses current clock', async () => {
   let now = Date.UTC(2026, 9, 31, 23, 59, 59, 999);
   const h = new DataAdmissionHost({clock: () => now, authorizeWorker: () => 'active', catalogHash: () => catalogHash,
-    loadPlugin: async entry => ({createIngress: entry === 'access' ? accessIngress : () => ({plan(t) {return {snapshot: {month: new Date(t.now).toISOString().slice(0, 7)}};}})})});
+    loadPlugin: async entry => ({createIngress: entry === 'access' ? accessIngress : () => ({bodyRequirements() { return Object.freeze({ request: 'none' }); }, plan(t) {return {snapshot: {month: new Date(t.now).toISOString().slice(0, 7)}};}})})});
   const plugins = [accessPlugin(), {name: 'opaque', entry: 'opaque', catalogHash, policy: null}];
   await h.publish({version: 1, plugins}); const t = target(), preview = h.admit(t, worker, true); now += 2;
   expect(h.admit(t, worker, false, preview.version).snapshots).toEqual(preview.snapshots);
@@ -178,7 +178,7 @@ test('preview pins admission month while final protected credential expiration u
 test('lost final-decision ACK replays exact signed operation without duplicate plugin debit', async () => {
   let plans = 0;
   const h = new DataAdmissionHost({authorizeWorker: () => 'active', catalogHash: () => catalogHash,
-    loadPlugin: async () => ({createIngress: () => ({plan(_t, _p, state) {plans++; return {state: Number(state ?? 0)+1, snapshot: null};}})})});
+    loadPlugin: async () => ({createIngress: () => ({ bodyRequirements() { return Object.freeze({ request: 'none' }); },plan(_t, _p, state) {plans++; return {state: Number(state ?? 0)+1, snapshot: null};}})})});
   await h.publish({version: 1, plugins: [{name: 'rate', entry: 'rate', catalogHash, policy: null}]});
   const secret = generateWorkerTransportSecret(), identity = {role: 'ingress' as const, process_instance_id: randomUUID(), boot_nonce: randomUUID()};
   const server = Bun.serve({hostname: '127.0.0.1', port: 0, fetch: createDataAdmissionRpcServer({host: h, transportSecret: secret, identity, authorizeWorker: () => 'active'})});
@@ -195,7 +195,7 @@ test('worker-set changes gate new requests and existing grants retain retired pl
   let sequence = 1, currentWorker = worker;
   const replacement = {...worker, process_instance_id: randomUUID(), boot_nonce: randomUUID()};
   const h = new DataAdmissionHost({admissionSequence: () => sequence, authorizeWorker: w => w.process_instance_id === currentWorker.process_instance_id ? 'active' : 'retired', catalogHash: () => catalogHash,
-    loadPlugin: async () => ({createIngress: () => ({plan() {return {snapshot: {upstream: 'up'}};}, beforeAttempt(t, snapshot) {return (snapshot as any).upstream === t.upstreamId ? null : {status: 403, error: 'old_scope'};}})})});
+    loadPlugin: async () => ({createIngress: () => ({ bodyRequirements() { return Object.freeze({ request: 'none' }); },plan() {return {snapshot: {upstream: 'up'}};}, beforeAttempt(t, snapshot) {return (snapshot as any).upstream === t.upstreamId ? null : {status: 403, error: 'old_scope'};}})})});
   await h.publish({version: 1, admissionSequence: 1, plugins: [{name: 'generic', entry: 'generic', catalogHash, policy: null}]}); const t = target(); h.admit(t, worker);
   await h.publish({version: 2, admissionSequence: 2, plugins: []}); expect(() => h.admit(target(), worker)).toThrow('admission_worker_set_changed'); sequence = 2; currentWorker = replacement;
   expect(h.admit(target(), replacement).snapshots).toEqual({}); expect(h.beforeAttempt(t, worker).snapshots.generic).toEqual({upstream: 'up'});

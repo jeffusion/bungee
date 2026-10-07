@@ -1,3 +1,5 @@
+import { validateDirectionalRules } from './directional-validator';
+import { analyzeExpressionDependencies } from '../../../core/src/utils/expression-dependencies';
 import type { Upstream } from '$api/routes';
 import type { ValidationError } from './route-validator';
 import { PluginsAPI } from '$api/plugins';
@@ -34,8 +36,10 @@ export function clearTransformersCache(): void {
  * 用于响应式语句中的实时验证
  */
 export function validateUpstreamSync(upstream: Partial<Upstream>, index: number): ValidationError[] {
-  const errors: ValidationError[] = [];
   const prefix = `endpoints[${index}]`;
+  const errors: ValidationError[] = validateDirectionalRules(upstream, prefix);
+  try { analyzeExpressionDependencies(upstream.condition, 'request'); }
+  catch { errors.push({ field: `${prefix}.condition`, message: get(_)('directional.invalidExpression') }); }
 
   // 验证 target
   if (!upstream.target) {

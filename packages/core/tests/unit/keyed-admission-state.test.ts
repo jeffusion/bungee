@@ -9,8 +9,8 @@ const target = (key='k'):AdmissionTarget => ({requestId:crypto.randomUUID(),atte
 function fixture(capacity=10000) {
   let now=0, reject=false, version=0;
   const host = new DataAdmissionHost({clock:()=>now,authorizeWorker:()=> 'active',catalogHash:()=> 'hash',loadPlugin:async entry=>({createIngress:()=> {
-    if(entry==='identity')return {resolveIdentity:(t:AdmissionTarget)=>t.principal,plan:()=>({snapshot:null})};
-    if(entry==='gate')return {plan:()=>reject?{denial:{status:403 as const,error:'gate'}}:{snapshot:null}};
+    if(entry==='identity')return {bodyRequirements() { return Object.freeze({ request: 'none' }); }, resolveIdentity:(t:AdmissionTarget)=>t.principal,plan:()=>({snapshot:null})};
+    if(entry==='gate')return {bodyRequirements() { return Object.freeze({ request: 'none' }); }, plan:()=>reject?{denial:{status:403 as const,error:'gate'}}:{snapshot:null}};
     const rate=createIngress();rate.keyedState={...rate.keyedState!,capacity};return rate;
   }})});
   const publish = (byKey:any)=>host.publish({version:++version,plugins:[{name:'identity',entry:'identity',catalogHash:'hash',policy:null},{name:'rate',entry:'rate',catalogHash:'hash',policy:{byKey}},{name:'gate',entry:'gate',catalogHash:'hash',policy:null}]});
