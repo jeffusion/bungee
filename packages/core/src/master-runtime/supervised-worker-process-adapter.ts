@@ -267,7 +267,18 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
    * and unknown throws a sanitized error while the caller retains ownership.
    */
   async verifyExactExit(): Promise<WorkerExitEvidence | null> {
-    if (this.exitEvidence !== null) return this.exitEvidence;
+    if (this.exitEvidence !== null) {
+      // Physical exit is permanent, but its first descriptor read may precede
+      // the final signed cleanup snapshot. Retry only incomplete evidence.
+      if (this.exitEvidence.terminalDrain?.cleanup_state === undefined
+        || this.exitEvidence.terminalDrain.cleanup_state === 'pending') {
+        try {
+          const terminal = await this.readTerminalDrainEvidence();
+          if (terminal !== null) this.exitEvidence = { ...this.exitEvidence, terminalDrain: terminal };
+        } catch { /* retain OS exit proof; unreadable cleanup remains unknown */ }
+      }
+      return this.exitEvidence;
+    }
     if (this.exitPublication !== null) return this.exitPublication;
     const startedAt = performance.now();
     const captured = this.capturedIdentity;

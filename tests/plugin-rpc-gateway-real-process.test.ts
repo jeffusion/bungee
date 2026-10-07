@@ -52,6 +52,7 @@ const ROUTE_ID = '30000000-0000-4000-8000-000000000201';
 type ProbeReport = { purpose: string | null; payload: Record<string, any> };
 type ProbeState = {
   plannerRuns: number;
+  shutdownActivePids: number[];
   calls: Array<{ method: string; purpose: string | null; pid: number | null }>;
   reports: ProbeReport[];
   slow: { entered: boolean; aborted: boolean };
@@ -221,6 +222,14 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
       }
 
       // ---- restart: the durable journal must serve the same committed result.
+      // Both workers still have accepted business work when authenticated shutdown freezes authority.
+      await requestJson(`${management}/api/plugins/${RPC_PROBE_PROVIDER}/control/crash`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ shutdownGate: true }),
+      }, currentFixture);
+      const shutdownState = await waitForProbeState(management, currentFixture,
+        state => firstPids.every(pid => state.shutdownActivePids.includes(pid)),
+        'both workers did not have active shutdown-gated queries');
+      expect(shutdownState.shutdownActivePids.sort((left, right) => left - right)).toEqual(firstPids);
       await stopOwnedMaster(master);
       master = undefined;
       await waitUntil(async () => firstPids.every((pid) => !isPidAlive(pid)), 'old serving workers did not exit', 15_000);

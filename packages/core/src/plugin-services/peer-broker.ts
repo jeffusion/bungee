@@ -1613,6 +1613,9 @@ export class WorkerPeerBroker {
     const catalog = this.#options.catalog();
     const port = this.#options.masterControlPort();
     if (authority === null) {
+      // Retirement already refuses new work. Keep its existing authenticated
+      // transport for accepted-task terminals; never open an unleased connection.
+      if (this.#retired) return;
       // No leased authority right now: PAUSE the transport only. The link and
       // every pending task/terminal barrier stay exactly as they are; nothing is
       // faked terminated and nothing is destroyed.

@@ -80,7 +80,7 @@ const crashTimer = setInterval(() => {
   crashPolling = true;
   void (async () => {
     const client = crashClient;
-    const status = await client.crashStatus(null);
+    const status = await client.crashStatus({pid: process.pid});
     if (!status.armed || crashStarted) return;
     crashStarted = true;
     const pid = process.pid;
