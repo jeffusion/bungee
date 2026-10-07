@@ -12,12 +12,21 @@ import { upgradeCommand } from './commands/upgrade';
 import { exportCommand, importCommand } from './commands/config-io';
 import { DEFAULT_MANAGEMENT_PORT } from './commands/management';
 import pkg from '../package.json';
+import { oauthCallbackCommand } from '../../core/src/oauth-callback';
 
 export function createProgram() {
   const program = new Command()
     .name('bungee')
     .description('High-performance reverse proxy server built with Bun and TypeScript')
     .version(pkg.version);
+
+  program
+    .command('oauth-callback')
+    .description('Capture one SIWC browser callback on 127.0.0.1:1455 for manual submission to Bungee')
+    .action(async () => {
+      try { await oauthCallbackCommand(); }
+      catch { console.error('OAuth callback capture failed or was cancelled. Check the local port and restart the login.'); process.exitCode = 1; }
+    });
 
   program
     .command('init')

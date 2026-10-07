@@ -72,7 +72,11 @@ if (import.meta.main) {
   let bootNonce: string | null = null;
   try {
     const initIndex = process.argv.indexOf('--initialize-config');
-    if (process.argv.includes('--recover-admin')) {
+    if (process.argv[2] === 'oauth-callback') {
+      if (process.argv.length !== 3) throw new Error('Invalid callback arguments');
+      const { oauthCallbackCommand } = await import('./oauth-callback');
+      await oauthCallbackCommand();
+    } else if (process.argv.includes('--recover-admin')) {
       const args = process.argv.slice(2);
       if (args.length !== 2 || args[0] !== '--recover-admin' || !args[1]) throw new Error('invalid_recovery_arguments');
       console.log('目标配置数据库：' + args[1]);
@@ -93,7 +97,10 @@ if (import.meta.main) {
     await dispatchProcessRole(role, undefined, bootNonce);
     }
   } catch (error) {
-    if (process.argv.includes('--recover') || process.argv.includes('--recover-admin')) {
+    if (process.argv[2] === 'oauth-callback') {
+      console.error('OAuth callback capture failed or was cancelled. Check the local port and restart the login.');
+      process.exitCode = 1;
+    } else if (process.argv.includes('--recover') || process.argv.includes('--recover-admin')) {
       console.error('Offline recovery failed; no recovery input is logged.');
       process.exitCode = 1;
     } else {

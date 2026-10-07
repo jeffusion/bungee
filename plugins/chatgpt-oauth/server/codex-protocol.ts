@@ -439,6 +439,15 @@ interface ToolState {
   done: boolean;
 }
 
+function chatToolCall(state: ToolState, value: string, includeIdentity: boolean, preserveCustomTools: boolean): JsonObject {
+  const custom = preserveCustomTools && state.kind === 'custom_tool_call';
+  return {
+    index: state.index,
+    ...(includeIdentity ? { id: state.id, type: custom ? 'custom' : 'function' } : {}),
+    [custom ? 'custom' : 'function']: { ...(includeIdentity ? { name: state.name } : {}), [custom ? 'input' : 'arguments']: value },
+  };
+}
+
 interface OutputRecord {
   item: JsonObject;
   index?: number;
@@ -456,6 +465,7 @@ export interface CodexResponseState {
 }
 
 export interface CodexConversionOptions extends CodexSSEOptions {
+  preserveCustomTools?: boolean;
   includeUsage?: boolean;
   request?: JsonObject;
   target?: 'chat' | 'responses';
@@ -559,6 +569,7 @@ export class CodexResponseProcessor {
   private readonly output: OutputRecord[] = [];
   private readonly includeUsage: boolean;
   private readonly target: 'chat' | 'responses';
+  private readonly preserveCustomTools: boolean;
   private text = '';
   private reasoning = '';
   private readonly messageText = new Map<string, Map<string, string>>();
@@ -576,9 +587,10 @@ export class CodexResponseProcessor {
   private sawDone = false;
   private readonly redactDiagnostic?: (message: string) => string;
 
-  constructor(options: Pick<CodexConversionOptions, 'includeUsage' | 'request' | 'target' | 'redactDiagnostic'> = {}) {
+  constructor(options: Pick<CodexConversionOptions, 'includeUsage' | 'request' | 'target' | 'redactDiagnostic' | 'preserveCustomTools'> = {}) {
     this.includeUsage = options.includeUsage ?? (options.request ? streamIncludesUsage(options.request) : false);
     this.target = options.target ?? 'chat';
+    this.preserveCustomTools = options.preserveCustomTools ?? false;
     this.redactDiagnostic = options.redactDiagnostic;
   }
 
@@ -728,7 +740,7 @@ export class CodexResponseProcessor {
       if (data.output_index !== undefined) this.tools.set(`output:${String(data.output_index)}`, state);
       const chunk = base();
       chunk.choices[0].delta.role = 'assistant';
-      chunk.choices[0].delta.tool_calls = [{ index: state.index, id: state.id, type: 'function', function: { name: state.name, arguments: '' } }];
+      chunk.choices[0].delta.tool_calls = [chatToolCall(state, '', true, this.preserveCustomTools)];
       output.push(chunk);
     } else if (type === 'response.function_call_arguments.delta' || type === 'response.custom_tool_call_input.delta') {
       const state = this.findTool(data);
@@ -737,7 +749,7 @@ export class CodexResponseProcessor {
         state.arguments += delta;
         state.emittedArguments = true;
         const chunk = base();
-        chunk.choices[0].delta.tool_calls = [{ index: state.index, function: { arguments: delta } }];
+        chunk.choices[0].delta.tool_calls = [chatToolCall(state, delta, false, this.preserveCustomTools)];
         output.push(chunk);
       }
     } else if (type === 'response.function_call_arguments.done' || type === 'response.custom_tool_call_input.done') {
@@ -747,7 +759,7 @@ export class CodexResponseProcessor {
       if (state && !state.emittedArguments && state.arguments) {
         state.emittedArguments = true;
         const chunk = base();
-        chunk.choices[0].delta.tool_calls = [{ index: state.index, function: { arguments: state.arguments } }];
+        chunk.choices[0].delta.tool_calls = [chatToolCall(state, state.arguments, false, this.preserveCustomTools)];
         output.push(chunk);
       }
     } else if (type === 'response.output_item.done') {
@@ -761,7 +773,7 @@ export class CodexResponseProcessor {
           if (!state.emittedArguments && state.arguments) {
             state.emittedArguments = true;
             const chunk = base();
-            chunk.choices[0].delta.tool_calls = [{ index: state.index, function: { arguments: state.arguments } }];
+            chunk.choices[0].delta.tool_calls = [chatToolCall(state, state.arguments, false, this.preserveCustomTools)];
             output.push(chunk);
           }
         } else {
@@ -769,7 +781,7 @@ export class CodexResponseProcessor {
           if (item.id !== undefined) this.tools.set(`item:${String(item.id)}`, state2);
           if (data.output_index !== undefined) this.tools.set(`output:${String(data.output_index)}`, state2);
           const chunk = base();
-          chunk.choices[0].delta.tool_calls = [{ index: state2.index, id: state2.id, type: 'function', function: { name: state2.name, arguments: state2.arguments } }];
+          chunk.choices[0].delta.tool_calls = [chatToolCall(state2, state2.arguments, true, this.preserveCustomTools)];
           output.push(chunk);
         }
         this.upsertOutput(item, data.output_index === undefined ? undefined : Number(data.output_index), this.target === 'responses', data.content_index === undefined ? undefined : Number(data.content_index), typeof data.item_id === 'string' ? data.item_id : undefined);
@@ -905,7 +917,7 @@ export async function convertCodexSSEToResponses(source: SSESource, options: Cod
   return (await consumeCodexResponse(source, { ...options, target: 'responses' })).response;
 }
 
-export function responsesToChatCompletion(response: JsonObject): JsonObject {
+export function responsesToChatCompletion(response: JsonObject, preserveCustomTools = false): JsonObject {
   let content = '';
   let reasoning = '';
   const tool_calls: any[] = [];
@@ -915,7 +927,8 @@ export function responsesToChatCompletion(response: JsonObject): JsonObject {
     validateChatOutputItem(item);
     if (item.type === 'message') content += textFromItem(item);
     if (item.type === 'reasoning') reasoning += (item.summary ?? []).filter((part: any) => part.type === 'summary_text').map((part: any) => String(part.text ?? '')).join('') + (item.content ?? []).filter((part: any) => part.type === 'reasoning_text').map((part: any) => String(part.text ?? '')).join('');
-    if (item.type === 'function_call' || item.type === 'custom_tool_call') tool_calls.push({ id: item.call_id, type: 'function', function: { name: item.name, arguments: String(item.arguments ?? item.input ?? '') } });
+    if (item.type === 'custom_tool_call' && preserveCustomTools) tool_calls.push({ id: item.call_id, type: 'custom', custom: { name: item.name, input: String(item.input ?? '') } });
+    else if (item.type === 'function_call' || item.type === 'custom_tool_call') tool_calls.push({ id: item.call_id, type: 'function', function: { name: item.name, arguments: String(item.arguments ?? item.input ?? '') } });
     if (item.type === 'image_generation_call' && item.result) images.push({ type: 'image_url', image_url: { url: `data:${imageMime(item.output_format)};base64,${item.result}` } });
   }
   const incompleteReason = String(response.incomplete_details?.reason ?? 'incomplete');

@@ -12,12 +12,14 @@ import type {
 } from '../../../packages/core/src/plugin-control/contracts';
 import type { FetchLike, CodexTokenSet } from './oauth';
 import { refreshCodexToken } from './oauth';
+import { getSiwcHostId, refreshSiwcToken, validSiwcMetadata } from './siwc';
 import { AccountControlError, AccountStore, accountListItem, type AccountListItem, type StoredAccount } from './accounts';
 import { LoginSessionError, LoginSessionManager, type LoginCommitInfo, type LoginFence, type LoginSessionDependencies } from './sessions';
 import { UsageError, UsageService } from './usage';
 import { AutoResetScheduler, type AutoResetTimer } from './auto-reset';
 
 export const CHATGPT_TARGET = 'https://chatgpt.com';
+export const SIWC_TARGET = 'https://api.openai.com';
 export const CONTROL_HOST_CONTRACT_GAP = 'ControlRpcContext.binding.bindingOptions.accountRef is required and host-resolved; RPC payload is never used as a fallback.';
 
 export interface ControlDependencies extends LoginSessionDependencies { now?: () => number; timeoutMs?: number; autoResetTimer?: AutoResetTimer }
@@ -32,6 +34,7 @@ export type ControlErrorCode =
   | 'reauth_required' | 'identity_missing' | 'identity_mismatch' | 'invalid_identity'
   | 'refresh_failed' | 'refresh_in_progress' | 'stale_refresh' | 'binding_options_unavailable' | 'disposed'
   | 'expired' | 'cancelled' | 'busy' | 'login_failed' | 'session_error'
+  | 'source_mismatch' | 'unsupported_operation'
   | 'reset_in_progress' | 'credits_unavailable' | 'credit_unavailable' | 'upstream_unavailable';
 
 const REFRESH_SAFETY_WINDOW_MS = 60_000;
@@ -45,7 +48,7 @@ function safeError(error: unknown): ControlError {
       invalid_input: 'invalid_input',
       not_found: 'not_found', disabled: 'disabled', revoked: 'revoked', reauth_required: 'reauth_required',
       identity_mismatch: 'identity_mismatch', invalid_identity: 'invalid_identity', disposed: 'disposed',
-      stale_refresh: 'stale_refresh',
+      stale_refresh: 'stale_refresh', unsupported_operation: 'unsupported_operation',
     };
     return new ControlError(map[error.code] ?? 'refresh_failed');
   }
@@ -152,6 +155,10 @@ function accountRefFromBinding(context: ControlRpcContext): string {
 function lease(account: StoredAccount): CredentialLease {
   if (account.status !== 'active') throw new ControlError(account.status);
   if (!account.accessToken) throw new ControlError('reauth_required');
+  if (account.siwc) {
+    if (!validSiwcMetadata(account.siwc) || !Number.isFinite(account.expiresAt)) throw new ControlError('reauth_required');
+    return { version: account.generation, expiresAt: account.expiresAt as number, headers: { Authorization: `Bearer ${account.accessToken}` } };
+  }
   if (!account.identity?.accountId) throw new ControlError('identity_missing');
   if (!Number.isFinite(account.expiresAt)) throw new ControlError('reauth_required');
   return { version: account.generation, expiresAt: account.expiresAt as number, headers: { Authorization: `Bearer ${account.accessToken}`, 'Chatgpt-Account-Id': account.identity.accountId } };
@@ -185,7 +192,7 @@ class ChatgptControl implements PluginControl {
       now: this.now,
       timeoutMs: deps.timeoutMs,
       hostSignal: this.apiLifetime.signal,
-      credential: (id, signal) => this.credential(id, signal),
+      credential: (id, signal) => this.credential(id, signal, 'codex'),
       rejectAccess: (id, version) => this.accounts.rejectAccess(id, version),
     });
     this.autoReset = new AutoResetScheduler(this.accounts, this.usage, this.apiLifetime.signal, this.now, deps.autoResetTimer);
@@ -208,7 +215,7 @@ class ChatgptControl implements PluginControl {
 
   async start(): Promise<void> {
     this.assertAlive();
-    await this.accounts.read();
+    await this.accounts.purgeRevoked();
     this.assertAlive();
     this.autoReset.start();
   }
@@ -229,7 +236,10 @@ class ChatgptControl implements PluginControl {
       }
       const generation = lock.account.generation;
       try {
-        const token = await refreshCodexToken(lock.account.refreshToken as string, { fetchImpl: this.deps.fetchImpl, signal });
+        const refreshOptions = { fetchImpl: this.deps.fetchImpl, signal, timeoutMs: this.deps.timeoutMs };
+        const token = lock.account.siwc
+          ? await refreshSiwcToken({ accessToken: lock.account.accessToken as string, refreshToken: lock.account.refreshToken as string, idToken: lock.account.idToken, identity: lock.account.identity, identityStatus: 'parsed', siwc: lock.account.siwc }, refreshOptions)
+          : await refreshCodexToken(lock.account.refreshToken as string, refreshOptions);
         this.assertAlive(signal);
         const updated = await this.accounts.replaceCredentials(id, token, { owner: this.workerOwner, generation });
         this.assertAlive(signal);
@@ -237,10 +247,11 @@ class ChatgptControl implements PluginControl {
       } catch (error) {
         if (this.disposed || this.host.signal.aborted) throw new ControlError('disposed');
         const oauthCode = (error as { kind?: string }).kind;
-        if (oauthCode === 'refresh_token_reused') {
+        if (oauthCode === 'refresh_token_reused' || (lock.account.siwc && ((error as { upstreamCode?: string }).upstreamCode === 'invalid_grant' || oauthCode === 'invalid_response' || (error instanceof AccountControlError && ['identity_mismatch', 'invalid_identity'].includes(error.code))))) {
           const fenced = await this.accounts.failRefreshReauth(id, this.workerOwner, generation).catch(() => false);
           if (!fenced) {
             const latest = await this.accounts.get(id).catch(() => undefined);
+            if (!latest) throw new ControlError('not_found');
             if (latest?.status === 'revoked') throw new ControlError('revoked');
             if (latest?.status === 'disabled') throw new ControlError('disabled');
           }
@@ -253,6 +264,7 @@ class ChatgptControl implements PluginControl {
         const released = await this.accounts.releaseRefresh(id, this.workerOwner, generation);
         if (!released) {
           const latest = await this.accounts.get(id).catch(() => undefined);
+          if (!latest) throw new ControlError('not_found');
           if (latest?.status === 'revoked') throw new ControlError('revoked');
           if (latest?.status === 'disabled') throw new ControlError('disabled');
           if (latest?.generation !== generation) throw new ControlError('stale_refresh');
@@ -264,10 +276,34 @@ class ChatgptControl implements PluginControl {
     throw new ControlError('refresh_in_progress');
   }
 
-  private async credential(id: string, signal: AbortSignal): Promise<CredentialLease> {
+  private async requireKind(id: string, kind: 'siwc' | 'codex', error: ControlErrorCode = 'source_mismatch'): Promise<StoredAccount> {
+    const account = await this.accounts.get(id);
+    if (Boolean(account.siwc) !== (kind === 'siwc')) throw new ControlError(error);
+    return account;
+  }
+
+  private async bindingAccount(context: ControlRpcContext): Promise<string> {
+    const id = accountRefFromBinding(context);
+    const source = context.binding.contributionId;
+    if (source === 'chatgpt-siwc') await this.requireKind(id, 'siwc');
+    else if (source === 'chatgpt' || source === 'upstream') await this.requireKind(id, 'codex');
+    else throw new ControlError('source_mismatch');
+    return id;
+  }
+
+  private async draft(context: ControlApiHandlerContext, kind: 'siwc' | 'codex'): Promise<Response> {
+    const body = await this.readJson(context); exactKeys(body, ['accountRef']);
+    const account = await this.requireKind(requiredText(body.accountRef, 128), kind);
+    if (!accountListItem(account).available) throw new ControlError(account.status === 'active' ? 'reauth_required' : account.status);
+    const draft: UpstreamDraft = { target: kind === 'siwc' ? SIWC_TARGET : CHATGPT_TARGET, bindingOptions: { accountRef: account.id } };
+    return jsonResponse(draft);
+  }
+
+  private async credential(id: string, signal: AbortSignal, kind?: 'codex'): Promise<CredentialLease> {
     this.assertAlive(signal);
     const account = await this.accounts.get(id);
     this.assertAlive(signal);
+    if (kind === 'codex' && account.siwc) throw new ControlError('unsupported_operation');
     if (account.status !== 'active') throw new ControlError(account.status);
     if (!isRefreshable(account, this.now())) { this.assertAlive(signal); return lease(account); }
     let shared = this.inFlight.get(id);
@@ -308,6 +344,7 @@ class ChatgptControl implements PluginControl {
   }
 
   private async startDevice(accountRef: string | undefined): Promise<unknown> {
+    if (accountRef !== undefined) await this.requireKind(accountRef, 'codex');
     const started = await this.sessions.startDevice(accountRef, () => this.loginFence(accountRef));
     void this.sessions.completeDevice(started.sessionId, (token, info, guard) => this.commitLogin(token, info, guard)).catch(() => undefined);
     return started;
@@ -326,11 +363,17 @@ class ChatgptControl implements PluginControl {
     };
     return [
       { path: '/accounts', methods: ['GET'], handler: 'listAccounts', invoke: invoke(async () => jsonResponse({ accounts: await this.accounts.list() })) },
-      { path: '/accounts/usage', methods: ['GET'], handler: 'getAccountUsage', invoke: invoke(async (context) => jsonResponse(await this.usage.get(this.accountRefQuery(context.request), context.requestSignal))) },
+      { path: '/accounts/codex', methods: ['GET'], handler: 'listCodexAccounts', invoke: invoke(async () => jsonResponse({ accounts: (await this.accounts.list()).filter(account => account.authType === 'codex') })) },
+      { path: '/accounts/siwc', methods: ['GET'], handler: 'listSiwcAccounts', invoke: invoke(async () => jsonResponse({ accounts: (await this.accounts.list()).filter(account => account.authType === 'siwc') })) },
+      { path: '/accounts/usage', methods: ['GET'], handler: 'getAccountUsage', invoke: invoke(async (context) => {
+        const id = this.accountRefQuery(context.request);
+        return jsonResponse(await this.usage.get(id, context.requestSignal));
+      }) },
       { path: '/accounts/usage/reset', methods: ['POST'], handler: 'resetAccountUsage', invoke: invoke(async (context) => {
         const body = await this.readJson(context);
         exactKeys(body, ['accountRef', 'redeemRequestId', 'creditId']);
         const accountRef = requiredText(body.accountRef, 128);
+        await this.requireKind(accountRef, 'codex', 'unsupported_operation');
         const redeemRequestId = requiredText(body.redeemRequestId, 128);
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(redeemRequestId)) throw new ControlError('invalid_input');
         const creditId = requiredText(body.creditId, 512);
@@ -352,12 +395,17 @@ class ChatgptControl implements PluginControl {
         if (typeof body.enabled !== 'boolean') throw new ControlError('invalid_input');
         return jsonResponse({ account: accountListItem(await this.accounts.setAutoResetCredits(requiredText(body.accountRef, 128), body.enabled)) });
       }) },
-      { path: '/accounts/draft', methods: ['POST'], handler: 'createDraft', invoke: invoke(async (context) => {
+      { path: '/accounts/draft', methods: ['POST'], handler: 'createDraft', invoke: invoke(context => this.draft(context, 'codex')) },
+      { path: '/accounts/siwc/draft', methods: ['POST'], handler: 'createSiwcDraft', invoke: invoke(context => this.draft(context, 'siwc')) },
+      { path: '/login/siwc', methods: ['POST'], handler: 'startSiwcLogin', invoke: invoke(async context => {
         const body = await this.readJson(context); exactKeys(body, ['accountRef']);
-        const account = await this.accounts.get(requiredText(body.accountRef, 128));
-        if (!accountListItem(account).available) throw new ControlError(account.status === 'active' ? 'reauth_required' : account.status);
-        const draft: UpstreamDraft = { target: CHATGPT_TARGET, bindingOptions: { accountRef: account.id } };
-        return jsonResponse(draft);
+        const accountRef = optionalText(body.accountRef, 128);
+        const account = accountRef === undefined ? undefined : await this.requireKind(accountRef, 'siwc');
+        const hostId = await getSiwcHostId(this.host.secretStore, () => !this.disposed && !this.host.signal.aborted);
+        this.assertAlive(context.requestSignal);
+        const fence = await this.loginFence(accountRef);
+        this.assertAlive(context.requestSignal);
+        return jsonResponse(this.sessions.startSiwc(hostId, accountRef, account?.siwc?.clientId, fence));
       }) },
       { path: '/login/device', methods: ['POST'], handler: 'startDeviceLogin', invoke: invoke(async (context) => {
         const body = await this.readJson(context); exactKeys(body, ['accountRef']);
@@ -366,6 +414,7 @@ class ChatgptControl implements PluginControl {
       { path: '/login/pkce', methods: ['POST'], handler: 'startPkceLogin', invoke: invoke(async (context) => {
         const body = await this.readJson(context); exactKeys(body, ['accountRef']);
         const accountRef = optionalText(body.accountRef, 128);
+        if (accountRef !== undefined) await this.requireKind(accountRef, 'codex');
         const started = this.sessions.startPkce(accountRef);
         try { if (accountRef !== undefined) this.sessions.setFence(started.sessionId, await this.loginFence(accountRef) as LoginFence); }
         catch (error) { this.sessions.cancel(started.sessionId); throw error; }
@@ -382,7 +431,8 @@ class ChatgptControl implements PluginControl {
         const sessionId = requiredText(body.sessionId, 128);
         const status = this.sessions.status(sessionId);
         if (status.state !== 'pending') return jsonResponse(status);
-        const result = await this.sessions.completePkce(sessionId, requiredText(body.callbackUrl, 4096), (token, info, guard) => this.commitLogin(token, info, guard));
+        const complete = status.kind === 'siwc' ? this.sessions.completeSiwc.bind(this.sessions) : this.sessions.completePkce.bind(this.sessions);
+        const result = await complete(sessionId, requiredText(body.callbackUrl, 4096), (token, info, guard) => this.commitLogin(token, info, guard));
         return jsonResponse({ account: result.result });
       }) },
       { path: '/login/device/complete', methods: ['POST'], handler: 'completeDeviceLogin', invoke: invoke(async (context) => {
@@ -418,9 +468,9 @@ class ChatgptControl implements PluginControl {
       { path: '/accounts/delete', methods: ['POST'], handler: 'deleteAccount', invoke: invoke(async (context) => {
         const body = await this.readJson(context); exactKeys(body, ['accountRef']);
         const accountRef = requiredText(body.accountRef, 128);
-        const account = await this.accounts.setStatus(accountRef, 'revoked');
+        await this.accounts.remove(accountRef);
         this.usage.invalidateAccount(accountRef);
-        return jsonResponse({ account: accountListItem(account) });
+        return jsonResponse({ deleted: true });
       }) },
     ];
   }
@@ -428,13 +478,13 @@ class ChatgptControl implements PluginControl {
   private buildRpc(): readonly { name: string; handler: string; invoke: (payload: unknown, context: ControlRpcContext) => unknown | Promise<unknown> }[] {
     return [
       { name: 'getCredential', handler: 'getCredential', invoke: async (_payload, context) => {
-        try { this.assertAlive(context.attempt.signal); return await this.credential(accountRefFromBinding(context), context.attempt.signal); } catch (error) { throw safeError(error); }
+        try { this.assertAlive(context.attempt.signal); return await this.credential(await this.bindingAccount(context), context.attempt.signal); } catch (error) { throw safeError(error); }
       } },
       { name: 'rejectAccess', handler: 'rejectAccess', invoke: async (payload, context) => {
         try {
           this.assertAlive(context.attempt.signal);
           const body = record(payload); exactKeys(body, ['version']);
-          return { rejected: await this.accounts.rejectAccess(accountRefFromBinding(context), requiredVersion(body.version)) };
+          return { rejected: await this.accounts.rejectAccess(await this.bindingAccount(context), requiredVersion(body.version)) };
         } catch (error) { throw safeError(error); }
       } },
     ];
@@ -457,10 +507,14 @@ export function createControl(context: ControlHostContext, dependencies: Control
 
 export const api = Object.freeze([
   { path: '/accounts', methods: ['GET'], handler: 'listAccounts' },
+  { path: '/accounts/codex', methods: ['GET'], handler: 'listCodexAccounts' },
+  { path: '/accounts/siwc', methods: ['GET'], handler: 'listSiwcAccounts' },
   { path: '/accounts/usage', methods: ['GET'], handler: 'getAccountUsage' },
   { path: '/accounts/usage/reset', methods: ['POST'], handler: 'resetAccountUsage' },
   { path: '/accounts/auto-reset', methods: ['POST'], handler: 'setAutoResetCredits' },
   { path: '/accounts/draft', methods: ['POST'], handler: 'createDraft' },
+  { path: '/accounts/siwc/draft', methods: ['POST'], handler: 'createSiwcDraft' },
+  { path: '/login/siwc', methods: ['POST'], handler: 'startSiwcLogin' },
   { path: '/login/device', methods: ['POST'], handler: 'startDeviceLogin' },
   { path: '/login/pkce', methods: ['POST'], handler: 'startPkceLogin' },
   { path: '/login/status', methods: ['GET'], handler: 'getLoginStatus' },

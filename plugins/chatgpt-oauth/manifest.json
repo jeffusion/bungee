@@ -43,6 +43,10 @@
     "nativeWidgets": [{ "id": "chatgpt-quota-usage", "title": "ui.widgetTitle", "component": "ChatgptQuotaWidget", "size": "medium" }],
     "api": [
       { "path": "/accounts", "methods": ["GET"], "capability": "config.read", "handler": "listAccounts", "execution": "control" },
+      { "path": "/accounts/codex", "methods": ["GET"], "capability": "config.read", "handler": "listCodexAccounts", "execution": "control" },
+      { "path": "/accounts/siwc", "methods": ["GET"], "capability": "config.read", "handler": "listSiwcAccounts", "execution": "control" },
+      { "path": "/accounts/siwc/draft", "methods": ["POST"], "capability": "config.write", "handler": "createSiwcDraft", "execution": "control" },
+      { "path": "/login/siwc", "methods": ["POST"], "capability": "config.write", "handler": "startSiwcLogin", "execution": "control" },
       { "path": "/accounts/usage", "methods": ["GET"], "capability": "config.read", "handler": "getAccountUsage", "execution": "control" },
       { "path": "/accounts/usage/reset", "methods": ["POST"], "capability": "config.write", "handler": "resetAccountUsage", "execution": "control" },
       { "path": "/accounts/auto-reset", "methods": ["POST"], "capability": "config.write", "handler": "setAutoResetCredits", "execution": "control" },
@@ -64,7 +68,7 @@
       {
         "id": "chatgpt",
         "label": "ChatGPT OAuth",
-        "listAccounts": "listAccounts",
+        "listAccounts": "listCodexAccounts",
         "createDraft": "createDraft",
         "credentialPolicy": {
           "allowedOrigins": ["https://chatgpt.com"],
@@ -106,6 +110,43 @@
             }
           ],
           "allowedHeaderNames": ["Authorization", "Chatgpt-Account-Id"]
+        }
+      },
+      {
+        "id": "chatgpt-siwc",
+        "label": "Sign in with ChatGPT",
+        "listAccounts": "listSiwcAccounts",
+        "createDraft": "createSiwcDraft",
+        "credentialPolicy": {
+          "allowedOrigins": ["https://api.openai.com"],
+          "allowedRequests": [
+            {
+              "pathname": "/v1/responses",
+              "methods": ["POST"],
+              "outboundHeaders": {
+                "passthrough": [],
+                "set": {
+                  "Accept": "text/event-stream",
+                  "Content-Type": "application/json",
+                  "User-Agent": "Bungee/5.11.0",
+                  "Originator": "Bungee"
+                }
+              }
+            },
+            {
+              "pathname": "/v1/models",
+              "methods": ["GET"],
+              "outboundHeaders": {
+                "passthrough": [],
+                "set": {
+                  "Accept": "application/json",
+                  "User-Agent": "Bungee/5.11.0",
+                  "Originator": "Bungee"
+                }
+              }
+            }
+          ],
+          "allowedHeaderNames": ["Authorization"]
         }
       }
     ]
@@ -239,8 +280,13 @@
       "ui.accountIdentity": "Account: {label}",
       "ui.credentialsHelp": "The plugin keeps credentials; they are not written to service configuration.",
       "ui.loginMethod": "Sign-in method",
-      "ui.device": "Device code",
-      "ui.pkce": "Browser sign-in (alternative)",
+      "ui.device": "Codex device code",
+      "ui.pkce": "Codex browser sign-in",
+      "ui.siwc": "Sign in with ChatGPT",
+      "ui.siwcHelp": "Open the authorization URL, sign in, then paste the complete callback URL from the browser address bar. The final loopback page may fail to load; you can still copy its URL.",
+      "ui.siwcUsage": "Check usage in ChatGPT settings",
+      "ui.siwcUsageHelp": "This sign-in method has no public usage or reset-credit query. Open ChatGPT settings to check usage.",
+      "ui.authMethod": "Sign-in: {method}",
       "ui.deviceHelp": "Enter the device code on the verification page. This window updates automatically after authorization.",
       "ui.pkceHelp": "Sign in in your browser, then paste the complete final localhost callback URL here.",
       "ui.statusLoading": "Checking login status",
@@ -314,7 +360,7 @@
       "errors.request_cancelled": "The request was cancelled.",
       "errors.unknown": "The operation did not complete. Refresh the status before retrying; do not resubmit authorization.",
       "metadata.name": "ChatGPT OAuth",
-      "plugin.description": "Use ChatGPT OAuth accounts as managed Codex upstreams",
+      "plugin.description": "Use ChatGPT sign-in and Codex accounts as separate managed upstreams",
       "config.accountRef.label": "Account reference",
       "config.accountRef.description": "The managed ChatGPT account reference; leading and trailing whitespace is not allowed. Codex compatibility is managed automatically by the plugin."
     },
@@ -446,8 +492,13 @@
       "ui.accountIdentity": "账号：{label}",
       "ui.credentialsHelp": "凭据由插件保管，不会写入服务配置。",
       "ui.loginMethod": "登录方式",
-      "ui.device": "设备码登录",
-      "ui.pkce": "浏览器登录（备用）",
+      "ui.device": "Codex 设备码登录",
+      "ui.pkce": "Codex 浏览器登录",
+      "ui.siwc": "使用 ChatGPT 登录",
+      "ui.siwcHelp": "打开授权地址完成登录，再从浏览器地址栏复制完整回调地址并粘贴到此处。最后的本地回调页面可能无法打开，仍可复制其地址。",
+      "ui.siwcUsage": "去 ChatGPT 设置查看用量",
+      "ui.siwcUsageHelp": "此登录方式没有公开的用量或重置额度查询。请在 ChatGPT 设置中查看用量。",
+      "ui.authMethod": "登录方式：{method}",
       "ui.deviceHelp": "在验证页面输入设备码，完成后这里会自动更新。",
       "ui.pkceHelp": "打开浏览器登录，将最终跳转的完整 localhost 回调地址粘贴到此处。",
       "ui.statusLoading": "正在查询登录状态",
@@ -521,7 +572,7 @@
       "errors.request_cancelled": "请求已取消。",
       "errors.unknown": "操作未完成，请刷新状态后重试。请勿重复提交授权。",
       "metadata.name": "ChatGPT OAuth",
-      "plugin.description": "将 ChatGPT OAuth 账号用作受管理的 Codex 上游",
+      "plugin.description": "将 ChatGPT 登录和 Codex 账号用作独立的受管理上游",
       "config.accountRef.label": "账号引用",
       "config.accountRef.description": "受管理的 ChatGPT 账号引用；首尾不允许有空白字符。Codex 兼容版本由插件自动管理。"
     }

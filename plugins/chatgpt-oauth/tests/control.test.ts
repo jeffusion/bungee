@@ -211,7 +211,7 @@ describe('ChatGPT control', () => {
     await control.dispose();
   });
 
-  test('refresh_token_reused cannot overwrite revoked state', async () => {
+  test('refresh_token_reused cannot recreate a deleted account', async () => {
     const store = new FakeSecretStore();
     const accounts = new AccountStore(store);
     const account = await accounts.create('A', token());
@@ -219,10 +219,10 @@ describe('ChatGPT control', () => {
     const control = createControl(host(store), { fetchImpl: () => new Promise((resolve) => { resolveFetch = resolve; }) });
     const pending = control.rpc.find((item) => item.name === 'getCredential')!.invoke({}, rpcContext(store, account.id));
     await new Promise((resolve) => setTimeout(resolve, 0));
-    await accounts.setStatus(account.id, 'revoked');
+    await accounts.remove(account.id);
     resolveFetch?.(new Response(JSON.stringify({ error: 'refresh_token_reused' }), { status: 400 }));
-    await expect(pending).rejects.toMatchObject({ code: 'revoked' });
-    expect((await accounts.get(account.id)).status).toBe('revoked');
+    await expect(pending).rejects.toMatchObject({ code: 'not_found' });
+    await expect(accounts.get(account.id)).rejects.toMatchObject({ code: 'not_found' });
     await control.dispose();
   });
 
