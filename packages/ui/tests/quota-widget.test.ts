@@ -3,7 +3,7 @@ import { compile } from 'svelte/compiler';
 import { fileURLToPath } from 'node:url';
 import { normalizeText } from '../../../tests/support/portable-text';
 import { loadPluginArtifactManifest } from '../../core/src/plugin-artifact-contract';
-import { accountSummary, accountUsage, errorText } from '../../../plugins/chatgpt-oauth/ui/account-model.js';
+import { accountSummary, accountUsage, errorText, canQueryUsage } from '../../../plugins/chatgpt-oauth/ui/account-model.js';
 
 const source = await Bun.file(fileURLToPath(new URL('../../../plugins/chatgpt-oauth/ui/ChatgptQuotaWidget.svelte', import.meta.url))).text();
 const manifest = await Bun.file(fileURLToPath(new URL('../../../plugins/chatgpt-oauth/manifest.json', import.meta.url))).json();
@@ -59,7 +59,7 @@ test('host header callback identities survive range updates but reject old updat
 
 // Exercise the actual refresh function, not a second implementation of its concurrency logic.
 const refreshSource = source.match(/  async function refresh\([\s\S]*?\n  }/)![0];
-const create = new Function('requestPluginControl', 'accountSummary', 'accountUsage', 'errorText', new Bun.Transpiler({ loader: 'ts' }).transformSync(`
+const create = new Function('requestPluginControl', 'accountSummary', 'accountUsage', 'errorText', 'canQueryUsage', new Bun.Transpiler({ loader: 'ts' }).transformSync(`
   let rows = [], busy = true, loaded = false, notice = '', generation = 0, disposed = false, controller;
   const pluginName = 'chatgpt-oauth';
   ${refreshSource}
@@ -70,12 +70,42 @@ const usage = { usage: { state: 'fresh', primary: { usedPercent: 12, windowSecon
 test('malformed usage is isolated; valid partial windows survive, malformed account records do not erase peers', async () => {
   const instance = create(async (_owner: string, path: string) => path === '/accounts'
     ? { accounts: [account('good'), account('bad'), { status: 'garbage' }, account('good'), account('')] }
-    : path.endsWith('good') ? usage : { usage: { state: 'fresh', primary: null }, resetCredits: { state: 'fresh', availableCount: -1 } }, accountSummary, accountUsage, errorText);
+    : path.endsWith('good') ? usage : { usage: { state: 'fresh', primary: null }, resetCredits: { state: 'fresh', availableCount: -1 } }, accountSummary, accountUsage, errorText, canQueryUsage);
   await instance.refresh();
   expect(instance.state().rows).toHaveLength(2);
   expect(instance.state().rows[0].usage.usage.value.primary.usedPercent).toBe(12);
   expect(instance.state().rows[1].error).toBe('errors.invalid_response');
   expect(instance.state().notice).toBe('ui.widgetPartialAccounts');
+});
+test('mixed account sources keep SIWC visible without querying usage or retaining a Codex snapshot', async () => {
+  let changed = false;
+  const paths: string[] = [];
+  const instance = create(async (_owner: string, path: string) => {
+    paths.push(path);
+    if (path === '/accounts') return { accounts: [
+      { ...account('legacy'), ...(changed ? { authType: 'siwc' } : {}) },
+      { ...account('codex'), authType: 'codex' },
+      { ...account('siwc'), authType: 'siwc' },
+      { ...account('disabled'), authType: 'codex', status: 'disabled', available: false },
+    ] };
+    return usage;
+  }, accountSummary, accountUsage, errorText, canQueryUsage);
+  await instance.refresh();
+  expect(paths).toEqual(['/accounts', '/accounts/usage?accountRef=legacy', '/accounts/usage?accountRef=codex']);
+  expect(instance.state().rows.map((row: any) => row.account.id)).toEqual(['legacy', 'codex', 'siwc', 'disabled']);
+  expect(instance.state().rows[0].usage.usage.value.primary.usedPercent).toBe(12);
+  for (const row of instance.state().rows.slice(2)) {
+    expect(row.usage).toBeUndefined();
+    expect(row.error).toBeUndefined();
+  }
+  expect(instance.state().notice).toBe('');
+  changed = true; paths.length = 0;
+  await instance.refresh();
+  expect(paths).toEqual(['/accounts', '/accounts/usage?accountRef=codex']);
+  expect(instance.state().rows).toHaveLength(4);
+  expect(instance.state().rows[0].account.authType).toBe('siwc');
+  expect(instance.state().rows[0].usage).toBeUndefined();
+  expect(instance.state().notice).toBe('');
 });
 test('credit count prefers authoritative fresh credit data then fresh usage; unknown never becomes zero', () => {
   const helper = source.match(/  function creditCount\([\s\S]*?\n  }/)![0];
@@ -98,7 +128,7 @@ test('unavailable envelopes are not last-good snapshots; failed GET becomes stal
     if (path.endsWith('empty')) return unavailable;
     if (path.endsWith('window')) return usage;
     return { usage: { state: 'unavailable' }, resetCredits: { state: 'fresh', availableCount: 0 } };
-  }, accountSummary, accountUsage, errorText);
+  }, accountSummary, accountUsage, errorText, canQueryUsage);
   await instance.refresh(); expect(state(instance.state().rows[0])).toBe('unavailable');
   failed = true; await instance.refresh();
   expect(instance.state().rows.map(state)).toEqual(['unavailable', 'stale', 'stale']);
@@ -114,7 +144,7 @@ test('four GET workers, abort before superseding, ignored late responses and dis
     const done = () => { if (counted) { active--; counted = false; } };
     signal.addEventListener('abort', done, { once: true });
     return new Promise(resolve => pending.push({ signal, finish: () => { done(); resolve(usage); } }));
-  }, accountSummary, accountUsage, errorText);
+  }, accountSummary, accountUsage, errorText, canQueryUsage);
   const old = instance.refresh(); await Bun.sleep(0);
   expect(pending).toHaveLength(4);
   const next = instance.refresh(); await Bun.sleep(0);
