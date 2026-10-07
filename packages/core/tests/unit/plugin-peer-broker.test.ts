@@ -310,6 +310,7 @@ interface WorkerRig {
 interface ConnectWorkerOptions {
   /** Really publish the worker-provided RPC service, as a worker plugin would. */
   readonly publishWorkerService?: boolean;
+  readonly authority?: () => typeof AUTHORITY | null;
 }
 
 /** Connects one real worker process (its canonical host + plugin init path). */
@@ -343,7 +344,7 @@ async function connectWorker(
     workerSlot: 0,
     masterControlPort: () => control.port,
     catalog: () => CATALOG,
-    authority: () => AUTHORITY,
+    authority: options.authority ?? (() => AUTHORITY),
   });
   workerBroker.setChannelProviderLease((plugin, context) => workerHost.beginChannelOperation(plugin, 'global', { ...context, authenticated: true })?.release ?? null);
   workerBroker.start();
@@ -695,6 +696,33 @@ describe('P4 canonical Host control ↔ worker peer integration', () => {
       scope: 'global', caller: Object.freeze({ subject: 'consumer', scope: 'global' }),
     })).not.toBeNull();
     await expect(rig.client().read('after-drain')).rejects.toBeDefined();
+  });
+
+  test('shutdown authority loss preserves accepted terminals until Host cleanup finishes', async () => {
+    const control = await createControlSide();
+    let authority: typeof AUTHORITY | null = AUTHORITY;
+    const worker = await connectWorker(control, WORKER_INSTANCE, BOOT_NONCE, { authority: () => authority });
+    let entered = false;
+    control.onSlowEntered(() => { entered = true; });
+    const pending = worker.client().slow(null);
+    void pending.catch(() => undefined);
+    await waitFor(() => entered);
+    worker.broker.retire();
+    worker.host.retireAll();
+    authority = null;
+    worker.broker.refresh();
+    expect(worker.broker.status.attached).toBe(true);
+    await expect(worker.client().read('after-shutdown')).rejects.toBeDefined();
+    let cleaned = false;
+    const cleanup = worker.registry.destroy().then(() => { cleaned = true; });
+    await Bun.sleep(20);
+    expect(cleaned).toBe(false);
+    expect(worker.host.rpc!.runtime.status().active).toBe(1);
+    control.releaseSlow();
+    expect(await pending).toBe('slow-done');
+    await cleanup;
+    expect(cleaned).toBe(true);
+    expect(worker.host.rpc!.runtime.status().active).toBe(0);
   });
 
   test('a real worker child process consumes a control service across processes', async () => {

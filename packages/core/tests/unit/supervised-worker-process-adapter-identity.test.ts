@@ -293,6 +293,15 @@ test('adopted exact exit includes only MAC-verified terminal cleanup evidence', 
     readDescriptor: async () => descriptor,
   });
   await adapter.initialization;
+  const completedDescriptor = structuredClone(descriptor);
+  const { descriptor_mac: _mac, ...completedBody } = completedDescriptor;
+  // Replace the whole signed snapshot: cleanup evidence may become readable
+  // after physical exit has already been observed by another caller.
+  Object.assign(descriptor, signWorkerDescriptor({ ...completedBody, evidence: {
+    kind: 'drained', message: { ...message, cleanup_state: 'pending' },
+  } }, CREDENTIAL.process_key));
+  expect((await adapter.verifyExactExit())?.terminalDrain?.cleanup_state).toBe('pending');
+  Object.assign(descriptor, completedDescriptor);
   expect(await adapter.verifyExactExit()).toEqual({ exited: true, pid: PID, terminalDrain: message });
 
   const tampered = { ...descriptor, evidence: { kind: 'drained' as const, message: {

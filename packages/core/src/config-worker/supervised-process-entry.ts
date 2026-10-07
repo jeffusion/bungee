@@ -64,19 +64,25 @@ export async function runSupervisedWorkerProcess(
   let shuttingDown = false;
   let resolveStopped!: () => void;
   const stopped = new Promise<void>((resolvePromise) => { resolveStopped = resolvePromise; });
+  const retireCommunication = (): void => {
+    peerBroker.retire();
+    services.retireAll();
+  };
   const shutdown = async (code: number): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
+    retireCommunication();
     let exitCode = code;
     const cleanupErrors: unknown[] = [];
-    try { pluginControl?.dispose(); } catch (error) { cleanupErrors.push(error); }
-    try { peerBroker.dispose(); } catch (error) { cleanupErrors.push(error); }
-    try { rateLimit?.dispose(); } catch (error) { cleanupErrors.push(error); }
-    setBoundControlClientProvider(null);
-    setWorkerRateLimitClient(null);
-    setWorkerRateLimitFailureObserver(null);
     try {
       await runtime.failClosed(async () => {
+        // Keep settlement routes and executor probes until HTTP work and Host leases drain.
+        try { pluginControl?.dispose(); } catch (error) { cleanupErrors.push(error); }
+        try { peerBroker.dispose(); } catch (error) { cleanupErrors.push(error); }
+        try { rateLimit?.dispose(); } catch (error) { cleanupErrors.push(error); }
+        setBoundControlClientProvider(null);
+        setWorkerRateLimitClient(null);
+        setWorkerRateLimitFailureObserver(null);
         try { await server?.stop(); } catch (error) { cleanupErrors.push(error); }
         if (cleanupErrors.length > 0) throw new AggregateError(cleanupErrors, 'worker resource or supervision cleanup failed');
       });
@@ -136,7 +142,11 @@ export async function runSupervisedWorkerProcess(
     masterControlPort: () => environment.masterControlPort,
     catalog: () => appliedCatalogHash,
     authority: () => server?.currentControllerAuthorityIfLeased() ?? null,
-    subscribeAuthority: (listener) => server?.subscribeControllerAuthority(() => listener()) ?? (() => undefined),
+    subscribeAuthority: (listener) => server?.subscribeControllerAuthority(() => {
+      // An authenticated shutdown freezes authority before its async cleanup starts.
+      if (server?.currentPhase === 'stopped') retireCommunication();
+      listener();
+    }) ?? (() => undefined),
     activatedPlugins: () => appliedActivatedPlugins,
   });
   const channels = new HostChannelAdapter({
@@ -214,10 +224,7 @@ export async function runSupervisedWorkerProcess(
       beforeBootstrap: (signal) => peerBroker.waitUntilDirectoryLoaded({ signal, timeoutMs: 5_000 }),
       // Real drain admission point: retire peer admission and host owners
       // synchronously before the HTTP drain window opens.
-      onDrainStart: () => {
-        peerBroker.retire();
-        services.retireAll();
-      },
+      onDrainStart: retireCommunication,
     }),
     compileSnapshot: createCatalogSnapshotCompiler(loadCatalog),
   });

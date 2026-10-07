@@ -56,6 +56,8 @@ export function createControl(context: any) {
   const state = {
     /** Planner invocations in THIS control instance; proves the side effect is not redone. */
     crashArmed: false,
+    shutdownGate: false,
+    shutdownActivePids: new Set<number>(),
     crashTarget: 0,
     crashEntered: [] as Array<{pid: number; kind: string}>,
     plannerRuns: 0,
@@ -75,12 +77,18 @@ export function createControl(context: any) {
   };
 
   return {
-    api: [{ path: '/crash', methods: ['POST'], handler: 'crash', invoke: async (ctx: any) => { state.crashTarget = (await ctx.request.json()).pid; state.crashArmed = true; return Response.json({armed: true}); } }, {
+    api: [{ path: '/crash', methods: ['POST'], handler: 'crash', invoke: async (ctx: any) => {
+      const body = await ctx.request.json();
+      if (body.shutdownGate) state.shutdownGate = true;
+      else { state.crashTarget = body.pid; state.crashArmed = true; }
+      return Response.json({armed: true});
+    } }, {
       path: '/state',
       methods: ['GET'],
       handler: 'state',
       invoke: () => Response.json({
         crashEntered: state.crashEntered,
+        shutdownActivePids: [...state.shutdownActivePids],
         plannerRuns: state.plannerRuns,
         calls: state.calls,
         reports: state.reports,
@@ -90,7 +98,14 @@ export function createControl(context: any) {
     rpc: [],
     start: () => {
       context.services.rpc.publish(CONTRACT, {
-        crashStatus: () => ({ armed: state.crashArmed, pid: state.crashTarget }),
+        crashStatus: async (input: any) => {
+          if (state.shutdownGate) {
+            state.shutdownActivePids.add(input.pid);
+            try { await new Promise(resolve => setTimeout(resolve, 1_000)); }
+            finally { state.shutdownActivePids.delete(input.pid); }
+          }
+          return { armed: state.crashArmed, pid: state.crashTarget };
+        },
         crashHold: (input: any) => { state.crashEntered.push({pid: input.pid, kind: 'query'}); return new Promise(() => {}); },
         crashCommand: (input: any) => { state.crashEntered.push({pid: input.pid, kind: 'command'}); return new Promise(() => {}); },
         echo: (input: any, ctx: any) => reply('echo', input, ctx),
