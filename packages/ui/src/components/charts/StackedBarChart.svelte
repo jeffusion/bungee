@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { _ } from '$i18n';
   import { onMount, onDestroy } from 'svelte';
   import { Bar } from 'svelte-chartjs';
   import {
@@ -23,6 +24,7 @@
     status3xx: number;
     status4xx: number;
     status5xx: number;
+    statusOther?: number;
   }> = [];
   export let title: string = '';
 
@@ -42,7 +44,8 @@
     { key: 'status2xx', label: '2xx', color: '#10b981' },
     { key: 'status3xx', label: '3xx', color: '#38bdf8' },
     { key: 'status4xx', label: '4xx', color: '#f59e0b' },
-    { key: 'status5xx', label: '5xx', color: '#ef4444' }
+    { key: 'status5xx', label: '5xx', color: '#ef4444' },
+    { key: 'statusOther', label: '', color: '#71717a' }
   ] as const;
 
   // Row caption — hostname drawn ABOVE each row in DM Mono uppercase with chiseled
@@ -106,8 +109,8 @@
   $: chartData = {
     labels: data.map(d => d.label),
     datasets: SERIES.map(s => ({
-      label: s.label,
-      data: data.map(d => (d as any)[s.key]),
+      label: s.key === 'statusOther' ? $_('dashboardLayout.otherStatus') : s.label,
+      data: data.map(d => d[s.key] ?? 0),
       backgroundColor: s.color,
       borderColor: s.color,
       // Hard-edge industrial bars (§2.3 / §6.2 never soft): zero border outline,

@@ -1,15 +1,17 @@
 import type { AppConfig } from '@jeffusion/bungee-types';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 type Scenario = 'managed' | 'failover' | 'cancelled' | 'timed-out' | 'edges' | 'aborted' | 'stats-api'
   | 'terminal-responses' | 'terminal-chat' | 'terminal-anthropic' | 'terminal-incomplete'
-  | 'terminal-failed' | 'terminal-truncated' | 'terminal-failover';
+  | 'terminal-failed' | 'terminal-truncated' | 'terminal-failover' | 'finite-business' | 'finite-http500' | 'finite-binary' | 'finite-recovery' | 'pending';
 
 const scenario = process.argv[2] as Scenario;
 const accessDb = process.env.BUNGEE_ACCESS_DB_PATH;
 
 if (!accessDb || !['managed', 'failover', 'cancelled', 'timed-out', 'edges', 'aborted', 'stats-api',
   'terminal-responses', 'terminal-chat', 'terminal-anthropic', 'terminal-incomplete',
-  'terminal-failed', 'terminal-truncated', 'terminal-failover'].includes(scenario)) {
+  'terminal-failed', 'terminal-truncated', 'terminal-failover', 'finite-business', 'finite-http500', 'finite-binary', 'finite-recovery', 'pending'].includes(scenario)) {
   throw new Error('unknown stats request outcomes scenario');
 }
 
@@ -27,7 +29,7 @@ async function waitForLogs(
   const deadline = Date.now() + 3_000;
   while (Date.now() < deadline) {
     await writer.flush();
-    const result = writer.getDatabase().prepare('SELECT COUNT(*) AS count FROM access_logs WHERE path = ?').get(path) as { count: number };
+    const result = writer.getDatabase().prepare('SELECT COUNT(*) AS count FROM access_logs WHERE path = ? AND protocol_outcome IS NOT NULL').get(path) as { count: number };
     if (result.count >= count) return;
     await sleep(25);
   }
@@ -48,6 +50,12 @@ async function main(): Promise<void> {
   const { LogQueryService } = await import('../../src/api/logs');
 
   const servers: Array<ReturnType<typeof Bun.serve>> = [];
+  const fileLogs = async () => {
+    await fileLogWriter.flush();
+    const dir = process.env.BUNGEE_FILE_LOG_DIR!;
+    return readdirSync(dir).filter(name => name.startsWith('access-')).flatMap(name =>
+      readFileSync(join(dir, name), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)));
+  };
   try {
     const serve = (config: AppConfig) => {
       const server = Bun.serve({
@@ -166,7 +174,30 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (scenario === 'cancelled' || scenario === 'timed-out' || scenario.startsWith('terminal-')) {
+    if (scenario.startsWith('finite-')) {
+      const payload = scenario === 'finite-binary' ? new Uint8Array([0, 255, 128, 13, 10])
+        : 'event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"quota"}}}\n\n';
+      const upstream = Bun.serve({ hostname: '127.0.0.1', port: 0,
+        fetch: () => new Response(payload, { status: scenario === 'finite-http500' ? 500 : 200,
+          headers: { 'content-type': scenario === 'finite-binary' ? 'application/octet-stream' : 'text/event-stream' } }) });
+      servers.push(upstream);
+      const endpoints = [{ target: `http://127.0.0.1:${upstream.port}` }];
+      const config = (scenario === 'finite-recovery'
+        ? { services: [{ name: 'recovery', endpoints, failover: { enabled: true } }], routes: [{ path: '/finite', service: 'recovery' }] }
+        : { routes: [{ path: '/finite', endpoints }] }) as AppConfig;
+      initializeRuntimeState(config);
+      if (scenario === 'finite-recovery') runtimeState.get('recovery')!.upstreams[0].status = 'HALF_OPEN';
+      const gateway = serve(config);
+      const response = await fetch(`http://127.0.0.1:${gateway.port}/finite`);
+      const bytes = [...new Uint8Array(await response.arrayBuffer())];
+      await waitForLogs(accessLogWriter, '/finite', 1);
+      const query = new LogQueryService(accessLogWriter.getDatabase());
+      console.log(`RESULT:${JSON.stringify({ status: response.status, bytes, expected: [...new Uint8Array(await new Response(payload).arrayBuffer())],
+        stats: await query.getStats(), fileLogs: await fileLogs() })}`);
+      return;
+    }
+
+    if (scenario === 'cancelled' || scenario === 'timed-out' || scenario === 'pending' || scenario.startsWith('terminal-')) {
       let interval: Timer | undefined;
       let upstreamHits = 0;
       const path = `/${scenario}`;
@@ -226,6 +257,15 @@ async function main(): Promise<void> {
         if (chunk.done) throw new Error('expected terminal payload before EOF');
         received += decoder.decode(chunk.value, { stream: true });
       }
+      if (scenario === 'pending') {
+        await accessLogWriter.flush();
+        const before = await new LogQueryService(accessLogWriter.getDatabase()).query({ path });
+        controller.abort('test client cancellation');
+        await reader.cancel().catch(() => undefined);
+        await waitForLogs(accessLogWriter, path, 1);
+        console.log(`RESULT:${JSON.stringify({ before, after: await new LogQueryService(accessLogWriter.getDatabase()).query({ path }) })}`);
+        return;
+      }
       let readFailed = false;
       if (scenario === 'timed-out') {
         try { while (!(await reader.read()).done) {} }
@@ -266,7 +306,7 @@ async function main(): Promise<void> {
       await request.catch(() => undefined);
       await waitForLogs(accessLogWriter, '/aborted', 1);
       const stats = await new LogQueryService(accessLogWriter.getDatabase()).getStats();
-      console.log(`RESULT:${JSON.stringify({ fallbackHits, stats })}`);
+      console.log(`RESULT:${JSON.stringify({ fallbackHits, stats, fileLogs: await fileLogs() })}`);
       return;
     }
 

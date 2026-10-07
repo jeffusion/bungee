@@ -5,6 +5,7 @@ import type { FileLogWriter } from './file-log-writer';
 import type { BodyStorageManager } from './body-storage';
 import type { HeaderStorageManager } from './header-storage';
 import type { RawResponseError } from '../plugin-control/contracts';
+import type { TransportOutcome } from './transport-outcome';
 
 function diagnosticMessage(error?: RawResponseError): string | undefined {
   if (!error) return undefined;
@@ -13,7 +14,7 @@ function diagnosticMessage(error?: RawResponseError): string | undefined {
 }
 
 export type RequestLoggerDependencies = {
-  readonly accessLogWriter?: Pick<AccessLogWriter, 'write' | 'updateResponseBodyId' | 'updateProtocolOutcome'>;
+  readonly accessLogWriter?: Pick<AccessLogWriter, 'write' | 'updateResponseBodyId' | 'updateProtocolOutcome'> & Partial<Pick<AccessLogWriter, 'updateTransportOutcome'>>;
   readonly fileLogWriter?: Pick<FileLogWriter, 'write'>;
   readonly bodyStorage?: Pick<BodyStorageManager, 'save'> & Partial<Pick<BodyStorageManager, 'getConfig'>>;
   readonly headerStorage?: Pick<HeaderStorageManager, 'save'>;
@@ -36,6 +37,8 @@ export interface RequestLogCompletionOptions {
   errorMessage?: string;
   protocolOutcome?: 'completed' | 'failed' | 'incomplete' | 'cancelled';
   protocolCode?: string;
+  transportOutcome?: TransportOutcome;
+  transportCode?: string;
   success?: boolean;
   protocolError?: RawResponseError;
 }
@@ -86,6 +89,12 @@ export class RequestLogger {
   private fileLogEntry: FileLogEntry | null = null;
   private fileLogWritten = false;
   private protocolError?: RawResponseError;
+  private transportOutcome: TransportOutcome = 'unknown';
+  private transportCode?: string;
+  private transportStarted = false;
+  private clientTransportObserved = false;
+  private deferTransportFileLog = false;
+  private fileLogWritePromise: Promise<void> | null = null;
   private readonly dependencies: Required<Pick<RequestLoggerDependencies, 'accessLogWriter' | 'fileLogWriter'>>
     & Omit<RequestLoggerDependencies, 'accessLogWriter' | 'fileLogWriter'>;
 
@@ -366,6 +375,9 @@ export class RequestLogger {
       protocolCode: options?.protocolCode,
       success: options?.success,
       ...options,
+      transportOutcome: this.transportOutcome,
+      transportCode: this.transportCode,
+      replacePendingTransport: this.transportStarted,
       errorMessage,
     };
 
@@ -399,6 +411,8 @@ export class RequestLogger {
       protocolOutcome: options?.protocolOutcome,
       protocolCode: options?.protocolCode,
       success: options?.success,
+      transportOutcome: this.transportOutcome,
+      transportCode: this.transportCode,
     };
 
     // write() 返回即表示已入队；此后 complete 幂等，避免附属文件日志失败时重复入队。
@@ -430,8 +444,31 @@ export class RequestLogger {
   }
 
   private async writeFileLog(): Promise<void> {
-    await this.dependencies.fileLogWriter.write(this.fileLogEntry!);
-    this.fileLogWritten = true;
+    if (this.fileLogWritten || !this.fileLogEntry) return;
+    // complete() may run before the returned response reaches EOF. Do not wait here:
+    // that would prevent the very EOF needed to release this diagnostic record.
+    if (this.deferTransportFileLog && (!this.clientTransportObserved || this.transportOutcome === 'pending')) return;
+    if (this.fileLogWritePromise) return this.fileLogWritePromise;
+    const write = this.dependencies.fileLogWriter.write(this.fileLogEntry).then(() => { this.fileLogWritten = true; });
+    this.fileLogWritePromise = write;
+    try { await write; } finally { if (this.fileLogWritePromise === write) this.fileLogWritePromise = null; }
+  }
+
+  /** The request handler enables this before any completion can serialize a final JSONL record. */
+  deferFileLogUntilTransportObserved(): void {
+    this.deferTransportFileLog = true;
+  }
+
+  /** The attempt was superseded or the handler threw before returning a response. */
+  releaseUnreturnedTransportFileLog(): void {
+    this.deferTransportFileLog = false;
+    this.enqueueReadyFileLog();
+  }
+
+  private enqueueReadyFileLog(): void {
+    if (this.fileLogEntry && !this.fileLogWritten) {
+      void this.writeFileLog().catch(error => console.error('Failed to enqueue transport file log:', error));
+    }
   }
 
   /** 显式持久化没有 upstream attempt 的 root final 记录。 */
@@ -450,6 +487,36 @@ export class RequestLogger {
 
   updateStreamResponseBodyId(bodyId: string): void {
     this.dependencies.accessLogWriter.updateResponseBodyId(this.requestId, bodyId);
+  }
+
+  /** Publish in-progress metadata without saving bodies or finalizing plugin/accounting hooks. */
+  beginTransport(status: number, options: Pick<RequestLogCompletionOptions, 'routePath' | 'upstream'> = {}): void {
+    this.clientTransportObserved = true;
+    this.updateTransportOutcome('pending');
+    if (this.completed || this.transportStarted) return;
+    this.transportStarted = true;
+    this.dependencies.accessLogWriter.write({
+      requestId: this.requestId, timestamp: this.startTime, method: this.method, path: this.path,
+      query: this.query || undefined, status, duration: Date.now() - this.startTime,
+      processingSteps: this.steps.length ? this.steps : undefined,
+      requestType: this.requestType, isFailoverAttempt: this.isFailoverAttempt,
+      parentRequestId: this.parentRequestId ?? undefined, attemptNumber: this.attemptNumber ?? undefined,
+      attemptUpstream: this.attemptUpstream ?? undefined, ...options,
+      transportOutcome: 'pending',
+    });
+  }
+
+  updateTransportOutcome(outcome: TransportOutcome, code?: string): void {
+    this.transportOutcome = outcome;
+    this.transportCode = code;
+    if (this.fileLogEntry) { this.fileLogEntry.transportOutcome = outcome; this.fileLogEntry.transportCode = code; }
+    this.dependencies.accessLogWriter.updateTransportOutcome?.(this.requestId, outcome, code);
+    if (this.clientTransportObserved && outcome !== 'pending') this.enqueueReadyFileLog();
+  }
+
+  /** Earlier attempts observe their upstream; the returned response owns the final observation. */
+  updateUpstreamTransportOutcome(outcome: TransportOutcome, code?: string): void {
+    if (!this.clientTransportObserved) this.updateTransportOutcome(outcome, code);
   }
 
   updateProtocolOutcome(

@@ -10,6 +10,7 @@
   import DashboardBoard from '$components/dashboard/DashboardBoard.svelte';
   import TrendChart from '$components/dashboard/TrendChart.svelte';
   import Sparkline from '$components/dashboard/Sparkline.svelte';
+  import { dashboardMetrics, successRate, failureRate, successHistory, failureHistory, rankFailures } from '$components/dashboard/outcomes';
   import { bucketTrend, completedBuckets } from '$components/dashboard/trends';
   import { GRID_COLUMNS, type CardDefinition, type KpiMetric } from '$components/dashboard/layout';
   import { getDashboardStats } from '$api/stats';
@@ -100,12 +101,7 @@
     enabled: boolean;
   }> = $state([]);
 
-  let calculatedStats: {
-    totalRequests: number;
-    requestsPerMinute: number;
-    successRate: number;
-    avgResponseTime: number;
-  } | null = $state(null);
+  let calculatedStats: ReturnType<typeof dashboardMetrics> | null = $state(null);
 
   let servicesStats: {
     totalServices: number;
@@ -133,7 +129,7 @@
       const snapshot = await getDashboardStats(range);
       if (version !== requestVersion || disposed || layoutEditing) return;
       history = snapshot.history;
-      calculatedStats = calculateStats(history);
+      calculatedStats = dashboardMetrics(snapshot);
       upstreamStats = snapshot.upstreams;
       lastUpdated = snapshot.endTime;
       statsStartTime = snapshot.startTime;
@@ -196,35 +192,8 @@
     };
   }
 
-  function calculateStats(history: StatsHistoryV2 | null) {
-    if (!history || history.requests.length === 0) return null;
-    const totalRequests = history.requests.reduce((s, v) => s + v, 0);
-    const rangeInSeconds = getRangeInSeconds(selectedRange);
-    const requestsPerMinute = (totalRequests / rangeInSeconds) * 60;
-    const totalErrors = history.errors.reduce((s, v) => s + v, 0);
-    const successRate = totalRequests > 0 ? ((totalRequests - totalErrors) / totalRequests) * 100 : 100;
-    const failureRate = totalRequests > 0 ? totalErrors / totalRequests * 100 : 0;
-    const avgResponseTime =
-      history.responseTime.length > 0
-        ? history.responseTime.reduce((s, v) => s + v, 0) / history.responseTime.length
-        : 0;
-    return { totalRequests, requestsPerMinute, successRate, failureRate, totalErrors, avgResponseTime };
-  }
-
-  function getRangeInSeconds(range: TimeRange): number {
-    switch (range) {
-      case '1h': return 3600;
-      case '12h': return 43200;
-      case '24h': return 86400;
-      default: return 3600;
-    }
-  }
-
-  // Map success rate to a tone for the KPI card
   function rateTone(rate: number): 'ok' | 'warn' | 'danger' {
-    if (rate >= 99) return 'ok';
-    if (rate >= 95) return 'warn';
-    return 'danger';
+    return rate >= 99 ? 'ok' : rate >= 95 ? 'warn' : 'danger';
   }
 
   // Route health dot status mapping
@@ -415,7 +384,7 @@
     if (!history) return [];
     return id === 'chart.requests' || id === 'kpi.requests' || id === 'kpi.rpm' ? history.requests :
       id === 'chart.latency' || id === 'kpi.latency' ? history.responseTime :
-      id === 'chart.success' || id === 'kpi.success' ? history.successRate : history.errors;
+      id === 'chart.success' || id === 'kpi.success' ? successHistory(history) : failureHistory(history);
   }
   function trendTone(id: string): 'orange' | 'sky' | 'emerald' | 'red' {
     return id.includes('latency') ? 'sky' : id.includes('success') ? 'emerald' : id.includes('errors') ? 'red' : 'orange';
@@ -472,8 +441,8 @@
 
 {#snippet outcomeSummary(row: UpstreamOutcomeStats)}
   <div class="flex flex-wrap gap-x-3 gap-y-1 font-mono text-[10px] leading-relaxed">
-    <span class="text-zinc-300">{$_('dashboardLayout.successfulRequests')} {row.successRequests} · {row.successRate.toFixed(2)}%</span>
-    <span class:text-red-300={row.failedRequests > 0} class:text-zinc-400={row.failedRequests === 0}>{$_('dashboardLayout.failedRequests')} {row.failedRequests} · {row.failureRate.toFixed(2)}%</span>
+    <span class="text-zinc-300">{$_('dashboardLayout.successfulRequests')} {row.requestCounts?.success ?? '—'} · {successRate(row.requestCounts)?.toFixed(2) ?? '—'}%</span>
+    <span class:text-red-300={(row.requestCounts?.failed ?? 0) > 0} class="text-zinc-400">{$_('dashboardLayout.failedRequests')} {row.requestCounts?.failed ?? '—'} · {failureRate(row.requestCounts)?.toFixed(2) ?? '—'}%</span>
   </div>
 {/snippet}
 
@@ -570,13 +539,14 @@
         {:else}<Sparkline values={trendValues(definition.id)} tone={trendTone(definition.id)} />{/if}
       {:else if definition.group === 'trend'}
         {@const values = trendValues(definition.id)}
-        {@const total = values.reduce((sum, value) => sum + value, 0)}
+        {@const samples = values.filter(Number.isFinite)}
+        {@const total = samples.reduce((sum, value) => sum + value, 0)}
         {@const unit = definition.id === 'chart.latency' ? 'MS' : definition.id === 'chart.success' ? '%' : 'REQ'}
         <div class="flex h-full min-h-0 flex-col gap-2.5" data-testid={definition.id === 'chart.requests' ? 'dashboard-chart-traffic' : undefined}>
           <div class="dashboard-chart-summary flex max-h-[22px] flex-wrap items-baseline gap-x-[18px] gap-y-1.5 overflow-hidden">
-            <span class="flex items-baseline gap-1.5 font-display text-lg font-bold leading-none text-zinc-100">{values.length ? definition.id === 'chart.latency' ? Math.round(calculatedStats?.avgResponseTime ?? 0).toLocaleString() : definition.id === 'chart.success' ? calculatedStats?.successRate.toFixed(2) : total.toLocaleString() : '—'}<small class="font-mono text-[10px] font-normal tracking-chiseled text-zinc-500">{unit}</small></span>
-            <span class="dashboard-stat">{$_('dashboardLayout.peak')} <b>{values.length ? Math.max(...values).toLocaleString() : '—'}</b></span>
-            <span class="dashboard-stat">{definition.id === 'chart.errors' ? $_('dashboardLayout.errorRate') : $_('dashboardLayout.average')} <b>{values.length ? definition.id === 'chart.errors' ? `${(calculatedStats?.failureRate ?? 0).toFixed(2)}%` : (total / values.length).toFixed(1) : '—'}</b></span>
+            <span class="flex items-baseline gap-1.5 font-display text-lg font-bold leading-none text-zinc-100">{values.length ? definition.id === 'chart.latency' ? Math.round(calculatedStats?.avgResponseTime ?? 0).toLocaleString() : definition.id === 'chart.success' ? calculatedStats?.successRate?.toFixed(2) ?? '—' : total.toLocaleString() : '—'}<small class="font-mono text-[10px] font-normal tracking-chiseled text-zinc-500">{unit}</small></span>
+            <span class="dashboard-stat">{$_('dashboardLayout.peak')} <b>{samples.length ? Math.max(...samples).toLocaleString() : '—'}</b></span>
+            <span class="dashboard-stat">{definition.id === 'chart.errors' ? $_('dashboardLayout.errorRate') : $_('dashboardLayout.average')} <b>{values.length ? definition.id === 'chart.errors' ? calculatedStats?.failureRate == null ? '—' : `${calculatedStats.failureRate.toFixed(2)}%` : samples.length ? (total / samples.length).toFixed(1) : '—' : '—'}</b></span>
           </div>
           <div class="min-h-0 flex-1">
             {#if refreshing && !history}<LoadingIndicator height="sm" />
@@ -592,39 +562,37 @@
               <section class="space-y-2" aria-label={upstreamHost(row.upstream)} data-testid={measuring ? undefined : 'upstream-status-row'}>
                 <MetricBar label={upstreamHost(row.upstream)} value={row.totalRequests} max={row.totalRequests} tone="neutral"
                   valueLabel={`${$_('dashboardLayout.total')} ${row.totalRequests.toLocaleString()}`}
-                  segments={statusSegments.map(segment => ({ label: segment.key === 'statusOther' ? $_('dashboardLayout.otherStatus') : segment.label, value: row[segment.key], tone: segment.tone }))} />
+                  segments={statusSegments.map(segment => ({ label: segment.key === 'statusOther' ? $_('dashboardLayout.otherStatus') : segment.label, value: row.httpStatusCounts?.[segment.key] ?? 0, tone: segment.tone }))} />
                 <dl class="dashboard-status-breakdown font-mono text-[10px] tabular-nums">
                   {#each statusSegments as segment}
                     <div class="min-w-0" data-status={segment.key}>
                       <dt class="flex items-center gap-1.5 text-zinc-400"><i class="h-2 w-2 shrink-0 {segment.color}" aria-hidden="true"></i>{segment.key === 'statusOther' ? $_('dashboardLayout.otherStatus') : segment.label}</dt>
-                      <dd class="mt-1 flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5"><span class="text-zinc-200">{row[segment.key].toLocaleString()}</span><span class="text-zinc-500">{row.totalRequests ? (row[segment.key] / row.totalRequests * 100).toFixed(1) : '0.0'}%</span></dd>
+                      <dd class="mt-1 flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5"><span class="text-zinc-200">{row.httpStatusCounts?.[segment.key].toLocaleString() ?? '—'}</span><span class="text-zinc-500">{row.httpStatusCounts ? `${row.totalRequests ? (row.httpStatusCounts[segment.key] / row.totalRequests * 100).toFixed(1) : '0.0'}%` : '—'}</span></dd>
                     </div>
                   {/each}
                 </dl>
-                <p class="font-mono text-[10px] leading-relaxed text-zinc-400">{$_('dashboardLayout.http2xxOutcome', { values: { failed: row.failed2xx } })}</p>
-                {@render outcomeSummary(row)}
               </section>
               {/snippet}
             </BCarouselList>{:else}<div class="dashboard-no-data">{$_('dashboard.noData')}</div>{/if}
           {:else}
             {@const failure = definition.id === 'chart.failures'}
-            {@const rows = failure ? upstreamStats.filter(row => row.failedRequests > 0).toSorted((a, b) => b.failedRequests - a.failedRequests) : upstreamStats}
+            {@const rows = failure ? rankFailures(upstreamStats) : upstreamStats}
             {@const total = upstreamStats.reduce((sum, row) => sum + row.totalRequests, 0)}
-            {@const maximum = Math.max(1, ...rows.map(row => failure ? row.failedRequests : row.totalRequests))}
+            {@const maximum = Math.max(1, ...rows.map(row => failure ? (row.requestCounts?.failed ?? 0) : row.totalRequests))}
             <div class="flex shrink-0 flex-wrap justify-between gap-2">
               {#if failure}
-                <span class="dashboard-stat">{$_('dashboardLayout.failedRequests')} <b>{upstreamStats.reduce((sum, row) => sum + row.failedRequests, 0)}</b></span>
+                <span class="dashboard-stat">{$_('dashboardLayout.failedRequests')} <b>{upstreamStats.some(row => !row.requestCounts) ? '—' : upstreamStats.reduce((sum, row) => sum + (row.requestCounts?.failed ?? 0), 0)}</b></span>
               {:else}<span class="dashboard-stat">{$_('dashboardLayout.total')} <b>{total.toLocaleString()}</b></span>{/if}
             </div>
             {#snippet distributionRow(row: UpstreamOutcomeStats, measuring = false)}
               <div class="space-y-1.5" data-testid={measuring ? undefined : failure ? 'upstream-failure-row' : 'upstream-distribution-row'}>
-                <MetricBar label={upstreamHost(row.upstream)} value={failure ? row.failedRequests : row.totalRequests} max={failure ? row.totalRequests : maximum} tone="neutral"
+                <MetricBar label={upstreamHost(row.upstream)} value={failure ? (row.requestCounts?.failed ?? 0) : row.totalRequests} max={failure ? row.totalRequests : maximum} tone="neutral"
                   valueLabel={failure ? $_('dashboardLayout.attemptCount', { values: { count: row.totalRequests } }) : `${row.totalRequests.toLocaleString()} · ${$_('dashboardLayout.trafficShare')} ${row.percentage.toFixed(1)}%`}
                   segments={failure ? [
-                    { label: $_('dashboardLayout.failedRequests'), value: row.failedRequests, tone: 'danger' },
+                    { label: $_('dashboardLayout.failedRequests'), value: (row.requestCounts?.failed ?? 0), tone: 'danger' },
                   ] : [
-                    { label: $_('dashboardLayout.successfulRequests'), value: row.successRequests, tone: 'ok' },
-                    { label: $_('dashboardLayout.failedRequests'), value: row.failedRequests, tone: 'danger' },
+                    { label: $_('dashboardLayout.successfulRequests'), value: row.requestCounts?.success ?? 0, tone: 'ok' },
+                    { label: $_('dashboardLayout.failedRequests'), value: row.requestCounts?.failed ?? 0, tone: 'danger' },
                   ]} />
                 {@render outcomeSummary(row)}
               </div>

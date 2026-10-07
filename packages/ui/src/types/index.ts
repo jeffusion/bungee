@@ -19,7 +19,19 @@ export interface PluginConfig {
   options?: Record<string, PluginConfigValue>;
 }
 
+export interface HttpStatusCounts {
+  status2xx: number; status3xx: number; status4xx: number; status5xx: number; statusOther: number;
+}
+export interface RequestCounts { success: number; failed: number; }
+export interface TransportCounts {
+  pending: number; completed: number; failed: number; cancelled: number; unknown: number;
+}
+export type CountHistory<T> = { [K in keyof T]: number[] };
+
 export interface StatsHistoryV2 {
+  requestCounts?: CountHistory<RequestCounts>;
+  httpStatusCounts?: CountHistory<HttpStatusCounts>;
+  transportCounts?: CountHistory<TransportCounts>;
   timestamps: string[];
   requests: number[];
   errors: number[];
@@ -62,12 +74,18 @@ export interface UpstreamStatusCodeStats {
 }
 
 export interface UpstreamOutcomeStats extends UnifiedUpstreamStats, UpstreamStatusCodeStats {
+  requestCounts?: RequestCounts;
+  httpStatusCounts?: HttpStatusCounts;
+  transportCounts?: TransportCounts;
   successRate: number;
   statusOther: number;
   failed2xx: number;
 }
 
 export interface DashboardStats {
+  requestCounts?: RequestCounts;
+  httpStatusCounts?: HttpStatusCounts;
+  transportCounts?: TransportCounts;
   startTime: number;
   endTime: number;
   range: TimeRange;

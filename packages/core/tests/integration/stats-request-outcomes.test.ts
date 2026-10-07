@@ -16,6 +16,8 @@ type AccessRow = {
   success: number;
   protocol_outcome: string | null;
   protocol_code: string | null;
+  transport_outcome: string | null;
+  transport_code: string | null;
   is_failover_attempt: number;
   attempt_number: number | null;
 };
@@ -70,13 +72,32 @@ async function runScenario(scenario: string): Promise<{ result: Record<string, a
     result: JSON.parse(encoded),
     rows: (path) => database.query(`
       SELECT request_id, parent_request_id, status, request_type, success,
-             protocol_outcome, protocol_code, is_failover_attempt, attempt_number
+             protocol_outcome, protocol_code, transport_outcome, transport_code, is_failover_attempt, attempt_number
       FROM access_logs WHERE path = ? ORDER BY id
     `).all(path) as AccessRow[],
   };
 }
 
 describe('stats request outcomes over real HTTP', () => {
+  for (const scenario of ['finite-business', 'finite-http500', 'finite-binary', 'finite-recovery']) {
+    test(`keeps HTTP and transport independent with exact opaque bytes: ${scenario}`, async () => {
+      const { result, rows } = await runScenario(scenario);
+      expect(result.status).toBe(scenario === 'finite-http500' ? 500 : 200);
+      expect(result.bytes).toEqual(result.expected);
+      expect(rows('/finite')).toEqual([expect.objectContaining({ transport_outcome: 'completed' })]);
+      expect(result.stats.transportCounts).toEqual({ pending: 0, completed: 1, failed: 0, cancelled: 0, unknown: 0 });
+      expect(result.fileLogs).toEqual([expect.objectContaining({ transportOutcome: 'completed',
+        ...(scenario === 'finite-recovery' ? { requestType: 'recovery' } : {}) })]);
+    }, 15_000);
+  }
+  test('publishes in-progress metadata and replaces it with exactly one terminal row', async () => {
+    const { result } = await runScenario('pending');
+    expect(result.before.total).toBe(1);
+    expect(result.before.data[0].transportOutcome).toBe('pending');
+    expect(result.after.total).toBe(1);
+    expect(result.after.data[0]).toMatchObject({ transportOutcome: 'cancelled', protocolOutcome: 'cancelled' });
+  }, 15_000);
+
   test('records one final failed row when managed control is unavailable', async () => {
     const { result, rows } = await runScenario('managed');
 
@@ -111,7 +132,7 @@ describe('stats request outcomes over real HTTP', () => {
 
     expect(result.status).toBe(200);
     expect(rows('/cancelled')).toEqual([expect.objectContaining({
-      status: 200, request_type: 'final', success: 0, protocol_outcome: 'cancelled', protocol_code: null,
+      status: 200, request_type: 'final', success: 0, protocol_outcome: 'cancelled', protocol_code: null, transport_outcome: 'cancelled',
     })]);
     expect(result.stats).toMatchObject({ totalRequests: 1, successRequests: 0, failedRequests: 1 });
     expect(result.dashboard.history.errors.reduce((sum: number, value: number) => sum + value, 0)).toBe(1);
@@ -122,7 +143,7 @@ describe('stats request outcomes over real HTTP', () => {
     const { result, rows } = await runScenario('timed-out');
     expect(result).toMatchObject({ status: 200, stats: { totalRequests: 1, failedRequests: 1 } });
     expect(rows('/timed-out')).toEqual([expect.objectContaining({
-      status: 200, success: 0, protocol_outcome: 'failed', protocol_code: 'request_timeout',
+      status: 200, success: 0, protocol_outcome: 'failed', protocol_code: 'request_timeout', transport_outcome: 'failed', transport_code: 'request_timeout',
     })]);
     expect(result.dashboard.history.errors.reduce((sum: number, value: number) => sum + value, 0)).toBe(1);
     expect(result.dashboard.upstreams).toEqual([expect.objectContaining({
@@ -191,6 +212,7 @@ describe('stats request outcomes over real HTTP', () => {
 
     expect(result).toMatchObject({ fallbackHits: 0, stats: { totalRequests: 1, failedRequests: 1 } });
     expect(attempts).toEqual([expect.objectContaining({ request_type: 'final', success: 0, parent_request_id: expect.any(String) })]);
+    expect(result.fileLogs).toEqual([expect.objectContaining({ requestType: 'final', transportOutcome: 'cancelled' })]);
   }, 15_000);
 
   test('returns real DTOs for every legal stats range and filter', async () => {

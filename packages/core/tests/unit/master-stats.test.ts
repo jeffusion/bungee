@@ -114,7 +114,7 @@ test('reports a close failure once without leaving close callers pending', async
       return { get: () => sql.includes('sqlite_version') ? { v: '3.53.0' }
         : sql.includes('journal_mode') ? { journal_mode: 'delete' }
           : sql.includes('synchronous') ? { synchronous: 2 }
-            : sql.includes('foreign_keys') ? { foreign_keys: 1 } : { timeout: 5000 } };
+            : sql.includes('foreign_keys') ? { foreign_keys: 1 } : { timeout: 5000 }, all: () => [] };
     },
     close() { closeCalls += 1; throw failure; },
   } as unknown as Database;
@@ -134,7 +134,7 @@ test('does not turn an in-flight successful stats response into a close failure'
       return { get: () => sql.includes('sqlite_version') ? { v: '3.53.0' }
         : sql.includes('journal_mode') ? { journal_mode: 'delete' }
           : sql.includes('synchronous') ? { synchronous: 2 }
-            : sql.includes('foreign_keys') ? { foreign_keys: 1 } : { timeout: 5000 } };
+            : sql.includes('foreign_keys') ? { foreign_keys: 1 } : { timeout: 5000 }, all: () => [] };
     },
     close() { throw failure; },
     prepare(sql: string) {

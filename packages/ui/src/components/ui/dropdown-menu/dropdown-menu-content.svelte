@@ -7,6 +7,7 @@
 
 	let className: $$Props["class"] = undefined;
 	export let sideOffset: $$Props["sideOffset"] = 4;
+	export let fitViewport: $$Props["fitViewport"] = true;
 	export let transition: $$Props["transition"] = flyAndScale;
 	export let transitionConfig: $$Props["transitionConfig"] = undefined;
 	export { className as class };
@@ -16,8 +17,9 @@
 	{transition}
 	{transitionConfig}
 	{sideOffset}
+	{fitViewport}
 	class={cn(
-		"bg-carbon-800 text-carbon-100 z-50 min-w-[8rem] border border-carbon-700 p-1 shadow-md focus:outline-none",
+		"bg-carbon-800 text-carbon-100 z-50 min-w-[8rem] max-w-[calc(100vw-1.5rem)] max-h-[70dvh] overflow-y-auto overscroll-contain border border-carbon-700 p-1 shadow-md focus:outline-none",
 		className
 	)}
 	{...$$restProps}

@@ -1,5 +1,6 @@
 import type { LogQueryService, StatsHistoryInterval, TimeSeriesStatsPoint } from '../logs';
 import type { StatsHistory, StatsHistoryV2, TimeRange } from '../types';
+import { emptyHttpCounts, emptyTransportCounts, type HttpStatusCounts, type TransportCounts } from '../../logger/transport-outcome';
 
 export type StatsQueryService = Pick<LogQueryService,
   'getStats' | 'getChainCount' | 'getCumulativeHistory' | 'getTimeSeriesStats'
@@ -76,6 +77,9 @@ export class StatsHandler {
         failedRequests: stats.failedRequests,
         successRate: stats.totalRequests > 0 ? (stats.successRequests / stats.totalRequests) * 100 : 100,
         averageResponseTime: stats.avgResponseTime,
+        requestCounts: stats.requestCounts,
+        httpStatusCounts: stats.httpStatusCounts,
+        transportCounts: stats.transportCounts,
         timestamp: new Date(queryTime).toISOString(),
       };
       const pluginStats = this.getPluginStats?.();
@@ -152,6 +156,14 @@ export class StatsHandler {
   private historyDto(data: TimeSeriesStatsPoint[]): StatsHistoryV2 {
     const rate = (count: number, total: number, empty = 0) => total ? Math.round(count / total * 10_000) / 100 : empty;
     return {
+      requestCounts: data.every(point => point.requestCounts) ? {
+        success: data.map(point => point.requestCounts!.success),
+        failed: data.map(point => point.requestCounts!.failed),
+      } : undefined,
+      httpStatusCounts: Object.fromEntries(Object.keys(emptyHttpCounts()).map(key => [key,
+        data.map(point => point.httpStatusCounts?.[key as keyof HttpStatusCounts] ?? 0)])) as StatsHistoryV2['httpStatusCounts'],
+      transportCounts: Object.fromEntries(Object.keys(emptyTransportCounts()).map(key => [key,
+        data.map(point => point.transportCounts?.[key as keyof TransportCounts] ?? (key === 'unknown' ? point.totalRequests : 0))])) as StatsHistoryV2['transportCounts'],
       timestamps: data.map(point => new Date(point.timestamp).toISOString()),
       requests: data.map(point => point.totalRequests),
       errors: data.map(point => point.failedRequests),
@@ -167,13 +179,13 @@ export class StatsHandler {
     try {
       const endTime = Date.now();
       const startTime = this.getStartTimeForRange(range, endTime);
-      const { timeSeries, upstreams } = await this.logQueryService.getDashboardStats(
+      const { timeSeries, upstreams, requestCounts, httpStatusCounts, transportCounts } = await this.logQueryService.getDashboardStats(
         startTime, endTime, this.getIntervalForRange(range),
       );
       return Response.json({
         startTime, endTime, range,
         units: { history: 'request_chain', upstreams: 'upstream_attempt' },
-        history: this.historyDto(timeSeries), upstreams,
+        history: this.historyDto(timeSeries), upstreams, requestCounts, httpStatusCounts, transportCounts,
       });
     } catch (error) {
       if (isDatabaseFailure(error)) throw error;

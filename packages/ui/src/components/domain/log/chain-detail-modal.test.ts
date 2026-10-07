@@ -18,6 +18,7 @@ const modules: Record<string, string> = {
   '$api/logs': `export const getChainDetail = () => new Promise(resolve => { window.resolveDetail = resolve; });`,
   '$i18n': `import { writable } from 'svelte/store';
     const translate = key => ({ 'logs.requestType_retry': '重试', 'logs.requestType_final': '最终请求',
+      'logs.transport.completed': '已完成', 'logs.transport.failed': '传输失败', 'logs.transport.cancelled': '已取消',
       'logs.chain.timelineTitle': '尝试时间线', 'logs.chain.detailTitle': '请求链详情',
       'logs.chain.overview': '请求链概览' }[key] || '测试字段');
     export const _ = writable(translate);
@@ -69,6 +70,7 @@ for (const count of [0, 1, 3]) {
         // The final-typed success is deliberately NOT last: no status-based selection/sorting.
         const attempts = Array.from({ length: count }, (_, i) => ({ requestId: `attempt-${i}`,
           status: i === 0 ? 200 : 502, requestType: i === 0 ? 'final' : 'retry', duration: 1234 + i,
+          transportOutcome: i === 0 ? 'failed' : i === 1 ? 'cancelled' : 'completed',
           attemptUpstream: 'test-upstream-' + 'long-name-'.repeat(18) }));
         (window as any).resolveDetail({ chain, attempts });
       }, count);
@@ -107,9 +109,14 @@ for (const count of [0, 1, 3]) {
           expect(await page.locator('[data-detail]').getAttribute('data-detail')).toBe('attempt-0');
           expect(await last.getAttribute('aria-expanded')).toBe('false');
         }
-        for (const width of [1280, 390, 320]) {
+        for (const width of [1280, 640, 390, 320]) {
           await page.setViewportSize({ width, height: 900 });
           expect(await buttons.evaluateAll(nodes => nodes.every(node => node.scrollWidth <= node.clientWidth))).toBe(true);
+          expect(await buttons.evaluateAll(nodes => nodes.every(node => {
+            const chips = node.children[1].children;
+            const rects = [...chips].map(chip => chip.getBoundingClientRect());
+            return rects.length === 3 && rects.every(rect => Math.abs(rect.top - rects[0].top) < 1 && rect.width > 0);
+          }))).toBe(true);
           expect(await page.locator('[data-testid="chain-detail-modal"] > .overflow-y-auto').evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
           await page.keyboard.press('Tab');
           await buttons.first().focus();

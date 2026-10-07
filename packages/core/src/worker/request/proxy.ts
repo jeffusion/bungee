@@ -54,6 +54,8 @@ export interface ProxyRequestResult {
   credentialLeaseVersion?: number;
   rejectAccess?: (signal: AbortSignal) => Promise<void>;
   shortCircuitedByPlugin?: boolean;
+  /** Deadline evidence only; never derived from an application completion result. */
+  transportFailureCode?: () => string | undefined;
 }
 
 export interface ProxyAttemptOptions {
@@ -834,6 +836,12 @@ export async function proxyRequest(
   type TimeoutReason = 'first_response_timeout' | 'request_timeout';
   type AbortSource = TimeoutReason | 'client_cancelled';
   let abortSource: AbortSource | null = null;
+  void transportCompletion.promise.then((outcome) => {
+    const timedOut = abortSource === 'first_response_timeout' || abortSource === 'request_timeout';
+    const status = timedOut && outcome.status !== 'completed' ? 'failed' : outcome.status;
+    reqLogger?.updateUpstreamTransportOutcome?.(status === 'incomplete' ? 'unknown' : status,
+      timedOut && outcome.status !== 'completed' ? abortSource! : 'code' in outcome ? outcome.code : undefined);
+  }).catch(() => undefined);
   let responseHeadersReceived = false;
   let deadlineStartedAt = 0;
   const elapsedDeadlineReason = (): TimeoutReason | undefined => {
@@ -1456,6 +1464,7 @@ export async function proxyRequest(
         headers: responseHeaders,
       }),
       completion: strictCompletion,
+      transportFailureCode: () => abortSource === 'first_response_timeout' || abortSource === 'request_timeout' ? abortSource : undefined,
       observationCompletion: rawBodyWasLeftUnconsumed || observationCompletions.length > 0
         ? Promise.all([rawObservationCompletion, ...observationCompletions]).then(() => undefined) : undefined,
       drainRetryObservation: instrumentedRawResponse && isJsonMediaType(instrumentedRawResponse.headers.get('content-type') ?? '') ? async () => {

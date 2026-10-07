@@ -1,5 +1,6 @@
 import { type LogQueryParams, type LogEntry, type LogQueryService } from '../logs';
 import type { Database } from 'bun:sqlite';
+import { TRANSPORT_OUTCOMES, type TransportOutcome } from '../../logger/transport-outcome';
 import type { BodyStorageManager } from '../../logger/body-storage';
 import type { HeaderStorageManager } from '../../logger/header-storage';
 import type { LogCleanupService } from '../../logger/log-cleanup';
@@ -15,6 +16,20 @@ function getStrictIntegerParam(url: URL, name: string): number | undefined | nul
 function getSingleParam(url: URL, name: string): string | undefined | null {
   const values = url.searchParams.getAll(name);
   return values.length === 0 ? undefined : values.length === 1 && values[0] !== '' ? values[0] : null;
+}
+
+function getOutcomeFilters(url: URL): Pick<LogQueryParams, 'status' | 'transportOutcome'> | Response {
+  const values = url.searchParams.getAll('status');
+  const statuses = values.map(value => /^\d{3}$/.test(value) ? Number(value) : NaN);
+  const transport = getSingleParam(url, 'transportOutcome');
+  if (statuses.some(value => !Number.isInteger(value) || value < 100 || value > 599)) {
+    return Response.json({ error: 'status must contain HTTP status codes between 100 and 599' }, { status: 400 });
+  }
+  if (transport === null || (transport !== undefined && !TRANSPORT_OUTCOMES.includes(transport as TransportOutcome))) {
+    return Response.json({ error: 'transportOutcome must be one of pending, completed, failed, cancelled, unknown' }, { status: 400 });
+  }
+  return { status: statuses.length === 0 ? undefined : statuses.length === 1 ? statuses[0] : [...new Set(statuses)],
+    transportOutcome: transport as TransportOutcome | undefined };
 }
 
 function getPollInterval(url: URL): number | null {
@@ -62,14 +77,16 @@ export class LogsHandler {
       const url = new URL(req.url);
       const groupBy = url.searchParams.get('groupBy');
 
+      const outcomeFilters = getOutcomeFilters(url);
+      if (outcomeFilters instanceof Response) return outcomeFilters;
       const params: LogQueryParams = {
+        ...outcomeFilters,
         page: url.searchParams.has('page') ? parseInt(url.searchParams.get('page')!) : undefined,
         limit: url.searchParams.has('limit') ? parseInt(url.searchParams.get('limit')!) : undefined,
         startTime: url.searchParams.has('startTime') ? parseInt(url.searchParams.get('startTime')!) : undefined,
         endTime: url.searchParams.has('endTime') ? parseInt(url.searchParams.get('endTime')!) : undefined,
         method: url.searchParams.get('method') || undefined,
         path: url.searchParams.get('path') || undefined,
-        status: url.searchParams.has('status') ? parseInt(url.searchParams.get('status')!) : undefined,
         routePath: url.searchParams.get('routePath') || undefined,
         upstream: url.searchParams.get('upstream') || undefined,
         transformer: url.searchParams.get('transformer') || undefined,
@@ -353,13 +370,22 @@ export class LogsHandler {
     try {
       const url = new URL(req.url);
       const format = (url.searchParams.get('format') || 'json') as 'json' | 'csv';
+      if (format !== 'json' && format !== 'csv') return Response.json({ error: 'format must be json or csv' }, { status: 400 });
 
+      const outcomeFilters = getOutcomeFilters(url);
+      if (outcomeFilters instanceof Response) return outcomeFilters;
       const params: LogQueryParams = {
+        ...outcomeFilters,
+        groupBy: url.searchParams.get('groupBy') === 'chain' ? 'chain' : undefined,
+        hasRetry: url.searchParams.has('hasRetry') ? url.searchParams.get('hasRetry') === 'true' : undefined,
+        chainStatusMin: getStrictIntegerParam(url, 'chainStatusMin') ?? undefined,
+        chainStatusMax: getStrictIntegerParam(url, 'chainStatusMax') ?? undefined,
+        minChainDurationMs: getStrictIntegerParam(url, 'minChainDurationMs') ?? undefined,
+        maxChainDurationMs: getStrictIntegerParam(url, 'maxChainDurationMs') ?? undefined,
         startTime: url.searchParams.has('startTime') ? parseInt(url.searchParams.get('startTime')!) : undefined,
         endTime: url.searchParams.has('endTime') ? parseInt(url.searchParams.get('endTime')!) : undefined,
         method: url.searchParams.get('method') || undefined,
         path: url.searchParams.get('path') || undefined,
-        status: url.searchParams.has('status') ? parseInt(url.searchParams.get('status')!) : undefined,
         routePath: url.searchParams.get('routePath') || undefined,
         upstream: url.searchParams.get('upstream') || undefined,
         transformer: url.searchParams.get('transformer') || undefined,
