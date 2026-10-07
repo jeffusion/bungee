@@ -93,6 +93,7 @@ export class RequestLogger {
   private fileLogEntry: FileLogEntry | null = null;
   private fileLogWritten = false;
   private protocolError?: RawResponseError;
+  private protocolOutcomeErrorMessage?: string;
   private transportOutcome: TransportOutcome = 'unknown';
   private transportCode?: string;
   private transportStarted = false;
@@ -461,7 +462,7 @@ export class RequestLogger {
 
     // 构建日志条目
     const protocolError = options?.protocolError ?? this.protocolError;
-    const errorMessage = diagnosticMessage(protocolError) ?? options?.errorMessage;
+    const errorMessage = diagnosticMessage(protocolError) ?? options?.errorMessage ?? this.protocolOutcomeErrorMessage;
     if (protocolError) this.addStep('response_error', protocolError);
     const logEntry = {
       requestId: this.requestId,
@@ -653,6 +654,11 @@ export class RequestLogger {
     error?: RawResponseError,
   ): void {
     this.protocolError = error;
+    const message = diagnosticMessage(error);
+    if (message) this.protocolOutcomeErrorMessage = message;
+    else if (!this.protocolOutcomeErrorMessage && (outcome === 'failed' || outcome === 'incomplete')) {
+      this.protocolOutcomeErrorMessage = `Response stream ${outcome}${code ? ` (${code})` : ''}`;
+    }
     this.dependencies.accessLogWriter.updateProtocolOutcome(this.requestId, outcome, success, code, diagnosticMessage(error));
   }
 

@@ -15,6 +15,21 @@ afterEach(() => {
 });
 
 describe('RequestLogger.complete', () => {
+  test.each(['failed', 'incomplete'] as const)('retains early %s diagnostics when replacing an in-progress record', async outcome => {
+    const entries: Record<string, any>[] = [];
+    const files: Record<string, any>[] = [];
+    const logger = new RequestLogger(new Request('http://localhost/early-diagnostic'), undefined, {
+      accessLogWriter: { write(entry) { entries.push(entry); }, updateResponseBodyId() {}, updateProtocolOutcome() {}, updateTransportOutcome() {} },
+      fileLogWriter: { async write(entry) { files.push(structuredClone(entry)); } },
+    });
+    logger.beginTransport(200);
+    logger.updateProtocolOutcome(outcome, false, 'body_limit');
+    logger.updateTransportOutcome('failed', 'stream_read_failed');
+    await logger.complete(200, { protocolOutcome: outcome, protocolCode: 'body_limit', success: false });
+    const errorMessage = `Response stream ${outcome} (body_limit)`;
+    expect(entries.at(-1)).toMatchObject({ replacePendingTransport: true, errorMessage });
+    expect(files).toEqual([expect.objectContaining({ errorMessage })]);
+  });
   for (const requestType of ['final', 'recovery'] as const) for (const phase of ['before-begin', 'pending', 'before-metadata']) {
     test(`serializes one terminal JSONL record even at the 100-row flush boundary: ${requestType}/${phase}`, async () => {
       const root = mkdtempSync(join(tmpdir(), 'bungee-file-transport-'));
