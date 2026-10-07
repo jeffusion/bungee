@@ -19,10 +19,11 @@
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { once } from 'node:events';
-import { captureProcessIdentity, probeProcessIdentity } from '../packages/core/src/master-runtime/process-identity';
+import { captureProcessIdentity, probeProcessIdentity, probeProcessInstance } from '../packages/core/src/master-runtime/process-identity';
 import {
   cleanupGatewayFixture,
   quarantinePortBlock,
@@ -252,7 +253,8 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
       const runtime = await requestJson(`${management}/api/config/runtime`, { signal: AbortSignal.timeout(2_000) }, currentFixture)
         .then(result => result.body, () => null);
       const provider = await readProbeState(management, currentFixture);
-      console.error(scrub(JSON.stringify({ event: 'rpc_probe_failure_snapshot', runtime, provider }), currentFixture));
+      console.error(scrub(JSON.stringify({ event: 'rpc_probe_failure_snapshot', runtime, provider,
+        workerDiagnostics: await readWorkerDiagnostics(currentFixture) }), currentFixture));
       const diagnostics = (await master?.diagnostics?.().catch((cause) => safeGatewayError(cause, currentFixture)) ?? '').slice(-12_000);
       throw new Error(safeGatewayError(new Error(`${safeGatewayError(error, currentFixture)}; master exit=${master?.child.exitCode ?? master?.child.signalCode ?? 'running'}; diagnostics=${diagnostics}`), currentFixture, 24_576));
     }
@@ -345,6 +347,7 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
       const runtime = await requestJson(`${management}/api/config/runtime`, {signal: AbortSignal.timeout(2_000)}, currentFixture)
         .then(result => result.body, () => null);
       const failure = scrub(JSON.stringify({...evidence, fixture: currentFixture.root, runtime,
+        workerDiagnostics: await readWorkerDiagnostics(currentFixture),
         error: safeGatewayError(error, currentFixture), diagnostics: await master?.diagnostics?.()}), currentFixture);
       await writeFile(`${evidenceRoot}/control-exit-failure.json`, failure);
       console.error(`rpc_control_exit_failure ${failure}`);
@@ -401,6 +404,28 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
     } finally {await upstream.stop(true);}
   }, 90000);
 });
+
+async function readWorkerDiagnostics(fixture: GatewayFixture) {
+  // Read only this test's private descriptors. Diagnostic fields never serve as exit proof.
+  const directory = join(dirname(fixture.configDbPath), 'runtime', 'workers');
+  const names = (await readdir(directory).catch(() => []))
+    .filter(name => /^[0-9a-f-]{36}\.json$/.test(name)).sort();
+  return await Promise.all(names.slice(0, 32).map(async name => {
+    try {
+      const file = Bun.file(join(directory, name));
+      if (file.size > 64 * 1024) return { name, error: 'descriptor_too_large' };
+      const descriptor = await file.json();
+      const message = descriptor.evidence?.message;
+      const started = performance.now();
+      const probe = await probeProcessInstance(descriptor.pid, descriptor.worker_instance_id);
+      return { name, pid: descriptor.pid, instance: descriptor.worker_instance_id,
+        phase: descriptor.phase, revision: descriptor.revision, evidence: descriptor.evidence?.kind,
+        status: message?.status, drainId: message?.drain_id, cleanupState: message?.cleanup_state,
+        httpStopped: message?.http_stopped, drainRemainingMs: message?.remaining_ms,
+        exitRemainingMs: message?.exit_remaining_ms, probe, probeElapsedMs: Math.round(performance.now() - started) };
+    } catch { return { name, error: 'descriptor_unavailable' }; }
+  }));
+}
 
 function bootstrapReports(state: ProbeState): ProbeReport[] {
   return state.reports.filter((report) => report.payload?.phase === 'bootstrap');
