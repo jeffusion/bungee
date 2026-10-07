@@ -37,9 +37,18 @@ test('migrated field titles use the field role, not metadata captions', async ()
   const logs = await read('./routes/Logs.svelte');
   // Only the toolbar's field titles, not page overlines or log table headings.
   const toolbar = logs.slice(logs.indexOf('<!-- 统一操作栏'), logs.indexOf('<!-- Filter Chips 展示区 -->'));
-  const titles = [...toolbar.matchAll(/<span class="([^"]+)">\{\$_\('logs\.[^']+'\)\}<\/span>/g)];
-  expect(titles).toHaveLength(31);
-  for (const title of titles) expect(title[1]).toBe('nx-field-label');
+  const titles = [...toolbar.matchAll(/<(span|label)\b([^>]*\bclass="[^"]+"[^>]*)>\{\$_\('(logs\.[^']+)'\)\}<\/\1>/g)];
+  expect(titles.map(title => title[3])).toEqual(expect.arrayContaining([
+    'logs.method', 'logs.status', 'logs.transportResult', 'logs.requestTypeFilter',
+    'logs.timeRange', 'logs.recentHours', 'logs.startTime', 'logs.endTime',
+    'logs.sortBy', 'logs.autoRefresh', 'logs.refreshInterval',
+  ]));
+  for (const title of titles) {
+    const classes = title[2].match(/class="([^"]+)"/)?.[1].split(/\s+/) ?? [];
+    expect(classes).toContain('nx-field-label');
+    expect(classes).not.toContain('nx-label');
+    expect(classes).not.toContain('nx-label-sm');
+  }
 
   const fields: [string, string[]][] = [
     ['./routes/ServiceEditor.svelte', ['serviceEditor.serviceName', 'upstream.description']],

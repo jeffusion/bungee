@@ -1,5 +1,6 @@
 <script lang="ts">
   import { _ } from '$i18n';
+  import { isLoading } from 'svelte-i18n';
   import { onMount, onDestroy } from 'svelte';
   import { Bar } from 'svelte-chartjs';
   import {
@@ -109,7 +110,7 @@
   $: chartData = {
     labels: data.map(d => d.label),
     datasets: SERIES.map(s => ({
-      label: s.key === 'statusOther' ? $_('dashboardLayout.otherStatus') : s.label,
+      label: s.key === 'statusOther' ? ($isLoading ? '' : $_('dashboardLayout.otherStatus')) : s.label,
       data: data.map(d => d[s.key] ?? 0),
       backgroundColor: s.color,
       borderColor: s.color,
