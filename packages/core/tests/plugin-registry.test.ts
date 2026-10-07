@@ -19,6 +19,8 @@ export class SimplePlugin {
     this.options = options;
   }
 
+  bodyRequirements() { return Object.freeze({ request: 'none' }); }
+
   register(hooks) {
     hooks.onRequestInit.tapPromise({ name: 'simple-test-plugin' }, async (ctx) => {
       // 简单的初始化逻辑
@@ -33,6 +35,8 @@ const interceptorPluginCode = `
 export class InterceptorPlugin {
   static name = 'interceptor-test-plugin';
   static version = '1.0.0';
+
+  bodyRequirements() { return Object.freeze({ request: 'none' }); }
 
   register(hooks) {
     hooks.onInterceptRequest.tapPromise({ name: 'interceptor-test-plugin' }, async (ctx) => {
@@ -57,6 +61,8 @@ const errorPluginCode = `
 export class ErrorPlugin {
   static name = 'error-test-plugin';
   static version = '1.0.0';
+
+  bodyRequirements() { return Object.freeze({ request: 'none' }); }
 
   register(hooks) {
     hooks.onRequestInit.tapPromise({ name: 'error-test-plugin' }, async (ctx) => {

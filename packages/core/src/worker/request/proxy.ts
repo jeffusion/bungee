@@ -5,14 +5,19 @@ import { DataAdmissionError } from '../../data-admission/host';
  */
 
 import { logger } from '../../logger';
-import { forEach, isEmpty } from 'lodash-es';
-import type { AppConfig, PluginConfigOptions } from '@jeffusion/bungee-types';
+import { forEach } from 'lodash-es';
+import type { AppConfig, PluginConfigOptions, ResponseModificationRules } from '@jeffusion/bungee-types';
 import type { PluginManifest } from '../../plugin.types';
 import type { RequestLogger } from '../../logger/request-logger';
 import { processDynamicValue } from '../../expression-engine';
 import type { EffectiveRouteConfig, RuntimeUpstream, RequestSnapshot } from '../types';
 import type { PhaseAwareHooks } from '../../scoped-plugin-registry';
 import type { AttemptObservationEvent } from '../../hooks/plugin-hooks';
+import { readSnapshotJson } from './snapshot';
+import { BodySource, BodyBufferLease, BodyProcessingError, decodeStream, isJsonMediaType, isObjectBody, reconcileEntityHeaders } from './body-source';
+import { analyzeExpressionDependencies, hasBodyModification } from '../../utils/expression-dependencies';
+import { collectPluginBodyRequirements } from '../../scoped-plugin-registry';
+import { applyHeaderRules } from '../response/processor';
 import { buildRequestContextFromSnapshot } from './context-builder';
 import type { MutableRequestContext as HookMutableRequestContext } from '../../hooks';
 import { cloneMutableRequestContext, rebaseToUpstream, type MutableRequestContext } from './context';
@@ -34,12 +39,15 @@ import {
   validateCredentialLease,
 } from './credential';
 
-type ExtendedRequestInit = RequestInit & { verbose?: boolean; timeout?: number | boolean };
+type ExtendedRequestInit = RequestInit & { verbose?: boolean; timeout?: number | boolean; decompress?: boolean; duplex?: string };
 type NetworkError = { message?: unknown; code?: unknown };
 
 export interface ProxyRequestResult {
   response: Response;
   completion: Promise<RawResponseCompletion>;
+  protocolCompletion?: Promise<RawResponseCompletion>;
+  observationCompletion?: Promise<void>;
+  drainRetryObservation?: () => Promise<void>;
   cleanup?: () => Promise<void>;
   streamCompletionState?: StreamCompletionState;
   upstreamId: string;
@@ -54,6 +62,7 @@ export interface ProxyAttemptOptions {
   readonly beforeSend?: (target: { url: string; model: string | null; body: unknown }) => Promise<void>;
   readonly onRequestDispatch?: () => void;
   readonly observeRequest?: (event: AttemptObservationEvent) => Promise<void>;
+  readonly shouldObserveResponse?: (protocol: 'json'|'sse') => boolean;
   readonly observeResponse?: (event: AttemptObservationEvent) => Promise<void>;
   readonly observeIncomplete?: (reason: 'raw-response-incomplete') => Promise<void>;
 }
@@ -376,7 +385,8 @@ async function acquireManagedCredential(
 function createExpressionContext(ctx: MutableRequestContext) {
   return {
     headers: ctx.headers,
-    body: ctx.body ?? {},
+    body: ctx.body,
+    request: {headers:ctx.headers,body:ctx.body},
     url: {
       pathname: ctx.url.pathname,
       search: ctx.url.search,
@@ -447,6 +457,7 @@ export async function proxyRequest(
   let credentialLeaseVersion: number | undefined;
   let rejectAccess: ((signal: AbortSignal) => Promise<void>) | undefined;
   const credentialSecrets: string[] = [];
+  const responseBodyOwners: Array<{dispose():void}> = [];
 
   // Log snapshot usage for debugging
   const bodySize = requestSnapshot.body
@@ -535,6 +546,27 @@ export async function proxyRequest(
     logger.debug({ request: requestLog, transformedPath: routeRelativeUrl.pathname }, 'Path after path_rewrite');
   }
 
+  const selectedDemandUrl = new URL(routeRelativeUrl);
+  rebaseToUpstream({url:selectedDemandUrl} as MutableRequestContext,upstream);
+  const selectedDemand = collectPluginBodyRequirements([phaseAwareHooks?.upstreamPhase], {
+    requestId,method:requestSnapshot.method,url:selectedDemandUrl,routeId,serviceId:route.service,upstreamId:upstream_id,stage:'selected',
+  });
+  const requestRules = deepMergeRules(route.request ?? {}, upstream.request ?? {});
+  const requestBodyMatches = !['GET','HEAD'].includes(requestSnapshot.method)
+    && (isJsonMediaType(requestSnapshot.content_type) || requestSnapshot.bodySource?.mode === 'empty');
+  if (!requestBodyMatches && hasBodyModification(requestRules.body)) {
+    reqLogger?.addStep('request_body_rules_skipped',{reason:'media_type_not_selected',content_type:requestSnapshot.content_type});
+    delete requestRules.body;
+  }
+  const responseRules: ResponseModificationRules = deepMergeRules(upstream.response ?? {}, route.response ?? {});
+  if (route.response?.body_formats !== undefined) responseRules.body_formats = route.response.body_formats;
+  const readDependency = analyzeExpressionDependencies(requestRules,'request').requestBody
+    || analyzeExpressionDependencies(responseRules,'response').requestBody;
+  const requestWrite = !['GET','HEAD'].includes(requestSnapshot.method) && (hasBodyModification(requestRules.body) || selectedDemand.request === 'json-write' || phase1and2Context?.bodyWrite === true);
+  if (selectedDemand.replay) await requestSnapshot.bodySource?.buffer('plugin-replay');
+  if (!requestSnapshot.is_json_body && (requestWrite || readDependency || selectedDemand.request !== 'none')) {
+    await readSnapshotJson(requestSnapshot,'selected-body-demand',requestWrite || requestSnapshot.bodySource?.mode === 'empty');
+  }
   // ===== 2. Build initial context from snapshot =====
   const { parsedBody } = buildRequestContextFromSnapshot(
     requestSnapshot,
@@ -555,6 +587,7 @@ export async function proxyRequest(
       routeId,
       serviceName: route.service,
     };
+  if (attemptContext.body === undefined && requestSnapshot.is_json_body) attemptContext.body = structuredClone(requestSnapshot.body);
   attemptContext.url = routeRelativeUrl;
   rebaseToUpstream(attemptContext, upstream);
   attemptContext.upstreamId = upstream_id;
@@ -562,47 +595,12 @@ export async function proxyRequest(
 
   // ===== 3. Apply route and upstream modification rules =====
   // Layer 1 (Outer): Route and Upstream rules
-  const {
-    path: routePath,
-    endpoints,
-    service,
-    timeouts,
-    failover,
-    path_rewrite,
-    auth,
-    plugins,
-    rate_limit,
-    cors,
-    direct_response,
-    redirect,
-    retry,
-    ...routeModificationRules
-  } = route;
-  const {
-    target,
-    weight,
-    priority,
-    plugins: upstreamPlugins,
-    id,
-    is_disabled,
-    upstream_id: runtime_upstream_id,
-    status,
-    last_failure_time,
-    consecutive_failures,
-    consecutive_successes,
-    recovery_attempt_count,
-    health_check_successes,
-    health_check_failures,
-    slow_start_recovery_time,
-    slow_start_weight_factor,
-    ...upstreamModificationRules
-  } = upstream;
-  const routeAndUpstreamRequestRules = deepMergeRules(routeModificationRules, upstreamModificationRules);
-
+  const routeAndUpstreamRequestRules = requestRules;
   let intermediateContext = createExpressionContext(attemptContext);
-  let intermediateBody = attemptContext.body ?? parsedBody;
+  let intermediateBody = attemptContext.body;
 
-  if (routeAndUpstreamRequestRules.body) {
+  if (hasBodyModification(routeAndUpstreamRequestRules.body) && !['GET','HEAD'].includes(requestSnapshot.method)) {
+    if (!isObjectBody(intermediateBody)) throw new BodyProcessingError(400, 'request_body_must_be_object');
     logger.debug({ request: requestLog }, "Applying Route + Upstream body rules (Layer 1)");
     intermediateBody = await applyBodyRules(
       intermediateBody,
@@ -611,6 +609,7 @@ export async function proxyRequest(
       requestLog
     );
     intermediateContext.body = intermediateBody;
+    intermediateContext.request!.body = intermediateBody;
   }
 
   // Rebuild context with the final body
@@ -629,39 +628,7 @@ export async function proxyRequest(
   // or preserve them; the lease is injected only after all mutable hooks.
   if (managedCredential) stripCredentialHeaders(hookHeaders, managedCredential.policy);
 
-  // 5.2. Apply header modification rules
-  if (finalRequestRules.headers) {
-    if (finalRequestRules.headers.remove) {
-      forEach(finalRequestRules.headers.remove, (key) => hookHeaders.delete(key));
-    }
-    if (finalRequestRules.headers.replace) {
-      forEach(finalRequestRules.headers.replace, (value, key) => {
-        if (hookHeaders.has(key)) {
-          try {
-            hookHeaders.set(key, String(processDynamicValue(value, finalContext)));
-          } catch (e) {
-            logger.error(
-              { request: requestLog, error: (e as Error).message },
-              "Header replace expression failed"
-            );
-          }
-        }
-      });
-    }
-    if (finalRequestRules.headers.add) {
-      forEach(finalRequestRules.headers.add, (value, key) => {
-        try {
-          hookHeaders.set(key, String(processDynamicValue(value, finalContext)));
-        } catch (e) {
-          logger.error(
-            { request: requestLog, error: (e as Error).message },
-            "Header add expression failed"
-          );
-        }
-      });
-    }
-  }
-
+  applyHeaderRules(hookHeaders,finalRequestRules.headers,finalContext);
   // 5.3. Apply query parameter modification rules
   if (finalRequestRules.query) {
     logger.debug({ request: requestLog }, "Applying query parameter rules");
@@ -677,20 +644,6 @@ export async function proxyRequest(
   // ===== 5. Prepare final body from snapshot =====
   let body: BodyInit | null = null;
 
-  if (requestSnapshot.body) {
-    if (requestSnapshot.is_json_body) {
-      // JSON body - serialize finalBody (which may have been modified by plugins/rules)
-      body = JSON.stringify(finalBody);
-      if (!isEmpty(finalBody)) {
-        hookHeaders.set('Content-Length', String(Buffer.byteLength(body as string)));
-      } else {
-        hookHeaders.delete('Content-Length');
-      }
-    } else {
-      // Non-JSON body - use original data from snapshot (ArrayBuffer can be reused)
-      body = requestSnapshot.body;
-    }
-  }
 
   // 6.1. Record request headers before plugin transformation
   // Note: Headers and body will be recorded again after plugin transformation
@@ -749,15 +702,6 @@ export async function proxyRequest(
     logger.debug({ request: requestLog, finalTransformedPath: targetUrlForRequest.pathname }, 'Path after plugins');
   }
 
-  // 7.1 Re-serialize body after plugins have modified it
-  if (requestSnapshot.body && requestSnapshot.is_json_body) {
-    body = JSON.stringify(finalBody);
-    if (!isEmpty(finalBody)) {
-      hookHeaders.set('Content-Length', String(Buffer.byteLength(body as string)));
-    } else {
-      hookHeaders.delete('Content-Length');
-    }
-  }
 
   // 7.2 Record headers and body after plugin transformation
   if (reqLogger) {
@@ -765,7 +709,7 @@ export async function proxyRequest(
     reqLogger.setRequestHeaders(headersForLog(hookHeaders));
 
     // Record transformed body (只记录 JSON 类型)
-    if (config.logging?.body?.enabled && requestSnapshot.is_json_body && finalBody) {
+    if (config.logging?.body?.enabled && requestSnapshot.is_json_body && finalBody !== undefined) {
       try {
         reqLogger.setRequestBody(finalBody);
       } catch (err) {
@@ -816,6 +760,10 @@ export async function proxyRequest(
     if (interceptResult?.action === 'failover') {
       throw new UpstreamPhaseFailoverSignal(interceptResult.reason);
     }
+    finalBody = ctx.body;
+    targetUrlForRequest.href = ctx.url.href;
+    hookHeaders.forEach((_,key)=>hookHeaders.delete(key));
+    for (const [key,value] of Object.entries(ctx.headers)) hookHeaders.set(key,value);
   }
 
   // Hooks receive mutable URL objects; fetch and credential checks use this private copy.
@@ -856,6 +804,28 @@ export async function proxyRequest(
   let upstreamResponse: Response | undefined;
   let rawResponse: RawResponseResult | undefined;
   let observedRawBodyCompleted = false;
+  const observationCompletions: Promise<void>[] = [];
+  const wireTeardowns: Promise<void>[] = [];
+  const ownedWireStreams: ReadableStream<Uint8Array>[] = [];
+  const trackResponseWire = (source: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> => {
+    const wireReader = source.getReader();
+    let finishWire!: () => void; let failWire!: (error:unknown) => void;
+    const wireTeardown = new Promise<void>((resolve,reject) => {finishWire=resolve;failWire=reject;});
+    void wireTeardown.catch(() => undefined); wireTeardowns.push(wireTeardown);
+    let wireCancelling=false;
+    const wireStream=new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try { const part=await wireReader.read(); if(part.done){if(!wireCancelling){wireReader.releaseLock();finishWire();controller.close();}}else controller.enqueue(part.value); }
+        catch(error){if(!wireCancelling){failWire(error);controller.error(error);}}
+      },
+      async cancel(reason) {
+        wireCancelling=true;
+        try {await wireReader.cancel(reason);finishWire();}catch(error){failWire(error);throw error;}
+        finally {wireReader.releaseLock();}
+      },
+    },{highWaterMark:0});
+    ownedWireStreams.push(wireStream);return wireStream;
+  };
   let instrumentedRawResponse: Response | undefined;
   let preparedResponseBody: ReadableStream<Uint8Array> | undefined;
   let streamCompletionState: StreamCompletionState | undefined;
@@ -912,11 +882,12 @@ export async function proxyRequest(
     cleanupPromise = (async () => {
       clearRequestTimeout();
       clearFirstResponseTimeout();
+      for (const owner of responseBodyOwners.splice(0)) owner.dispose();
       requestSignal?.removeEventListener('abort', captureClientAbort);
       const bodies = [upstreamResponse, rawResponse?.response]
         .filter((response): response is Response => response !== undefined && !response.bodyUsed)
         .map((response) => response.body)
-        .filter(Boolean) as ReadableStream<Uint8Array>[];
+        .filter(body => body !== null && !body.locked) as ReadableStream<Uint8Array>[];
       const streamTeardown = streamCompletionState?.teardown;
       const requestTeardown = streamCompletionState?.teardownNow?.('attempt cleanup');
       const cancelPreparedBody = preparedResponseBody?.cancel('attempt cleanup').catch(() => undefined);
@@ -938,6 +909,8 @@ export async function proxyRequest(
             cancel,
             cancelPreparedBody,
             requestTeardown,
+            ...ownedWireStreams.filter(stream=>!stream.locked).map(stream=>stream.cancel('attempt cleanup')),
+            ...wireTeardowns,
             streamTeardown ?? Promise.resolve(),
           ]),
           deadline,
@@ -982,6 +955,8 @@ export async function proxyRequest(
     // Route deadlines own cancellation; Bun's default idle timeout can cut off quiet LLM streams early.
     timeout: false,
     signal: attemptSignal,
+    decompress: false,
+    duplex: 'half',
   };
 
   try {
@@ -1011,6 +986,7 @@ export async function proxyRequest(
       for (const [name, value] of Object.entries(credential.headers)) fetchHeaders.set(name, value);
     }
 
+    // Entity metadata is reconciled after profiles, hooks and credentials.
     // ===== 9. Execute the request =====
     stripHopHeaders(fetchHeaders);
     logger.debug({ request: { requestId } }, `\n=== Proxying to target ===`);
@@ -1056,9 +1032,20 @@ export async function proxyRequest(
       throwIfAttemptCannotDispatch();
       await attemptOptions?.beforeSend?.({ url: finalTargetUrl.href,
         model: null,
-        body: immutableSnapshot(fetchOptions.body) });
+        body: immutableSnapshot(finalBody) });
+      if (!requestWrite && !['GET','HEAD'].includes(requestSnapshot.method)) fetchOptions.body = requestSnapshot.bodySource?.take() ?? requestSnapshot.body ?? null;
+      if (requestWrite && !['GET','HEAD'].includes(requestSnapshot.method)) {
+        fetchOptions.body = JSON.stringify(finalBody);
+        const outputLease=new BodyBufferLease();responseBodyOwners.push(outputLease);outputLease.add(Buffer.byteLength(fetchOptions.body as string));
+      }
+      reconcileEntityHeaders(fetchHeaders,fetchOptions.body ?? null,requestWrite);
+      attemptContext.headers = headersToRecord(fetchHeaders);
+      attemptContext.body = finalBody;
+      attemptContext.url = finalTargetUrl;
+      if(config.logging?.body?.enabled && finalBody === undefined) reqLogger?.addStep('body_logging_incomplete',{direction:'request',reason:'opaque_body_not_observed',observer_incomplete:true});
+      reqLogger?.addStep('request_body_dispatch',{mode:requestWrite ? 'json-write' : requestSnapshot.bodySource?.mode ?? 'empty',reasons:requestSnapshot.bodySource?.reasons ?? [],source:'wire',replay:requestSnapshot.bodySource?.replayable ?? false,observer_incomplete:false});
       throwIfAttemptCannotDispatch();
-      await attemptOptions?.observeRequest?.(Object.freeze({
+      if (finalBody !== undefined && attemptOptions?.observeRequest) observationCompletions.push(attemptOptions.observeRequest(Object.freeze({
         requestId,
         routeId,
           attemptId: attemptOptions.attemptId,
@@ -1067,8 +1054,15 @@ export async function proxyRequest(
           isActive: () => true,
           // Query strings may contain provider API keys. Path preserves model context without credentials.
           url: finalTargetUrl.pathname,
-          body: immutableSnapshot(fetchOptions.body),
-      }));
+          body: immutableSnapshot(finalBody),
+      })));
+      if (finalBody === undefined && attemptOptions?.observeRequest && fetchOptions.body !== null && fetchOptions.body !== undefined) {
+        const observer = createAttemptResponseObserver('json',{requestId,routeId,attemptId:attemptOptions.attemptId,upstreamId:upstream_id,status:0},
+          attemptOptions.observeRequest,undefined,fetchHeaders.get('content-encoding') ?? '', 'request',finalTargetUrl.pathname,attemptSignal);
+        const observerSource = fetchOptions.body instanceof ReadableStream ? fetchOptions.body : new Response(fetchOptions.body).body!;
+        fetchOptions.body = observerSource.pipeThrough(observer); observationCompletions.push(observer.completion);
+        void transportCompletion.promise.then(() => observer.finish());
+      }
       throwIfAttemptCannotDispatch();
       attemptOptions?.onRequestDispatch?.();
       proxyRes = await abortable(fetch(finalTargetUrl.href, fetchOptions), attemptSignal);
@@ -1104,7 +1098,8 @@ export async function proxyRequest(
         throw new UpstreamTimeoutError(timeoutReason);
       }
       if (abortSource === 'client_cancelled') throw new Error('Request cancelled');
-      if (error instanceof DataAdmissionError) throw error;
+      if (error instanceof DataAdmissionError || error instanceof BodyProcessingError) throw error;
+      if (requestSnapshot.bodySource?.lastError) throw requestSnapshot.bodySource.lastError;
       const networkError = error !== null && typeof error === 'object' ? error as NetworkError : undefined;
       const code = typeof networkError?.code === 'string' ? networkError.code : undefined;
       const errorMessage = typeof networkError?.message === 'string' ? networkError.message : '';
@@ -1161,12 +1156,12 @@ export async function proxyRequest(
     if (attemptOptions?.observeResponse && proxyRes.body && ![204, 205, 304].includes(proxyRes.status)) {
       const contentType = proxyRes.headers.get('content-type')?.toLowerCase() ?? '';
       // Some managed upstreams omit Content-Type even though the outbound request explicitly asks for SSE.
-      const requestedSse = fetchHeaders.get('accept')?.toLowerCase().includes('text/event-stream')
-        || (finalBody !== null && typeof finalBody === 'object' && !Array.isArray(finalBody) && finalBody.stream === true);
+      const requestedSse = fetchHeaders.get('accept')?.toLowerCase().includes('text/event-stream');
       const protocol = contentType.includes('text/event-stream') || (!contentType && requestedSse)
         ? 'sse'
         : /(?:application\/json|\+json)(?:\s*;|$)/i.test(contentType) ? 'json' : undefined;
-      if (protocol) {
+      if (!protocol) observationCompletions.push(attemptOptions.observeIncomplete?.('raw-response-incomplete') ?? Promise.resolve());
+      if (protocol && (attemptOptions.shouldObserveResponse?.(protocol) ?? true)) {
         try {
           // Preflight metadata reconstruction before locking the transport body in pipeThrough.
           const preflight = new Response(null, {
@@ -1179,18 +1174,11 @@ export async function proxyRequest(
           Object.defineProperty(preflight, 'type', { value: proxyRes.type });
 
           const sourceResponse = proxyRes;
-          const observedResponse = new Response(sourceResponse.body!.pipeThrough(createAttemptResponseObserver(
-            protocol,
-            {
-              requestId,
-              routeId,
-              attemptId: attemptOptions.attemptId,
-              upstreamId: upstream_id,
-              status: proxyRes.status,
-            },
-            attemptOptions.observeResponse,
-            () => { observedRawBodyCompleted = true; },
-          )), {
+          const observer = createAttemptResponseObserver(protocol,{requestId,routeId,attemptId:attemptOptions.attemptId,upstreamId:upstream_id,status:proxyRes.status},
+            attemptOptions.observeResponse,()=>{observedRawBodyCompleted=true;},proxyRes.headers.get('content-encoding') ?? '', 'response','',attemptSignal);
+          observationCompletions.push(observer.completion);
+          const wireSource=trackResponseWire(sourceResponse.body!);
+          const observedResponse = new Response(wireSource.pipeThrough(observer), {
             status: sourceResponse.status,
             statusText: sourceResponse.statusText,
             headers: sourceResponse.headers,
@@ -1225,6 +1213,9 @@ export async function proxyRequest(
       }
     }
 
+    const responseDemand = collectPluginBodyRequirements([phaseAwareHooks?.upstreamPhase,phaseAwareHooks?.servicePhase,phaseAwareHooks?.routePhase], {
+      requestId,method:requestSnapshot.method,url:finalTargetUrl,routeId,serviceId:route.service,upstreamId:upstream_id,stage:'selected',
+    });
     // Strict raw response hooks run before all legacy response processing.
     rawResponse = { response: proxyRes, completion: transportCompletion.promise };
     const hasRawResponseCallbacks = Boolean(phaseAwareHooks && (
@@ -1243,6 +1234,17 @@ export async function proxyRequest(
         upstreamId: upstream_id,
         attemptId: attemptOptions?.attemptId ?? requestId,
         signal: attemptSignal,
+        decodeResponseBody: (response: Response) => {
+          if (!responseDemand.response?.length && !phase1and2Context?.bodyRequirements?.response?.length) {
+            throw new BodyProcessingError(500,'undeclared_raw_body_demand');
+          }
+          if (!response.body) return null;
+          try {
+            const decoded=decodeStream(trackResponseWire(response.body), response.headers.get('content-encoding') ?? '', requestSnapshot.bodySource?.maxBytes ?? 50*1024*1024, attemptSignal);
+            responseBodyOwners.push({dispose:()=>decoded.dispose()});return decoded;
+          }
+          catch(error) { if(error instanceof BodyProcessingError && error.status===503)throw error;throw new BodyProcessingError(502,'invalid_response_body'); }
+        },
         redactDiagnostic: (message: string) => sanitizeMessage(message, credentialSecrets),
       }), attemptSignal, (lateResult) => {
         if (lateResult.response.body) void lateResult.response.body.cancel('request aborted').catch(() => undefined);
@@ -1277,7 +1279,6 @@ export async function proxyRequest(
     const strictCompletion = abortable(
       Promise.all([
         combineCompletions(rawResponse.completion, transportCompletion.promise),
-        rawObservationCompletion,
       ]).then(([completion]) => completion),
       attemptSignal,
     ).then(
@@ -1291,6 +1292,25 @@ export async function proxyRequest(
         : { status: 'failed' as const, code: abortSource ?? 'attempt_aborted' },
     );
 
+    void strictCompletion.then(clearRequestTimeout,clearRequestTimeout);
+
+    // Mandatory JSON plugin views are decoded only for matching media. A read-only
+    // hook returning the same Response keeps the original wire payload and coding.
+    let pluginBodyOwner: BodySource | undefined;
+    let originalPluginResponse: Response | undefined;
+    if ((responseDemand.response?.includes('json') || phase1and2Context?.bodyRequirements?.response?.includes('json')) && isJsonMediaType(proxyRes.headers.get('content-type') ?? '') && proxyRes.body) {
+      originalPluginResponse = proxyRes;
+      pluginBodyOwner = new BodySource(proxyRes.body,requestSnapshot.bodySource?.maxBytes ?? 50*1024*1024,proxyRes.headers.get('content-encoding') ?? '',attemptSignal);
+      responseBodyOwners.push(pluginBodyOwner);
+      try {
+        const value = await pluginBodyOwner.json('plugin-response-demand');
+        const decodedBody = JSON.stringify(value);const decodedHeaders = new Headers(proxyRes.headers);
+        reconcileEntityHeaders(decodedHeaders,decodedBody,true);
+        proxyRes = new Response(decodedBody,{status:proxyRes.status,statusText:proxyRes.statusText,headers:decodedHeaders});
+      } catch(error) {pluginBodyOwner.dispose();throw error instanceof BodyProcessingError && error.status === 503 ? error : new BodyProcessingError(502,'invalid_response_body');}
+    }
+    const pluginResponseView = proxyRes;
+    let restoredPluginWire = false;
     // ===== 11. Plugin onResponse (inbound chain) =====
     if (!isStreamingResponse(proxyRes) && phaseAwareHooks) {
       const latencyMs = Date.now() - requestStartTime;
@@ -1323,8 +1343,20 @@ export async function proxyRequest(
       }
     }
 
+    if (pluginBodyOwner && originalPluginResponse) {
+      if (proxyRes === pluginResponseView) {
+        const restoredHeaders = new Headers(proxyRes.headers);
+        for (const name of ['content-encoding', 'content-length', 'transfer-encoding']) {
+          const originalValue = originalPluginResponse.headers.get(name);
+          if (originalValue === null) restoredHeaders.delete(name); else restoredHeaders.set(name, originalValue);
+        }
+        proxyRes = new Response(pluginBodyOwner.take(), {status:proxyRes.status,statusText:proxyRes.statusText,headers:restoredHeaders});
+        restoredPluginWire=true;
+      }
+    }
+    const pluginRepresentationChanged = !restoredPluginWire && proxyRes !== pluginResponseView && proxyRes.body !== pluginResponseView.body;
     // ===== 10. Prepare the response =====
-    const finalResponseRules = upstreamModificationRules;
+    const finalResponseRules = responseRules;
 
     // Build stream request context for stream processing
     const streamRequestContext = {
@@ -1343,10 +1375,26 @@ export async function proxyRequest(
       throw new Error('streaming raw HTTP error replacement requires strict failure');
     }
 
-    streamCompletionState =
-      isStreamingResponse(proxyRes)
-        ? { interrupted: false, cancelled: false }
-        : undefined;
+    // A finite raw error replacement must prove its origin before any headers
+    // escape. Stream ownership does not weaken the adapter's error contract.
+    if (hasRawResponseCallbacks && !isStreamingResponse(proxyRes)
+      && rawResponse.completion !== transportCompletion.promise
+      && (rawResponse.response.status >= 400 || proxyRes.status >= 400)) {
+      // Error replacements are deliberately finite. Consume only this bounded
+      // representation to settle the transport half of joined raw proofs.
+      const errorBody = new BodySource(proxyRes.body, requestSnapshot.bodySource?.maxBytes ?? 50*1024*1024, '', attemptSignal);
+      responseBodyOwners.push(errorBody);
+      const errorBytes = await errorBody.buffer('raw-error-proof');
+      proxyRes = new Response(errorBytes as BodyInit, {status:proxyRes.status,statusText:proxyRes.statusText,headers:proxyRes.headers});
+      transportCompletion.settle({status:'completed'});
+      const outcome = await abortable(rawResponse.completion, attemptSignal);
+      if (outcome.status !== 'completed' && !isSafeUpstreamHttpError(originalResponse, originalStatus, rawResponse, proxyRes, outcome)
+        && !isSafeAdaptedErrorResponse(originalResponse, rawResponse, proxyRes, outcome)) {
+        throw new Error('raw response error replacement failed validation');
+      }
+    }
+
+    streamCompletionState = proxyRes.body ? { interrupted: false, cancelled: false, complete: outcome=>{transportCompletion.settle(outcome);} } : undefined;
 
     const preparedResponse = await abortable(
       prepareResponse(
@@ -1360,13 +1408,17 @@ export async function proxyRequest(
         streamRequestContext,
         streamCompletionState,
         phaseAwareHooks?.inbound,
-        Boolean(phaseAwareHooks && (
+        Boolean(phaseAwareHooks && (selectedDemand.response?.includes('sse-json') || phase1and2Context?.bodyRequirements?.response?.includes('sse-json')) && (
+          phaseAwareHooks.globalPrecompiled?.hasStreamCallbacks ||
           phaseAwareHooks.upstreamPhase.hasStreamCallbacks ||
           phaseAwareHooks.servicePhase?.hasStreamCallbacks ||
           phaseAwareHooks.routePhase.hasStreamCallbacks
         )),
         hasRawResponseCallbacks,
         attemptSignal,
+        responseBodyOwners,
+        restoredPluginWire ? pluginBodyOwner : undefined,
+        pluginRepresentationChanged,
       ),
       attemptSignal,
       (lateResponse) => {
@@ -1382,7 +1434,7 @@ export async function proxyRequest(
 
     if (streamCompletionState) {
       streamCompletionState.completion = strictCompletion;
-      streamCompletionState.complete = transportCompletion.settle;
+      streamCompletionState.complete = outcome=>{transportCompletion.settle(outcome);};
     } else {
       transportCompletion.settle({ status: 'completed' });
       const outcome = await abortable(strictCompletion, attemptSignal);
@@ -1404,6 +1456,18 @@ export async function proxyRequest(
         headers: responseHeaders,
       }),
       completion: strictCompletion,
+      observationCompletion: rawBodyWasLeftUnconsumed || observationCompletions.length > 0
+        ? Promise.all([rawObservationCompletion, ...observationCompletions]).then(() => undefined) : undefined,
+      drainRetryObservation: instrumentedRawResponse && isJsonMediaType(instrumentedRawResponse.headers.get('content-type') ?? '') ? async () => {
+        // Capture finite error usage only when an optional consumer exists. Never
+        // retain an unbounded retry body or wait beyond the attempt deadline.
+        const body = preparedResponseBody;
+        if (!body || body.locked) return;
+        const reader = body.getReader(); let size = 0;
+        try { while (size <= 1024 * 1024) { const part = await abortable(reader.read(), attemptSignal); if (part.done) return; size += part.value.byteLength; } }
+        finally { await reader.cancel('bounded retry observation finished').catch(() => undefined); reader.releaseLock(); }
+      } : undefined,
+      protocolCompletion: hasRawResponseCallbacks ? rawResponse.completion : undefined,
       cleanup,
       streamCompletionState,
       upstreamId: upstream_id,
@@ -1426,7 +1490,7 @@ export async function proxyRequest(
     const clientCancelled = abortSource === 'client_cancelled';
     const safeError = deadlineError
       ?? (clientCancelled ? new Error('Request cancelled')
-        : error instanceof UpstreamNetworkError || error instanceof DataAdmissionError ? error : sanitizeError(error, credentialSecrets));
+        : error instanceof UpstreamNetworkError || error instanceof DataAdmissionError || error instanceof BodyProcessingError ? error : sanitizeError(error, credentialSecrets));
     const completionFailure = deadlineError
       ? { status: 'failed' as const, code: timeoutReason! }
       : clientCancelled
@@ -1495,7 +1559,7 @@ export async function proxyRequest(
     if (deadlineError) throw deadlineError;
     if (clientCancelled) throw safeError;
     if (error instanceof UpstreamNetworkError) throw safeError;
-    if (error instanceof DataAdmissionError) throw error;
+    if (error instanceof DataAdmissionError || error instanceof BodyProcessingError) throw error;
     throw hookError ?? safeError;
   }
   // 注：预编译 hooks 无需 acquire/release，长生命周期实例

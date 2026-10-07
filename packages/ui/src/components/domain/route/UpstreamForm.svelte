@@ -1,9 +1,7 @@
 <script lang="ts">
   import type { Upstream } from '$api/routes';
   import { hasInvalidManagedBinding } from '$api/config-adapters';
-  import HeadersEditor from './HeadersEditor.svelte';
-  import BodyEditor from './BodyEditor.svelte';
-  import QueryEditor from './QueryEditor.svelte';
+  import DirectionalModificationEditor from './DirectionalModificationEditor.svelte';
   import PluginEditor from '$components/domain/plugin/PluginEditor.svelte';
   import UpstreamSourcePicker from './UpstreamSourcePicker.svelte';
   import { _ } from '$i18n';
@@ -26,18 +24,10 @@
   import { onMount } from 'svelte';
   onMount(() => {
     if (upstream) {
-      upstream.headers = upstream.headers || { add: {}, remove: [], replace: {} };
-      upstream.body = upstream.body || { add: {}, remove: [], replace: {}, default: {} };
-      upstream.query = upstream.query || { add: {}, remove: [], replace: {}, default: {} };
       if (!upstream.plugins && !upstream.managedBy) upstream.plugins = [];
     }
   });
 
-  // Collapsible sub-section state
-  let openSection = $state<'headers' | 'body' | 'query' | null>(null);
-  function toggleSection(name: 'headers' | 'body' | 'query') {
-    openSection = openSection === name ? null : name;
-  }
 </script>
 
 {#if upstream}
@@ -171,78 +161,7 @@
       {/if}
     </div>
 
-    <!-- Advanced sections separator -->
-    <div class="flex items-center gap-3 pt-2">
-      <span class="h-px flex-1 bg-carbon-600"></span>
-      <span class="nx-label">// {$_('routeEditor.requestModification')}</span>
-      <span class="h-px flex-1 bg-carbon-600"></span>
-    </div>
-
-    <!-- Collapsible Headers -->
-    <div class="border border-carbon-600 bg-carbon-950/60">
-      <button
-        type="button"
-        class="w-full flex items-center justify-between px-3 py-2 font-mono text-[11px] uppercase tracking-command text-zinc-200 hover:text-nexus-300 hover:bg-carbon-700/30 transition-colors"
-        onclick={() => toggleSection('headers')}
-      >
-        <span class="flex items-center gap-2">
-          <span class={openSection === 'headers' ? 'nx-stripe' : 'nx-stripe nx-stripe-zinc'} aria-hidden="true"></span>
-          {$_('headers.title')}
-        </span>
-        <svg viewBox="0 0 24 24" class="h-3.5 w-3.5 transition-transform" style:transform={openSection === 'headers' ? 'rotate(180deg)' : ''} fill="none" stroke="currentColor" stroke-width="2">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
-        </svg>
-      </button>
-      {#if openSection === 'headers'}
-        <div class="border-t border-carbon-600 p-3">
-          <HeadersEditor bind:value={upstream.headers} label={$_('headers.title')} showHelp={false} showLabel={false} />
-        </div>
-      {/if}
-    </div>
-
-    <!-- Collapsible Body -->
-    <div class="border border-carbon-600 bg-carbon-950/60">
-      <button
-        type="button"
-        class="w-full flex items-center justify-between px-3 py-2 font-mono text-[11px] uppercase tracking-command text-zinc-200 hover:text-nexus-300 hover:bg-carbon-700/30 transition-colors"
-        onclick={() => toggleSection('body')}
-      >
-        <span class="flex items-center gap-2">
-          <span class={openSection === 'body' ? 'nx-stripe' : 'nx-stripe nx-stripe-zinc'} aria-hidden="true"></span>
-          {$_('body.title')}
-        </span>
-        <svg viewBox="0 0 24 24" class="h-3.5 w-3.5 transition-transform" style:transform={openSection === 'body' ? 'rotate(180deg)' : ''} fill="none" stroke="currentColor" stroke-width="2">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
-        </svg>
-      </button>
-      {#if openSection === 'body'}
-        <div class="border-t border-carbon-600 p-3">
-          <BodyEditor bind:value={upstream.body} label={$_('body.title')} showHelp={false} showLabel={false} />
-        </div>
-      {/if}
-    </div>
-
-    <!-- Collapsible Query -->
-    <div class="border border-carbon-600 bg-carbon-950/60">
-      <button
-        type="button"
-        class="w-full flex items-center justify-between px-3 py-2 font-mono text-[11px] uppercase tracking-command text-zinc-200 hover:text-nexus-300 hover:bg-carbon-700/30 transition-colors"
-        onclick={() => toggleSection('query')}
-      >
-        <span class="flex items-center gap-2">
-          <span class={openSection === 'query' ? 'nx-stripe' : 'nx-stripe nx-stripe-zinc'} aria-hidden="true"></span>
-          {$_('query.title')}
-        </span>
-        <svg viewBox="0 0 24 24" class="h-3.5 w-3.5 transition-transform" style:transform={openSection === 'query' ? 'rotate(180deg)' : ''} fill="none" stroke="currentColor" stroke-width="2">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
-        </svg>
-      </button>
-      {#if openSection === 'query'}
-        <div class="border-t border-carbon-600 p-3">
-          <QueryEditor bind:value={upstream.query} label={$_('query.title')} showHelp={false} showLabel={false} />
-        </div>
-      {/if}
-    </div>
+    <DirectionalModificationEditor bind:policy={upstream} />
   </div>
 </div>
 {/if}

@@ -26,9 +26,9 @@ import {
 
 const GLOBAL_KEYS = ['log_level', 'body_parser_limit', 'auth', 'logging', 'publication'] as const;
 const SERVICE_KEYS = ['health_check', 'failover', 'load_balancing'] as const;
-const ROUTE_KEYS = ['headers', 'body', 'query', 'path_rewrite', 'auth', 'timeouts', 'rate_limit', 'cors',
+const ROUTE_KEYS = ['request', 'response', 'path_rewrite', 'auth', 'timeouts', 'rate_limit', 'cors',
   'response_rules', 'direct_response', 'redirect', 'retry'] as const;
-const UPSTREAM_KEYS = ['headers', 'body', 'query', 'description', 'condition'] as const;
+const UPSTREAM_KEYS = ['request', 'response', 'description', 'condition'] as const;
 const ENTITY_KEYS = ['id', 'position', 'plugins'] as const;
 
 function allowed(...groups: readonly (readonly string[])[]): ReadonlySet<string> {

@@ -13,6 +13,7 @@ function setup(path = RESPONSES_PATH, stream = true) {
   adapter.beforeRequest(request);
   const context: RawResponseContext = {
     method: 'POST', originalUrl: request.originalUrl, requestId: request.requestId,
+    decodeResponseBody: response => response.body,
     clientIP: request.clientIP, attemptId: 'error-test', signal: new AbortController().signal,
     redactDiagnostic: value => value.replaceAll('opaque-managed-secret', '[REDACTED]'),
   };

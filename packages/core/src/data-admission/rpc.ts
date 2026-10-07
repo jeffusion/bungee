@@ -85,6 +85,7 @@ export function createDataAdmissionRpcServer(options: { host: DataAdmissionHost;
       if (!Number.isSafeInteger(input.version)) throw new Error('invalid admission version');
       return options.host.admit(parseAdmissionTarget(input.target),worker,false,input.version as number); }
     const target = parseAdmissionTarget(payload);
+    if (operation === 'inspect') return options.host.inspect(target,worker);
     if (operation === 'preview') return options.host.admit(target,worker,true);
     if (operation === 'attempt') return options.host.beforeAttempt(target,worker);
     throw new Error('unknown admission operation');
@@ -119,4 +120,4 @@ export function createSignedWorkerRpcClient(options: {
     }
   };
 }
-export type DataAdmissionRpc = (operation: 'admit'|'attempt'|'release',payload: AdmissionTarget|{requestId:string},signal?:AbortSignal)=>Promise<AdmissionGrant|unknown>;
+export type DataAdmissionRpc = (operation: 'inspect'|'preview'|'admit'|'attempt'|'release',payload: AdmissionTarget|{requestId:string},signal?:AbortSignal)=>Promise<AdmissionGrant|unknown>;

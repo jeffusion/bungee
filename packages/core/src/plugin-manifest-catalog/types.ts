@@ -112,7 +112,7 @@ export type StrictPluginManifest = Readonly<{
   name: string;
   version: string;
   builtin?: boolean;
-  schemaVersion: 2;
+  schemaVersion: 3;
   artifactKind: PluginArtifactKind;
   main: string;
   capabilities: readonly PluginCapability[];

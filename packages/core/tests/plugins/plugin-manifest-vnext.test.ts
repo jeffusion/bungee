@@ -33,6 +33,7 @@ function writePluginModule(targetPath: string, pluginName: string): void {
     return {
       pluginName: ${JSON.stringify(pluginName)},
       config,
+      bodyRequirements() { return Object.freeze({ request: 'none' }); },
       register() {},
     };
   }
@@ -78,7 +79,7 @@ describe('plugin manifest vNext contract', () => {
       const root = createTempRoot();
       const name = 'automatic-global-plugin';
       createPluginArtifact(join(root, 'plugins'), name, {
-        name, version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+        name, version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin',
         main: 'server/index.ts', runtimeScope: 'global', capabilities: ['hooks', 'dynamicRuntimeLoad'],
         uiExtensionMode: 'none', engines: { bungee: `^${CORE_HOST_VERSION}` },
       });
@@ -96,7 +97,7 @@ describe('plugin manifest vNext contract', () => {
     const root = createTempRoot();
     const name = 'automatic-global-plugin';
     const dir = createPluginArtifact(join(root, 'plugins'), name, {
-      name, version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+      name, version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin',
       main: 'server/index.ts', runtimeScope: 'global', capabilities: ['hooks', 'dynamicRuntimeLoad'],
       uiExtensionMode: 'none', engines: { bungee: `^${CORE_HOST_VERSION}` },
     });
@@ -118,7 +119,7 @@ describe('plugin manifest vNext contract', () => {
     const root = createTempRoot();
     const name = 'failing-global-plugin';
     const dir = createPluginArtifact(join(root, 'plugins'), name, {
-      name, version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+      name, version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin',
       main: 'server/index.ts', runtimeScope: 'global', capabilities: ['hooks', 'dynamicRuntimeLoad'],
       uiExtensionMode: 'none', engines: { bungee: `^${CORE_HOST_VERSION}` },
     });
@@ -139,7 +140,7 @@ describe('plugin manifest vNext contract', () => {
       ['global-without-hooks', 'global', ['api', 'dynamicRuntimeLoad']],
     ] as const) {
       const dir = createPluginArtifact(root, name, {
-        name, version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+        name, version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin',
         main: 'server/index.ts', runtimeScope, capabilities,
         uiExtensionMode: 'none', engines: { bungee: `^${CORE_HOST_VERSION}` },
       });
@@ -152,7 +153,7 @@ describe('plugin manifest vNext contract', () => {
       name: 'native-settings',
       version: '1.0.0',
       builtin: true,
-      schemaVersion: 2,
+      schemaVersion: 3,
       artifactKind: 'runtime-plugin',
       main: 'server/index.ts',
       capabilities: ['hooks', 'dynamicRuntimeLoad', 'nativeWidgetsStatic'],
@@ -171,7 +172,7 @@ describe('plugin manifest vNext contract', () => {
       name: 'native-settings',
       version: '1.0.0',
       builtin: true,
-      schemaVersion: 2,
+      schemaVersion: 3,
       artifactKind: 'runtime-plugin',
       main: 'server/index.ts',
       capabilities: ['hooks', 'dynamicRuntimeLoad', 'nativeWidgetsStatic'],
@@ -198,7 +199,7 @@ describe('plugin manifest vNext contract', () => {
     const pluginDir = createPluginArtifact(root, 'manifest-vnext-ok', {
       name: 'manifest-vnext-ok',
       version: '1.0.0',
-      schemaVersion: 2,
+      schemaVersion: 3,
       artifactKind: 'runtime-plugin',
       main: 'dist/index.js',
       capabilities: ['hooks', 'api', 'nativeWidgetsStatic', 'sandboxUiExtension', 'dynamicRuntimeLoad', 'controlPlane'],
@@ -214,7 +215,7 @@ describe('plugin manifest vNext contract', () => {
 
     const loaded = await loadPluginArtifactManifest(pluginDir);
 
-    expect(loaded.schemaVersion).toBe(2);
+    expect(loaded.schemaVersion).toBe(3);
     expect(loaded.artifactKind).toBe('runtime-plugin');
     expect(loaded.capabilities).toEqual(['hooks', 'api', 'nativeWidgetsStatic', 'sandboxUiExtension', 'dynamicRuntimeLoad', 'controlPlane']);
     expect(loaded.uiExtensionMode).toBe('sandbox-iframe');
@@ -227,7 +228,7 @@ describe('plugin manifest vNext contract', () => {
     const pluginDir = createPluginArtifact(root, 'manifest-vnext-unsupported-capability', {
       name: 'manifest-vnext-unsupported-capability',
       version: '1.0.0',
-      schemaVersion: 2,
+      schemaVersion: 3,
       artifactKind: 'runtime-plugin',
       main: 'dist/index.js',
       capabilities: ['hooks', 'nativeRuntimeInjection'],
@@ -253,7 +254,7 @@ describe('plugin manifest vNext contract', () => {
     const pluginDir = createPluginArtifact(root, 'manifest-vnext-engine-mismatch', {
       name: 'manifest-vnext-engine-mismatch',
       version: '1.0.0',
-      schemaVersion: 2,
+      schemaVersion: 3,
       artifactKind: 'runtime-plugin',
       main: 'dist/index.js',
       capabilities: ['hooks'],
@@ -324,7 +325,7 @@ describe('plugin manifest vNext contract', () => {
     const supportedCapabilityDir = createPluginArtifact(root, 'manifest-vnext-serve-ok', {
       name: 'manifest-vnext-serve-ok',
       version: '1.0.0',
-      schemaVersion: 2,
+      schemaVersion: 3,
       artifactKind: 'runtime-plugin',
       main: 'dist/index.js',
       capabilities: ['hooks', 'dynamicRuntimeLoad'],
@@ -334,7 +335,7 @@ describe('plugin manifest vNext contract', () => {
     const unsupportedCapabilityDir = createPluginArtifact(root, 'manifest-vnext-status-unsupported-capability', {
       name: 'manifest-vnext-status-unsupported-capability',
       version: '1.0.0',
-      schemaVersion: 2,
+      schemaVersion: 3,
       artifactKind: 'runtime-plugin',
       main: 'dist/index.js',
       capabilities: ['hooks', 'nativeRuntimeInjection'],
@@ -344,7 +345,7 @@ describe('plugin manifest vNext contract', () => {
     const missingArtifactDir = createPluginArtifact(root, 'manifest-vnext-status-missing-artifact', {
       name: 'manifest-vnext-status-missing-artifact',
       version: '1.0.0',
-      schemaVersion: 2,
+      schemaVersion: 3,
       artifactKind: 'runtime-plugin',
       main: 'dist/index.js',
       capabilities: ['hooks'],
@@ -392,7 +393,7 @@ describe('plugin manifest vNext contract', () => {
       expect(unsupportedCapability?.state.lifecycle).toBe('quarantined');
       expect(unsupportedCapability?.state.states.scopedServing).toBe('non-serving');
       expect(unsupportedCapability?.sources.runtime).toBe(false);
-      expect(unsupportedCapability?.state.contract?.schemaVersion).toBe(2);
+      expect(unsupportedCapability?.state.contract?.schemaVersion).toBe(3);
       expect(unsupportedCapability?.state.contract?.capabilities).toEqual(['hooks', 'nativeRuntimeInjection']);
       expect(unsupportedCapability?.state.contract?.validationFailureCode).toBe('unsupported-capability');
       expect(unsupportedCapability?.state.failures.validation).toEqual({
@@ -406,7 +407,7 @@ describe('plugin manifest vNext contract', () => {
       expect(missingArtifact?.state.lifecycle).toBe('degraded');
       expect(missingArtifact?.state.states.scopedServing).toBe('non-serving');
       expect(missingArtifact?.sources.runtime).toBe(false);
-      expect(missingArtifact?.state.contract?.schemaVersion).toBe(2);
+      expect(missingArtifact?.state.contract?.schemaVersion).toBe(3);
       expect(missingArtifact?.state.contract?.main).toBe('dist/index.js');
       expect(missingArtifact?.state.contract?.validationFailureCode).toBe('missing-artifact');
       expect(missingArtifact?.state.failures.validation).toEqual({
@@ -426,7 +427,7 @@ describe('plugin manifest vNext contract', () => {
     const pluginDir = createPluginArtifact(root, 'manifest-vnext-source-entry', {
       name: 'manifest-vnext-source-entry',
       version: '1.0.0',
-      schemaVersion: 2,
+      schemaVersion: 3,
       artifactKind: 'runtime-plugin',
       main: 'server/index.ts',
       capabilities: ['hooks', 'dynamicRuntimeLoad', 'api', 'controlPlane'],

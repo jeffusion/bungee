@@ -6,6 +6,7 @@ import { ConfigRepositoryError } from '../config-storage';
 import { validateMutationId } from '../config-storage/repository-validation';
 import { hashConfigurationContent } from '../config-storage/content-hash';
 import { parseNormalizeCompileAggregate } from '../config-storage/aggregate';
+import { migrateLegacyDirectionalAggregate, type DirectionalMigrationWarning } from '../config-storage/directional-migration';
 import { isPluginName } from '../config-storage/plugin-name';
 import type { ServingConfigWorker } from '../config-publication';
 import { readControlJson } from './control-api-body';
@@ -15,10 +16,11 @@ import type { PublicationTaskLifecycle } from './publication-task-manager';
 import { logger } from '../logger';
 import { serializeErrorChain } from './error-chain';
 import { isLowercaseUuid } from '../config-storage/validation';
+import { buildRouteBodyPlans } from './route-body-plan';
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' } as const;
 const PUT_FIELDS = new Set(['expected_revision', 'aggregate', 'mutation_id', 'kind', 'managementSetup']);
-const VALIDATE_FIELDS = new Set(['aggregate']);
+const VALIDATE_FIELDS = new Set(['aggregate', 'envelope']);
 const EXPORT_FORMAT = 'bungee-config-snapshot';
 const EXPORT_FORMAT_VERSION = 1;
 const EXPORT_SCHEMA_VERSION = 2;
@@ -236,7 +238,12 @@ async function validateRequest(request: Request, options: ConfigControlApiOption
   const body = await readControlJson(request);
   if (!body.ok) return json({ error: body.error }, body.status);
   const envelope = exactObject(body.value, VALIDATE_FIELDS);
-  if (envelope === null || !('aggregate' in envelope)) return json({ error: 'invalid_request' }, 400);
+  if (envelope === null || Object.keys(envelope).length !== 1) return json({ error: 'invalid_request' }, 400);
+  if ('envelope' in envelope) {
+    const prepared = prepareImport(envelope.envelope, options);
+    return prepared instanceof Response ? prepared : json({ valid: true, errors: [], aggregate: prepared.aggregate, warnings: prepared.warnings });
+  }
+  if (!('aggregate' in envelope)) return json({ error: 'invalid_request' }, 400);
   const parsed = options.parseAggregate(envelope.aggregate);
   return parsed.ok ? json({ valid: true, errors: [] }) : json({ valid: false, errors: parsed.errors });
 }
@@ -381,6 +388,27 @@ function parseSnapshotEnvelope(value: unknown): UntrustedConfigurationSnapshotEn
     aggregate: envelope.aggregate,
     envelope_hash: envelope.envelope_hash,
   };
+}
+
+/** Preview and commit share one conversion boundary; verify original bytes before conversion. */
+function prepareImport(value: unknown, options: ConfigControlApiOptions): Response | {
+  aggregate: ConfigurationAggregateV2; warnings: DirectionalMigrationWarning[];
+} {
+  const envelope = parseSnapshotEnvelope(value);
+  if (envelope === null) return json({ error: 'invalid_snapshot' }, 400);
+  const { envelope_hash: envelopeHash, ...base } = envelope;
+  if (envelopeHash !== hashConfigurationContent(base)
+    || envelope.content_hash !== hashConfigurationContent(envelope.aggregate)) return json({ error: 'invalid_snapshot' }, 400);
+  const warnings: DirectionalMigrationWarning[] = [];
+  let converted: unknown;
+  try { converted = migrateLegacyDirectionalAggregate(envelope.aggregate, warnings); }
+  catch { return json({ error: 'invalid_configuration' }, 422); }
+  const exported = parseNormalizeCompileAggregate(converted);
+  if (!exported.ok) return json({ error: 'invalid_configuration', errors: exported.errors }, 422);
+  // Apply the installed catalog's dependency closure only after checking the sealed content.
+  const parsed = options.parseAggregate(exported.value);
+  if (!parsed.ok) return json({ error: 'invalid_configuration', errors: parsed.errors }, 422);
+  return { aggregate: parsed.value, warnings };
 }
 
 const UPSTREAM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -837,28 +865,20 @@ async function importConfig(
     || !('envelope' in wrapper)) return json({ error: 'invalid_request' }, 400);
   const expectedRevision = wrapper.expected_revision;
   const mutationId = wrapper.mutation_id;
-  const envelope = parseSnapshotEnvelope(wrapper.envelope);
-  if (envelope === null) return json({ error: 'invalid_snapshot' }, 400);
-  const { envelope_hash: envelopeHash, ...envelopeBase } = envelope;
-  if (envelopeHash !== hashConfigurationContent(envelopeBase)) {
-    return json({ error: 'invalid_snapshot' }, 400);
-  }
   return serializeMutation(options, async () => {
     const activeResult = safeSnapshot(options);
     if (activeResult instanceof Response) return activeResult;
     const active = activeResult;
     if (!await options.managementAuth?.recheck(request) || !matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
-    // Verify the exported content before applying this installation's dependency
-    // closure. A newer catalog may legitimately enable additional providers.
-    const exported = parseNormalizeCompileAggregate(envelope.aggregate);
-    if (!exported.ok) return json({ error: 'invalid_configuration', errors: exported.errors }, 422);
-    if (envelope.content_hash !== hashConfigurationContent(exported.value)) return json({ error: 'invalid_snapshot' }, 400);
-    const parsed = options.parseAggregate(exported.value);
-    if (!parsed.ok) return json({ error: 'invalid_configuration', errors: parsed.errors }, 422);
-    freezeJson(parsed.value);
-    return commitConfigurationMutation(request, options, {
-      active, next: parsed.value, kind: 'config', mutationId, expectedRevision, managementSetup: wrapper.managementSetup,
+    const prepared = prepareImport(wrapper.envelope, options);
+    if (prepared instanceof Response) return prepared;
+    freezeJson(prepared.aggregate);
+    const response = await commitConfigurationMutation(request, options, {
+      active, next: prepared.aggregate, kind: 'config', mutationId, expectedRevision, managementSetup: wrapper.managementSetup,
     });
+    if (!response.ok || prepared.warnings.length === 0) return response;
+    logger.warn({ mutationId, ignored_rules: prepared.warnings }, 'Incompatible configuration modification rules were ignored during import');
+    return json({ ...await response.json(), warnings: prepared.warnings }, response.status);
   });
 }
 
@@ -902,7 +922,7 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
       const observabilityRequest = serializedOptions.observabilityApi?.matches(path) === true;
       const pluginCatalogRequest = serializedOptions.pluginCatalogApi?.matches(path) === true;
       const mutationRequest = isMutationRequest(path, request.method, upstreamToggleMatch, pluginToggleMatch);
-      const managed = path === '/api/auth/setup' || path === '/api/config' || path === '/api/config/runtime' || path === '/api/runtime/upstreams'
+      const managed = path === '/api/auth/setup' || path === '/api/config' || path === '/api/config/runtime' || path === '/api/runtime/upstreams' || path === '/api/runtime/routes'
         || path === '/api/config/validate'
         || path === '/api/config/export' || path === '/api/config/import'
         || operationMatch !== null || retryMatch !== null
@@ -998,6 +1018,12 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
               target_revision: snapshot!.revision,
             },
           });
+        }
+        if (path === '/api/runtime/routes' && request.method === 'GET') {
+          return json({ schema: 'bungee-route-body-plan-v1', source: 'committed_configuration',
+            revision: snapshot.revision, content_hash: snapshot.content_hash,
+            publication: serializedOptions.runtimePublicationEvidence?.() ?? { serving_complete: false, serving_revision: null },
+            routes: buildRouteBodyPlans(snapshot.aggregate) });
         }
         if (path === '/api/runtime/upstreams' && request.method === 'GET') {
           return serializedOptions.runtimeUpstreams === undefined

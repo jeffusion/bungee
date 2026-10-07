@@ -71,7 +71,7 @@ describe('plugin artifact contract', () => {
     const pluginDir = createPluginArtifact(root, 'artifact-ok', {
       name: 'artifact-ok',
       version: '1.0.0',
-      schemaVersion: 2,
+      schemaVersion: 3,
       artifactKind: 'runtime-plugin',
       main: 'dist/index.js',
       capabilities: ['hooks'],
@@ -93,7 +93,7 @@ describe('plugin artifact contract', () => {
     expect(manifest?.pluginDir).toBe(await realpath(pluginDir));
     expect(manifest?.mainPath).toBe(await realpath(join(pluginDir, 'dist', 'index.js')));
     expect(manifest?.uiAssetsPath).toBe(await realpath(join(pluginDir, 'ui')));
-    expect(manifest?.schemaVersion).toBe(2);
+    expect(manifest?.schemaVersion).toBe(3);
     expect(manifest?.artifactKind).toBe('runtime-plugin');
     expect(manifest?.capabilities).toEqual(['hooks']);
     expect(manifest?.uiExtensionMode).toBe('sandbox-iframe');
@@ -128,7 +128,7 @@ describe('plugin artifact contract', () => {
     const pluginDir = createPluginArtifact(root, 'missing-capabilities', {
       name: 'missing-capabilities',
       version: '1.0.0',
-      schemaVersion: 2,
+      schemaVersion: 3,
       artifactKind: 'runtime-plugin',
       main: 'dist/index.js',
       uiExtensionMode: 'none',
@@ -147,7 +147,7 @@ describe('plugin artifact contract', () => {
     const pluginDir = createPluginArtifact(root, 'missing-built-entry', {
       name: 'missing-built-entry',
       version: '1.0.0',
-      schemaVersion: 2,
+      schemaVersion: 3,
       artifactKind: 'runtime-plugin',
       main: 'dist/index.js',
       capabilities: ['hooks'],
@@ -167,7 +167,7 @@ describe('plugin artifact contract', () => {
     const pluginDir = createPluginArtifact(root, 'invalid-ui-extension-mode', {
       name: 'invalid-ui-extension-mode',
       version: '1.0.0',
-      schemaVersion: 2,
+      schemaVersion: 3,
       artifactKind: 'runtime-plugin',
       main: 'dist/index.js',
       capabilities: ['hooks'],
@@ -185,14 +185,14 @@ describe('plugin artifact contract', () => {
   test('rejects invalid bungee and incompatible node engine ranges', async () => {
     const root = createTempRoot();
     const invalidRange = createPluginArtifact(root, 'invalid-engine-range', {
-      name: 'invalid-engine-range', version: '1.0.0', schemaVersion: 2,
+      name: 'invalid-engine-range', version: '1.0.0', schemaVersion: 3,
       artifactKind: 'runtime-plugin', main: 'dist/index.js', capabilities: ['hooks'],
       uiExtensionMode: 'none', engines: { bungee: 'latest' },
     }, { writeBuiltEntry: true });
     expect(loadPluginArtifactManifest(invalidRange)).rejects.toThrow('engines.bungee');
 
     const incompatibleNode = createPluginArtifact(root, 'incompatible-node', {
-      name: 'incompatible-node', version: '1.0.0', schemaVersion: 2,
+      name: 'incompatible-node', version: '1.0.0', schemaVersion: 3,
       artifactKind: 'runtime-plugin', main: 'dist/index.js', capabilities: ['hooks'],
       uiExtensionMode: 'none', engines: { bungee: `^${CORE_HOST_VERSION}`, node: '>999.0.0' },
     }, { writeBuiltEntry: true });
@@ -202,7 +202,7 @@ describe('plugin artifact contract', () => {
   test('allows an ancestor alias but rejects a symlinked plugin root', async () => {
     const root = createTempRoot();
     const pluginDir = createPluginArtifact(root, 'aliased-plugin', {
-      name: 'aliased-plugin', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+      name: 'aliased-plugin', version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin',
       main: 'dist/index.js', capabilities: ['hooks'], uiExtensionMode: 'none',
       engines: { bungee: `^${CORE_HOST_VERSION}` },
     });
@@ -219,7 +219,7 @@ describe('plugin artifact contract', () => {
   test('allows a contained entry whose name merely starts with two dots', async () => {
     const root = createTempRoot();
     const pluginDir = createPluginArtifact(root, 'dot-prefix-plugin', {
-      name: 'dot-prefix-plugin', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+      name: 'dot-prefix-plugin', version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin',
       main: '..plugin/index.js', capabilities: ['hooks'], uiExtensionMode: 'none',
       engines: { bungee: `^${CORE_HOST_VERSION}` },
     });
@@ -234,7 +234,7 @@ describe('plugin artifact contract', () => {
     writePluginModule(outside);
 
     const manifestSymlink = createPluginArtifact(root, 'manifest-link', {
-      name: 'manifest-link', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+      name: 'manifest-link', version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin',
       main: 'dist/index.js', capabilities: ['hooks'], uiExtensionMode: 'none',
       engines: { bungee: `^${CORE_HOST_VERSION}` },
     });
@@ -252,13 +252,13 @@ describe('plugin artifact contract', () => {
       ['main-escape', (pluginDir: string) => {
         rmSync(join(pluginDir, 'manifest.json'));
         writeFileSync(join(pluginDir, 'manifest.json'), JSON.stringify({
-          name: 'main-escape', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin', main: '../outside.js',
+          name: 'main-escape', version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin', main: '../outside.js',
           capabilities: ['hooks'], uiExtensionMode: 'none', engines: { bungee: `^${CORE_HOST_VERSION}` },
         }));
       }],
     ] as const) {
       const pluginDir = createPluginArtifact(root, name, {
-        name, version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+        name, version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin',
         main: 'dist/index.js', capabilities: ['hooks'], uiExtensionMode: 'none',
         engines: { bungee: `^${CORE_HOST_VERSION}` },
       });
@@ -267,7 +267,7 @@ describe('plugin artifact contract', () => {
     }
 
     const controlDir = createPluginArtifact(root, 'control-link', {
-      name: 'control-link', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+      name: 'control-link', version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin',
       main: 'dist/index.js', capabilities: ['hooks', 'controlPlane'], uiExtensionMode: 'none',
       control: { entry: 'control.js', rpc: [] }, engines: { bungee: `^${CORE_HOST_VERSION}` },
     });
@@ -278,7 +278,7 @@ describe('plugin artifact contract', () => {
   test('rejects a symlinked UI directory instead of following it', async () => {
     const root = createTempRoot();
     const pluginDir = createPluginArtifact(root, 'ui-link', {
-      name: 'ui-link', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+      name: 'ui-link', version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin',
       main: 'dist/index.js', capabilities: ['hooks'], uiExtensionMode: 'none',
       engines: { bungee: `^${CORE_HOST_VERSION}` },
     }, { writeUiAssets: true });

@@ -13,7 +13,7 @@ import {
   AsyncSeriesMapHook,
 } from './impl';
 import type { PluginServices } from '../plugin-services';
-import type { PluginStorage } from '../plugin.types';
+import type { PluginStorage, SSEEnvelope } from '../plugin.types';
 import type { InterceptResult, PluginPhase } from '@jeffusion/bungee-types';
 import type { RawResponseResult } from '../plugin-control/contracts';
 
@@ -63,6 +63,8 @@ export interface ResponseContext extends RequestContext {
 export interface RawResponseContext extends RequestContext {
   readonly signal: AbortSignal;
   readonly attemptId: string;
+  /** Explicit content consumer; consumes this response under host decoder/size/deadline limits. */
+  readonly decodeResponseBody: (response: Response) => ReadableStream<Uint8Array> | null;
   /** Redacts credentials acquired by the host without exposing them to plugins. */
   readonly redactDiagnostic?: (message: string) => string;
 }
@@ -84,8 +86,8 @@ export type AttemptObservationEvent = Readonly<{
 } & (
   | { phase: 'selected' }
   | { phase: 'request'; url: string; body: unknown }
-  | { phase: 'response'; status: number; protocol: 'json' | 'sse'; body: Record<string, unknown> }
-  | { phase: 'incomplete'; reason: 'observer-timeout' | 'observer-error' | 'raw-response-incomplete' | 'buffer-limit' | 'frame-limit' | 'frame-truncated' }
+  | { phase: 'response'; status: number; protocol: 'json' | 'sse'; body: Record<string, unknown>; envelope?: SSEEnvelope }
+  | { phase: 'incomplete'; reason: 'observer-timeout' | 'observer-error' | 'raw-response-incomplete' | 'buffer-limit' | 'frame-limit' | 'frame-truncated' | 'decode-error' | 'unsupported-encoding' }
   | { phase: 'end'; outcome: AttemptObservationOutcome; sent: boolean }
   | { phase: 'request-end' }
 )>;
@@ -120,7 +122,7 @@ export interface ErrorContext extends RequestContext {
  * 流式数据块上下文
  *
  * 性能优化：chunkIndex/isFirstChunk/isLastChunk 不再是 readonly，
- * 允许 StreamExecutor 复用 context 对象以减少 GC 压力
+ * 保存当前事件序号与本次响应内的插件状态
  */
 export interface StreamChunkContext extends RequestContext {
   /** 块索引 */
@@ -141,6 +143,8 @@ export interface StreamChunkContext extends RequestContext {
   readonly request?: any;
   /** Strict raw-response processing must propagate plugin failures. */
   readonly strict?: boolean;
+  /** Metadata of the current SSE event, independent from its JSON payload. */
+  readonly sseEvent?: SSEEnvelope;
 }
 
 /**
@@ -276,7 +280,7 @@ export function createPluginHooks() {
      * - [chunk]: 1:1 转换
      * - [chunk1, chunk2, ...]: 1:M 拆分
      */
-    onStreamChunk: new AsyncSeriesMapHook<any, [StreamChunkContext]>('onStreamChunk'),
+    onStreamChunk: new AsyncSeriesMapHook<SSEEnvelope, [StreamChunkContext]>('onStreamChunk'),
 
     /**
      * 流结束时刷新缓冲区
@@ -286,7 +290,7 @@ export function createPluginHooks() {
      *
      * 每个插件接收上一个插件输出的 chunks 数组，返回处理后的 chunks 数组
      */
-    onFlushStream: new AsyncSeriesWaterfallHook<any[], [StreamChunkContext]>('onFlushStream'),
+    onFlushStream: new AsyncSeriesWaterfallHook<SSEEnvelope[], [StreamChunkContext]>('onFlushStream'),
 
     /**
      * 错误处理

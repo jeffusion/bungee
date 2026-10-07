@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import type { PluginBodyRequirements, PluginBodyRequirementContext } from './plugin.types';
 import type { WorkerAdmissionPlugin } from './data-admission/worker';
 import type { PluginDependencyGraph } from './plugin-dependencies';
 /**
@@ -76,6 +77,7 @@ export interface AttemptObservationOwner {
   readonly pluginName: string;
   readonly scopeKey: string;
   readonly hooks: PluginHooks['onAttemptObservation'];
+  readonly observe?: PluginBodyRequirements['observe'];
 }
 
 /**
@@ -137,6 +139,7 @@ function toPluginScopeInfo(scope: PluginScope): PluginScopeInfo {
  * 由 PluginClass.createHandler() 创建，长生命周期
  */
 export interface PluginHandler extends WorkerAdmissionPlugin {
+  bodyRequirements(ctx: PluginBodyRequirementContext): PluginBodyRequirements;
   /** 插件名称 */
   readonly pluginName: string;
 
@@ -157,6 +160,32 @@ export interface PluginHandler extends WorkerAdmissionPlugin {
    * 释放资源，如数据库连接、定时器等
    */
   destroy?(): Promise<void>;
+}
+
+/** Empty scopes have no demands; initialized plugins must declare them explicitly. */
+export function collectPluginBodyRequirements(phases: Array<PrecompiledHooks | null | undefined>, ctx: PluginBodyRequirementContext): PluginBodyRequirements {
+  const result: {request: PluginBodyRequirements['request'];response: ('json'|'sse-json')[];replay:boolean;observe:{request:boolean;response:boolean;sse:boolean}} = {
+    request:'none',response:[],replay:false,observe:{request:false,response:false,sse:false},
+  };
+  const seen = new Set<PluginHandler>();
+  for (const phase of phases) for (const handler of phase?.handlers ?? []) {
+    if (seen.has(handler)) continue; seen.add(handler);
+    assertBodyContract(handler);
+    const demand = handler.bodyRequirements(ctx);
+    if (!demand || !['none','json-read','json-write'].includes(demand.request)
+      || (demand.response !== undefined && (!Array.isArray(demand.response) || demand.response.some(item=>!['json','sse-json'].includes(item))))
+      || (demand.replay !== undefined && typeof demand.replay !== 'boolean')
+      || (demand.observe !== undefined && (typeof demand.observe !== 'object' || demand.observe === null || Object.values(demand.observe).some(value=>typeof value !== 'boolean')))) {
+      throw new Error('invalid_plugin_body_requirements');
+    }
+    if (demand.request === 'json-write' || (demand.request === 'json-read' && result.request === 'none')) result.request = demand.request;
+    result.response = [...new Set([...result.response,...(demand.response ?? [])])]; result.replay ||= demand.replay === true;
+    for (const key of ['request','response','sse'] as const) result.observe[key] ||= demand.observe?.[key] === true;
+  }
+  return result;
+}
+function assertBodyContract(handler: {bodyRequirements?: unknown}): void {
+  if (typeof handler.bodyRequirements !== 'function') throw new Error('plugin_body_requirements_missing');
 }
 
 /**
@@ -625,6 +654,7 @@ export class ScopedPluginRegistry {
       async createHandler(config: Record<string, any>, initContext: PluginInitContext): Promise<PluginHandler> {
         // 创建旧架构插件实例
         const instance = new PluginClassDef(config);
+        assertBodyContract(instance);
 
         // 调用插件的 init 方法（如果存在）
         if (instance.init) {
@@ -635,6 +665,7 @@ export class ScopedPluginRegistry {
         const handler: PluginHandler = {
           pluginName: PluginClassDef.name,
           config,
+          bodyRequirements: instance.bodyRequirements.bind(instance),
 
           register(hooks: PluginHooks): void {
             // 调用旧架构插件的 register 方法
@@ -777,6 +808,7 @@ export class ScopedPluginRegistry {
       createdHandler = this.serviceHost.rpc === undefined || servicesContext === undefined
         ? await pluginClass.createHandler(config, initContext)
         : await this.serviceHost.runInInvocation(servicesContext, { purpose: 'bootstrap' }, () => pluginClass.createHandler(config, initContext));
+      assertBodyContract(createdHandler);
       this.serviceHost.markReady(effectivePluginName, getScopeKey(scope));
     } catch (error) {
       // Failed initialization must not retain publications or block the retry.
@@ -1013,7 +1045,7 @@ export class ScopedPluginRegistry {
     return result;
   }
 
-  getAttemptObservationOwners(routeId: string, upstreamId?: string, serviceName?: string): AttemptObservationOwner[] {
+  getAttemptObservationOwners(routeId: string, upstreamId?: string, serviceName?: string, context?: PluginBodyRequirementContext): AttemptObservationOwner[] {
     if (!this.precompiled) this.precompileAllHooks();
     const candidates = [
       ...(upstreamId ? this.upstreamInstances.get(`${routeId}#${upstreamId}`) ?? [] : []),
@@ -1029,7 +1061,8 @@ export class ScopedPluginRegistry {
       seen.add(name);
       const hooks = this.attemptObservationHooks.get(instance);
       if (!hooks?.hasCallbacks()) continue;
-      owners.push({ pluginName: name, scopeKey: getScopeKey(instance.scope), hooks });
+      const observe = context ? collectPluginBodyRequirements([{handlers:[instance.handler]} as PrecompiledHooks],context).observe : undefined;
+      owners.push({ pluginName: name, scopeKey: getScopeKey(instance.scope), hooks, observe });
     }
     return owners;
   }
@@ -1163,7 +1196,7 @@ export class ScopedPluginRegistry {
     return {
       handlers,
       hooks,
-      hasStreamCallbacks: hooks.onStreamChunk.hasCallbacks(),
+        hasStreamCallbacks: hooks.onStreamChunk.hasCallbacks() || hooks.onFlushStream.hasCallbacks(),
       hasResponseCallbacks: hooks.onResponse.hasCallbacks(),
       hasRawResponseCallbacks: hooks.onRawResponse.hasCallbacks(),
       hasInterceptCallbacks: hooks.onInterceptRequest.hasCallbacks(),
@@ -1212,7 +1245,7 @@ export class ScopedPluginRegistry {
     return {
       handlers: allHandlers,
       hooks: combinedHooks,
-      hasStreamCallbacks: combinedHooks.onStreamChunk.hasCallbacks(),
+      hasStreamCallbacks: combinedHooks.onStreamChunk.hasCallbacks() || combinedHooks.onFlushStream.hasCallbacks(),
       hasResponseCallbacks: combinedHooks.onResponse.hasCallbacks(),
       hasRawResponseCallbacks: combinedHooks.onRawResponse.hasCallbacks(),
       hasInterceptCallbacks: combinedHooks.onInterceptRequest.hasCallbacks(),
@@ -1645,6 +1678,7 @@ export class ScopedPluginRegistry {
           const scope: PluginScope = { type: 'route', routeId };
           const initContext = await this.createInitContext(pluginClass.name, pluginConfig.options || {}, scope);
           const handler = await pluginClass.createHandler(pluginConfig.options || {}, initContext);
+          assertBodyContract(handler);
           this.serviceHost.markReady(pluginClass.name, getScopeKey(scope));
 
           newInstances.push({
@@ -1723,6 +1757,7 @@ export class ScopedPluginRegistry {
           const scope: PluginScope = { type: 'upstream', routeId, upstreamId };
           const initContext = await this.createInitContext(pluginClass.name, pluginConfig.options || {}, scope);
           const handler = await pluginClass.createHandler(pluginConfig.options || {}, initContext);
+          assertBodyContract(handler);
           this.serviceHost.markReady(pluginClass.name, getScopeKey(scope));
 
           newInstances.push({

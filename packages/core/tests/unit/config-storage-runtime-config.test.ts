@@ -59,9 +59,9 @@ function fullSnapshot(): CommittedConfigurationSnapshotV2 {
             is_disabled: true,
             description: 'secondary',
             condition: '{{ true }}',
-            headers: { add: { 'x-upstream': 'b' } },
+            request: { headers: { add: { 'x-upstream': 'b' } },
             body: { default: { model: 'b' } },
-            query: { remove: ['debug'] },
+            query: { remove: ['debug'] } },
             plugins: [{ id: ID.upstreamBindingB, position: 4, name: 'active-plugin', enabled: true }],
           },
           {
@@ -81,9 +81,9 @@ function fullSnapshot(): CommittedConfigurationSnapshotV2 {
           id: ID.routeDirect,
           position: 6,
           path: '/direct',
-          headers: { replace: { host: 'direct' } },
+          request: { headers: { replace: { host: 'direct' } },
           body: { add: { stream: true } },
-          query: { default: { version: '2' } },
+          query: { default: { version: '2' } } },
           auth: { enabled: false, tokens: [] },
           timeouts: { request_ms: 900 },
           rate_limit: { enabled: true, requests_per_second: 4, burst: 8 },
@@ -160,7 +160,7 @@ describe('compileRuntimeConfigSnapshot', () => {
     expect(service?.endpoints[1]).toMatchObject({
       id: ID.upstreamB, weight: 20, priority: 2, is_disabled: true,
       description: 'secondary', condition: '{{ true }}',
-      headers: { add: { 'x-upstream': 'b' } }, body: { default: { model: 'b' } }, query: { remove: ['debug'] },
+      request: { headers: { add: { 'x-upstream': 'b' } }, body: { default: { model: 'b' } }, query: { remove: ['debug'] } },
     });
     expect(service).toMatchObject({
       health_check: { enabled: true, interval_ms: 1000, expected_status: [200, 204] },
@@ -170,8 +170,8 @@ describe('compileRuntimeConfigSnapshot', () => {
     expect(serviceRoute).toMatchObject({ id: ID.routeService, path: '/service', service: 'primary', path_rewrite: { '^/service': '/v1' } });
     expect(directRoute).toMatchObject({
       id: ID.routeDirect, path: '/direct', endpoints: [{ id: ID.directUpstream, target: 'https://direct.example' }],
-      headers: { replace: { host: 'direct' } }, body: { add: { stream: true } },
-      query: { default: { version: '2' } }, auth: { enabled: false, tokens: [] },
+      request: { headers: { replace: { host: 'direct' } }, body: { add: { stream: true } },
+      query: { default: { version: '2' } } }, auth: { enabled: false, tokens: [] },
       timeouts: { request_ms: 900 }, rate_limit: { enabled: true, requests_per_second: 4, burst: 8 },
       cors: { enabled: true, allowed_origins: ['https://client.example'] },
       response_rules: [{ enabled: true, path: '/cached', type: 'direct_response', status: 200 }],

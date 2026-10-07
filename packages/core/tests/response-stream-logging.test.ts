@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, test } from 'bun:test';
+import { afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import fs from 'fs';
 import path from 'path';
 import type { AppConfig, ModificationRules } from '@jeffusion/bungee-types';
@@ -82,8 +82,9 @@ afterEach(async () => {
 });
 
 describe('prepareResponse streamed logging', () => {
-  test('cancels a pending upstream read and persists the partial capture once', async () => {
+  test('opaque logging reports incomplete and cancels a pending read without blocking', async () => {
     const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages'), undefined, { bodyStorage });
+    const steps = spyOn(reqLogger, 'addStep');
     const requestId = reqLogger.getRequestId();
     trackedRequestIds.push(requestId);
     let cancellations = 0;
@@ -107,13 +108,12 @@ describe('prepareResponse streamed logging', () => {
     await reqLogger.complete(200, { success: false });
     await accessLogWriter.flush();
     const row = accessLogWriter.getDatabase().query('SELECT resp_body_id FROM access_logs WHERE request_id=?').get(requestId) as { resp_body_id: string };
-    trackedBodyIds.push(row.resp_body_id);
-    expect(await bodyStorage.load(row.resp_body_id)).toMatchObject({
-      interrupted: true, capturedMessages: 1,
-    });
+    expect(row.resp_body_id).toBeNull();
+    expect(steps).toHaveBeenCalledWith('body_logging_incomplete', { direction: 'response', reason: 'opaque_body_not_observed', observer_incomplete: true });
+    steps.mockRestore();
   });
 
-  test('retains partial or empty interrupted SSE captures and the HTTP-200 failure reason', async () => {
+  test('opaque SSE errors retain the HTTP-200 failure reason without forcing capture', async () => {
     for (const withPartialBody of [true, false]) {
       const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages'), undefined, { bodyStorage });
       const requestId = reqLogger.getRequestId();
@@ -141,10 +141,7 @@ describe('prepareResponse streamed logging', () => {
       await accessLogWriter.flush();
       const row = accessLogWriter.getDatabase().query('SELECT status,success,error_message,resp_body_id FROM access_logs WHERE request_id=?').get(requestId) as Record<string, any>;
       expect(row).toMatchObject({ status: 200, success: 0, error_message: 'Response stream failed (body_limit)' });
-      trackedBodyIds.push(row.resp_body_id);
-      expect(await bodyStorage.load(row.resp_body_id)).toMatchObject({
-        kind: 'sse_messages', interrupted: true, capturedMessages: withPartialBody ? 1 : 0,
-      });
+      expect(row.resp_body_id).toBeNull();
     }
   });
 
@@ -179,8 +176,9 @@ describe('prepareResponse streamed logging', () => {
     expect(row?.resp_body_id).toBe(expectedBodyId);
   });
 
-  test('records full SSE messages beyond body size limit and updates resp_body_id', async () => {
+  test('opaque SSE beyond logging size remains byte-exact and reports incomplete', async () => {
     const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages?stream=true', { method: 'POST' }), undefined, { bodyStorage });
+    const steps = spyOn(reqLogger, 'addStep');
     const requestId = reqLogger.getRequestId();
     trackedRequestIds.push(requestId);
     enqueueAccessLog(requestId);
@@ -206,7 +204,6 @@ describe('prepareResponse streamed logging', () => {
 
     streamChunks.push('data: [DONE]\n\n');
 
-    const expectedMessageCount = 20;
 
     const config: AppConfig = {
       routes: [],
@@ -238,6 +235,7 @@ describe('prepareResponse streamed logging', () => {
     expect(emittedText.includes('event: message_start')).toBeTrue();
     expect(emittedText.includes('data: [DONE]')).toBeTrue();
     expect(emittedText.includes(longSuffix)).toBeTrue();
+    expect(emittedText).toBe(streamChunks.join(''));
 
     await accessLogWriter.flush();
 
@@ -247,29 +245,9 @@ describe('prepareResponse streamed logging', () => {
       .get(requestId) as { resp_body_id: string | null } | null;
 
     expect(row).not.toBeNull();
-    expect(typeof row?.resp_body_id).toBe('string');
-
-    const respBodyId = row?.resp_body_id as string;
-    expect(respBodyId.length).toBeGreaterThan(0);
-    trackedBodyIds.push(respBodyId);
-
-    const recorded = await bodyStorage.load(respBodyId) as {
-      kind: string;
-      totalMessages: number;
-      capturedMessages: number;
-      droppedMessages: number;
-      messages: Array<{ event?: string; done?: boolean; dataText: string }>;
-    };
-
-    expect(recorded.kind).toBe('sse_messages');
-    expect(recorded.totalMessages).toBe(expectedMessageCount);
-    expect(recorded.capturedMessages).toBe(expectedMessageCount);
-    expect(recorded.droppedMessages).toBe(0);
-    expect(recorded.messages.length).toBe(expectedMessageCount);
-    expect(recorded.messages[0]?.event).toBe('message_start');
-    expect(recorded.messages[1]?.event).toBe('content_block_delta');
-    expect(recorded.messages[1]?.dataText.includes(longSuffix)).toBeTrue();
-    expect(recorded.messages[expectedMessageCount - 1]?.done).toBeTrue();
+    expect(row?.resp_body_id).toBeNull();
+    expect(steps).toHaveBeenCalledWith('body_logging_incomplete', { direction: 'response', reason: 'opaque_body_not_observed', observer_incomplete: true });
+    steps.mockRestore();
   });
 
   test('does not record streamed body when body logging is disabled', async () => {

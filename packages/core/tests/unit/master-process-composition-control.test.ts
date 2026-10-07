@@ -86,7 +86,7 @@ test('composition retains ACKed serving/draining snapshots and installs the peer
     const pluginRoot = join(root, 'fake-control');
     await mkdir(pluginRoot, { recursive: true });
     await writeFile(join(pluginRoot, 'manifest.json'), JSON.stringify({
-      name: 'fake-control', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin', main: 'main.ts',
+      name: 'fake-control', version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin', main: 'main.ts',
       control: { entry: 'control.ts', rpc: [{ name: 'refresh', access: 'bound-attempt' }] },
       capabilities: ['hooks', 'controlPlane', 'dynamicRuntimeLoad'], uiExtensionMode: 'none', engines: { bungee: '^4.3.0 || ^5.0.0' }, configSchema: [],
     }));

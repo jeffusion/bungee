@@ -272,11 +272,11 @@ describe('data-plane final regressions', () => {
       apply(target, thisArg, args) {
         const [callback, delay, ...callbackArgs] = args;
         if (delay === 250 && typeof callback === 'function') {
-          cleanupTimer = target.apply(thisArg, [callback, 60_000, ...callbackArgs]);
+          cleanupTimer = Reflect.apply(target, thisArg, [callback, 60_000, ...callbackArgs]);
           deadlineScheduled(() => callback(...callbackArgs));
           return cleanupTimer;
         }
-        return target.apply(thisArg, args);
+        return Reflect.apply(target, thisArg, args);
       },
     });
     const timer = spyOn(globalThis, 'setTimeout').mockImplementation(timerImplementation);

@@ -170,8 +170,7 @@ plugins/
 {
   "name": "token-stats",
   "version": "1.0.0",
-  "manifestContract": "vnext",
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "artifactKind": "runtime-plugin",
   "main": "dist/index.js",
   "uiExtensionMode": "sandbox-iframe",
@@ -191,8 +190,7 @@ plugins/
 {
   "name": "token-stats",
   "version": "1.0.0",
-  "manifestContract": "vnext",
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "artifactKind": "runtime-plugin",
   "main": "dist/index.js",
   "uiExtensionMode": "native-static",
@@ -209,8 +207,7 @@ plugins/
 
 | 字段 | 类型 | 必填 | 描述 |
 |------|------|------|------|
-| `manifestContract` | string | ✅ | 契约版本，固定为 `"vnext"` |
-| `schemaVersion` | number | ✅ | Manifest 结构版本，当前为 `2` |
+| `schemaVersion` | number | ✅ | Manifest 结构版本，当前为 `3` |
 | `artifactKind` | string | ✅ | 产物类型，当前仅支持 `"runtime-plugin"` |
 | `main` | string | ✅ | 服务端入口产物路径（相对于插件根目录） |
 | `uiExtensionMode` | string | ✅ | UI 模式：`none`, `native-static`, `sandbox-iframe` |
@@ -309,6 +306,7 @@ packages/core/dist/plugins/
 
 ```typescript
 class MyPlugin implements Plugin {
+  bodyRequirements(): PluginBodyRequirements { return { request: 'none' }; }
   static readonly name = 'my-plugin';
   static readonly version = '1.0.0';
 
@@ -335,7 +333,6 @@ class MyPlugin implements Plugin {
 {
   "name": "token-stats",
   "version": "1.0.0",
-  "manifestContract": "vnext",
   "main": "dist/index.js",
   "contributes": {
     "api": [
@@ -348,6 +345,7 @@ class MyPlugin implements Plugin {
 **server/index.ts**（Source）:
 ```typescript
 class TokenStatsPlugin implements Plugin {
+  bodyRequirements(): PluginBodyRequirements { return { request: 'none' }; }
   static readonly name = 'token-stats';
   static readonly version = '1.0.0';
 
@@ -515,9 +513,11 @@ interface Plugin {
 ### Simple Example: Header Transformer
 
 ```typescript
-import type { Plugin, PluginContext } from '../plugin.types';
+import type { Plugin, PluginBodyRequirements, PluginContext } from '../plugin.types';
 
 export default class CustomHeaderPlugin implements Plugin {
+
+  bodyRequirements(): PluginBodyRequirements { return { request: 'none' }; }
   name = 'custom-header-transformer';
   version = '1.0.0';
 
@@ -537,9 +537,11 @@ export default class CustomHeaderPlugin implements Plugin {
 ### Stream Transformer Example
 
 ```typescript
-import type { Plugin, StreamChunkContext } from '../plugin.types';
+import type { Plugin, PluginBodyRequirements, StreamChunkContext } from '../plugin.types';
 
 export default class CustomStreamPlugin implements Plugin {
+
+  bodyRequirements(): PluginBodyRequirements { return { request: 'none' }; }
   name = 'custom-stream-transformer';
 
   async processStreamChunk(
@@ -1233,6 +1235,7 @@ async onBeforeRequest(ctx: PluginContext): Promise<void> {
 
 ```typescript
 export class OpenAIToAnthropicPlugin implements Plugin {
+  bodyRequirements(): PluginBodyRequirements { return { request: 'json-write' }; }
   name = 'my-format-plugin';
 
   async onBeforeRequest(ctx: PluginContext): Promise<void> {
@@ -1362,6 +1365,8 @@ interface MyPluginOptions {
 }
 
 export default class MyPlugin implements Plugin {
+
+  bodyRequirements(): PluginBodyRequirements { return { request: 'none' }; }
   name = 'my-plugin';
 
   constructor(private options: MyPluginOptions = {}) {
@@ -1430,5 +1435,34 @@ For OpenAI Messages compatibility adapter examples, see:
 - [OpenAI Messages/Responses Compatibility Guide](./openai-messages-to-chat.md)
 - [Plugin Registry Implementation](../packages/core/src/plugin-registry.ts)
 - [Plugin Type Definitions](../packages/core/src/plugin.types.ts)
-- [Stream Executor](../packages/core/src/stream-executor.ts)
+- [HTTP/SSE response pipeline](../packages/core/src/worker/response/processor.ts)
 - [Test Examples](../packages/core/tests/plugin-registry.test.ts)
+
+## SDK 3 的内容需求与 SSE 封套
+
+所有 runtime 插件实例、factory handler 都必须实现同步 `bodyRequirements(context): PluginBodyRequirements`。缺少方法会使初始化失败；不根据旧 Hook 自动推断，也不支持旧插件回退。manifest 使用 `schemaVersion: 3`，不增加 compatibility 字段。
+
+`context` 包含 `requestId`、`method`、`url: URL`、`routeId?`、`serviceId?`、`upstreamId?` 和 `stage: 'route' | 'selected'`。只对当前阶段实际参与的插件求值，endpoint 插件选中后才参与。需求必须按路径和实际开启的功能返回。
+
+```typescript
+import type { PluginBodyRequirementContext, PluginBodyRequirements } from '../packages/core/src/plugin.types';
+bodyRequirements(ctx: PluginBodyRequirementContext): PluginBodyRequirements {
+  return this.enabled && ctx.method === 'POST' && ctx.url.pathname === '/v1/messages'
+    ? { request: 'json-write', response: ['json', 'sse-json'] }
+    : { request: 'none' };
+}
+```
+
+`request: 'none'` 不读取内容；`json-read` 提供只读 JSON 视图但发送原始 wire 字节；`json-write` 才允许序列化改写。`replay: true` 独立声明重放保留。元数据插件应返回 none。上文较早的直接方法示例仅说明算法，当前运行时仍需通过 `register(hooks)` 注册。
+
+可降级观测使用 `observe: { request: true, response: true, sse: true }`，不会把主转发升级为必需 JSON。单请求/JSON/SSE 事件最多 1 MiB，每请求队列 256 KiB，worker 合计 16 MiB，回调期限 250 ms；溢出、解码失败、不支持编码或慢消费者只生成 incomplete，继续转发。强制预算通过有效策略的准入需求独立要求内容，不能因可选统计故障放宽。
+
+`onStreamChunk` 接收和返回 `SSEEnvelope`，`onFlushStream` 返回封套数组。封套字段为 `data: string`、`json?`、`event?`、`id?`、`retry?`、`comments?`、`raw?`；N:M 每个输出拥有自己的封套。修改后清除 raw 并更新 data/json；保留独立 metadata，不向 JSON 注入 `_event`，不按 JSON.type 推断原始 event。新协议事件由转换器显式填写 event。
+
+```typescript
+hooks.onStreamChunk.tap('example', envelope => {
+  if (!envelope.json || typeof envelope.json !== 'object') return null;
+  const json = { ...envelope.json, customField: true };
+  return [{ ...envelope, raw: undefined, data: JSON.stringify(json), json }];
+});
+```

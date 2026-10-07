@@ -75,17 +75,6 @@ function toV2Plugins(
   });
 }
 
-function toV2Headers(
-  headers: NonNullable<EditorUpstream['headers']>,
-): NonNullable<EditorUpstream['headers']> {
-  const { add, replace, remove } = headers;
-  return {
-    ...(add === undefined ? {} : { add }),
-    ...(replace === undefined ? {} : { replace }),
-    ...(remove === undefined ? {} : { remove }),
-  };
-}
-
 export function toEditorUpstream(upstream: UpstreamV2): EditorUpstream {
   assertManagedBinding(upstream.managedBy, upstream.plugins);
   const { id, position, plugins, ...policy } = upstream;
@@ -170,13 +159,12 @@ function toV2Upstreams(
     if (match?.managedBy && !upstream.managedBy) throw new ManagedBindingError();
     assertManagedBinding(upstream.managedBy, upstream.plugins);
     const {
-      _uid, _position, plugins = [], headers, condition, ...policy
+      _uid, _position, plugins = [], condition, ...policy
     } = upstream;
     return {
       ...policy,
       // A cleared optional condition means unconditional, not an empty expression.
       ...(condition === undefined || condition.trim() === '' ? {} : { condition }),
-      ...(headers === undefined ? {} : { headers: toV2Headers(headers) }),
       id: match?.id ?? _uid ?? uuidv4(),
       position: match?.position ?? nextPosition++,
       weight: upstream.weight ?? match?.weight ?? 100,
@@ -244,11 +232,10 @@ export function toV2Route(
   position: number,
 ): RouteV2 {
   const {
-    _uid, _position, _serviceId, service, endpoints = [], plugins = [], transformer, headers, auth: _legacyAuth, ...policy
+    _uid, _position, _serviceId, service, service_id: _runtimeServiceId, endpoints = [], plugins = [], transformer, auth: _legacyAuth, ...policy
   } = route as EditorRoute & {auth?:unknown};
   const base = {
     ...policy,
-    ...(headers === undefined ? {} : { headers: toV2Headers(headers) }),
     id: previous?.id ?? uuidv4(),
     position: previous?.position ?? position,
     plugins: toV2Plugins(plugins, previous?.plugins ?? []),

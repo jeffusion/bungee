@@ -17,6 +17,8 @@ client -> stable public listener -> admitted worker -> route -> service -> upstr
 
 The listener selects one admitted worker per request and streams the request and response without retrying. Internal transport uses a master-generation secret and restores the original URL and host before routing.
 
+HTTP bodies are opaque streams by default. Worker rules, explicit plugin requirements, and effective admission policies request content views only when needed; read-only views preserve original wire bytes. All HTTP response bodies share completion, cancellation, and drain handling. See [HTTP body architecture](http-body-architecture.md) for directional rules, decoding and replay limits, SSE envelopes, and bounded observers.
+
 ## Revision Publication
 
 1. The control API commits a complete aggregate to `data/bungee.db` using `expected_revision`.

@@ -2,7 +2,7 @@
   "name": "key-rate-limit",
   "version": "1.0.0",
   "builtin": true,
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "artifactKind": "runtime-plugin",
   "runtimeScope": "global",
   "main": "server/index.ts",

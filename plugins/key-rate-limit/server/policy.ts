@@ -19,6 +19,7 @@ function refill(state: DurableJson, now: number): Bucket {
   return {...prior,at,tokens:Math.min(prior.burst,prior.tokens+(at-prior.at)/1000*prior.rps)};
 }
 export function createIngress(): IngressPlugin { return {
+  bodyRequirements() { return { request: 'none' }; },
   keyedState: {
     capacity: 10000,
     policyForKey(value,key) { return (value as any)?.byKey?.[key] ?? null; },

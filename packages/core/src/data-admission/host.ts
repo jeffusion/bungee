@@ -71,7 +71,7 @@ export class DataAdmissionHost {
       const module = await (this.options.loadPlugin ?? (entry => import(entry)))(publication.entry);
       if (typeof module.createIngress !== 'function') throw new Error('ingress plugin must export createIngress');
       const plugin = module.createIngress();
-      if (typeof plugin.plan !== 'function') throw new Error('invalid ingress plugin');
+      if (typeof plugin.plan !== 'function' || typeof plugin.bodyRequirements !== 'function') throw new Error('invalid ingress plugin');
       const previous = this.plugins.find(p => p.publication.name === publication.name && p.publication.entry === publication.entry);
       plugins.push({ publication: plugin.keyedState ? freezeJson(structuredClone(publication)) : structuredClone(publication), plugin, state: previous?.state ?? null,
         ...(plugin.keyedState ? {keyed: previous?.keyed ?? new KeyedAdmissionState(plugin.keyedState.capacity)} : {}) });
@@ -124,6 +124,28 @@ export class DataAdmissionHost {
       } catch { /* Protected-route admission independently fails closed. */ }
     }
     return ANONYMOUS_PRINCIPAL;
+  }
+  /** Policy inspection performs identity/protection checks without planning or debiting. */
+  inspect(target: AdmissionTarget, worker: RateLimitWorkerIdentity): {policyVersion:number;requirements:Record<string,{request:'none'|'json-read'}>} {
+    if (this.blocked) throw new DataAdmissionError(503,'admission_state_unavailable');
+    if (this.publicationAdmissionSequence !== undefined && this.options.admissionSequence?.() !== this.publicationAdmissionSequence) throw new DataAdmissionError(503,'admission_worker_set_changed');
+    if (this.options.authorizeWorker(worker) !== 'active') throw new DataAdmissionError(503,'admission_worker_not_active');
+    for (const requirement of this.routeRequirements) if (requirement.routeIds.includes(target.routeId)
+      && !this.plugins.some(runtime=>runtime.publication.name === requirement.plugin && runtime.plugin.resolveIdentity)) throw new DataAdmissionError(503,'route_protection_unavailable');
+    let principal = ANONYMOUS_PRINCIPAL;
+    for (const runtime of this.plugins) if (runtime.plugin.resolveIdentity) {
+      try { principal = runtime.plugin.resolveIdentity({...target,now:this.now()},structuredClone(runtime.publication.policy)); }
+      catch (error) { throw normalizeAdmissionError(error) ?? new DataAdmissionError(503,'route_protection_unavailable'); }
+    }
+    if (principal.domain === 'anonymous' && this.routeRequirements.some(requirement=>requirement.routeIds.includes(target.routeId))) throw new DataAdmissionError(503,'route_protection_unavailable');
+    const requirements: Record<string,{request:'none'|'json-read'}> = {};
+    for (const runtime of this.plugins) {
+      if (typeof runtime.plugin.bodyRequirements !== 'function') throw new DataAdmissionError(503,'admission_body_requirements_missing');
+      const demand = runtime.plugin.bodyRequirements({...target,principal,now:this.now()},structuredClone(runtime.publication.policy));
+      if (!demand || !['none','json-read'].includes(demand.request)) throw new DataAdmissionError(503,'admission_body_requirements_invalid');
+      requirements[runtime.publication.name] = demand;
+    }
+    return {policyVersion:this.version,requirements};
   }
   admit(target: AdmissionTarget, worker: RateLimitWorkerIdentity, preview = false, expectedVersion?: number): AdmissionGrant {
     if (expectedVersion !== undefined && expectedVersion !== this.version) throw new DataAdmissionError(409, 'admission_version_changed');

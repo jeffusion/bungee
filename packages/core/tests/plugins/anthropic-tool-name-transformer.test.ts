@@ -159,7 +159,7 @@ describe('anthropic-tool-name-transformer plugin', () => {
     expect(data.content[0].input.plain).toBe('not-json');
   });
 
-  test('keeps original response body readable when upstream JSON is invalid', async () => {
+  test('rejects invalid JSON when response processing is mandatory', async () => {
     const fetchMock = mock(async (request: Request | string, _init?: RequestInit) => {
       const url = typeof request === 'string' ? request : request.url;
       if (url.includes('mock-anthropic.com')) {
@@ -190,12 +190,10 @@ describe('anthropic-tool-name-transformer plugin', () => {
     const response = await handleRequest(req, config);
     const text = await response.text();
 
-    expect(text).toBe('{invalid');
-    expect(response.status).toBe(418);
-    expect(response.statusText).toBe("I'm a teapot");
-    expect(response.headers.get('content-type')).toBe('application/json');
-    expect(response.headers.get('content-length')).toBe('8');
-    expect(response.headers.get('x-upstream-trace')).toBe('invalid-json');
+    expect(JSON.parse(text)).toMatchObject({ error: 'invalid_response_body', code: 'invalid_response_body' });
+    expect(response.status).toBe(502);
+    expect(response.headers.get('content-type')).toContain('application/json');
+    expect(response.headers.get('content-length')).not.toBe('8');
   });
 
   test('transforms tool_use name in SSE content_block_start', async () => {

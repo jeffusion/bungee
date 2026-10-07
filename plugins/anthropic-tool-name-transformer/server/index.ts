@@ -132,6 +132,8 @@ function fixSerializedInputs(body: any): boolean {
 // ============================================================
 
 interface ToolNameTransformerOptions {
+  /** Enable name mapping and PascalCase fallback (default true). */
+  transformNames?: boolean;
   /** 自定义名称映射（key=value 格式，每行一个） */
   nameMap?: string;
   /** 是否修复序列化的数组/对象，默认 true */
@@ -149,20 +151,27 @@ export const AnthropicToolNameTransformerPlugin = definePlugin(
 
     private nameMap: NameMap;
     private shouldFixArrays: boolean;
+    private readonly shouldTransformNames: boolean;
 
     constructor(options?: ToolNameTransformerOptions) {
       this.nameMap = parseNameMap(options?.nameMap);
       this.shouldFixArrays = options?.fixSerializedArrays !== false;
+      this.shouldTransformNames = options?.transformNames !== false;
     }
 
-    register(hooks: PluginHooks): void {
+    bodyRequirements(context: import('../../../packages/core/src/plugin.types').PluginBodyRequirementContext): import('../../../packages/core/src/plugin.types').PluginBodyRequirements {
+      const names = this.shouldTransformNames;
+      return { request: names && !/^(GET|HEAD)$/i.test(context.method) ? 'json-write' : 'none', response: [...(this.shouldFixArrays ? ['json' as const] : []), ...(names ? ['sse-json' as const] : [])] };
+    }
+
+  register(hooks: PluginHooks): void {
       const pluginName = 'anthropic-tool-name-transformer';
 
       // 1. 请求前处理：转换 tool name
       hooks.onBeforeRequest.tap(
         { name: pluginName, stage: 0 },
         (ctx) => {
-          transformRequestBody(ctx.body, this.nameMap);
+          if (this.shouldTransformNames) transformRequestBody(ctx.body, this.nameMap);
           return ctx;
         }
       );
@@ -201,64 +210,16 @@ export const AnthropicToolNameTransformerPlugin = definePlugin(
       // 3. SSE 流式响应：转换 content_block_start 中的 tool_use name
       hooks.onStreamChunk.tap(
         { name: pluginName, stage: 0 },
-        (chunk, _ctx) => {
-          if (isRecord(chunk)) {
-            const block = chunk.content_block;
-            if (
-              chunk.type === 'content_block_start' &&
-              isRecord(block) &&
-              block.type === 'tool_use' &&
-              typeof block.name === 'string'
-            ) {
-              block.name = mapName(block.name, this.nameMap);
-            }
-            return [chunk];
-          }
-
-          if (typeof chunk !== 'string' && !(chunk instanceof Uint8Array)) {
-            return [chunk];
-          }
-
-          const sourceText = typeof chunk === 'string'
-            ? chunk
-            : new TextDecoder().decode(chunk);
-
-          const lines = sourceText.split('\n');
-          let modified = false;
-
-          for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
-            if (!line.startsWith('data:')) continue;
-
-            const jsonStr = line.slice(5).trim();
-            if (!jsonStr || jsonStr === '[DONE]') continue;
-
-            try {
-              const data = JSON.parse(jsonStr);
-              if (
-                data.type === 'content_block_start' &&
-                data.content_block?.type === 'tool_use' &&
-                data.content_block.name
-              ) {
-                data.content_block.name = mapName(data.content_block.name, this.nameMap);
-                lines[i] = 'data: ' + JSON.stringify(data);
-                modified = true;
-              }
-            } catch {
-              // 非合法 JSON SSE 行，跳过
-            }
-          }
-
-          if (!modified) {
-            return [chunk];
-          }
-
-          const output = lines.join('\n');
-          if (typeof chunk === 'string') {
-            return [output];
-          }
-
-          return [new TextEncoder().encode(output)];
+        (envelope, _ctx) => {
+          if (!this.shouldTransformNames) return null;
+          const chunk = envelope.json;
+          if (!isRecord(chunk)) return null;
+          const block = chunk.content_block;
+          if (chunk.type !== 'content_block_start' || !isRecord(block) || block.type !== 'tool_use' || typeof block.name !== 'string') return null;
+          const name = mapName(block.name, this.nameMap);
+          if (name === block.name) return null;
+          const json = { ...chunk, content_block: { ...block, name } };
+          return [{ ...envelope, raw: undefined, data: JSON.stringify(json), json }];
         }
       );
     }

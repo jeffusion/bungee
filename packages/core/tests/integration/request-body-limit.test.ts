@@ -49,7 +49,8 @@ describe('request body limits and error records', () => {
   test('returns one logged 413 with a saved response for declared and chunked oversized bodies', async () => {
     for (const declared of [true, false]) {
       const path = uniquePath();
-      const config: AppConfig = { body_parser_limit: '1kb', routes: [{ path, endpoints: [] }] };
+      // A necessary rule reads the chunked body before upstream selection.
+      const config: AppConfig = { body_parser_limit: '1kb', routes: [{ path, endpoints: [], request:{headers:{add:{'x-check':'{{body.checked}}'}}} }] };
       const body = JSON.stringify({ data: 'x'.repeat(1024) });
       const req = new Request(`http://localhost${path}`, {
         method: 'POST', headers: { 'content-type': 'application/json', ...(declared ? { 'content-length': String(body.length) } : {}) },
@@ -146,12 +147,14 @@ describe('request body limits and error records', () => {
       expect(JSON.parse(transportRejection.body)).toMatchObject({
         code: 'request_body_too_large', limit_bytes: 1024, received_bytes: 129 * 1024 * 1024,
       });
-      expect(upstreamCalls).toBe(1);
+      // Declared oversize is rejected before dispatch; chunked oversize can
+      // reach the upstream before the streaming counter rejects its body.
+      expect(upstreamCalls).toBe(2);
       await accessLogWriter.flush();
       const failures = accessLogWriter.getDatabase().query('SELECT resp_body_id,error_message FROM access_logs WHERE path=? AND status=413').all(path) as Record<string, any>[];
       expect(failures).toHaveLength(3);
       for (const failure of failures) {
-        expect(failure.error_message).toContain('Request body too large');
+        expect(failure.error_message).toBe('request_body_too_large');
         expect(await bodyStorage.load(failure.resp_body_id)).toMatchObject({ code: 'request_body_too_large' });
       }
     } finally {
@@ -164,8 +167,11 @@ describe('request body limits and error records', () => {
   test('uses the current global limit on subsequent requests', async () => {
     const path = uniquePath();
     const req = () => new Request(`http://localhost${path}`, { method: 'POST', body: 'x'.repeat(1500) });
-    const routes: AppConfig['routes'] = [{ path, endpoints: [], direct_response: { enabled: true, status: 200 } }];
-    expect((await handleRequest(req(), { routes, body_parser_limit: '2kb' }, { logging: logging() })).status).toBe(200);
+    const upstream = Bun.serve({port:0,hostname:'127.0.0.1',async fetch(request){await request.arrayBuffer();return new Response('ok');}});
+    servers.push(upstream);
+    const routes: AppConfig['routes'] = [{ path, endpoints: [{target:upstream.url.origin}] }];
+    const accepted=await handleRequest(req(), { routes, body_parser_limit: '2kb' }, { logging: logging() });
+    expect(accepted.status).toBe(200);await accepted.text();
     expect((await handleRequest(req(), { routes, body_parser_limit: '1kb' }, { logging: logging() })).status).toBe(413);
   });
 });

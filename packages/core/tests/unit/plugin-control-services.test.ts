@@ -43,7 +43,7 @@ function serviceRecord(name: string, character: string, options: ServiceRecordOp
     manifest: {
       name,
       version: '1.0.0',
-      schemaVersion: 2,
+      schemaVersion: 3,
       artifactKind: 'runtime-plugin',
       main: 'main.ts',
       capabilities: ['api', 'dynamicRuntimeLoad', 'controlPlane'],

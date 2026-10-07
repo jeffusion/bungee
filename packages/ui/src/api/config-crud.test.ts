@@ -4,7 +4,6 @@ import { RouteStaleError, RoutesAPI } from './routes';
 import { ServicesAPI, ServiceStaleError } from './services';
 import { ManagedBindingError, toEditorRoute, toEditorService } from './config-adapters';
 import { ConfigurationStaleError } from './config';
-import type { EditorRoute, EditorUpstream } from './config-adapters';
 
 const aggregate: ConfigurationAggregateV2 = {
   logical_configuration: {
@@ -378,10 +377,7 @@ describe('v2 route and service CRUD adapters', () => {
         target: 'https://alpha.example.com',
         weight: 100,
         priority: 1,
-        headers: {
-          add: { 'x-test': 'yes' },
-          default: { legacy: 'must-not-persist' },
-        } as unknown as NonNullable<EditorUpstream['headers']>,
+        request: { headers: { add: { 'x-test': 'yes' } } },
         plugins: [{ name: 'endpoint-plugin', enabled: true }],
       }],
       plugins: [{ name: 'service-plugin', enabled: true }],
@@ -395,7 +391,7 @@ describe('v2 route and service CRUD adapters', () => {
     expect(logical.services[0].endpoints[0].position).toBe(0);
     expect(logical.services[0].endpoints[0].plugins[0].id).toBe('endpoint-plugin-id');
     expect(logical.services[0].endpoints[0].plugins[0]).toMatchObject({ position: 3, options: { mode: 'strict' } });
-    expect(logical.services[0].endpoints[0].headers).toEqual({ add: { 'x-test': 'yes' } });
+    expect(logical.services[0].endpoints[0].request.headers).toEqual({ add: { 'x-test': 'yes' } });
     expect(logical.services[0].plugins[0].id).toBe('service-plugin-id');
     expect(logical.services[0].plugins[0]).toMatchObject({ position: 4, options: { sample: 0.5 } });
     expect(logical.routes[0]).toMatchObject({ id: 'route-id', service_id: 'service-id' });
@@ -413,10 +409,7 @@ describe('v2 route and service CRUD adapters', () => {
     await RoutesAPI.create({
       path: '/new',
       service: 'alpha',
-      headers: {
-        remove: ['x-remove'],
-        default: { legacy: 'must-not-persist' },
-      } as unknown as NonNullable<EditorRoute['headers']>,
+      request: { headers: { remove: ['x-remove'] } },
       plugins: [{ name: 'route-plugin' }],
     });
 
@@ -427,7 +420,7 @@ describe('v2 route and service CRUD adapters', () => {
     expect(created.position).toBe(1);
     expect(created.service_id).toBe('service-id');
     expect('service' in created).toBe(false);
-    expect(created.headers).toEqual({ remove: ['x-remove'] });
+    expect(created.request.headers).toEqual({ remove: ['x-remove'] });
     expect(created.plugins[0]).toMatchObject({ position: 0, name: 'route-plugin', enabled: true });
     expect(created.plugins[0].id).toBeString();
   });

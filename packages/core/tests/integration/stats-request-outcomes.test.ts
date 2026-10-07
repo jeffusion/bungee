@@ -146,22 +146,24 @@ describe('stats request outcomes over real HTTP', () => {
   }, 15_000);
 
   for (const protocol of ['responses', 'chat', 'anthropic'] as const) {
-    test(`keeps ${protocol} terminal followed by immediate client abort successful`, async () => {
+    test(`records cancelled after opaque ${protocol} terminal-shaped bytes and immediate client abort`, async () => {
       const scenario = `terminal-${protocol}`;
       const { result, rows } = await runScenario(scenario);
+      expect(result.payloadReceived).toBe(true);
       expect(rows(`/${scenario}`)).toEqual([expect.objectContaining({
-        status: 200, request_type: 'final', success: 1, protocol_outcome: 'completed',
+        status: 200, request_type: 'final', success: 0, protocol_outcome: 'cancelled',
       })]);
-      expect(result.stats).toMatchObject({ totalRequests: 1, successRequests: 1, failedRequests: 0 });
-      expect(result.upstreamStats).toEqual([expect.objectContaining({ totalRequests: 1, successRequests: 1, failedRequests: 0 })]);
+      expect(result.stats).toMatchObject({ totalRequests: 1, successRequests: 0, failedRequests: 1 });
+      expect(result.upstreamStats).toEqual([expect.objectContaining({ totalRequests: 1, successRequests: 0, failedRequests: 1 })]);
     }, 15_000);
   }
 
   for (const [scenario, outcome] of [
-    ['terminal-incomplete', 'incomplete'], ['terminal-failed', 'failed'], ['terminal-truncated', 'cancelled'],
+    ['terminal-incomplete', 'cancelled'], ['terminal-failed', 'cancelled'], ['terminal-truncated', 'cancelled'],
   ]) {
-    test(`preserves ${outcome} for ${scenario} followed by client abort`, async () => {
+    test(`records ${outcome} for opaque ${scenario} bytes followed by client abort`, async () => {
       const { result, rows } = await runScenario(scenario);
+      expect(result.payloadReceived).toBe(true);
       expect(rows(`/${scenario}`)).toEqual([expect.objectContaining({
         status: 200, success: 0, protocol_outcome: outcome,
       })]);
@@ -169,17 +171,18 @@ describe('stats request outcomes over real HTTP', () => {
     }, 15_000);
   }
 
-  test('counts a completed failover chain once while retaining the failed upstream attempt', async () => {
+  test('counts an opaque client-cancelled failover chain once while retaining the failed upstream attempt', async () => {
     const { result, rows } = await runScenario('terminal-failover');
+    expect(result.payloadReceived).toBe(true);
     const attempts = rows('/terminal-failover');
     expect(result.upstreamHits).toBe(2);
     expect(attempts).toEqual([
       expect.objectContaining({ status: 503, request_type: 'retry', success: 0 }),
-      expect.objectContaining({ status: 200, request_type: 'final', success: 1, protocol_outcome: 'completed' }),
+      expect.objectContaining({ status: 200, request_type: 'final', success: 0, protocol_outcome: 'cancelled' }),
     ]);
     expect(attempts[0].parent_request_id).toBe(attempts[1].parent_request_id);
-    expect(result.stats).toMatchObject({ totalRequests: 1, successRequests: 1, failedRequests: 0 });
-    expect(result.upstreamStats).toEqual([expect.objectContaining({ totalRequests: 2, successRequests: 1, failedRequests: 1 })]);
+    expect(result.stats).toMatchObject({ totalRequests: 1, successRequests: 0, failedRequests: 1 });
+    expect(result.upstreamStats).toEqual([expect.objectContaining({ totalRequests: 2, successRequests: 0, failedRequests: 2 })]);
   }, 15_000);
 
   test('records client abort as one final attempt without selecting fallback', async () => {

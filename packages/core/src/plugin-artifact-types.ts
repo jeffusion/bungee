@@ -1,7 +1,7 @@
 import type { LoadedPluginManifest, PluginManifest } from './plugin.types';
 
 export { CORE_HOST_VERSION } from './core-version';
-export const CURRENT_PLUGIN_SCHEMA_VERSION = 2;
+export const CURRENT_PLUGIN_SCHEMA_VERSION = 3;
 export const VALID_PLUGIN_UI_EXTENSION_MODES = ['none', 'native-static', 'sandbox-iframe'] as const;
 export const VALID_PLUGIN_ARTIFACT_KINDS = ['runtime-plugin'] as const;
 export const SUPPORTED_PLUGIN_CAPABILITIES = [

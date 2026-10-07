@@ -18,7 +18,7 @@ function fixture(): { root: string; pluginPath: string } {
   writeFileSync(pluginPath, `export default class BindingAggregationPlugin {
     static name = '${pluginName}';
     static version = '1.0.0';
-    static async createHandler() { return { pluginName: '${pluginName}', register() {} }; }
+    static async createHandler() { return { pluginName: '${pluginName}', bodyRequirements() { return { request: 'none' }; }, register() {} }; }
   }`);
   writeRuntimeTestManifest(pluginPath, pluginName);
   return { root, pluginPath };
@@ -30,7 +30,7 @@ function writePlugin(root: string, name: string): string {
   writeFileSync(pluginPath, `export default class TestPlugin {
     static name = '${name}';
     static version = '1.0.0';
-    static async createHandler() { return { pluginName: '${name}', register() {} }; }
+    static async createHandler() { return { pluginName: '${name}', bodyRequirements() { return { request: 'none' }; }, register() {} }; }
   }`);
   writeRuntimeTestManifest(pluginPath, name);
   return pluginPath;

@@ -42,11 +42,11 @@ function createPrecompiledHooks(options?: {
   }
 
   return {
-    handlers: [],
+    handlers: [{pluginName:'test-plugin',config:{},bodyRequirements(){return {request:'none',response:options?.onStreamChunk || options?.onFlushStream ? ['sse-json'] : []};},register(){}}],
     hooks,
     hasInterceptCallbacks: false,
     hasResponseCallbacks: false,
-    hasStreamCallbacks: hooks.onStreamChunk.hasCallbacks(),
+    hasStreamCallbacks: hooks.onStreamChunk.hasCallbacks() || hooks.onFlushStream.hasCallbacks(),
     metadata: {
       createdAt: Date.now(),
       pluginCount: 1,
@@ -256,7 +256,7 @@ describe('plugin onFinally lifecycle', () => {
 
     const response = await handleRequest(request, config);
     expect(response.status).toBe(200);
-    await response.text();
+    await expect(response.text()).rejects.toThrow();
 
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({

@@ -1,3 +1,4 @@
+import { validateDirectionalRules } from './directional-validator';
 import { resolveRouteEndpoints, type Route, type Service } from '$api/routes';
 import { validateUpstream } from './upstream-validator';
 import { _ } from '$i18n';
@@ -10,7 +11,7 @@ export interface ValidationError {
 }
 
 export async function validateRoute(route: Partial<Route>, services: Service[] = []): Promise<ValidationError[]> {
-  const errors: ValidationError[] = [];
+  const errors: ValidationError[] = validateDirectionalRules(route);
   const endpoints = resolveRouteEndpoints(route, services);
 
   if (!route.path) {

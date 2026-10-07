@@ -129,11 +129,12 @@ plugins/my-plugin/
 ### 2. 实现插件类
 
 ```typescript
-import type { Plugin, PluginHooks, PluginInitContext } from '@jeffusion/bungee-types';
+import type { Plugin, PluginBodyRequirements, PluginHooks, PluginInitContext } from '@jeffusion/bungee-types';
 import { definePlugin } from '@jeffusion/bungee-types';
 
 export const MyPlugin = definePlugin(
   class implements Plugin {
+    bodyRequirements(): PluginBodyRequirements { return { request: 'none' }; }
     // 静态元数据（必需，需与 manifest.json 一致）
     static readonly name = 'my-plugin';
     static readonly version = '1.0.0';
@@ -160,12 +161,11 @@ export default MyPlugin;
 {
   "name": "my-plugin",
   "version": "1.0.0",
-  "manifestContract": "vnext",
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "artifactKind": "runtime-plugin",
   "main": "dist/index.js",
   "uiExtensionMode": "none",
-  "capabilities": ["hooks"],
+  "capabilities": ["hooks", "dynamicRuntimeLoad"],
   "engines": {
     "bungee": "^4.2.0"
   }
@@ -239,6 +239,7 @@ import type { PluginConfigField } from '../../plugin.types';
 
 export const MyPlugin = definePlugin(
   class implements Plugin {
+    bodyRequirements(): PluginBodyRequirements { return { request: 'none' }; }
     static readonly name = 'my-plugin';
     static readonly version = '1.0.0';
     static readonly description = 'My plugin with configuration';
@@ -398,6 +399,7 @@ async onInit(context: PluginInitContext): Promise<void> {
 ```typescript
 export const MyPlugin = definePlugin(
   class implements Plugin {
+    bodyRequirements(): PluginBodyRequirements { return { request: 'none' }; }
     static readonly name = 'my-plugin';
     static readonly version = '1.0.0';
     static readonly description = 'My plugin';
@@ -498,6 +500,7 @@ interface MyPluginOptions {
 
 export const MyPlugin = definePlugin(
   class implements Plugin {
+    bodyRequirements(): PluginBodyRequirements { return { request: 'none' }; }
     private options: MyPluginOptions;
 
     constructor(options: MyPluginOptions) {
@@ -588,12 +591,13 @@ async onInit(context: PluginInitContext): Promise<void> {
 ### 1. 简单的日志插件
 
 ```typescript
-import type { Plugin, PluginContext } from '../../plugin.types';
+import type { Plugin, PluginBodyRequirements, PluginContext } from '../../plugin.types';
 import { definePlugin } from '../../plugin.types';
 import { logger } from '../../logger';
 
 export const RequestLoggerPlugin = definePlugin(
   class implements Plugin {
+    bodyRequirements(): PluginBodyRequirements { return { request: 'none' }; }
     static readonly name = 'request-logger';
     static readonly version = '1.0.0';
     static readonly description = 'Log all incoming requests';
@@ -614,12 +618,13 @@ export default RequestLoggerPlugin;
 ### 2. 请求计数插件
 
 ```typescript
-import type { Plugin, PluginContext, PluginInitContext } from '../../plugin.types';
+import type { Plugin, PluginBodyRequirements, PluginContext, PluginInitContext } from '../../plugin.types';
 import { definePlugin } from '../../plugin.types';
 import { logger } from '../../logger';
 
 export const RequestCounterPlugin = definePlugin(
   class implements Plugin {
+    bodyRequirements(): PluginBodyRequirements { return { request: 'none' }; }
     static readonly name = 'request-counter';
     static readonly version = '1.0.0';
     static readonly description = 'Count requests by path';
@@ -645,7 +650,7 @@ export default RequestCounterPlugin;
 ### 3. API 转换插件
 
 ```typescript
-import type { Plugin, PluginContext } from '../../plugin.types';
+import type { Plugin, PluginBodyRequirements, PluginContext } from '../../plugin.types';
 import { definePlugin } from '../../plugin.types';
 
 interface TransformerOptions {
@@ -655,6 +660,10 @@ interface TransformerOptions {
 
 export const APITransformerPlugin = definePlugin(
   class implements Plugin {
+    bodyRequirements(): PluginBodyRequirements {
+      return this.options.from !== this.options.to
+        ? { request: 'json-write', response: ['json'] } : { request: 'none' };
+    }
     static readonly name = 'api-transformer';
     static readonly version = '1.0.0';
     static readonly description = 'Transform API requests between different formats';
@@ -775,5 +784,36 @@ A: 插件会增加一定的处理时间，建议：
 
 ---
 
-**最后更新**: 2025-12-14
-**版本**: v2.4.0
+**最后更新**: 2026-10-06
+**插件契约版本**: SDK 3
+
+## SDK 3 的内容需求与 SSE 封套
+
+所有 runtime 插件实例、factory handler 都必须实现同步 `bodyRequirements(context): PluginBodyRequirements`。缺少方法会使初始化失败；不根据旧 Hook 自动推断，也不支持旧插件回退。manifest 使用 `schemaVersion: 3`，不增加 compatibility 字段。
+
+`context` 包含 `requestId`、`method`、`url: URL`、`routeId?`、`serviceId?`、`upstreamId?` 和 `stage: 'route' | 'selected'`。只对当前阶段实际参与的插件求值，endpoint 插件选中后才参与。需求必须按路径和实际开启的功能返回。
+
+```typescript
+import type { PluginBodyRequirementContext, PluginBodyRequirements } from '../packages/core/src/plugin.types';
+bodyRequirements(ctx: PluginBodyRequirementContext): PluginBodyRequirements {
+  return this.enabled && ctx.method === 'POST' && ctx.url.pathname === '/v1/messages'
+    ? { request: 'json-write', response: ['json', 'sse-json'] }
+    : { request: 'none' };
+}
+```
+
+`request: 'none'` 不读取内容；`json-read` 提供只读 JSON 视图但发送原始 wire 字节；`json-write` 才允许序列化改写。`replay: true` 独立声明重放保留。元数据插件应返回 none。上文较早的直接方法示例仅说明算法，当前运行时仍需通过 `register(hooks)` 注册。
+
+可降级观测使用 `observe: { request: true, response: true, sse: true }`，不会把主转发升级为必需 JSON。单请求/JSON/SSE 事件最多 1 MiB，每请求队列 256 KiB，worker 合计 16 MiB，回调期限 250 ms；溢出、解码失败、不支持编码或慢消费者只生成 incomplete，继续转发。强制预算通过有效策略的准入需求独立要求内容，不能因可选统计故障放宽。
+
+`onStreamChunk` 接收和返回 `SSEEnvelope`，`onFlushStream` 返回封套数组。封套字段为 `data: string`、`json?`、`event?`、`id?`、`retry?`、`comments?`、`raw?`；N:M 每个输出拥有自己的封套。修改后清除 raw 并更新 data/json；保留独立 metadata，不向 JSON 注入 `_event`，不按 JSON.type 推断原始 event。新协议事件由转换器显式填写 event。
+
+```typescript
+hooks.onStreamChunk.tap('example', envelope => {
+  if (!envelope.json || typeof envelope.json !== 'object') return null;
+  const json = { ...envelope.json, customField: true };
+  return [{ ...envelope, raw: undefined, data: JSON.stringify(json), json }];
+});
+```
+
+`anthropic-tool-name-transformer` 的 `transformNames` 默认开启，保留自定义名称映射和 PascalCase 转换。只有显式关闭 `transformNames` 与 `fixSerializedArrays` 时，该插件不要求内容解析。

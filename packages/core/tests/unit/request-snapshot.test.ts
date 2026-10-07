@@ -1,5 +1,9 @@
-import { describe, it, expect } from 'bun:test';
-import { createRequestSnapshot, RequestBodyTooLargeError } from '../../src/worker/request/snapshot';
+import { afterEach, describe, it, expect } from 'bun:test';
+import { createRequestSnapshot, readSnapshotJson, RequestBodyTooLargeError } from '../../src/worker/request/snapshot';
+
+const owned: Array<NonNullable<Awaited<ReturnType<typeof createRequestSnapshot>>['bodySource']>> = [];
+afterEach(() => { for (const source of owned.splice(0)) source.dispose(); });
+async function capture(...args: Parameters<typeof createRequestSnapshot>) { const snapshot = await createRequestSnapshot(...args); owned.push(snapshot.bodySource!); return snapshot; }
 
 describe('createRequestSnapshot', () => {
   it('should capture request without body', async () => {
@@ -11,17 +15,17 @@ describe('createRequestSnapshot', () => {
       }
     });
 
-    const snapshot = await createRequestSnapshot(req);
+    const snapshot = await capture(req);
 
     expect(snapshot.method).toBe('GET');
     expect(snapshot.url).toBe('http://localhost/test');
     expect(snapshot.headers['user-agent']).toBe('test');
     expect(snapshot.headers['accept']).toBe('application/json');
-    expect(snapshot.body).toBeNull();
+    expect(snapshot.body).toBeUndefined();
     expect(snapshot.is_json_body).toBe(false);
   });
 
-  it('should capture JSON body correctly', async () => {
+  it('should capture metadata and read JSON only on demand', async () => {
     const testData = {
       name: 'test',
       value: 123,
@@ -36,9 +40,12 @@ describe('createRequestSnapshot', () => {
       body: JSON.stringify(testData)
     });
 
-    const snapshot = await createRequestSnapshot(req);
+    const snapshot = await capture(req);
 
     expect(snapshot.method).toBe('POST');
+    expect(snapshot.body).toBeUndefined();
+    expect(snapshot.is_json_body).toBe(false);
+    await readSnapshotJson(snapshot, 'test-read');
     expect(snapshot.is_json_body).toBe(true);
     expect(snapshot.body).toEqual(testData);
     expect(snapshot.content_type).toBe('application/json');
@@ -49,7 +56,7 @@ describe('createRequestSnapshot', () => {
     expect(testData.name).toBe('test'); // Original unchanged
   });
 
-  it('should capture binary body as ArrayBuffer', async () => {
+  it('should forward binary body without parsing', async () => {
     const binaryData = new Uint8Array([1, 2, 3, 4, 5]);
 
     const req = new Request('http://localhost/upload', {
@@ -60,15 +67,15 @@ describe('createRequestSnapshot', () => {
       body: binaryData
     });
 
-    const snapshot = await createRequestSnapshot(req);
+    const snapshot = await capture(req);
 
     expect(snapshot.method).toBe('POST');
     expect(snapshot.is_json_body).toBe(false);
-    expect(snapshot.body).toBeInstanceOf(ArrayBuffer);
+    expect(snapshot.body).toBeUndefined();
     expect(snapshot.content_type).toBe('application/octet-stream');
 
     // Verify ArrayBuffer content
-    const view = new Uint8Array(snapshot.body);
+    const view = new Uint8Array(await new Response(snapshot.bodySource!.take()).arrayBuffer());
     expect(Array.from(view)).toEqual([1, 2, 3, 4, 5]);
   });
 
@@ -83,7 +90,7 @@ describe('createRequestSnapshot', () => {
     });
 
     await expect(createRequestSnapshot(req)).rejects.toThrow(
-      /Request body too large/
+      /request_body_too_large/
     );
   });
 
@@ -93,9 +100,10 @@ describe('createRequestSnapshot', () => {
       const req = new Request('http://localhost/upload', {
         method: 'POST', headers: { 'content-type': 'application/json', 'content-length': String(body.length) }, body,
       });
-      const snapshot = await createRequestSnapshot(req, limit);
+      const snapshot = await capture(req, limit);
+      await readSnapshotJson(snapshot, 'large-json');
       expect(snapshot.body.data.length).toBe(11 * 1024 * 1024);
-      expect(req.bodyUsed).toBe(false);
+      expect(req.bodyUsed).toBe(true);
     }
   });
 
@@ -106,7 +114,7 @@ describe('createRequestSnapshot', () => {
       body: new ReadableStream({ pull() { reads += 1; } }, { highWaterMark: 0 }),
     });
     await expect(createRequestSnapshot(req, '1kb')).rejects.toMatchObject({
-      name: 'RequestBodyTooLargeError', maxBytes: 1024, receivedBytes: 1025,
+      status: 413, code: 'request_body_too_large', maxBytes: 1024, receivedBytes: 1025,
     });
     expect(reads).toBe(0);
   });
@@ -125,7 +133,9 @@ describe('createRequestSnapshot', () => {
           cancel() { cancelled = true; },
         }, { highWaterMark: 0 }),
       });
-      await expect(createRequestSnapshot(req, '1kb')).rejects.toBeInstanceOf(RequestBodyTooLargeError);
+      const snapshot = await capture(req, '1kb');
+      expect(reads).toBe(0);
+      await expect(new Response(snapshot.bodySource!.take()).arrayBuffer()).rejects.toMatchObject({ status: 413, code: 'request_body_too_large' });
       await Bun.sleep(0);
       expect(cancelled).toBe(true);
       expect(reads).toBeLessThanOrEqual(3);
@@ -138,16 +148,18 @@ describe('createRequestSnapshot', () => {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: json,
     });
     const size = Buffer.byteLength(json);
-    expect((await createRequestSnapshot(req, `${size}b`)).body).toEqual({ data: 'é' });
-    await expect(createRequestSnapshot(req, `${size - 1}b`)).rejects.toBeInstanceOf(RequestBodyTooLargeError);
+    const exact = await capture(req, `${size}b`);
+    expect(await readSnapshotJson(exact, 'exact')).toEqual({ data: 'é' });
+    const below = await capture(new Request('http://localhost/upload', { method: 'POST', body: json }), `${size - 1}b`);
+    await expect(readSnapshotJson(below, 'below')).rejects.toMatchObject({ status: 413 });
     const binary = new Uint8Array([0, 255, 128, 42]);
-    const snapshot = await createRequestSnapshot(new Request('http://localhost/upload', {
+    const snapshot = await capture(new Request('http://localhost/upload', {
       method: 'POST', body: binary,
     }), '4b');
-    expect(new Uint8Array(snapshot.body)).toEqual(binary);
+    expect(new Uint8Array(await new Response(snapshot.bodySource!.take()).arrayBuffer())).toEqual(binary);
   });
 
-  it('should reject invalid JSON body', async () => {
+  it('should reject invalid JSON only on an explicit read', async () => {
     const req = new Request('http://localhost/test', {
       method: 'POST',
       headers: {
@@ -156,7 +168,10 @@ describe('createRequestSnapshot', () => {
       body: 'invalid json {'
     });
 
-    await expect(createRequestSnapshot(req)).rejects.toThrow(/Invalid JSON body/);
+    const snapshot = await capture(req);
+    expect(req.bodyUsed).toBe(false);
+    expect(snapshot.body).toBeUndefined();
+    await expect(readSnapshotJson(snapshot, 'invalid')).rejects.toMatchObject({ status: 400, code: 'invalid_json_body' });
   });
 
   it('should handle JSON with application/json; charset=utf-8', async () => {
@@ -170,8 +185,11 @@ describe('createRequestSnapshot', () => {
       body: JSON.stringify(testData)
     });
 
-    const snapshot = await createRequestSnapshot(req);
+    const snapshot = await capture(req);
 
+    expect(snapshot.body).toBeUndefined();
+    expect(snapshot.is_json_body).toBe(false);
+    await readSnapshotJson(snapshot, 'test-read');
     expect(snapshot.is_json_body).toBe(true);
     expect(snapshot.body).toEqual(testData);
   });
@@ -186,7 +204,7 @@ describe('createRequestSnapshot', () => {
       }
     });
 
-    const snapshot = await createRequestSnapshot(req);
+    const snapshot = await capture(req);
 
     expect(snapshot.headers['authorization']).toBe('Bearer token123');
     expect(snapshot.headers['x-custom-header']).toBe('custom-value');
@@ -202,8 +220,11 @@ describe('createRequestSnapshot', () => {
       body: '{}'
     });
 
-    const snapshot = await createRequestSnapshot(req);
+    const snapshot = await capture(req);
 
+    expect(snapshot.body).toBeUndefined();
+    expect(snapshot.is_json_body).toBe(false);
+    await readSnapshotJson(snapshot, 'test-read');
     expect(snapshot.is_json_body).toBe(true);
     expect(snapshot.body).toEqual({});
   });
@@ -218,14 +239,14 @@ describe('createRequestSnapshot', () => {
       body: formData
     });
 
-    const snapshot = await createRequestSnapshot(req);
+    const snapshot = await capture(req);
 
     expect(snapshot.is_json_body).toBe(false);
-    expect(snapshot.body).toBeInstanceOf(ArrayBuffer);
-    expect(snapshot.body.byteLength).toBeGreaterThan(0);
+    expect(snapshot.body).toBeUndefined();
+    expect((await new Response(snapshot.bodySource!.take()).arrayBuffer()).byteLength).toBeGreaterThan(0);
   });
 
-  it('should create independent snapshots', async () => {
+  it('should create independent snapshots from separately owned requests', async () => {
     const testData = { count: 0 };
 
     const req = new Request('http://localhost/test', {
@@ -236,8 +257,10 @@ describe('createRequestSnapshot', () => {
       body: JSON.stringify(testData)
     });
 
-    const snapshot1 = await createRequestSnapshot(req.clone());
-    const snapshot2 = await createRequestSnapshot(req.clone());
+    const snapshot1 = await capture(req);
+    const snapshot2 = await capture(new Request(req.url, { method: 'POST', headers: req.headers, body: JSON.stringify(testData) }));
+    await readSnapshotJson(snapshot1, 'independent');
+    await readSnapshotJson(snapshot2, 'independent');
 
     // Modify snapshot1
     snapshot1.body.count = 100;

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { toArrayBuffer } from 'bun:ffi';
+import { toArrayBuffer, type Pointer } from 'bun:ffi';
 import { fileURLToPath } from 'node:url';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -8,7 +8,7 @@ import { createKernelMonotonicClock, kernelMonotonicNowNs, readKernelDeadlineClo
 import { createConfigWorkerRuntimeController } from '../../src/config-publication/worker-runtime';
 import { drainMessage, fakeLifecycle, PROCESS_IDENTITY, startMessage } from './config-publication-worker-runtime.fixtures';
 
-const output = (address: number) => new BigInt64Array(toArrayBuffer(address, 0, 16));
+const output = (address: number) => new BigInt64Array(toArrayBuffer(address as Pointer, 0, 16));
 
 test('QPC preserves integer precision and uses the Windows BOOL ABI', () => {
   let closed = false;

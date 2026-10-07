@@ -26,7 +26,7 @@ describe('builtin plugin manifests', () => {
     const manifest = await loadPluginArtifactManifest(path.join(BUILTIN_PLUGINS_DIR, pluginName));
 
     expect(manifest.manifestContract).toBe('vnext');
-    expect(manifest.schemaVersion).toBe(2);
+    expect(manifest.schemaVersion).toBe(3);
     expect(manifest.artifactKind).toBe('runtime-plugin');
     expect(manifest.main).toBe('server/index.ts');
     expect(manifest.engines.bungee).toBe(BUILTIN_PLUGIN_ENGINES[pluginName]);

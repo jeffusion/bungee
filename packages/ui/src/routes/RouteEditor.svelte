@@ -15,6 +15,7 @@
   import BasicInfoSection from '$components/domain/route/sections/BasicInfoSection.svelte';
   import UpstreamTargetSection from '$components/domain/route/sections/UpstreamTargetSection.svelte';
   import ModificationSection from '$components/domain/route/sections/ModificationSection.svelte';
+  import RouteBodyPlan from '$components/domain/route/RouteBodyPlan.svelte';
   import CorsSection from '$components/domain/route/sections/CorsSection.svelte';
   import RateLimitSection from '$components/domain/route/sections/RateLimitSection.svelte';
   import RetrySection from '$components/domain/route/sections/RetrySection.svelte';
@@ -75,9 +76,8 @@
   let route = $state<Route>({
     path: '',
     endpoints: [{ _uid: uuidv4(), target: '', weight: 100, priority: 1 }],
-    headers: { add: {}, remove: [], replace: {} },
-    body: { add: {}, remove: [], replace: {}, default: {} },
-    query: { add: {}, remove: [], replace: {}, default: {} },
+    request: {},
+    response: {},
     plugins: [],
   });
   let pendingRestore = $state.raw<{ draft: Route; initialRoute: string } | null>(null);
@@ -249,15 +249,13 @@
   function normalizeRoute(loaded: Route): Route {
     return {
       ...loaded,
-      headers: loaded.headers || { add: {}, remove: [], replace: {} },
-      body: loaded.body || { add: {}, remove: [], replace: {}, default: {} },
-      query: loaded.query || { add: {}, remove: [], replace: {}, default: {} },
+      request: loaded.request || {},
+      response: loaded.response || {},
       plugins: loaded.plugins || [],
       endpoints: loaded.endpoints?.map(u => ({
         ...u, _uid: u._uid ?? uuidv4(),
-        headers: u.headers || { add: {}, remove: [], default: {} },
-        body: u.body || { add: {}, remove: [], replace: {}, default: {} },
-        query: u.query || { add: {}, remove: [], replace: {}, default: {} },
+        request: u.request || {},
+        response: u.response || {},
       })),
     };
   }
@@ -286,15 +284,13 @@
     route = {
       ...route,
       ...template,
-      headers: template.headers || route.headers,
-      body: template.body || route.body,
-      query: template.query || route.query,
+      request: template.request || route.request,
+      response: template.response || route.response,
       endpoints: template.endpoints?.map((u) => ({
         ...u,
         _uid: uuidv4(),
-        headers: u.headers || { add: {}, remove: [], default: {} },
-        body: u.body || { add: {}, remove: [], replace: {}, default: {} },
-        query: u.query || { add: {}, remove: [], replace: {}, default: {} },
+        request: u.request || {},
+        response: u.response || {},
       })) || route.endpoints,
     };
     toast.show($_('routeEditor.templateApplied'), 'success');
@@ -539,6 +535,7 @@
           <div data-testid="section-processing" class="space-y-4">
             <PanelCard title={$_('routeEditor.builder.processing')} tag="MOD">
               <ModificationSection bind:route />
+              {#if baseline}{#key baseline.id}<RouteBodyPlan routeId={baseline.id} />{/key}{/if}
             </PanelCard>
           </div>
 
@@ -597,17 +594,17 @@
 
             <PanelCard title={$_('routeEditor.review.requestConfiguration')} tag="REVIEW">
               <div class="space-y-3">
-                {#if (route.headers && Object.keys(route.headers).length > 0) || (route.body && Object.keys(route.body).length > 0) || (route.query && Object.keys(route.query).length > 0)}
+                {#if (route.request?.headers && Object.keys(route.request?.headers).length > 0) || (route.request?.body && Object.keys(route.request?.body).length > 0) || (route.request?.query && Object.keys(route.request?.query).length > 0)}
                   <div>
                     <span class="nx-label-sm block mb-1.5">{$_('routeEditor.builder.processing')}</span>
                     <div class="flex flex-wrap gap-1.5">
-                      {#if route.headers && Object.keys(route.headers).length > 0}
+                      {#if route.request?.headers && Object.keys(route.request?.headers).length > 0}
                         <StatusBadge variant="muted">{$_('routeEditor.review.headersModification')}</StatusBadge>
                       {/if}
-                      {#if route.body && Object.keys(route.body).length > 0}
+                      {#if route.request?.body && Object.keys(route.request?.body).length > 0}
                         <StatusBadge variant="muted">{$_('routeEditor.review.bodyModification')}</StatusBadge>
                       {/if}
-                      {#if route.query && Object.keys(route.query).length > 0}
+                      {#if route.request?.query && Object.keys(route.request?.query).length > 0}
                         <StatusBadge variant="muted">{$_('routeEditor.review.queryModification')}</StatusBadge>
                       {/if}
                     </div>

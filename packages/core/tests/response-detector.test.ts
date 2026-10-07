@@ -46,11 +46,13 @@ describe('checkResponseForFailover — non-streaming', () => {
     expect(result.matchedKeyword).toBe('internalerror');
   });
 
-  test('2. body 不含 keyword → hit=false, response 不变', async () => {
+  test('2. body 不含 keyword → hit=false，保留正文字节和响应元数据', async () => {
     const response = makeNonStreamingResponse('{"ok":true}');
     const result = await checkResponseForFailover(response, ['internalerror']);
     expect(result.hit).toBe(false);
-    expect(result.response).toBe(response);
+    expect(result.response?.status).toBe(response.status);
+    expect(result.response?.headers.get('content-type')).toBe('application/json');
+    expect(await result.response!.text()).toBe('{"ok":true}');
   });
 
   test('3. Content-Length > 1MB → 跳过检测 hit=false', async () => {
@@ -123,15 +125,13 @@ describe('checkResponseForFailover — error/edge cases', () => {
       status: 200,
       headers: { 'content-type': 'text/event-stream' },
     });
-    expect(checkResponseForFailover(response, ['x'])).rejects.toThrow(
-      /Failed to peek streaming response/
-    );
+    await expect(checkResponseForFailover(response, ['x'])).rejects.toMatchObject({ status: 502, code: 'response_inspection_failed' });
   });
 
   test('11. 流式 chunk 切片：8KB chunk + 4KB peek 上限，后 4KB 入 overflow，wrapped body 完整', async () => {
     const fullChunk = new Uint8Array(8 * 1024);
     for (let i = 0; i < fullChunk.length; i++) {
-      fullChunk[i] = (i % 256);
+      fullChunk[i] = 65 + (i % 26); // Necessary keyword inspection expects valid UTF-8.
     }
     const tailChunk = new TextEncoder().encode('\n\ntail');
     const response = makeStreamingResponse([fullChunk, tailChunk], 200, {});
@@ -144,10 +144,14 @@ describe('checkResponseForFailover — error/edge cases', () => {
     expect(Array.from(received)).toEqual(Array.from(concatBytes(fullChunk, tailChunk)));
   });
 
-  test('12. 非流式命中后 clone.body.locked 为 false（cancel + releaseLock）', async () => {
-    const response = makeNonStreamingResponse('{"error":"internalerror"}', 200);
-    const cloned = response.clone();
-    await checkResponseForFailover(response, ['internalerror']);
-    expect(cloned.body!.locked).toBe(false);
+  test('12. 命中后取消唯一源，不 clone/tee 响应', async () => {
+    let cancelled = 0;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode('{"error":"internalerror"}')); },
+      cancel() { cancelled++; },
+    }, { highWaterMark: 0 }), { headers: { 'content-type': 'application/json' } });
+    response.clone = () => { throw new Error('inspection must not clone'); };
+    expect((await checkResponseForFailover(response, ['internalerror'])).hit).toBe(true);
+    expect(cancelled).toBe(1);
   });
 });

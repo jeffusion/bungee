@@ -2,7 +2,7 @@
   "name": "chatgpt-oauth",
   "version": "1.0.0",
   "builtin": true,
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "artifactKind": "runtime-plugin",
   "main": "server/index.ts",
   "services": {"provides": [{"id": "chatgpt-oauth.credentials.v1", "version": 1, "process": "control", "kind": "rpc"}], "consumes": [{"plugin": "chatgpt-oauth", "id": "chatgpt-oauth.credentials.v1", "version": 1, "process": "worker", "kind": "rpc"}]},

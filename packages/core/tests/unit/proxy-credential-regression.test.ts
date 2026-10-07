@@ -70,6 +70,7 @@ function phaseHooks(options: {
   }
   const configuredUpstream = {
     ...upstream,
+    handlers: [{ pluginName: 'regression-hooks', config: {}, bodyRequirements: () => ({ request: 'none', response: [ ...(options.onResponse ? ['json' as const] : []), ...(options.stream ? ['sse-json' as const] : []) ] }), register() {} }],
     hasResponseCallbacks: Boolean(options.onResponse),
     hasRawResponseCallbacks: Boolean(options.raw),
     hasStreamCallbacks: Boolean(options.stream),
@@ -288,7 +289,7 @@ describe('proxy credential regressions', () => {
     }
   }, 30_000);
 
-  test('JSON responses invoke onResponse and remain buffered even for streaming requests', async () => {
+  test('JSON responses invoke declared onResponse and settle through generic completion', async () => {
     installProvider();
     let onResponseCalls = 0;
     global.fetch = (async () => new Response('{"ok":true}', {
@@ -307,7 +308,7 @@ describe('proxy credential regressions', () => {
 
     expect(await result.response.text()).toBe('{"ok":true}');
     expect(onResponseCalls).toBe(1);
-    expect(result.streamCompletionState).toBeUndefined();
+    expect(await result.completion).toEqual({ status: 'completed' });
     await result.cleanup?.();
   });
 
@@ -586,8 +587,11 @@ describe('proxy credential regressions', () => {
       hooks: phaseHooks({
         raw: async (raw) => ({ response: raw.response, completion: new Promise(() => {}) }),
       }),
-    }).catch((caught: unknown) => caught);
-    expect((result as Error).message).toBe('Upstream request deadline exceeded');
+    });
+    // Generic responses return at headers; the attempt deadline belongs to completion.
+    expect(result.response.status).toBe(200);
+    expect(await result.completion).toEqual({ status: 'failed', code: 'request_timeout' });
+    await result.cleanup?.();
   });
 
   test('cleanup failure blocks timeout failover and retains the deadline as cause', async () => {
@@ -664,7 +668,7 @@ describe('proxy credential regressions', () => {
         const [callback, delay, ...callbackArgs] = args;
         expect(delay).toBe(60_000);
         if (typeof callback === 'function') expireRequest = () => callback(...callbackArgs);
-        return target.apply(thisArg, args);
+        return Reflect.apply(target, thisArg, args);
       },
     });
     const timer = spyOn(globalThis, 'setTimeout').mockImplementationOnce(timerImplementation);
@@ -1088,7 +1092,10 @@ describe('proxy credential regressions', () => {
         response: new Response('data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n', { headers: { 'content-type': 'text/event-stream' } }),
         completion: Promise.resolve({ status: 'completed' }),
       }, { requestId: stableRequestId, attemptId: 'retry-probe', signal: new AbortController().signal } as any);
-      expect(await probe.response.text()).toContain('"object":"chat.completion.chunk"');
+      // Reading the first complete response now runs its finalization. It must
+      // not remove the second attempt's state, which is proven by its actual
+      // converted response below; an unprepared probe has no conversion state.
+      expect(await probe.response.text()).toContain('"type":"response.completed"');
       await read(secondRetry);
       expect(credentialCalls.filter(({ method }) => method === 'getCredential').map(({ attemptId }) => attemptId)).toContain('retry-1');
       expect(credentialCalls.filter(({ method }) => method === 'getCredential').map(({ attemptId }) => attemptId)).toContain('retry-2');

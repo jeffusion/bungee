@@ -946,6 +946,7 @@ import type { PluginHooks, PluginInitContext } from './hooks';
  *     static readonly name = 'my-plugin';
  *     static readonly version = '1.0.0';
  *
+ *     bodyRequirements(): PluginBodyRequirements { return { request: 'none' }; }
  *     register(hooks: PluginHooks) {
  *       // 并行执行的初始化（非阻塞）
  *       hooks.onRequestInit.tapPromise({ name: 'my-plugin' }, async (ctx) => {
@@ -962,7 +963,36 @@ import type { PluginHooks, PluginInitContext } from './hooks';
  * );
  * ```
  */
+/** SDK 3: content demand is evaluated before reading each selected request body. */
+export interface PluginBodyRequirementContext {
+  readonly requestId: string;
+  readonly method: string;
+  readonly url: URL;
+  readonly routeId?: string;
+  readonly serviceId?: string;
+  readonly upstreamId?: string;
+  readonly stage: 'route' | 'selected';
+}
+export interface PluginBodyRequirements {
+  readonly request: 'none' | 'json-read' | 'json-write';
+  readonly response?: readonly ('json' | 'sse-json')[];
+  /** Replay retention is independent of content decoding. */
+  readonly replay?: boolean;
+  /** Optional bounded observation never upgrades forwarding demands. */
+  readonly observe?: Readonly<{ request?: boolean; response?: boolean; sse?: boolean }>;
+}
+export interface SSEEnvelope {
+  data: string;
+  json?: unknown;
+  event?: string;
+  id?: string;
+  retry?: string;
+  comments?: string[];
+  /** Original complete event; remove after modifying data or metadata. */
+  raw?: string;
+}
 export interface Plugin {
+  bodyRequirements(context: PluginBodyRequirementContext): PluginBodyRequirements;
   resolveAdmissionModel?: import('./data-admission/worker').WorkerAdmissionPlugin['resolveAdmissionModel'];
   prepareAdmissionAttempt?: import('./data-admission/worker').WorkerAdmissionPlugin['prepareAdmissionAttempt'];
   /**
@@ -1049,6 +1079,7 @@ export type PluginConstructor = {
  *
  *     constructor(options: MyOptions) { }
  *
+ *     bodyRequirements(): PluginBodyRequirements { return { request: 'none' }; }
  *     register(hooks: PluginHooks) {
  *       hooks.onBeforeRequest.tapPromise({ name: 'my-plugin' }, async (ctx) => {
  *         // Plugin logic here

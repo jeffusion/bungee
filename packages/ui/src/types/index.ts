@@ -1,3 +1,4 @@
+import type { DirectionalModificationRules } from '@jeffusion/bungee-types';
 // Monitoring types for dashboard
 export type TimeRange = '1h' | '12h' | '24h';
 
@@ -108,14 +109,11 @@ export interface AppConfig {
   [key: string]: any;
 }
 
-export interface Route {
+export interface Route extends DirectionalModificationRules {
   path: string;
   path_rewrite?: { [pattern: string]: string };
   service?: string;
   endpoints?: Upstream[];
-  headers?: ModificationRules;
-  body?: ModificationRules;
-  query?: ModificationRules;
   transformer?: string | object;
   auth?: AuthConfig;
   timeouts?: RouteTimeoutsConfig;
@@ -131,16 +129,13 @@ export interface Service {
   load_balancing?: LoadBalancingConfig;
 }
 
-export interface Upstream {
+export interface Upstream extends DirectionalModificationRules {
   _uid?: string;
   id?: string;
   target: string;
   weight?: number;
   priority?: number;
   transformer?: string | object;
-  headers?: ModificationRules;
-  body?: ModificationRules;
-  query?: ModificationRules;
   is_disabled?: boolean;
   description?: string;
   condition?: string;

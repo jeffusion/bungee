@@ -31,6 +31,8 @@ function writePluginModule(targetPath: string): void {
     this.options = options;
   }
 
+  bodyRequirements() { return Object.freeze({ request: 'none' }); }
+
   register() {}
 }
 `
@@ -163,7 +165,7 @@ describe('plugin runtime state machine', () => {
     createPluginArtifact(root, 'artifact-quarantined', {
       name: 'artifact-quarantined',
       version: '1.0.0',
-      schemaVersion: 2,
+      schemaVersion: 3,
       artifactKind: 'runtime-plugin',
       main: 'dist/index.js',
       capabilities: ['hooks', 'nativeRuntimeInjection'],
@@ -176,7 +178,7 @@ describe('plugin runtime state machine', () => {
     createPluginArtifact(root, 'artifact-degraded', {
       name: 'artifact-degraded',
       version: '1.0.0',
-      schemaVersion: 2,
+      schemaVersion: 3,
       artifactKind: 'runtime-plugin',
       main: 'dist/index.js',
       capabilities: ['hooks'],

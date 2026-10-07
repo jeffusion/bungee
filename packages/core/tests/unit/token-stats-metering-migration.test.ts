@@ -118,7 +118,7 @@ describe('token-stats deployed v005 schema upgrade', () => {
       const legacyRow = row();
       const columns = Object.keys(legacyRow);
       fixture.db.query(`INSERT INTO token_stats_attempts (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`).run(...Object.values(legacyRow).map(value => typeof value === 'boolean' ? Number(value) : value));
-      const before = fixture.db.query('SELECT * FROM token_stats_attempts').all();
+      const before = fixture.db.query<Record<string, unknown>, []>('SELECT * FROM token_stats_attempts').all();
       fixture.db.close();
       expect((await new MigrationManager(fixture.path).migrate()).success).toBeTrue();
       fixture.db = new Database(fixture.path, { strict: true });

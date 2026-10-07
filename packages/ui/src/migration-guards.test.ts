@@ -635,8 +635,9 @@ describe('Migration Guards', () => {
     expect(content.includes("import { checkResponseForFailover } from './response-detector'")).toBe(true);
     expect(content.includes('checkResponseForFailover(result.response, responseKeywords)')).toBe(true);
     expect(helperContent).toMatch(/export function isStreamingResponse\s*\(response: Response\): boolean\s*\{/);
-    expect(content.includes("import { isStreamingResponse } from '../response/streaming-response'"))
+    expect(content.includes("import { isStreamingResponse as isSSEResponse } from '../response/streaming-response'"))
       .toBe(true);
+    expect(content).toMatch(/function isStreamingResponse\(response: Response\): boolean \{ return response.body !== null; \}/);
   });
 
   test('FailoverEditor.svelte must render keyword list for retry_on_response with working remove', () => {

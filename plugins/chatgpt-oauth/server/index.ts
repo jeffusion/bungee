@@ -26,6 +26,12 @@ export const ChatgptOauthPlugin = definePlugin(
       this.adapter = new ChatgptOauthAdapter();
     }
 
+    bodyRequirements(context: import('../../../packages/core/src/plugin.types').PluginBodyRequirementContext): import('../../../packages/core/src/plugin.types').PluginBodyRequirements {
+      const path = context.url.pathname;
+      if (path === '/v1/models' && context.method.toUpperCase() === 'GET') return { request: 'none', response: ['json'] };
+      return context.method.toUpperCase() === 'POST' && ['/v1/chat/completions', '/v1/responses', '/backend-api/codex/responses'].includes(path) ? { request: 'json-write', response: path === '/backend-api/codex/responses' ? [] : ['json', 'sse-json'] } : { request: 'none' };
+    }
+
     register(hooks: PluginHooks): void {
       hooks.onBeforeRequest.tap(
         { name: 'chatgpt-oauth', stage: -10 },

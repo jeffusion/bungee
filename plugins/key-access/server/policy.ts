@@ -63,6 +63,13 @@ function check(target: AdmissionTarget, policy: AccessPolicy | null): AdmissionD
   return null;
 }
 export function createIngress(): IngressPlugin { return {
+  bodyRequirements(target, value) {
+    const publication = validatePublication(value);
+    if (!publication.protectedRouteIds.includes(target.routeId) || target.principal.domain !== 'data') return { request: 'none' };
+    const policy = validatePolicy(publication.byKey[target.principal.keyId] ?? null);
+    const urlModel = /\/models\/([^/:]+):(?:streamGenerateContent|generateContent)$/.test(new URL(target.url).pathname);
+    return { request: policy?.models !== null && policy?.models !== undefined && policy.models.length > 0 && !urlModel ? 'json-read' : 'none' };
+  },
   authenticate(request, value, now) {
     const p = validatePublication(value);
     const match = /^Bearer (bng_data_[A-Za-z0-9_-]{43})$/i.exec(request.headers.get('authorization') ?? '');

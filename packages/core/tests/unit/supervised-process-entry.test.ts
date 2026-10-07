@@ -110,7 +110,7 @@ test('abandoned candidate preparation joins watchdog cleanup before clearing the
   const exitProcess = mock((_code: number) => undefined);
   let running: Promise<void> | undefined;
   try {
-    const env = { ...await environment(directory), BUNGEE_WORKER_STARTUP_WATCHDOG_MS: '100' };
+    const env: NodeJS.ProcessEnv = { ...await environment(directory), BUNGEE_WORKER_STARTUP_WATCHDOG_MS: '100' };
     running = runSupervisedWorkerProcess({ env, kernelBootId: async () => TEST_KERNEL_BOOT_ID,
       loadCatalog: async () => ({}) as any, exitProcess });
     await waitForDescriptor(env.BUNGEE_WORKER_DESCRIPTOR_PATH!, running);

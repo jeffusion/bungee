@@ -39,6 +39,7 @@ export default class ${className} {
     return {
       pluginName: ${JSON.stringify(pluginName)},
       config,
+      bodyRequirements() { return Object.freeze({ request: 'none' }); },
       register(hooks) {
         hooks.onBeforeRequest.tapPromise({ name: ${JSON.stringify(pluginName)} }, async (ctx) => {
           ctx.headers['x-runtime-generation'] = generation;
@@ -73,7 +74,7 @@ function writeManifestRuntimePlugin(root: string, pluginName: string, marker: st
   writeFileSync(join(pluginDir, 'manifest.json'), JSON.stringify({
     name: pluginName,
     version: '1.0.0',
-    schemaVersion: 2,
+    schemaVersion: 3,
     artifactKind: 'runtime-plugin',
     main: 'server/index.ts',
     capabilities: ['hooks', 'dynamicRuntimeLoad'],
@@ -87,7 +88,7 @@ export default class ManifestRuntimePlugin {
   static name = ${JSON.stringify(pluginName)};
   static version = '1.0.0';
   static async createHandler() {
-    return { pluginName: ${JSON.stringify(pluginName)}, register() {} };
+    return { pluginName: ${JSON.stringify(pluginName)}, bodyRequirements() { return { request: 'none' }; }, register() {} };
   }
 }
 `);

@@ -148,7 +148,11 @@ export const DeepSeekReasoningFixPlugin = definePlugin(
 
     constructor() {}
 
-    register(hooks: PluginHooks): void {
+    bodyRequirements(context: import('../../../packages/core/src/plugin.types').PluginBodyRequirementContext): import('../../../packages/core/src/plugin.types').PluginBodyRequirements {
+      return { request: /^(GET|HEAD)$/i.test(context.method) ? 'none' : 'json-write' };
+    }
+
+  register(hooks: PluginHooks): void {
       // 在 ai-transformer 转换后修补
       // stage=20 确保在 ai-transformer (stage=0) 之后执行
       hooks.onBeforeRequest.tap(

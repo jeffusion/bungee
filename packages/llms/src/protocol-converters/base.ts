@@ -11,6 +11,8 @@ export interface ResponseContext {
 }
 
 export interface StreamChunkContext {
+  /** SSE metadata belongs to the transport envelope, not the JSON object. */
+  sseEvent?: { event?: string; id?: string; retry?: string; comments?: string[] };
   streamState: Map<string, any>;
   chunkIndex?: number;
   isFirstChunk?: boolean;

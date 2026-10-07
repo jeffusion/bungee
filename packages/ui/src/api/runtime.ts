@@ -31,6 +31,21 @@ export function getRuntimeUpstreams(): Promise<RuntimeUpstreamsResponse> {
   return api.get<RuntimeUpstreamsResponse>('/runtime/upstreams');
 }
 
+export interface RouteBodyDirectionPlan { mode: string; reasons: string[]; body_formats?: string[] }
+export interface RouteBodyPlan {
+  route_id: string; path: string; request: RouteBodyDirectionPlan; response: RouteBodyDirectionPlan;
+  replay: boolean; dynamic_plugins: string[];
+  endpoints: Array<Omit<RouteBodyPlan, 'route_id' | 'path' | 'endpoints'> & { upstream_id: string }>;
+}
+export interface RouteBodyPlansResponse {
+  schema: 'bungee-route-body-plan-v1'; source: 'committed_configuration'; revision: number;
+  publication: { serving_complete: boolean; serving_revision: number | null };
+  routes: RouteBodyPlan[];
+}
+export function getRouteBodyPlans(): Promise<RouteBodyPlansResponse> {
+  return api.get<RouteBodyPlansResponse>('/runtime/routes');
+}
+
 export function findRuntimeUpstream(response: RuntimeUpstreamsResponse | null, stateKey: string, id?: string): RuntimeUpstream | undefined {
   if (!id || !response || response.availability === 'unknown' || response.availability === 'overflow') return undefined;
   return response.upstreams.find(upstream => upstream.state_key === stateKey && upstream.upstream_id === id);

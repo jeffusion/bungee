@@ -55,6 +55,8 @@ export interface TokenAccountingResponseInput {
 }
 
 export interface TokenAccountingStreamChunkInput {
+  /** Independent SSE event name; never injected into JSON. */
+  event?: string;
   chunk: Record<string, unknown>;
 }
 
@@ -118,7 +120,7 @@ export interface ProviderTokenAccountingAdapter {
   readonly capabilities: ProviderTokenAccountingCapabilities;
   consumeRequest(state: TokenAccountingSessionState, body: Record<string, unknown>): void;
   consumeResponse(state: TokenAccountingSessionState, body: Record<string, unknown>): CanonicalTokenAccountingEventV2;
-  consumeStreamChunk(state: TokenAccountingSessionState, chunk: Record<string, unknown>): CanonicalTokenAccountingEventV2 | null;
+  consumeStreamChunk(state: TokenAccountingSessionState, chunk: Record<string, unknown>, event?: string): CanonicalTokenAccountingEventV2 | null;
   finalizeCompletedStream(state: TokenAccountingSessionState): CanonicalTokenAccountingEventV2;
   finalizeAbortedStream(state: TokenAccountingSessionState): CanonicalTokenAccountingEventV2;
 }

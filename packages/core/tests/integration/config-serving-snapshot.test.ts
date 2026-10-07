@@ -170,7 +170,7 @@ describe('configuration serving snapshot migration', () => {
     const repository = ConfigRepository.open(path);
     repositories.push(repository);
     expect(repository.getDatabase().query<{ version: number; name: string }, []>('SELECT version,name FROM schema_migrations ORDER BY version').all().at(-1))
-      .toEqual({ version: 14, name: 'plugin_communication_and_command_journal' });
+      .toEqual({ version: 15, name: 'directional_request_response_modifications' });
     expect(repository.getDatabase().query<Record<string, unknown>, [string]>(
       'SELECT * FROM configuration_operations WHERE mutation_id=?').get('fixed-v9-operation')).toEqual(operationBytes);
     expect(repository.getDatabase().query<Record<string, unknown>, [string]>(
@@ -187,12 +187,12 @@ describe('configuration serving snapshot migration', () => {
       'SELECT * FROM configuration_recoveries WHERE recovery_id=?').get('33333333-3333-4333-8333-333333333333')).toEqual(recoveryBytes);
   });
 
-  test('fresh schema includes v14 and rejects a UTF-16 v7 fixture before running v8', () => {
+  test('fresh schema includes v15 and rejects a UTF-16 v7 fixture before running v8', () => {
     const fresh = openRepository();
     const freshDb = fresh.getDatabase();
     expect(freshDb.query<{ version: number; name: string }, []>(
       'SELECT version,name FROM schema_migrations ORDER BY version',
-    ).all()).toHaveLength(14);
+    ).all()).toHaveLength(15);
     expect(freshDb.query<{ name: string; sql: string }, []>(
       "SELECT name,sql FROM sqlite_master WHERE type='table' AND name='configuration_serving_snapshots'",
     ).get()?.sql).toContain('STRICT');
@@ -276,7 +276,7 @@ describe('configuration serving snapshot migration', () => {
 
     const repository = ConfigRepository.open(path);
     repositories.push(repository);
-    expect(repository.getDatabase().query<{ version: number }, []>('SELECT version FROM schema_migrations').all()).toHaveLength(14);
+    expect(repository.getDatabase().query<{ version: number }, []>('SELECT version FROM schema_migrations').all()).toHaveLength(15);
     expect(() => verifySchemaFingerprint(repository.getDatabase())).not.toThrow();
   });
 });

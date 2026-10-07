@@ -1,4 +1,20 @@
 {
+  "bodyPlan": {"title":"已保存的正文处理计划","help":"计划对应已提交配置。插件与准入策略按实际请求决定内容需求；最终处理方式见请求日志。","unavailable":"处理计划暂不可用。","revision":"配置修订","route":"路由规则","opaque":"字节流透传","content":"按规则读取或修改内容","replay":"已配置重放缓冲","plugins":"按请求决定需求的插件"},
+  "directional": {
+    "invalidExpression": "表达式无效，或请求规则引用了仅在响应阶段可用的 response。",
+    "invalidFormats": "响应格式只能包含不重复的 json 和 sse-json。",
+    "sseHeaderDependency": "SSE 响应头不能引用响应 body；请使用 request.body，或仅启用 JSON 格式。",
+    "request": "出站请求",
+    "response": "上游响应",
+    "direction": "修改方向",
+    "field": "修改字段",
+    "requestHelp": "请求规则按 Route → Endpoint 合并，上游设置优先。body / headers 指当前请求；request 表示出站请求。",
+    "responseHelp": "响应规则按 Endpoint → Route 合并，路由设置优先。body / headers 指当前响应；request 可引用最终出站请求。仅修改上游响应，本地直接响应和重定向不套用。",
+    "formats": "响应 Body 格式",
+    "json": "JSON 响应",
+    "sseJson": "SSE JSON data 帧",
+    "formatsHelp": "默认支持两种格式。SSE 响应头不能引用响应 body；可引用 request.body。空规则不会要求解析 Body。"
+  },
   "configurationSave": {
     "waitingStopped": "已停止等待，后台发布未取消，不能据此判定失败。请查看全局设置中的真实发布状态，不要重复保存。",
     "publishing": "配置已保存，正在应用。无需再次保存。",
@@ -431,7 +447,7 @@
     "loadError": "读取配置失败，已完成的发布不会因此撤销。请重新读取。", "loading": "正在读取全局设置", "unknown": "未知", "detailsUnavailable": "发布详情暂不可用，不能据此认定未提交。",
     "publicationDetails": "发布详情", "operationStages": "校验 → 提交版本 → 新流量切换 → 前置请求交接 → 排空启动确认 → 自然排空 → 清理退出 → 发布收敛", "committedRevision": "已提交版本", "resultStatus": "结果状态", "workerReports": "工作进程上报（不等同于接流确认）", "recovery": "恢复状态", "checkOperation": "查询本次发布", "dashboardRecovery": "前往仪表板查看恢复摘要",
     "importPreview": "快照预览 · 尚未提交", "snapshotWarning": "配置快照不等于系统备份，可能包含令牌及插件配置。请妥善保管；导入覆盖完整配置，不会恢复日志或插件运行数据。",
-    "sourceRevision": "快照来源版本", "activations": "插件启用项", "globalBindings": "全局绑定", "importImpact": "包含全部路由、服务、作用域绑定和插件启用状态。下方只显示安全摘要。确认后才发布新版本，完整性由服务端再次校验。", "cancelImport": "取消导入", "invalidImport": "快照格式无效或超过预览限制（1 MiB、16 层、单集合 500 项）。未提交配置。", "exportError": "导出快照失败。"
+    "sourceRevision": "快照来源版本", "activations": "插件启用项", "globalBindings": "全局绑定", "importImpact": "包含全部路由、服务、作用域绑定和插件启用状态。下方只显示安全摘要。确认后才发布新版本，完整性由服务端再次校验。", "importIgnoredRules": "已自动忽略 {count} 项无法兼容或被新格式覆盖的修改规则，其余有效规则将保留。无需手动修复，具体原因记录在服务日志中。", "cancelImport": "取消导入", "invalidImport": "快照格式无效、服务端校验未通过或预览不可用。未提交配置。", "exportError": "导出快照失败。"
   },
   "configuration": {
     "title": "全局设置",

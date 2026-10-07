@@ -116,7 +116,7 @@ describe('anthropic-request-sanitizer plugin', () => {
 
     const forwarded = getForwardedCall();
     const forwardedHeaders = new Headers(forwarded.options.headers);
-    const forwardedBody = JSON.parse(String(forwarded.options.body));
+    const forwardedBody = await new Response(forwarded.options.body).json();
 
     expect(forwarded.url.includes('beta=true')).toBe(false);
     expect(forwardedHeaders.get('anthropic-beta')).toBe('claude-code-20250219');
@@ -174,7 +174,7 @@ describe('anthropic-request-sanitizer plugin', () => {
 
     const forwarded = getForwardedCall();
     const forwardedHeaders = new Headers(forwarded.options.headers);
-    const forwardedBody = JSON.parse(String(forwarded.options.body));
+    const forwardedBody = await new Response(forwarded.options.body).json();
 
     expect(forwarded.url.includes('beta=true')).toBe(false);
     expect(forwardedHeaders.get('anthropic-beta')).toBe('claude-code-20250219,computer-use-2025-01-24');
@@ -256,7 +256,7 @@ describe('anthropic-request-sanitizer plugin', () => {
     await handleRequest(req, config);
 
     const forwarded = getForwardedCall();
-    const forwardedBody = JSON.parse(String(forwarded.options.body));
+    const forwardedBody = await new Response(forwarded.options.body).json();
 
     expect(forwardedBody.cache_control).toBeUndefined();
     expect(forwardedBody.metadata).toEqual({ keep: true });
@@ -347,7 +347,7 @@ describe('anthropic-request-sanitizer plugin', () => {
     await handleRequest(req, config);
 
     const forwarded = getForwardedCall();
-    const forwardedBody = JSON.parse(String(forwarded.options.body));
+    const forwardedBody = await new Response(forwarded.options.body).json();
 
     expect(forwardedBody.messages).toHaveLength(1);
     expect(forwardedBody.messages[0].role).toBe('user');
@@ -395,7 +395,7 @@ describe('anthropic-request-sanitizer plugin', () => {
     await handleRequest(req, config);
 
     const forwarded = getForwardedCall();
-    const forwardedBody = JSON.parse(String(forwarded.options.body));
+    const forwardedBody = await new Response(forwarded.options.body).json();
 
     expect(forwardedBody.messages).toHaveLength(3);
     expect(forwardedBody.messages[2].content[0].tool_use_id).toBe('phantom');
@@ -439,7 +439,7 @@ describe('anthropic-request-sanitizer plugin', () => {
     await handleRequest(req, config);
 
     const forwarded = getForwardedCall();
-    const forwardedBody = JSON.parse(String(forwarded.options.body));
+    const forwardedBody = await new Response(forwarded.options.body).json();
 
     expect(forwardedBody.messages[1].role).toBe('assistant');
     expect(forwardedBody.messages[1].content).toEqual([{ type: 'text', text: 'checking' }]);
@@ -489,7 +489,7 @@ describe('anthropic-request-sanitizer plugin', () => {
     await handleRequest(req, config);
 
     const forwarded = getForwardedCall();
-    const forwardedBody = JSON.parse(String(forwarded.options.body));
+    const forwardedBody = await new Response(forwarded.options.body).json();
     const assistantContent = forwardedBody.messages[1].content;
 
     expect(assistantContent.map((b: { type?: string }) => b.type)).toEqual([
@@ -543,7 +543,7 @@ describe('anthropic-request-sanitizer plugin', () => {
 
     const forwarded = getForwardedCall();
     const forwardedHeaders = new Headers(forwarded.options.headers);
-    const forwardedBody = JSON.parse(String(forwarded.options.body));
+    const forwardedBody = await new Response(forwarded.options.body).json();
 
     expect(forwardedBody.cache_control).toEqual({ type: 'ephemeral' });
     expect(forwardedBody.context_management).toEqual({ type: 'auto' });

@@ -48,6 +48,8 @@ export interface AdmissionPlan {
   readonly denial?: AdmissionDenial;
 }
 export interface IngressPlugin {
+  /** Effective policy demand; no policy means no content decoding. */
+  bodyRequirements(target: AdmissionTarget, policy: DurableJson): { readonly request: 'none' | 'json-read' };
   /** Optional per-principal state. Policies are frozen; plans receive only this key's clones.
    * Expiry must mean absence is behaviorally equivalent to retaining the state. */
   keyedState?: {

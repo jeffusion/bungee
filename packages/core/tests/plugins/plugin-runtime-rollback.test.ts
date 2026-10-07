@@ -76,6 +76,7 @@ export default class RuntimeRollbackPlugin {
     return {
       pluginName: ${JSON.stringify(pluginName)},
       config,
+      bodyRequirements() { return Object.freeze({ request: 'none' }); },
       register(hooks) {
         hooks.onBeforeRequest.tapPromise({ name: ${JSON.stringify(pluginName)} }, async (ctx) => {
           ctx.headers['x-plugin-generation'] = generation;
@@ -229,7 +230,7 @@ describe('plugin runtime rollback semantics', () => {
       createPluginArtifact(artifactRoot, 'artifact-quarantined', {
         name: 'artifact-quarantined',
         version: '1.0.0',
-        schemaVersion: 2,
+        schemaVersion: 3,
         artifactKind: 'runtime-plugin',
         main: 'dist/index.js',
         capabilities: ['hooks', 'nativeRuntimeInjection'],
@@ -240,7 +241,7 @@ describe('plugin runtime rollback semantics', () => {
       createPluginArtifact(artifactRoot, 'artifact-degraded', {
         name: 'artifact-degraded',
         version: '1.0.0',
-        schemaVersion: 2,
+        schemaVersion: 3,
         artifactKind: 'runtime-plugin',
         main: 'dist/index.js',
         capabilities: ['hooks'],

@@ -1,6 +1,7 @@
 import type { Database } from 'bun:sqlite';
 import type { Sha256Digest } from '@jeffusion/bungee-types';
 import { parseNormalizeCompileAggregate } from './aggregate';
+import { validatePreDirectionalAggregate } from './directional-migration';
 import { canonicalJson, hashConfigurationContent } from './content-hash';
 import { validateDigest } from './repository-validation';
 import type { RepositorySnapshot, ServingSnapshotKey } from './repository-types';
@@ -119,7 +120,10 @@ export function getServingSnapshot(
     }
     if (canonical !== row.aggregate_json) corrupt('configuration serving snapshot JSON is not canonical');
 
-    const normalized = parseNormalizeCompileAggregate(parsed, undefined);
+    // Historical snapshots retain their original aggregate and identity. This read-only
+    // compatibility path never feeds transformed content to workers under the old hash.
+    const strict = parseNormalizeCompileAggregate(parsed, undefined);
+    const normalized = strict.ok ? strict : validatePreDirectionalAggregate(parsed);
     if (!normalized.ok) corrupt('configuration serving snapshot aggregate is invalid');
     if (canonicalJson(normalized.value) !== row.aggregate_json) {
       corrupt('configuration serving snapshot aggregate normalization drifted');

@@ -19,7 +19,7 @@ export function manifest(name: string, overrides: Record<string, unknown> = {}):
   return {
     name,
     version: '1.0.0',
-    schemaVersion: 2,
+    schemaVersion: 3,
     artifactKind: 'runtime-plugin',
     main: 'server/index.ts',
     capabilities: ['hooks', 'dynamicRuntimeLoad'],

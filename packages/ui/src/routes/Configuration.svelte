@@ -11,10 +11,10 @@
   import { settingsDirty } from '$stores/navigation-guard';
   import { token as authToken } from '$stores/auth';
   import {
-    getConfigSnapshot, getConfigurationOperation, validateAggregate, commitConfiguration, importConfig,
+    getConfigSnapshot, getConfigurationOperation, validateAggregate, validateImport, commitConfiguration, importConfig,
     ConfigurationStaleError, ConfigurationOperationConflictError, ConfigurationOperationDegradedError,
     ConfigurationOperationTimeoutError, ConfigurationValidationError,
-    type ConfigurationSnapshot, type ConfigurationImportEnvelope, type ConfigurationOperationState,
+    type ConfigurationSnapshot, type ConfigurationImportEnvelope, type ConfigurationImportPreview, type ConfigurationOperationState,
   } from '$api/config';
   import { PanelCard, StatusBadge, SystemAlertBar, IndustrialDialog, LoadingIndicator } from '$components/industrial';
   import { Input } from '$components/ui/input';
@@ -43,6 +43,7 @@
   const publicationErrors = $derived({ ...publicationBackendErrors, ...(!imported && publicationEdited ? parsedPublication.errors : {}) });
   const publicationInvalid = $derived(Object.keys(publicationErrors).length > 0);
   let imported = $state<ConfigurationImportEnvelope | null>(null);
+  let importPreview = $state<ConfigurationImportPreview | null>(null);
   let reviewOpen = $state(false), busy = $state(false), validating = $state(false), loading = $state(true);
   let conflict = $state(false), detailsOpen = $state(false), storageWarning = $state('');
   let phase = $state<SubmissionPhase>('idle');
@@ -67,9 +68,9 @@
   const publication = $derived($publicationRecovery.publication);
   const fresh = $derived($publicationRecovery.fresh);
   const serving = $derived(servingStatus(publication, fresh));
-  const candidate = $derived(snapshot && draft ? imported?.aggregate ?? { ...snapshot.config, logical_configuration: draft } : null);
+  const candidate = $derived(snapshot && draft ? (imported ? importPreview?.aggregate ?? null : { ...snapshot.config, logical_configuration: draft }) : null);
   const publicationDisplay = $derived(imported ? Object.fromEntries(publicationFields.map(field => {
-    const policy = imported!.aggregate.logical_configuration.publication;
+    const policy = importPreview?.aggregate.logical_configuration.publication;
     const value = policy === undefined ? publicationInputs()[field] : typeof policy?.[field] === 'number' ? String(policy[field] / 1000) : '';
     return [field, value];
   })) as PublicationInputs : publicationRaw);
@@ -146,7 +147,9 @@
       if (file.size > IMPORT_LIMITS.bytes) throw new Error('snapshot_limit');
       const parsed = parseImportPreview(await file.text());
       if (disposed || generation !== importGeneration || locked) return;
-      imported = parsed; notice = '';
+      const preview = await validateImport(parsed);
+      if (disposed || generation !== importGeneration || locked) return;
+      importPreview = preview; imported = parsed; notice = '';
     }
     catch { if (!disposed && generation === importGeneration) notice = 'invalidImport'; }
   }
@@ -422,6 +425,7 @@
           <p class="break-all font-mono text-xs text-zinc-400">{imported.content_hash}</p>
           <p class="text-sm text-zinc-300">{t('importRoutes')} {importCounts.routes} · {t('importServices')} {importCounts.services} · {t('activations')} {importCounts.activations} · {t('globalBindings')} {importCounts.bindings}</p>
           <p class="text-sm text-zinc-400">{t('importImpact')}</p>
+          {#if importPreview?.warnings.length}<p class="text-sm text-amber-300" role="status" data-testid="import-ignored-rules">{$_('settings.importIgnoredRules', { values: { count: importPreview.warnings.length } })}</p>{/if}
           <ConfigurationDiff changes={diff} testId="import-diff" />
           <Button variant="outline" onclick={cancelImport} disabled={locked}>{t('cancelImport')}</Button>
         </div>

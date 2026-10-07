@@ -102,7 +102,7 @@ export function parsePluginManifestText(content: string, source = 'manifest.json
   exact(root, TOP_FIELDS, '');
   const name = string(root.name, 'name');
   if (!isPluginName(name)) throw new PluginManifestCatalogError('name', 'invalid plugin name');
-  if (root.schemaVersion !== 2) throw new PluginManifestCatalogError('schemaVersion', 'expected exactly 2');
+  if (root.schemaVersion !== 3) throw new PluginManifestCatalogError('schemaVersion', 'expected exactly 3');
   const parsedCapabilities = capabilities(root.capabilities);
   const runtimeScope = root.runtimeScope === undefined ? undefined
     : literal(root.runtimeScope, ['global', 'scoped'] as const, 'runtimeScope');
@@ -224,7 +224,7 @@ export function parsePluginManifestText(content: string, source = 'manifest.json
     }
   }
   const parsed: StrictPluginManifest = {
-    name, version: version(root.version, 'version'), schemaVersion: 2,
+    name, version: version(root.version, 'version'), schemaVersion: 3,
     artifactKind: literal(root.artifactKind, VALID_PLUGIN_ARTIFACT_KINDS, 'artifactKind'),
     main: main(root.main), capabilities: parsedCapabilities, uiExtensionMode, engines: engines(root.engines),
     ...optionalProperty('runtimeScope', runtimeScope),

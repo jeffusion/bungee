@@ -86,29 +86,29 @@ describe('deepMergeEndpoint', () => {
     const merged = deepMergeEndpoint(
       {
         target: 'http://same',
-        headers: { add: { 'x-base': '1' }, remove: ['x-remove-base'] },
+        request: { headers: { add: { 'x-base': '1' }, remove: ['x-remove-base'] },
         body: { add: { base: true }, remove: ['legacy'] },
-        query: { default: { base: '1' }, remove: ['old'] },
+        query: { default: { base: '1' }, remove: ['old'] }, },
       },
       {
         target: 'http://same',
-        headers: { replace: { 'x-override': '2' }, remove: ['x-remove-base', 'x-remove-override'] },
+        request: { headers: { replace: { 'x-override': '2' }, remove: ['x-remove-base', 'x-remove-override'] },
         body: { replace: { override: true }, remove: ['override-only'] },
-        query: { add: { override: '2' }, remove: ['old', 'new'] },
+        query: { add: { override: '2' }, remove: ['old', 'new'] }, },
       },
     );
 
-    expect(merged.headers).toEqual({
+    expect(merged.request?.headers).toEqual({
       add: { 'x-base': '1' },
       replace: { 'x-override': '2' },
       remove: ['x-remove-base', 'x-remove-override'],
     });
-    expect(merged.body).toEqual({
+    expect(merged.request?.body).toEqual({
       add: { base: true },
       replace: { override: true },
       remove: ['legacy', 'override-only'],
     });
-    expect(merged.query).toEqual({
+    expect(merged.request?.query).toEqual({
       default: { base: '1' },
       add: { override: '2' },
       remove: ['old', 'new'],
@@ -186,8 +186,8 @@ describe('resolveEffectiveRouteEndpoints', () => {
             weight: 10,
             priority: 3,
             plugins: ['service-auth', { name: 'shared', options: { value: 'service' } }],
-            headers: { add: { 'x-service': '1' }, remove: ['x-old'] },
-            body: { add: { service: true } },
+            request: { headers: { add: { 'x-service': '1' }, remove: ['x-old'] },
+            body: { add: { service: true } }, },
           },
           { target: 'http://service-only', plugins: ['service-only'] },
         ],
@@ -203,8 +203,8 @@ describe('resolveEffectiveRouteEndpoints', () => {
             target: 'http://same',
             weight: 99,
             plugins: [{ name: 'shared', options: { value: 'route' } }, 'route-only'],
-            headers: { replace: { 'x-route': '2' }, remove: ['x-old', 'x-new'] },
-            query: { add: { route: 'yes' } },
+            request: { headers: { replace: { 'x-route': '2' }, remove: ['x-old', 'x-new'] },
+            query: { add: { route: 'yes' } }, },
           },
           { target: 'http://route-only' },
         ],
@@ -218,13 +218,13 @@ describe('resolveEffectiveRouteEndpoints', () => {
         weight: 99,
         priority: 3,
         plugins: ['service-auth', { name: 'shared', options: { value: 'route' } }, 'route-only'],
-        headers: {
+        request: { headers: {
           add: { 'x-service': '1' },
           replace: { 'x-route': '2' },
           remove: ['x-old', 'x-new'],
         },
         body: { add: { service: true } },
-        query: { add: { route: 'yes' } },
+        query: { add: { route: 'yes' } }, },
       },
       { target: 'http://service-only', plugins: ['service-only'] },
       { target: 'http://route-only' },
@@ -237,9 +237,9 @@ describe('extractModificationRules', () => {
     expect(extractModificationRules({
       target: 'http://same',
       plugins: ['auth'],
-      headers: { add: { 'x-test': '1' } },
+      request: { headers: { add: { 'x-test': '1' } },
       body: { add: { ok: true } },
-      query: { add: { q: '1' } },
+      query: { add: { q: '1' } }, },
     })).toEqual({
       headers: { add: { 'x-test': '1' } },
       body: { add: { ok: true } },

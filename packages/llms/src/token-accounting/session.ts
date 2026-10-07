@@ -354,14 +354,15 @@ function isDeferredFailure(body: JsonRecord): boolean {
 function observeOpenAIOutput(
   state: TokenAccountingSessionState,
   chunk: JsonRecord,
-  includeResponseSnapshot = true
+  includeResponseSnapshot = true,
+  event?: string
 ): void {
   if (state.outputAuthority === 'official') return;
   let nodes = MAX_INPUT_ESTIMATE_NODES;
   const truncated = () => {
     if (isDeferred(state)) (state as StreamEstimateState).estimateTruncated = true;
   };
-  const type = asString(chunk.type);
+  const type = event ?? asString(chunk.type);
   if (type === 'response.output_text.delta') {
     if (isDeferred(state)) observeBoundedOutput(state, chunk.delta);
     else observeOutput(state, chunk.delta);
@@ -790,7 +791,7 @@ function createOpenAIAdapter(): ProviderTokenAccountingAdapter {
         outputAuthority: state.outputAuthority
       }, isIncomplete || isFailed ? 'failed' : 'completed');
     },
-    consumeStreamChunk(state, chunk) {
+    consumeStreamChunk(state, chunk, event) {
       if (state.finalReceived || isDoneSentinel(chunk)) return null;
       const response = readRecord(chunk, 'response');
       const usage = openAIUsage(chunk);
@@ -808,10 +809,10 @@ function createOpenAIAdapter(): ProviderTokenAccountingAdapter {
       }
       const reportedCache = readNumber(promptDetails, 'cached_tokens');
       if (reportedCache !== undefined) state.cacheReadTokens = reportedCache;
-      const responseType = asString(chunk.type);
+      const responseType = event ?? asString(chunk.type);
       const responseStatus = asString(response?.status);
       const responseCompleted = responseType === 'response.completed' || responseStatus === 'completed';
-      observeOpenAIOutput(state, chunk, !responseCompleted);
+      observeOpenAIOutput(state, chunk, !responseCompleted, event);
       const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
       if (choices.some((choice) => isRecord(choice) && asString(choice.finish_reason) !== undefined && choice.finish_reason !== null)) {
         state.protocolTerminalSeen = true;
@@ -976,9 +977,9 @@ function createAnthropicAdapter(): ProviderTokenAccountingAdapter {
         outputAuthority: estimatedOutput === undefined ? 'none' : 'local'
       });
     },
-    consumeStreamChunk(state, chunk) {
+    consumeStreamChunk(state, chunk, event) {
       if (state.finalReceived || isDoneSentinel(chunk)) return null;
-      const type = asString(chunk.type);
+      const type = event ?? asString(chunk.type);
       if (isDeferred(state) && type === 'error') {
         state.protocolTerminalSeen = true;
         (state as StreamEstimateState).deferredOutcome = 'failed';
@@ -1190,7 +1191,7 @@ function createGeminiAdapter(): ProviderTokenAccountingAdapter {
         outputAuthority: state.outputAuthority
       });
     },
-    consumeStreamChunk(state, chunk) {
+    consumeStreamChunk(state, chunk, event) {
       if (state.finalReceived || isDoneSentinel(chunk)) return null;
       observeGeminiOutput(state, chunk);
       const usageMetadata = readRecord(chunk, 'usageMetadata');
@@ -1325,8 +1326,8 @@ export function createTokenAccountingSession(
       if (event.final || event.outcome !== 'completed') terminalEvent = event;
       return event;
     },
-    consumeStreamChunk({ chunk }): CanonicalTokenAccountingEventV2 | null {
-      const event = adapter.consumeStreamChunk(state, chunk);
+    consumeStreamChunk({ chunk, event: eventName }): CanonicalTokenAccountingEventV2 | null {
+      const event = adapter.consumeStreamChunk(state, chunk, eventName);
       if (event && (event.final || event.outcome !== 'completed')) terminalEvent = event;
       return event;
     },

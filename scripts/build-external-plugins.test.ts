@@ -43,7 +43,7 @@ function workspace(): Readonly<{ root: string; source: string; output: string }>
 
 function strictManifest(name: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    name, version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin',
+    name, version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin',
     main: 'server/index.ts', capabilities: ['hooks', 'dynamicRuntimeLoad'],
     uiExtensionMode: 'none', engines: { bungee: '^4.2.0 || ^5.0.0' }, configSchema: [], ...overrides,
   };
@@ -94,7 +94,7 @@ describe('rewriteManifestForBuiltArtifact', () => {
     const rewritten = rewriteManifestForBuiltArtifact({
       name: 'ai-transformer',
       version: '2.0.0',
-      schemaVersion: 2,
+      schemaVersion: 3,
       artifactKind: 'runtime-plugin',
       main: 'server/index.ts',
       capabilities: ['hooks', 'api', 'dynamicRuntimeLoad'],
@@ -112,7 +112,7 @@ describe('rewriteManifestForBuiltArtifact', () => {
     });
 
     expect(rewritten.main).toBe('index.js');
-    expect(rewritten.schemaVersion).toBe(2);
+    expect(rewritten.schemaVersion).toBe(3);
     expect(rewritten.capabilities).toEqual(['hooks', 'api', 'dynamicRuntimeLoad']);
     expect(rewritten.metadata?.name).toBe('metadata.name');
     expect(rewritten.translations?.['zh-CN']?.['metadata.name']).toBe('AI 格式转换器');

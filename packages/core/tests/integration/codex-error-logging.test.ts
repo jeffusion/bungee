@@ -11,7 +11,7 @@ import { restoreWorkerTransportRequest } from '../../src/config-worker/private-t
 import { TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/config-worker-private-transport';
 import { localAdmissionSelector } from '../fixtures/public-listener';
 
-test('OAuth HTTP and SSE diagnostics reach public clients, SQLite, file logs and body capture', async () => {
+test('OAuth HTTP and SSE diagnostics reach clients and durable logs with opaque capture marked incomplete', async () => {
   await ensureDataPlaneSchema();
   const [{ handleRequest }, runtime, { accessLogWriter }, { fileLogWriter }] = await Promise.all([
     import('../../src/worker/request/handler'), import('../../src/worker/state/runtime-state'),
@@ -77,9 +77,8 @@ test('OAuth HTTP and SSE diagnostics reach public clients, SQLite, file logs and
       expect(row.error_message).toContain('Retry later');
       expect(row.error_message).not.toContain('private-token');
       expect(JSON.parse(row.processing_steps)).toContainEqual(expect.objectContaining({ step: 'response_error', detail: expect.objectContaining({ source: 'upstream', code }) }));
-      const capture = await bodyStorage.load(row.resp_body_id);
-      expect(JSON.stringify(capture)).toContain(code);
-      expect(JSON.stringify(capture)).not.toContain('private-token');
+      expect(row.resp_body_id).toBeNull();
+      expect(JSON.parse(row.processing_steps)).toContainEqual(expect.objectContaining({ step: 'body_logging_incomplete', detail: expect.objectContaining({ observer_incomplete: true }) }));
       await fileLogWriter.flush();
       const lines = (await Bun.file(join(dataPlaneFileLogDir, `access-${new Date().toISOString().slice(0, 10)}.log`)).text()).trim().split('\n');
       const entry = lines.map(line => JSON.parse(line)).find(entry => entry.requestId === row.request_id);

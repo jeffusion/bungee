@@ -104,7 +104,7 @@ function providerRecord(): PluginManifestRecord {
     manifestPath: '/tmp/provider/manifest.json', mainPath: '/tmp/provider/main.ts', controlPath: '/tmp/provider/control.ts',
     runtimeHash: `sha256:${'b'.repeat(64)}`, configSchema: [],
     manifest: {
-      name: 'provider', version: '1.0.0', schemaVersion: 2, artifactKind: 'runtime-plugin', main: 'main.ts',
+      name: 'provider', version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin', main: 'main.ts',
       capabilities: ['api', 'dynamicRuntimeLoad', 'controlPlane'], runtimeScope: 'global', uiExtensionMode: 'none',
       engines: { bungee: '^4.3.0 || ^5.0.0' }, control: { entry: 'control.ts', rpc: [] }, configSchema: [],
     },
@@ -375,7 +375,7 @@ async function connectWorker(
         const client = context.services!.rpc!.consume('provider', CONTRACT);
         bootstrapValue = await client.read('bootstrap');
         capturedClient = client;
-        return { pluginName: name, config: {}, register() {}, async destroy() { /* nothing to release */ } };
+        return { bodyRequirements() { return { request: 'none' as const }; }, pluginName: name, config: {}, register() {}, async destroy() { /* nothing to release */ } };
       },
     };
     return pluginClass;

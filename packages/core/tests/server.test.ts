@@ -17,7 +17,7 @@ const mockConfig: AppConfig = {
           weight: 100,
           priority: 1,
           // Upstream-level rules that merge and override
-          headers: {
+          request: { headers: {
             add: { 'x-upstream-header': 'upstream', 'x-shared-header': 'upstream-override' },
             replace: { 'x-replace-header': 'upstream-replaced' },
             remove: ['x-remove-upstream'],
@@ -26,7 +26,7 @@ const mockConfig: AppConfig = {
             add: { upstream_field: 'upstream', shared_field: 'upstream-override' },
             replace: { replace_field: 'upstream-replaced' },
             remove: ['remove_upstream'],
-          },
+          } },
         },
       ],
       failover: { enabled: false, retry_on: [] },
@@ -75,7 +75,7 @@ const mockConfig: AppConfig = {
       path: '/api',
       service: 'api-service',
       // Route-level rules
-      headers: {
+      request: { headers: {
         add: { 'x-route-header': 'route', 'x-shared-header': 'route' },
         replace: { 'x-replace-header': 'route-replaced' },
         remove: ['x-remove-route'],
@@ -85,7 +85,7 @@ const mockConfig: AppConfig = {
         replace: { replace_field: 'route-replaced' },
         remove: ['remove_route'],
         default: { route_default: 'default' },
-      },
+      } },
     },
     {
       path: '/load-balance',
@@ -566,14 +566,14 @@ describe('Server Request Handler', () => {
           target: 'http://mock-target.com',
           weight: 100,
           priority: 1,
-          headers: {
+          request: { headers: {
             add: {
               'x-timestamp': '{{now()}}',
               'x-method': '{{method}}',
               'x-host': '{{headers.host}}',
               'x-uuid': '{{uuid()}}',
             }
-          }
+          } }
         }],
       }]
     };
@@ -603,13 +603,13 @@ describe('Server Request Handler', () => {
           target: 'http://mock-target.com',
           weight: 100,
           priority: 1,
-          body: {
+          request: { body: {
             add: {
               'processed_at': '{{new Date().toISOString()}}',
               'request_id': '{{uuid()}}',
               'user_agent': '{{headers["user-agent"] || "unknown"}}',
             }
-          }
+          } }
         }],
       }]
     };
@@ -645,12 +645,12 @@ describe('Server Request Handler', () => {
           target: 'http://mock-target.com',
           weight: 100,
           priority: 1,
-          headers: {
+          request: { headers: {
             add: {
               'x-base64': '{{base64encode(headers.host)}}',
               'x-upper': '{{toUpperCase(headers["user-agent"])}}',
             }
-          }
+          } }
         }],
       }]
     };
@@ -680,13 +680,13 @@ describe('Server Request Handler', () => {
           target: 'http://mock-target.com',
           weight: 100,
           priority: 1,
-          headers: {
+          request: { headers: {
             add: {
               'x-valid': '{{headers.host}}',
               'x-invalid': '{{headers.nonexistent.invalid}}',
               'x-fallback': '{{headers.missing || "default"}}',
             }
-          }
+          } }
         }],
       }]
     };

@@ -1,7 +1,8 @@
+import { analyzeExpressionDependencies } from '../utils/expression-dependencies';
 import { isObject, rejectUnknownFields, type JsonObject, type ValidationContext } from './validation';
 import { stringArray, stringRecord } from './policy-fields';
 
-const HEADER_FIELDS = new Set(['add', 'replace', 'remove']);
+const HEADER_FIELDS = new Set(['add', 'replace', 'default', 'remove']);
 const BODY_FIELDS = new Set(['add', 'replace', 'remove', 'default']);
 const QUERY_FIELDS = new Set(['add', 'replace', 'remove', 'default']);
 
@@ -34,6 +35,7 @@ export function validateModificationRules(
   if (headers) {
     if (headers.add !== undefined) stringRecord(headers.add, `${prefix}headers.add`, context);
     if (headers.replace !== undefined) stringRecord(headers.replace, `${prefix}headers.replace`, context);
+    if (headers.default !== undefined) stringRecord(headers.default, `${prefix}headers.default`, context);
     if (headers.remove !== undefined) stringArray(headers.remove, `${prefix}headers.remove`, context);
   }
   const body = modificationObject(object.body, `${prefix}body`, BODY_FIELDS, context);
@@ -49,5 +51,31 @@ export function validateModificationRules(
     if (query.replace !== undefined) stringRecord(query.replace, `${prefix}query.replace`, context);
     if (query.remove !== undefined) stringArray(query.remove, `${prefix}query.remove`, context);
     if (query.default !== undefined) stringRecord(query.default, `${prefix}query.default`, context);
+  }
+}
+
+/** 方向块独立校验；请求阶段和 SSE 响应头不允许读取尚不可用的数据。 */
+export function validateDirectionalModificationRules(object: JsonObject, path: string, context: ValidationContext): void {
+  for (const direction of ['request', 'response'] as const) {
+    const blockPath = `${path}.${direction}`;
+    const block = modificationObject(object[direction], blockPath,
+      new Set(direction === 'request' ? ['headers', 'body', 'query'] : ['headers', 'body', 'body_formats']), context);
+    if (!block) continue;
+    validateModificationRules(block, blockPath, context);
+    if (direction === 'response' && block.body_formats !== undefined) {
+      if (!Array.isArray(block.body_formats) || block.body_formats.some(format => format !== 'json' && format !== 'sse-json')
+        || new Set(block.body_formats).size !== block.body_formats.length) {
+        context.add('invalid_value', `${blockPath}.body_formats`, 'Expected unique json or sse-json formats');
+      }
+    }
+    try {
+      analyzeExpressionDependencies(block, direction);
+      if (direction === 'response' && (!Array.isArray(block.body_formats) || block.body_formats.includes('sse-json'))
+        && analyzeExpressionDependencies(block.headers, direction).responseBody) {
+        context.add('invalid_expression', `${blockPath}.headers`, 'SSE response headers cannot depend on the current response body; use request.body or restrict body_formats to json');
+      }
+    } catch (error) {
+      context.add('invalid_expression', blockPath, error instanceof Error ? error.message : String(error));
+    }
   }
 }

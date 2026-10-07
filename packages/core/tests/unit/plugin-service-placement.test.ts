@@ -95,7 +95,7 @@ describe('process-specific local services', () => {
           context.services!.onDispose(service!.subscribe());
           context.services!.onDispose(() => { cleaned.push('second-cleanup'); });
         }
-        return { pluginName: name, config: {}, register() {}, async destroy() { cleaned.push(`destroy:${name}`); } };
+        return { bodyRequirements() { return { request: 'none' as const }; }, pluginName: name, config: {}, register() {}, async destroy() { cleaned.push(`destroy:${name}`); } };
       } } satisfies PluginClass;
     };
     const graph = new PluginDependencyGraph([

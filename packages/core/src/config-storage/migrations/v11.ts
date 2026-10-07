@@ -10,7 +10,7 @@ import { readRawActiveAggregate } from '../read-materialization';
 import { readRepositorySnapshot } from '../repository-snapshot';
 import { ConfigRepositoryError } from '../repository-types';
 import { sqliteAll, sqliteGet } from '../sqlite-query';
-import { parseNormalizeCompileAggregate } from '../aggregate';
+import { validatePreDirectionalAggregate } from '../directional-migration';
 
 type RevisionRow = { readonly revision: number; readonly content_hash: string };
 type StateRow = { readonly active_revision: number; readonly updated_at: number };
@@ -44,7 +44,7 @@ function withoutServiceTimeouts(value: unknown): ConfigurationAggregateV2 {
   });
   if (!found) migrationError('legacy timeout migration was requested without Service.timeouts');
   const logical = aggregate.logical_configuration as Record<string, unknown>;
-  const result = parseNormalizeCompileAggregate({ ...value as object,
+  const result = validatePreDirectionalAggregate({ ...value as object,
     logical_configuration: { ...logical, services: stripped } });
   if (!result.ok) throw new ConfigRepositoryError('schema_corrupt', 'legacy configuration is invalid after removing Service.timeouts', result.errors);
   const normalized = result.value;

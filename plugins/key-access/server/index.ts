@@ -3,6 +3,7 @@ export { createIngress } from './policy';
 export default definePlugin(class {
   static readonly name = 'key-access';
   static readonly version = '1.0.0';
+  bodyRequirements(): import('../../../packages/core/src/plugin.types').PluginBodyRequirements { return { request: 'none' }; }
   register() {}
   resolveAdmissionModel(input: {url: string; body: unknown}): string | null {
     const url = new URL(input.url);

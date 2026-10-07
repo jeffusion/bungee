@@ -48,6 +48,8 @@ export const ModelsDevPlugin = definePlugin(
       this.logger.info('models-dev worker catalog view initialized');
     }
 
+    bodyRequirements() { return { request: 'none' as const }; }
+
     register(_hooks: PluginHooks): void {}
 
     async onDestroy(): Promise<void> {

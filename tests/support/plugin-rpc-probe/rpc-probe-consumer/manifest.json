@@ -1,7 +1,7 @@
 {
   "name": "rpc-probe-consumer",
   "version": "1.0.0",
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "artifactKind": "runtime-plugin",
   "capabilities": ["hooks", "dynamicRuntimeLoad"],
   "runtimeScope": "global",

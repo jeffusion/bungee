@@ -2,7 +2,7 @@
   "name": "anthropic-tool-name-transformer",
   "version": "1.0.0",
   "builtin": true,
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "artifactKind": "runtime-plugin",
   "main": "server/index.ts",
   "capabilities": ["hooks", "dynamicRuntimeLoad"],
@@ -16,6 +16,13 @@
     "icon": "text_rotation_none"
   },
   "configSchema": [
+    {
+      "name": "transformNames",
+      "type": "boolean",
+      "label": "transformNames.label",
+      "description": "transformNames.description",
+      "default": true
+    },
     {
       "name": "nameMap",
       "type": "textarea",
@@ -37,6 +44,8 @@
     "en": {
       "plugin.description": "Transforms Anthropic API tool names to PascalCase and fixes serialized arrays in tool_use inputs",
       "metadata.name": "Anthropic Tool Name Transformer",
+      "transformNames.label": "Transform Tool Names",
+      "transformNames.description": "Enabled by default. Apply custom mappings and PascalCase fallback to requests and SSE events.",
       "nameMap.label": "Custom Name Mapping",
       "nameMap.description": "Custom tool name mappings (one per line, format: lowercase=PascalCase). Unmapped names default to PascalCase conversion.",
       "fixSerializedArrays.label": "Fix Serialized Arrays",
@@ -45,6 +54,8 @@
     "zh-CN": {
       "plugin.description": "将 Anthropic API 中的 tool name 转换为 PascalCase，并修复 tool_use input 中数组被序列化为字符串的问题",
       "metadata.name": "Anthropic 工具名称转换器",
+      "transformNames.label": "转换工具名称",
+      "transformNames.description": "默认开启，对请求和 SSE 使用自定义映射及 PascalCase 转换；关闭名称和数组修复后无需解析内容。",
       "nameMap.label": "自定义名称映射",
       "nameMap.description": "自定义工具名称映射（每行一个，格式：小写名=PascalCase名）。未映射名称默认转换为 PascalCase。",
       "fixSerializedArrays.label": "修复序列化数组",

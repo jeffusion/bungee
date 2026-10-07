@@ -280,3 +280,13 @@ core 提供 collection 和 resource extension 的通用只读 Host：按 manifes
 12. 本地恢复要求整个实例停止，插件实现 identity／plugin-state 恢复；普通导入不覆盖运行状态。
 
 本轮已核验范围见 [实施记录](./authentication-implementation.md)，上述架构标准不等于全部浏览器或生产验收已经完成。
+
+## SDK 3 内容需求边界
+
+代理默认按 opaque 字节流传输。所有 runtime 插件/handler 必须实现 `bodyRequirements(context)`；manifest schema 为 3，缺方法明确初始化失败，不使用旧插件或兼容声明回退。需求按当前方法、URL、路由和已选择的 Service/Upstream 求值，未选中的 endpoint 插件不能要求读体。
+
+请求需求区分 `none`、`json-read`、`json-write`：只读视图保留原始 wire，只有显式改写才序列化；响应需求为 `('json' | 'sse-json')[]`，重放通过独立 `replay` 声明。功能关闭、元数据操作、模型从 URL 可取得时不因 Hook 存在读取内容。有效预算和模型授权通过准入策略声明必需 JSON，无策略不会触发强制解析。
+
+统计的 optional observe 独立于强制内容需求。token-metering 无消费者时不解析，有消费者时复用有界侧观察：单请求、普通 JSON 和单 SSE 事件不超过 1 MiB，每请求队列 256 KiB，worker 共 16 MiB，回调期限 250 ms。超限、解码失败、不支持编码和慢消费者标记 incomplete 并继续原始转发；未知用量不填零。预算的强制准入和可靠结算仍失败关闭。
+
+SSE Hook 使用独立封套 `{data,json?,event?,id?,retry?,comments?,raw?}`，原始事件元数据与 JSON 分离，禁止 `_event` 注入及按 payload.type 重建原始 event。转换器显式生成新协议事件，N:M 输出各自封套。
