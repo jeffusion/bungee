@@ -96,8 +96,7 @@ const crashTimer = setInterval(() => {
     let lastCode = 'none';
     for (let attempt = 0; attempt < 400; attempt++) {
       try {
-        const probes = [];
-        for (let index = 0; index < 64; index++) probes.push(await client.pulse({pid, note: 'capacity-reclaimed'}));
+        const probes = await Promise.all(Array.from({length: 64}, () => client.pulse({pid, note: 'capacity-reclaimed'})));
         const persisted = await client.crashCommand.queryResult(`rpc-probe.crash.${pid}`)
           .then(() => 'resolved', (error: any) => codeOf(error));
         await client.report({pid, phase: 'crash-recovered', commandCode: outcomes[0], settled: outcomes.length,
