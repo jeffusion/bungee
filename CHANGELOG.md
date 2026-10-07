@@ -1,3 +1,16 @@
+# [5.14.0](https://github.com/jeffusion/bungee/compare/v5.13.0...v5.14.0) (2026-10-07)
+
+
+### Bug Fixes
+
+* **ui:** guard chart translations and align responsive layout checks ([dbc7f5d](https://github.com/jeffusion/bungee/commit/dbc7f5dfd4e4e5b143ff4de8f6b86370820eada3))
+* **ui:** respect LLM template in dashboard browser regression ([67eebec](https://github.com/jeffusion/bungee/commit/67eebec21c72ad19db952b1a6d192b27770a47fe))
+
+
+### Features
+
+* **logs:** separate transport outcomes and refine dashboard statistics ([5cf8dfa](https://github.com/jeffusion/bungee/commit/5cf8dfa527ba1f88ce8656f34b7ceaf70b1a1a5c))
+
 # [5.13.0](https://github.com/jeffusion/bungee/compare/v5.12.0...v5.13.0) (2026-10-07)
 
 
