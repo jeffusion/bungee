@@ -10,6 +10,7 @@ const evidence = process.env.DASHBOARD_EVIDENCE_DIR ?? '/tmp/bungee-dashboard-ev
 const previewOnly = process.argv.includes('--preview');
 const nativeOnly = process.argv.includes('--native');
 const tokenManifest = nativeOnly ? await Bun.file(new URL('../../../plugins/token-stats/manifest.json', import.meta.url)).json() : null;
+const modelsDevManifest = nativeOnly ? await Bun.file(new URL('../../../plugins/models-dev/manifest.json', import.meta.url)).json() : null;
 fs.mkdirSync(evidence, { recursive: true });
 const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext({ viewport: { width: 1440, height: 1100 }, locale: 'zh-CN', timezoneId: 'Asia/Shanghai' });
@@ -93,7 +94,7 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
   if (url.pathname === '/api/auth/verify') return route.fulfill({ json: { success: true, mode: 'anonymous', subject: { id: 'anonymous', provider: 'anonymous' } } });
   if (url.pathname === '/api/resources/api-key') return route.fulfill({ json: { keys: [] } });
   if (nativeOnly && url.pathname === '/api/plugin-translations') return route.fulfill({ json: Object.fromEntries(
-    Object.entries(tokenManifest.translations).map(([language, messages]) => [language, { plugins: { 'token-stats': messages } }])) });
+    Object.entries(tokenManifest.translations).map(([language, messages]) => [language, { plugins: { 'token-stats': messages, 'models-dev': modelsDevManifest.translations[language] } }])) });
   if (url.pathname === '/api/config/runtime') return route.fulfill({ json: config });
   if (url.pathname === '/api/config') return route.fulfill({ json: { revision: 1, content_hash: config.content_hash, config: config.config } });
   if (url.pathname === '/api/runtime/upstreams') return route.fulfill({ json: { schema: 'bungee-runtime-upstreams-v1', generated_at: Date.now(), availability: 'complete', reason: null,
@@ -130,15 +131,21 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
     } });
   }
   if (url.pathname === '/api/plugins/token-stats/control/pricing') return route.fulfill({ json: {
-    settings: { autoRefresh: true, intervalHours: 24, timeoutSeconds: 15 }, source: 'https://models.dev/api.json',
+    state: 'empty', version: null, fetchedAt: null, error: null, modelCount: 0, providerCount: 0,
+  } });
+  if (url.pathname === '/api/plugins/token-stats/control/pricing/mappings') return route.fulfill({ json: { mappings: [] } });
+  if (url.pathname === '/api/plugins/models-dev/control/catalog/providers') return route.fulfill({ json: { providers: [] } });
+  if (url.pathname === '/api/plugins/models-dev/control/catalog/status') return route.fulfill({ json: {
+    state: 'empty', version: null, settings: { autoRefresh: true, intervalHours: 24, timeoutSeconds: 15 },
     refreshing: false, lastAttemptAt: null, lastSuccessAt: null, nextRefreshAt: null, lastError: null,
-    consecutiveFailures: 0, modelCount: 0, providerCount: 0,
+    modelCount: 0, providerCount: 0,
   } });
   if (url.pathname === '/api/plugins') return route.fulfill({ json: previewOnly ? [] : nativeOnly
     ? [{ name: 'token-stats', version: tokenManifest.version, enabled: true, metadata: { ...tokenManifest.metadata, contributes: { ...tokenManifest.contributes,
         nativeWidgets: tokenManifest.contributes.nativeWidgets.map((widget: any) => ({ ...widget, props: { pluginName: 'intruder', selectedRange: '24h' } })),
       } } },
-      { name: 'intruder', enabled: true, metadata: { contributes: { nativeWidgets: tokenManifest.contributes.nativeWidgets } } }]
+      { name: 'intruder', enabled: true, metadata: { contributes: { nativeWidgets: tokenManifest.contributes.nativeWidgets } } },
+      { name: 'models-dev', version: modelsDevManifest.version, enabled: true, metadata: { ...modelsDevManifest.metadata, contributes: modelsDevManifest.contributes } }]
     : [{ name: 'demo', enabled: !disabledPlugin, metadata: { name: 'demo', version: '1.0.0', contributes: { widgets: [{ id: 'demo', title: '测试插件', path: 'widget.html', size: 'medium' }] } } }] });
   return route.fulfill({ json: {} });
 });
@@ -859,9 +866,22 @@ try {
     await expect(page.getByTestId('token-stats-page')).toHaveCount(0);
     await expect(page.getByTestId('token-stats-settings')).toBeVisible();
     await expect(bucketDetail).toHaveCount(0);
+    await expect(page.getByTestId('price-mappings-save')).toBeEnabled();
+    await expect(page.getByTestId('pricing-catalog-state')).toHaveText(tokenManifest.translations['zh-CN']['settings.empty']);
+    await expect(page.getByTestId('pricing-catalog-version')).toHaveText(tokenManifest.translations['zh-CN']['settings.never']);
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await expect(page.getByRole('spinbutton')).toHaveCount(0);
+    await page.goto(`${baseUrl}/#/plugins/models-dev${modelsDevManifest.contributes.settings}`);
+    await expect(page.getByTestId('models-dev-settings')).toBeVisible();
+    await expect(page.getByTestId('token-stats-settings')).toHaveCount(0);
     await expect(page.getByRole('spinbutton')).toHaveCount(2);
+    await expect(page.getByTestId('models-dev-interval')).toHaveValue('24');
+    await expect(page.getByTestId('models-dev-timeout')).toHaveValue('15');
+    await expect(page.getByTestId('models-dev-state')).toHaveText(modelsDevManifest.translations['zh-CN']['settings.empty']);
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await page.screenshot({ path: `${evidence}/models-dev-settings.png`, fullPage: true });
     if (pageErrors.length) throw new Error(`Browser errors: ${pageErrors.join('\n')}`);
-    console.log('Native Token Stats checks passed: LLM defaults, API template persistence, screenshot layout, undo/cancel/persistence, mobile templates, combined KPI, time chart, shared range, native page, sorting/search, keyboard chart, pricing and responsive layout.');
+    console.log('Native Token Stats checks passed: LLM defaults, API template persistence, screenshot layout, undo/cancel/persistence, mobile templates, combined KPI, time chart, shared range, native page, sorting/search, keyboard chart, pricing, models.dev settings and responsive layout.');
     await browser.close();
     process.exit(0);
   }
