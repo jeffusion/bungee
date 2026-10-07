@@ -663,7 +663,7 @@ function spyChild(pid: number) {
 }
 
 test('an attached worker fact becomes null after injected child exit without releasing required retirement ownership', async () => {
-  const directory = await mkdtemp('/tmp/opencode/bungee-physical-session-exit-');
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-physical-session-exit-'));
   const identity: ConfigProcessIdentity = { master_generation: GENERATION, worker_instance_id: '40000000-0000-4000-8000-000000000072', worker_slot: 1 };
   const boot = '50000000-0000-4000-8000-000000000072';
   const child = spyChild(57_102);
