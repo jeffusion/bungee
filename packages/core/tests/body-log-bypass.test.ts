@@ -1,11 +1,11 @@
 import { afterEach, expect, test } from 'bun:test';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { gzipSync, zstdCompressSync } from 'node:zlib';
 import { createServer } from 'node:http';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import { ensureDataPlaneSchema } from './helpers/data-plane-runtime';
+import { makeCanonicalTempDir } from '../../../tests/support/canonical-temp';
 
 await ensureDataPlaneSchema();
 const { accessLogWriter } = await import('../src/logger/access-log-writer');
@@ -19,7 +19,8 @@ const requestIds: string[] = [];
 const maxBytes = 5 * 1024 * 1024;
 
 async function setup(maxSize = maxBytes) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bungee-body-log-bypass-'));
+  // macOS temporary paths can contain symlink ancestors; storage requires physical paths.
+  const root = makeCanonicalTempDir('bungee-body-log-bypass');
   roots.push(root);
   const storage = new BodyStorageManager({ enabled: true, maxSize }, root);
   const logging = { accessLogWriter: {
@@ -362,7 +363,7 @@ test('Buffer views retain an independent log copy when the source buffer is reus
 
 test('file logs retain all late body references even when flushed before body storage finishes', async () => {
   const { logging, storage, rows } = await setup();
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bungee-body-log-files-')); roots.push(root);
+  const root = makeCanonicalTempDir('bungee-body-log-files'); roots.push(root);
   const { FileLogWriter } = await import('../src/logger/file-log-writer');
   const files = new FileLogWriter(root);
   let finishSave!: () => void;
@@ -398,7 +399,7 @@ test('file logs retain all late body references even when flushed before body st
 
 test('locally generated upstream timeouts capture bodies before immutable file log completion', async () => {
   const { logging, storage, config, rows } = await setup();
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bungee-body-log-timeout-')); roots.push(root);
+  const root = makeCanonicalTempDir('bungee-body-log-timeout'); roots.push(root);
   const { FileLogWriter } = await import('../src/logger/file-log-writer');
   const { initializeRuntimeState, runtimeState } = await import('../src/worker/state/runtime-state');
   const files = new FileLogWriter(root);
