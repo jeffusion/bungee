@@ -1,3 +1,10 @@
+# [5.13.0](https://github.com/jeffusion/bungee/compare/v5.12.0...v5.13.0) (2026-10-07)
+
+
+### Features
+
+* **core:** proxy HTTP bodies opaquely and migrate directional rules ([b73c9a6](https://github.com/jeffusion/bungee/commit/b73c9a6609e5d08b858f5fc525bd06085b1e5450))
+
 # [5.12.0](https://github.com/jeffusion/bungee/compare/v5.11.0...v5.12.0) (2026-10-07)
 
 
