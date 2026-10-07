@@ -55,12 +55,17 @@ test('original-lab estimates and context tiers settle protected USD budgets acro
   };
   const rows = (): Row[] => {
     const db = new Database(fixture.accessDbPath, { readonly: true });
-    try { return db.query<Row, []>('SELECT attempt_id, model, cost_usd, input_tokens FROM token_stats_attempts ORDER BY rowid').all(); }
+    try {
+      db.exec('PRAGMA busy_timeout = 5000');
+      return db.query<Row, []>('SELECT attempt_id, model, cost_usd, input_tokens FROM token_stats_attempts ORDER BY rowid').all();
+    }
     finally { db.close(); }
   };
   const publish = async (version: number, multiplier = 1, corrupt = false) => {
     const db = new Database(fixture.configDbPath);
     try {
+      // Match production connections while the master and workers write concurrently.
+      db.exec('PRAGMA busy_timeout = 5000');
       const store = new HostSnapshotStore(new PluginCommunicationStore(db, undefined, { setup: false }).forNamespace('models-dev'),
         { owner: 'models-dev', id: 'models-dev.catalog.v1', schemaVersion: 1, maxVersions: 3 });
       const price = { input: 2 * multiplier, output: 10 * multiplier, cache_read: 0.1 * multiplier,
@@ -116,7 +121,10 @@ test('original-lab estimates and context tiers settle protected USD budgets acro
     master = await startTrackedGatewayMaster(startup, fixture, lease);
     await waitForHealth(master, lease.base, fixture);
     const db = new Database(fixture.accessDbPath);
-    try { await new SQLitePluginStorage(db, 'models-dev').set(MODELS_DEV_SETTINGS_KEY, { autoRefresh: false, intervalHours: 24, timeoutSeconds: 15 }); }
+    try {
+      db.exec('PRAGMA busy_timeout = 5000');
+      await new SQLitePluginStorage(db, 'models-dev').set(MODELS_DEV_SETTINGS_KEY, { autoRefresh: false, intervalHours: 24, timeoutSeconds: 15 });
+    }
     finally { db.close(); }
     await publish(1);
     const initial = await api('/api/config');
