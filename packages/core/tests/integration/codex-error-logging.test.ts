@@ -11,7 +11,7 @@ import { restoreWorkerTransportRequest } from '../../src/config-worker/private-t
 import { TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/config-worker-private-transport';
 import { localAdmissionSelector } from '../fixtures/public-listener';
 
-test('OAuth HTTP and SSE diagnostics reach clients and durable logs with opaque capture marked incomplete', async () => {
+test('OAuth HTTP and SSE diagnostics reach clients and durable logs with independent body logging', async () => {
   await ensureDataPlaneSchema();
   const [{ handleRequest }, runtime, { accessLogWriter }, { fileLogWriter }] = await Promise.all([
     import('../../src/worker/request/handler'), import('../../src/worker/state/runtime-state'),
@@ -70,6 +70,8 @@ test('OAuth HTTP and SSE diagnostics reach clients and durable logs with opaque 
       expect(text).toContain(code);
       expect(text).not.toContain('private-token');
       expect(text).not.toContain('private-payload');
+      const { flushBodyCaptures } = await import('../../src/logger/body-capture');
+      await flushBodyCaptures();
       await accessLogWriter.flush();
       const row = accessLogWriter.getDatabase().query('SELECT * FROM access_logs WHERE path=? ORDER BY id DESC LIMIT 1').get(routeId) as Record<string, any>;
       expect(row).toMatchObject({ status: expectedStatus, success: 0, protocol_outcome: 'failed', protocol_code: httpError ? 'upstream_http_error' : 'failed' });
@@ -77,8 +79,9 @@ test('OAuth HTTP and SSE diagnostics reach clients and durable logs with opaque 
       expect(row.error_message).toContain('Retry later');
       expect(row.error_message).not.toContain('private-token');
       expect(JSON.parse(row.processing_steps)).toContainEqual(expect.objectContaining({ step: 'response_error', detail: expect.objectContaining({ source: 'upstream', code }) }));
-      expect(row.resp_body_id).toBeNull();
-      expect(JSON.parse(row.processing_steps)).toContainEqual(expect.objectContaining({ step: 'body_logging_incomplete', detail: expect.objectContaining({ observer_incomplete: true }) }));
+      expect(row.resp_body_id).toBeString();
+      const recorded = await bodyStorage.load(row.resp_body_id);
+      expect(typeof recorded === 'string' ? recorded : JSON.stringify(recorded)).toBe(text);
       await fileLogWriter.flush();
       const lines = (await Bun.file(join(dataPlaneFileLogDir, `access-${new Date().toISOString().slice(0, 10)}.log`)).text()).trim().split('\n');
       const entry = lines.map(line => JSON.parse(line)).find(entry => entry.requestId === row.request_id);

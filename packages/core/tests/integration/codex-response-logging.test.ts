@@ -11,7 +11,7 @@ import { CODEX_MAX_SSE_LINE_BYTES } from '../../../../plugins/chatgpt-oauth/serv
 import { TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/config-worker-private-transport';
 import { localAdmissionSelector } from '../fixtures/public-listener';
 
-test('Codex large response and durable failure diagnostics survive with opaque capture marked incomplete', async () => {
+test('Codex large response and durable failure diagnostics survive with bounded independent body logging', async () => {
   await ensureDataPlaneSchema();
   const [{ handleRequest }, runtime, { accessLogWriter }, { fileLogWriter }] = await Promise.all([
     import('../../src/worker/request/handler'),
@@ -97,7 +97,7 @@ test('Codex large response and durable failure diagnostics survive with opaque c
         } else {
           expect(row.original_req_body_id).toBeNull();
           expect(JSON.parse(row.processing_steps)).toContainEqual(expect.objectContaining({
-            step: 'body_recording_skipped', detail: expect.objectContaining({ reason: 'size_limit', maxBytes: 5 * 1024 * 1024 }),
+            step: 'body_logging_incomplete', detail: expect.objectContaining({ direction: 'original-request', reason: 'size_limit' }),
           }));
         }
         expect(runtime.getActiveRequestCount('response-replay', 'primary')).toBe(0);

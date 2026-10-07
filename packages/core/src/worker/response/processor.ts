@@ -148,7 +148,6 @@ export async function prepareResponse(
       }
       body = modified ? JSON.stringify(value) : source.take();
       if(modified && bodyOwners){const lease=new BodyBufferLease();lease.add(Buffer.byteLength(body as string));bodyOwners.push(lease);}
-      if (config?.logging?.body?.enabled) reqLogger?.setResponseBody(value);
     } catch (error) { if (error instanceof BodyProcessingError && error.status === 503) throw error; throw new BodyProcessingError(502,'invalid_response_body'); }
     finally { if (!bodyOwners) source.dispose(); }
   } else if (sse && res.body && ((bodyRules && formats.includes('sse-json')) || hasInboundStreamCallbacks)) {
@@ -159,10 +158,11 @@ export async function prepareResponse(
   } else if (bodyRules) {
     reqLogger?.addStep('response_body_rules_skipped',{reason:'media_type_not_selected',content_type:media});
   }
-  if(config?.logging?.body?.enabled && body instanceof ReadableStream && !modified) reqLogger?.addStep('body_logging_incomplete',{direction:'response',reason:'opaque_body_not_observed',observer_incomplete:true});
   reqLogger?.addStep('response_body_plan',{mode:modified ? (sse ? 'sse-json-write' : 'json-write') : dependencies.responseBody ? 'json-read' : 'opaque-stream',reasons:[...(bodyRules ? ['response-body-rules'] : []),...(dependencies.responseBody ? ['response-header-expression'] : []),...(hasInboundStreamCallbacks ? ['plugin-sse'] : [])],source:'wire'});
   applyHeaderRules(headers,rules.headers,responseContext);
   reconcileEntityHeaders(headers,body,modified);
+  reqLogger?.setResponseHeaders(headerRecord(headers));
+  if (reqLogger) body = reqLogger.observeBody(body, 'response', headers, config?.logging?.body, signal, res.status);
   if (body instanceof ReadableStream) body = completionStream(body,state,signal);
   else state?.complete?.({status:'completed'});
   return {headers,body};

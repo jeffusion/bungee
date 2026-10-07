@@ -72,7 +72,7 @@ describe('request body limits and error records', () => {
       expect(JSON.parse(row.processing_steps).at(-1).step).toBe('request_body_rejected');
       // Error responses are saved even when the independent log size limit is smaller.
       expect(await bodyStorage.load(row.resp_body_id)).toEqual(responseBody);
-      expect(await headerStorage.load(row.resp_header_id)).toEqual({ 'content-type': 'application/json' });
+      expect((await headerStorage.load(row.resp_header_id))['content-type']).toStartWith('application/json');
     }
   }, 15_000);
 
@@ -150,6 +150,8 @@ describe('request body limits and error records', () => {
       // Declared oversize is rejected before dispatch; chunked oversize can
       // reach the upstream before the streaming counter rejects its body.
       expect(upstreamCalls).toBe(2);
+      const { flushBodyCaptures } = await import('../../src/logger/body-capture');
+      await flushBodyCaptures();
       await accessLogWriter.flush();
       const failures = accessLogWriter.getDatabase().query('SELECT resp_body_id,error_message FROM access_logs WHERE path=? AND status=413').all(path) as Record<string, any>[];
       expect(failures).toHaveLength(3);

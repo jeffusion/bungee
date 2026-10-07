@@ -82,7 +82,7 @@ afterEach(async () => {
 });
 
 describe('prepareResponse streamed logging', () => {
-  test('opaque logging reports incomplete and cancels a pending read without blocking', async () => {
+  test('body logging discards cancelled partial streams without blocking', async () => {
     const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages'), undefined, { bodyStorage });
     const steps = spyOn(reqLogger, 'addStep');
     const requestId = reqLogger.getRequestId();
@@ -109,7 +109,7 @@ describe('prepareResponse streamed logging', () => {
     await accessLogWriter.flush();
     const row = accessLogWriter.getDatabase().query('SELECT resp_body_id FROM access_logs WHERE request_id=?').get(requestId) as { resp_body_id: string };
     expect(row.resp_body_id).toBeNull();
-    expect(steps).toHaveBeenCalledWith('body_logging_incomplete', { direction: 'response', reason: 'opaque_body_not_observed', observer_incomplete: true });
+    expect(steps).toHaveBeenCalledWith('body_logging_incomplete', { direction: 'response', reason: 'cancelled', observer_incomplete: true });
     steps.mockRestore();
   });
 
@@ -246,7 +246,7 @@ describe('prepareResponse streamed logging', () => {
 
     expect(row).not.toBeNull();
     expect(row?.resp_body_id).toBeNull();
-    expect(steps).toHaveBeenCalledWith('body_logging_incomplete', { direction: 'response', reason: 'opaque_body_not_observed', observer_incomplete: true });
+    expect(steps).toHaveBeenCalledWith('body_logging_incomplete', { direction: 'response', reason: 'size_limit', observer_incomplete: true });
     steps.mockRestore();
   });
 
