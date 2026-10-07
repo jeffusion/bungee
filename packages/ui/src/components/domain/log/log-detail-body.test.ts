@@ -24,9 +24,14 @@ const modules: Record<string, string> = {
     window.bodyCalls = [];
     export async function loadBodyById(id) {
       window.bodyCalls.push(id);
+      if (window.sseBodies) return structuredClone(window.sseBodies[id]);
       return { content: 'body-' + id };
     }
     export async function loadHeaderById(id) {
+      if (window.contentType) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        return { 'Content-Type': window.contentType };
+      }
       return { 'x-test': 'header-' + id };
     }
   `,
@@ -147,3 +152,47 @@ for (const scenario of ['config-failed', 'body-disabled', 'missing-ids'] as cons
     }, 15000);
   }
 }
+
+test('all body tabs display new arrays and historical SSE text or wrappers as event/data arrays', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext();
+  context.setDefaultTimeout(3000);
+  cleanup = async () => { try { await context.close(); } finally { await browser.close(); } };
+  const expected = [{ event: 'named', data: { x: 1 } }, { event: 'message', data: '[DONE]' }];
+  const cases = [
+    { body: 'event: named\ndata: {"x":1}\n\ndata: [DONE]\n\n', contentType: 'text/event-stream', expected },
+    { body: { kind: 'sse_messages', messages: [{ event: 'named', dataText: '{"x":1}' }, { done: true, dataText: '[DONE]' }] }, contentType: '', expected },
+    { body: expected, contentType: 'text/event-stream', expected },
+    { body: 'data: ordinary text\n\n', contentType: 'text/plain', expected: 'data: ordinary text\n\n' },
+  ];
+  for (const fixture of cases) {
+    const page = await context.newPage();
+    try {
+      const errors: string[] = [];
+      page.on('pageerror', error => errors.push(error.message));
+      await page.setContent('<!doctype html><html><body></body></html>');
+      await page.addScriptTag({ content: script });
+      await page.evaluate(({ body, contentType }) => {
+        const fixture = window as any;
+        fixture.contentType = contentType;
+        fixture.sseBodies = { original: body, transformed: body, response: body };
+        fixture.start({
+          requestId: 'sse', timestamp: 0, method: 'POST', path: '/test', status: 200, duration: 1,
+          originalReqBodyId: 'original', reqBodyId: 'transformed', respBodyId: 'response',
+          originalReqHeaderId: 'original', reqHeaderId: 'transformed', respHeaderId: 'response',
+        });
+      }, fixture);
+      for (const tab of tabs) {
+        if (tab !== 'original') await page.locator(`[data-tab="${tab}"]`).click();
+        await page.waitForFunction(({ tab, expected }) => {
+          const fixture = window as any;
+          return fixture.bodyCalls.includes(tab)
+            && document.querySelector('[data-body]')?.textContent === JSON.stringify(expected);
+        }, { tab, expected: fixture.expected });
+        expect(JSON.parse((await page.locator('[data-body]').textContent())!)).toEqual(fixture.expected);
+      }
+      expect(await page.evaluate(() => (window as any).bodyCalls)).toEqual(tabs);
+      expect(errors).toEqual([]);
+    } finally { await page.close(); }
+  }
+}, 15000);

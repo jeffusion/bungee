@@ -1,4 +1,5 @@
 import { BodyProcessingError, decodeStream } from '../worker/request/body-source';
+import { formatSSELog } from '@jeffusion/bungee-types';
 
 const TOTAL_LIMIT = 32 * 1024 * 1024;
 const MAX_CAPTURES = 64;
@@ -20,6 +21,7 @@ export function captureBody(
   source: ReadableStream<Uint8Array>, maxBytes: number, coding: string,
   save: (body: unknown) => Promise<void>, incomplete: (reason: BodyCaptureReason) => void,
   signal?: AbortSignal,
+  contentType = '',
 ): BodyCapture {
   // Acquire first: a locked source must not leak a capture/buffer reservation.
   const reader = source.getReader();
@@ -98,6 +100,9 @@ export function captureBody(
           try { value = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
           catch { value = { encoding: 'base64', data: base64() }; }
         }
+        value = formatSSELog(value, contentType, bytes => {
+          if (!reserve(bytes)) throw new BodyProcessingError(503, 'body_buffer_capacity');
+        });
         await save(value);
       } catch (error) {
         const reason = error instanceof BodyProcessingError
