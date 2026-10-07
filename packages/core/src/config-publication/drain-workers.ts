@@ -29,6 +29,8 @@ type FrozenDrainTask = {
   readonly startDeadlineNs?: string;
 };
 const drainTasks = new WeakMap<ServingConfigWorker['process'], FrozenDrainTask>();
+const reportedTerminalMismatches = new WeakSet<ServingConfigWorker['process']>();
+const reportedTerminalProbeFailures = new WeakSet<ServingConfigWorker['process']>();
 
 function errorDetail(error: unknown, fallback: string): string {
   return error instanceof Error && error.message.trim().length > 0 ? error.message.slice(0, 512) : fallback;
@@ -77,16 +79,32 @@ async function completedTerminalExit(
   task?: Pick<FrozenDrainTask, 'drainId' | 'policy'>,
   timeoutMs = 100,
 ): Promise<WorkerExitEvidence | null> {
+  const startedAt = performance.now();
+  let outcome = 'timeout';
+  let probeError: string | undefined;
   try {
     // A stalled OS probe must not hold the retirement task beyond its window.
     const evidence = await new Promise<WorkerExitEvidence | null>((resolve) => {
       const timeout = scheduler.schedule(timeoutMs, () => resolve(null));
       Promise.resolve().then(() => worker.process.verifyExactExit?.()).then(
-        result => { bestEffort(() => timeout.cancel()); resolve(result ?? null); },
-        () => { bestEffort(() => timeout.cancel()); resolve(null); },
+        result => { outcome = result == null ? 'unconfirmed' : 'verified'; bestEffort(() => timeout.cancel()); resolve(result ?? null); },
+        error => { outcome = 'error'; probeError = errorDetail(error, 'exit probe failed'); bestEffort(() => timeout.cancel()); resolve(null); },
       );
     });
     const message = evidence?.terminalDrain;
+    if (evidence == null && !reportedTerminalProbeFailures.has(worker.process)) {
+      reportedTerminalProbeFailures.add(worker.process);
+      console.error(JSON.stringify({ event: 'worker_terminal_exit_probe', pid: worker.process.pid,
+        outcome, elapsedMs: Math.round(performance.now() - startedAt), error: probeError }));
+    }
+    if (evidence !== null && evidence !== undefined && !reportedTerminalMismatches.has(worker.process)
+      && (message === undefined || !terminalMatchesWorker(message, worker, task))) {
+      reportedTerminalMismatches.add(worker.process);
+      console.error(JSON.stringify({ event: 'worker_terminal_exit_mismatch', pid: worker.process.pid, evidencePid: evidence.pid,
+        expected: { ...worker.process.identity, boot_nonce: worker.boot_nonce, revision: worker.revision,
+          content_hash: worker.content_hash, plugin_catalog_hash: worker.plugin_catalog_hash,
+          publication: worker.publication, boot_id: worker.process.kernelBootId, task }, terminal: message ?? null }));
+    }
     return evidence !== null && evidence !== undefined && evidence.pid === worker.process.pid
       && message !== undefined && terminalMatchesWorker(message, worker, task) ? evidence : null;
   } catch { return null; }
