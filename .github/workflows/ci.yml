@@ -40,9 +40,6 @@ jobs:
       - name: Build full pipeline
         run: bun run build
 
-      - name: Verify plugin RPC lifecycle
-        run: bun test tests/plugin-rpc-gateway-real-process.test.ts
-
       - name: Run tests
         run: bun test
 
