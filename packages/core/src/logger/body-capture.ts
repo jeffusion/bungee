@@ -22,6 +22,7 @@ export function captureBody(
   save: (body: unknown) => Promise<void>, incomplete: (reason: BodyCaptureReason) => void,
   signal?: AbortSignal,
   contentType = '',
+  requestAccept = '',
 ): BodyCapture {
   // Acquire first: a locked source must not leak a capture/buffer reservation.
   const reader = source.getReader();
@@ -102,7 +103,7 @@ export function captureBody(
         }
         value = formatSSELog(value, contentType, bytes => {
           if (!reserve(bytes)) throw new BodyProcessingError(503, 'body_buffer_capacity');
-        });
+        }, requestAccept);
         await save(value);
       } catch (error) {
         const reason = error instanceof BodyProcessingError

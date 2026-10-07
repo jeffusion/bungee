@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { gzipSync, zstdCompressSync } from 'node:zlib';
+import { createServer } from 'node:http';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import { ensureDataPlaneSchema } from './helpers/data-plane-runtime';
 
@@ -65,6 +66,45 @@ test('models-sized opaque response is logged without a body demand', async () =>
     expect(steps).toContainEqual(expect.objectContaining({ step: 'response_body_plan', detail: expect.objectContaining({ mode: 'opaque-stream', reasons: [] }) }));
     expect(steps.some((step: any) => step.step === 'body_logging_incomplete')).toBe(false);
   } finally { await server.stop(true); }
+});
+
+test('missing response media type uses final request Accept only for valid SSE log copies', async () => {
+  const { logging, storage, config, rows } = await setup();
+  const text = ': ping\nevent: named\ndata: {"x":1}\n\ndata: [DONE]\n\n';
+  let seenAccept: string | null = null;
+  let payload = text;
+  let media = '';
+  // Node's HTTP server leaves Content-Type absent; Bun Response infers a type.
+  const server = createServer(async (req, res) => {
+    seenAccept = req.headers.accept ?? null;
+    for await (const _ of req) { /* finish the upload before responding */ }
+    if (media) res.setHeader('content-type', media);
+    res.end(payload);
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const target = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  try {
+    const cases = [
+      { accept: 'text/event-stream', payload: text, media: '', expected: [{ event: 'named', data: { x: 1 } }, { event: 'message', data: '[DONE]' }] },
+      { accept: 'text/event-stream', payload: 'upstream failed', media: '', expected: 'upstream failed' },
+      { accept: 'text/event-stream', payload: text, media: 'text/plain', expected: text },
+      { accept: 'application/json', payload: text, media: '', expected: text },
+    ];
+    for (const fixture of cases) {
+      payload = fixture.payload; media = fixture.media;
+      // Request rules overwrite the incoming Accept; inference must use the outbound value.
+      const response = await handleRequest(new Request('http://gateway/test', { method: 'POST', body: '{"x":1}',
+        headers: { accept: 'application/json', 'content-type': 'application/json' } }),
+        config(target, { request: { headers: { replace: { Accept: fixture.accept } } } }), { logging });
+      expect(seenAccept).toBe(fixture.accept);
+      expect(response.headers.get('content-type')).toBe(media || null);
+      expect(await response.text()).toBe(payload);
+      const row = (await rows()).at(-1)!;
+      expect(await storage.load(row.resp_body_id)).toEqual(fixture.expected);
+      expect(await storage.load(row.req_body_id)).toEqual({ x: 1 });
+      expect(JSON.parse(row.processing_steps).some((step: any) => step.step === 'body_logging_incomplete')).toBe(false);
+    }
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });
 
 test('opaque request and response logging preserve compressed, malformed and binary wire bytes', async () => {

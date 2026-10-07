@@ -195,6 +195,47 @@ describe('proxy credential regressions', () => {
     await result.cleanup?.();
   });
 
+  test('final request logs redact custom lease headers and retain the profiled SSE Accept', async () => {
+    const customManifest = structuredClone(manifest) as any;
+    const policy = customManifest.contributes.upstreamSources[0].credentialPolicy;
+    policy.allowedHeaderNames = ['X-Provider-Key'];
+    policy.allowedRequests[0].outboundHeaders = { passthrough: [], set: { Accept: 'text/event-stream' } };
+    setPluginRegistry({ getPluginStateSnapshot: () => ({ persistedEnabled: 'enabled', manifest: customManifest }) } as unknown as PluginRegistry);
+    installProvider({ credential: async () => ({ version: 3, expiresAt: Date.now() + 10_000,
+      headers: { 'x-provider-key': 'CUSTOM_LEASE_TEST_SECRET' } }) });
+    let fetchedHeaders: Headers | undefined;
+    const wire = 'event: named\ndata: {"x":1}\n\n';
+    global.fetch = (async (_input, init) => {
+      fetchedHeaders = new Headers(init?.headers);
+      if (init?.body) await new Response(init.body).arrayBuffer();
+      return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        controller.enqueue(new TextEncoder().encode(wire)); controller.close();
+      } }));
+    }) as typeof fetch;
+    const savedHeaders: Record<string, Record<string, string>> = {};
+    const savedBodies: Record<string, unknown> = {};
+    const { RequestLogger } = await import('../../src/logger/request-logger');
+    const logger = new RequestLogger(new Request('http://proxy.test/v1/chat'), undefined, {
+      accessLogWriter: { write() {}, updateResponseBodyId() {}, updateBodyId() {}, updateProtocolOutcome() {} }, fileLogWriter: { write() {} },
+      headerStorage: { async save(_id, headers, direction) { savedHeaders[direction] = structuredClone(headers); return direction; } },
+      bodyStorage: { async save(_id, body, direction) { savedBodies[direction] = body; return direction; } },
+    });
+    const result = await proxyRequest(createSnapshot(), { ...route, timeouts: { request_ms: 500 } }, createUpstream(),
+      { requestId: logger.getRequestInfo().requestId }, { ...config, logging: { body: { enabled: true, max_size: 4096 } } } as AppConfig,
+      'route-1', logger, undefined, undefined, undefined, { servingRevision: 7, attemptId: 'attempt-1' });
+    try {
+      expect(fetchedHeaders?.get('x-provider-key')).toBe('CUSTOM_LEASE_TEST_SECRET');
+      expect(fetchedHeaders?.get('accept')).toBe('text/event-stream');
+      expect(result.response.headers.get('content-type')).toBeNull();
+      expect(await result.response.text()).toBe(wire);
+      await logger.bodyLoggingCompletion(); await logger.complete(200);
+      expect(savedHeaders.request.accept).toBe('text/event-stream');
+      expect(savedHeaders.request['x-provider-key']).toBe('[REDACTED]');
+      expect(JSON.stringify(savedHeaders)).not.toContain('CUSTOM_LEASE_TEST_SECRET');
+      expect(savedBodies.response).toEqual([{ event: 'named', data: { x: 1 } }]);
+    } finally { await result.cleanup?.(); }
+  });
+
   test('actual SSE responses stay incremental when the request is non-streaming', async () => {
     installProvider();
     let onResponseCalls = 0;
