@@ -229,9 +229,56 @@ test('SSE logging preserves the final event envelope with and without modificati
       let wire = new TextDecoder().decode((first as ReadableStreamReadResult<Uint8Array>).value);
       while (true) { const next = await reader.read(); if (next.done) break; wire += new TextDecoder().decode(next.value); }
       expect(wire).toBe(modify ? text.replace('"x":1', '"x":2') : text);
-      expect(await storage.load((await rows()).at(-1)!.resp_body_id)).toBe(wire);
+      expect(await storage.load((await rows()).at(-1)!.resp_body_id)).toEqual([
+        { event: 'named', data: { x: modify ? 2 : 1 } },
+        { event: 'message', data: '[DONE]' },
+      ]);
     }
   } finally { finish?.(); await server.stop(true); }
+});
+
+test('all SSE body directions use the same array format while preserving compressed wire bytes', async () => {
+  const { logging, storage, config, rows } = await setup();
+  const text = 'event: named\r\ndata: {"x":1}\r\n\r\ndata: hello\r\ndata: world\r\n\r\ndata: [DONE]\r\n\r\n';
+  const expected = [{ event: 'named', data: { x: 1 } }, { event: 'message', data: 'hello\nworld' }, { event: 'message', data: '[DONE]' }];
+  const server = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(req) {
+    return new Response(await req.arrayBuffer(), { headers: req.headers });
+  } });
+  try {
+    for (const coding of ['', 'gzip', 'zstd']) {
+      const bytes = coding === 'gzip' ? gzipSync(encoder.encode(text)) : coding === 'zstd' ? zstdCompressSync(encoder.encode(text)) : encoder.encode(text);
+      const response = await handleRequest(new Request('http://gateway/test', { method: 'POST', body: bytes,
+        headers: { 'content-type': 'text/event-stream; charset=utf-8', ...(coding ? { 'content-encoding': coding } : {}) } }), config(server.url.origin), { logging });
+      expect(response.headers.get('content-encoding') ?? '').toBe(coding);
+      expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array(bytes));
+      const row = (await rows()).at(-1)!;
+      for (const field of ['original_req_body_id', 'req_body_id', 'resp_body_id']) expect(await storage.load(row[field])).toEqual(expected);
+    }
+  } finally { await server.stop(true); }
+});
+
+test('SSE array expansion obeys the log size limit without affecting the response', async () => {
+  const { logging, config, rows } = await setup(64);
+  const text = 'data:\n\n'.repeat(4);
+  const server = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: () => new Response(text, { headers: { 'content-type': 'text/event-stream' } }) });
+  try {
+    const response = await handleRequest(new Request('http://gateway/test'), config(server.url.origin), { logging });
+    expect(response.status).toBe(200); expect(await response.text()).toBe(text);
+    const [row] = await rows();
+    expect(row.resp_body_id).toBeNull();
+    expect(JSON.parse(row.processing_steps)).toContainEqual(expect.objectContaining({ step: 'body_logging_incomplete', detail: expect.objectContaining({ reason: 'size_limit' }) }));
+  } finally { await server.stop(true); }
+});
+
+test('SSE parsing capacity exhaustion remains isolated and releases its reservations', async () => {
+  const text = 'data:0\n\n'.repeat(200_000);
+  const reasons: string[] = []; const saved: unknown[] = [];
+  const capture = captureBody(new Response(text).body!, maxBytes, '', async value => { saved.push(value); }, reason => reasons.push(reason), undefined, 'text/event-stream');
+  expect(await new Response(capture.body).text()).toBe(text); await capture.completion;
+  expect(saved).toEqual([]); expect(reasons).toEqual(['buffer_capacity']);
+  const after = captureBody(new Response('data: ok\n\n').body!, 1024, '', async value => { saved.push(value); }, reason => reasons.push(reason), undefined, 'text/event-stream');
+  expect(await new Response(after.body).text()).toBe('data: ok\n\n'); await after.completion;
+  expect(saved).toEqual([[{ event: 'message', data: 'ok' }]]); expect(reasons).toEqual(['buffer_capacity']);
 });
 
 test('concurrent logging saturation skips copies and releases all capacity without losing wire bytes', async () => {

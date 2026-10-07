@@ -5,6 +5,7 @@
   import type { LogEntry } from '$api/logs';
   import { loadBodyById, loadHeaderById } from '$api/logs';
   import { LoadingIndicator, SegmentedControl } from '$components/industrial';
+  import { formatSSELog } from '@jeffusion/bungee-types';
 
   export let log: LogEntry;
   export let onClose: (() => void) | undefined = undefined;
@@ -217,7 +218,7 @@
     requestBodyError = null;
 
     try {
-      requestBody = await loadBodyById(log.reqBodyId);
+      requestBody = formatSSELog(await loadBodyById(log.reqBodyId), bodyContentType(requestHeaders));
     } catch (error) {
       requestBodyError = error instanceof Error ? error.message : 'Failed to load request body';
     } finally {
@@ -232,7 +233,7 @@
     responseBodyError = null;
 
     try {
-      responseBody = await loadBodyById(log.respBodyId);
+      responseBody = formatSSELog(await loadBodyById(log.respBodyId), bodyContentType(responseHeaders));
     } catch (error) {
       responseBodyError = error instanceof Error ? error.message : 'Failed to load response body';
     } finally {
@@ -292,12 +293,16 @@
     originalRequestBodyError = null;
 
     try {
-      originalRequestBody = await loadBodyById(log.originalReqBodyId);
+      originalRequestBody = formatSSELog(await loadBodyById(log.originalReqBodyId), bodyContentType(originalRequestHeaders));
     } catch (error) {
       originalRequestBodyError = error instanceof Error ? error.message : 'Failed to load original request body';
     } finally {
       loadingOriginalRequestBody = false;
     }
+  }
+
+  function bodyContentType(headers: Record<string, string> | null): string {
+    return Object.entries(headers ?? {}).find(([name]) => name.toLowerCase() === 'content-type')?.[1] ?? '';
   }
 
   async function loadActiveTabData(tab: 'original' | 'transformed' | 'response'): Promise<void> {

@@ -180,7 +180,7 @@ export class RequestLogger {
         if (this.captureVersions.get(type) !== version && !(version === 0 && !this.captureVersions.has(type))) return;
         if (id) this.recordCapturedId(type, id);
         else this.addStep('body_logging_incomplete', { direction: type, reason: 'storage_failed', observer_incomplete: true });
-      }, reason => this.addStep('body_logging_incomplete', { direction: type, reason, observer_incomplete: true }), signal);
+      }, reason => this.addStep('body_logging_incomplete', { direction: type, reason, observer_incomplete: true }), signal, headers.get('content-type') ?? '');
       this.bodyCaptures.set(type, capture);
       return capture.body;
     } catch {
