@@ -49,3 +49,9 @@ bun test plugins/chatgpt-oauth/tests/siwc-adapter.test.ts \
 ```
 
 这些测试覆盖请求转换、受限工具、模型列表、SSE 聚合/转换、授权地址校验、登录类型和 manifest 契约；真实登录、账户权限及上游服务可用性需用自己的账户验证。
+
+## 共享正文接口
+
+插件 server 只依赖公开 `@jeffusion/bungee-core/plugin` SDK。代理返回的模型列表和 HTTP 错误使用宿主 `bodyHandle.json()`；Codex/SIWC 的流式转换和非流式聚合共同使用 `bodyHandle.events()`。解压、SSE 分帧和 JSON 解析由宿主完成，插件只校验 Codex 事件与终态。模型正文限额继承宿主 `bodyHandle.maxBytes`，日志保存限额独立。缺少共享正文视图会返回固定错误，不自行创建读流器。
+
+OAuth 令牌交换、账户用量/额度 RPC、模型目录缓存和管理 API 输入是独立辅助网络入口，其限额和 reader 不用于代理正文。

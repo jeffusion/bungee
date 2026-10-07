@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import type { ControlHostContext, PluginControl } from '../../../packages/core/src/plugin-control/contracts';
-import type { PluginDurableState, DurableJson } from '../../../packages/core/src/plugin-durable-state';
-import type { DataPrincipal } from '../../../packages/core/src/plugin-extensions';
+import type { ControlHostContext, PluginControl } from '@jeffusion/bungee-core/plugin';
+import type { PluginDurableState, DurableJson } from '@jeffusion/bungee-core/plugin';
+import type { DataPrincipal } from '@jeffusion/bungee-core/plugin';
 import { validatePolicy, validatePublication, stringIds, validPrincipal, type AccessPublication, type AccessCredential } from './policy';
 
 type ReadState = Pick<PluginDurableState, 'get' | 'list'>;

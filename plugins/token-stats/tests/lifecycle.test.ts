@@ -67,7 +67,8 @@ function selected(requestId: string, attemptId?: string, upstreamId?: string): A
 function request(requestId: string, options: { attemptId?: string; upstreamId?: string; url?: string; body?: unknown } = {}): AttemptObservationEvent {
   return { ...base(requestId, options.attemptId, options.upstreamId), phase: 'request',
     url: options.url ?? 'https://api.openai.com/v1/responses',
-    body: options.body ?? JSON.stringify({ model: 'gpt-4o-mini', input: 'hello' }) };
+    // Fixtures represent the already decoded gateway observation, not its wire encoding.
+    body: typeof options.body === 'string' ? JSON.parse(options.body) : options.body ?? { model: 'gpt-4o-mini', input: 'hello' } };
 }
 function response(requestId: string, body: Record<string, unknown>, options: {
   attemptId?: string; upstreamId?: string; status?: number; protocol?: 'json' | 'sse';

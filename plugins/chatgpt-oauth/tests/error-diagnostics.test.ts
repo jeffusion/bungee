@@ -1,6 +1,7 @@
+import { ChatgptOauthAdapter } from './shared-body-fixture';
 import { expect, test } from 'bun:test';
 import type { MutableRequestContext, RawResponseContext } from '../../../packages/core/src/hooks';
-import { ChatgptOauthAdapter, CHAT_COMPLETIONS_PATH, RESPONSES_PATH } from '../server/adapter';
+import { CHAT_COMPLETIONS_PATH, RESPONSES_PATH } from '../server/adapter';
 import { errorDiagnostic } from '../server/error-diagnostics';
 
 function setup(path = RESPONSES_PATH, stream = true) {
@@ -13,7 +14,6 @@ function setup(path = RESPONSES_PATH, stream = true) {
   adapter.beforeRequest(request);
   const context: RawResponseContext = {
     method: 'POST', originalUrl: request.originalUrl, requestId: request.requestId,
-    decodeResponseBody: response => response.body,
     clientIP: request.clientIP, attemptId: 'error-test', signal: new AbortController().signal,
     redactDiagnostic: value => value.replaceAll('opaque-managed-secret', '[REDACTED]'),
   };

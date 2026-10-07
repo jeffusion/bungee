@@ -28,6 +28,7 @@ const roots: string[] = [];
 const registries: ScopedPluginRegistry[] = [];
 const byteObserverCompletions: Promise<void>[] = [];
 function trackedByteObserver(...args: Parameters<typeof createAttemptResponseObserver>) {
+  args[8] = {maxBytes:1024*1024,...args[8]};
   const observer = createAttemptResponseObserver(...args);
   byteObserverCompletions.push(observer.completion);
   return observer;
@@ -148,6 +149,7 @@ async function setup(options: { twoUpstreams?: boolean; retry?: boolean; interce
     ...(options.twoUpstreams ? [{ id: 'b', target: 'http://attempt-b.test', priority: 2, plugins: [] }] : []),
   ];
   const config = {
+    body_parser_limit:'1mb',
     plugins: options.multiScope ? [binding('global')] : [],
     services: [{ name: 'svc', endpoints, plugins: options.multiScope ? [binding('service')] : [],
       failover: { enabled: options.twoUpstreams, retry_on: [500] },
@@ -282,6 +284,7 @@ describe('attempt observation lifecycle', () => {
 
   test.each(['retry','failover'] as const)('observed %s waits for the original source cancellation gate', async (mode) => {
     const {config}=await setup(mode==='retry' ? {retry:true} : {twoUpstreams:true});
+    config.body_parser_limit='1mb';
     let calls=0;let cancelled=false;let released=false;let release!:()=>void;let started!:()=>void;
     const gate=new Promise<void>(resolve=>{release=resolve;});const cancellation=new Promise<void>(resolve=>{started=resolve;});
     globalThis.fetch=consumingUpstreamFetch((async()=>{

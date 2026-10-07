@@ -1,4 +1,4 @@
-import type { IngressPlugin } from '../../../packages/core/src/plugin-extensions';
+import type { IngressPlugin } from '@jeffusion/bungee-core/plugin';
 export interface BudgetPolicy { mode: 'daily' | 'weekly' | 'monthly' | 'cumulative'; unit?: 'tokens' | 'usd'; limit: number }
 export interface BudgetSnapshot { keyId: string; requestId: string; month: string; day?: string; week?: string; policy: BudgetPolicy; version: number }
 export function usdToNanoUsd(value: unknown): number {

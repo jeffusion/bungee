@@ -3,6 +3,7 @@
 import dotenv from 'dotenv';
 import { initializeConfigurationDatabase } from './master-runtime/initialize-configuration';
 export { initializeConfigurationDatabase };
+export type * from './gateway/plugin';
 import { readAdministratorRecovery } from './master-runtime/recovery-prompt';
 import { recoverOffline, readRecoveryInput } from './master-runtime/offline-recovery';
 export { recoverOffline };
@@ -31,6 +32,8 @@ export class ProcessRoleError extends Error {
 
 const PRODUCTION_DEPENDENCIES: ProcessRoleDependencies = {
   async startWorker() {
+    const { initializeGateway } = await import('./gateway/runtime');
+    initializeGateway();
     const { startConfigWorkerProcess } = await import('./worker');
     await startConfigWorkerProcess();
   },

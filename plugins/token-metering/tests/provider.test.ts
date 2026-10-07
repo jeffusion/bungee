@@ -23,6 +23,27 @@ async function fixture() {
 }
 
 describe('shared token metering provider', () => {
+  test('incomplete ordinary API observations reach required settlement but stay out of optional statistics', async () => {
+    const f=await fixture();const stats:TokenMeteringResult[]=[];const required:TokenMeteringResult[]=[];
+    f.consumer('stats').subscribe({onResult:result=>{stats.push(result);}});
+    f.consumer('budget').subscribe({required:true,onResult:result=>{required.push(result);}});
+    await f.send({phase:'selected'});
+    await f.send({phase:'request',url:'https://app.example/ordinary',body:{input:'search'}});
+    await f.send({phase:'incomplete',direction:'response',reason:'decode-error'});
+    await f.send({phase:'end',sent:true,outcome:'completed'});
+    expect(stats).toHaveLength(0);expect(required).toHaveLength(1);expect(required[0]).toMatchObject({provider:'unknown',observationIncomplete:true});
+    await f.provider.onDestroy();
+  });
+  test('request observation failure still permits official response usage', async () => {
+    const f=await fixture();const results:TokenMeteringResult[]=[];
+    f.consumer('stats').subscribe({onResult:result=>{results.push(result);}});
+    await f.send({phase:'selected'});
+    await f.send({phase:'incomplete',direction:'request',reason:'buffer-limit'});
+    await f.send({phase:'response',status:200,protocol:'json',body:{model:'gpt-4o-mini',choices:[{message:{role:'assistant',content:'answer'}}],usage:{prompt_tokens:11,completion_tokens:3}}});
+    await f.send({phase:'end',sent:true,outcome:'completed'});
+    expect(results[0]).toMatchObject({inputTokens:11,outputTokens:3,inputSource:'official',outputSource:'official',observationIncomplete:true});
+    await f.provider.onDestroy();
+  });
   test('trusted keyId propagates while absent identity stays null; prepared pricingProvider follows final URL', async () => {
     const f = await fixture(); const results: TokenMeteringResult[] = [];
     const service = f.consumer('stats'); service.subscribe({onResult: result => {results.push(result);}});

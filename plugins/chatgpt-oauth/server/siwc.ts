@@ -1,5 +1,5 @@
 import { createPublicKey, randomBytes, randomUUID, verify, type JsonWebKey } from 'node:crypto';
-import type { SecretStore } from '../../../packages/core/src/plugin-control/contracts';
+import type { SecretStore } from '@jeffusion/bungee-core/plugin';
 import { CODEX_CALLBACK_TTL_MS, CodexOAuthError, requestJson, type CodexTokenSet, type OAuthRequestOptions, type PKCE } from './oauth';
 
 export const SIWC_AUTH_URL = 'https://auth.openai.com/api/accounts/authorize';

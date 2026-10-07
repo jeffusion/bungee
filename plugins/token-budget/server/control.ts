@@ -1,6 +1,6 @@
 import { businessRpc } from './rpc';
 import { randomUUID } from 'node:crypto';
-import type { ControlHostContext, PluginControl } from '../../../packages/core/src/plugin-control/contracts';
+import type { ControlHostContext, PluginControl } from '@jeffusion/bungee-core/plugin';
 import { validatePolicy } from './policy';
 import { publication, readKey, readUsage, setPolicy, stateRpc, recoverPending, recoverUsage } from './ledger';
 

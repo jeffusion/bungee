@@ -231,7 +231,7 @@ describe('llms protocol converters', () => {
 
   test('gemini to anthropic error response should be transformed to gemini error envelope', async () => {
     const converter = new GeminiToAnthropicConverter();
-    const ctx: ResponseContext = {
+    const ctx = {
       response: new Response(JSON.stringify({
         type: 'error',
         error: {
@@ -244,7 +244,8 @@ describe('llms protocol converters', () => {
       })
     };
 
-    const transformed = await converter.onResponse?.(ctx);
+    const responseContext: ResponseContext = { ...ctx, bodyHandle: { json: () => ctx.response.clone().json() } };
+    const transformed = await converter.onResponse?.(responseContext);
     expect(transformed).toBeDefined();
     const body = await transformed!.json();
 
@@ -260,14 +261,15 @@ describe('llms protocol converters', () => {
       title: 'Gateway Problem',
       detail: 'Not OpenAI schema'
     };
-    const ctx: ResponseContext = {
+    const ctx = {
       response: new Response(JSON.stringify(payload), {
         status: 422,
         headers: { 'Content-Type': 'application/problem+json' }
       })
     };
 
-    const transformed = await converter.onResponse?.(ctx);
+    const responseContext: ResponseContext = { ...ctx, bodyHandle: { json: () => ctx.response.clone().json() } };
+    const transformed = await converter.onResponse?.(responseContext);
     expect(transformed).toBe(ctx.response);
     expect(await transformed!.json()).toEqual(payload);
   });
@@ -278,14 +280,15 @@ describe('llms protocol converters', () => {
       title: 'Gateway Problem',
       detail: 'Not Anthropic schema'
     };
-    const ctx: ResponseContext = {
+    const ctx = {
       response: new Response(JSON.stringify(payload), {
         status: 422,
         headers: { 'Content-Type': 'application/problem+json' }
       })
     };
 
-    const transformed = await converter.onResponse?.(ctx);
+    const responseContext: ResponseContext = { ...ctx, bodyHandle: { json: () => ctx.response.clone().json() } };
+    const transformed = await converter.onResponse?.(responseContext);
     expect(transformed).toBe(ctx.response);
     expect(await transformed!.json()).toEqual(payload);
   });
@@ -296,7 +299,7 @@ describe('llms protocol converters', () => {
       title: 'Gateway Problem',
       detail: 'Not OpenAI schema'
     };
-    const ctx: ResponseContext = {
+    const ctx = {
       originalUrl: new URL('https://example.test/v1/messages'),
       response: new Response(JSON.stringify(payload), {
         status: 422,
@@ -304,7 +307,8 @@ describe('llms protocol converters', () => {
       })
     };
 
-    const transformed = await converter.onResponse?.(ctx);
+    const responseContext: ResponseContext = { ...ctx, bodyHandle: { json: () => ctx.response.clone().json() } };
+    const transformed = await converter.onResponse?.(responseContext);
     expect(transformed).toBe(ctx.response);
     expect(await transformed!.json()).toEqual(payload);
   });
@@ -315,14 +319,15 @@ describe('llms protocol converters', () => {
       title: 'Gateway Problem',
       detail: 'Not Gemini schema'
     };
-    const ctx: ResponseContext = {
+    const ctx = {
       response: new Response(JSON.stringify(payload), {
         status: 422,
         headers: { 'Content-Type': 'application/problem+json' }
       })
     };
 
-    const transformed = await converter.onResponse?.(ctx);
+    const responseContext: ResponseContext = { ...ctx, bodyHandle: { json: () => ctx.response.clone().json() } };
+    const transformed = await converter.onResponse?.(responseContext);
     expect(transformed).toBe(ctx.response);
     expect(await transformed!.json()).toEqual(payload);
   });
@@ -333,14 +338,15 @@ describe('llms protocol converters', () => {
       title: 'Gateway Problem',
       detail: 'Not Anthropic schema'
     };
-    const ctx: ResponseContext = {
+    const ctx = {
       response: new Response(JSON.stringify(payload), {
         status: 422,
         headers: { 'Content-Type': 'application/problem+json' }
       })
     };
 
-    const transformed = await converter.onResponse?.(ctx);
+    const responseContext: ResponseContext = { ...ctx, bodyHandle: { json: () => ctx.response.clone().json() } };
+    const transformed = await converter.onResponse?.(responseContext);
     expect(transformed).toBe(ctx.response);
     expect(await transformed!.json()).toEqual(payload);
   });
@@ -351,15 +357,48 @@ describe('llms protocol converters', () => {
       title: 'Gateway Problem',
       detail: 'Not Gemini schema'
     };
-    const ctx: ResponseContext = {
+    const ctx = {
       response: new Response(JSON.stringify(payload), {
         status: 422,
         headers: { 'Content-Type': 'application/problem+json' }
       })
     };
 
-    const transformed = await converter.onResponse?.(ctx);
+    const responseContext: ResponseContext = { ...ctx, bodyHandle: { json: () => ctx.response.clone().json() } };
+    const transformed = await converter.onResponse?.(responseContext);
     expect(transformed).toBe(ctx.response);
     expect(await transformed!.json()).toEqual(payload);
   });
+});
+
+function freezeJSON(value: any): any {
+  if (value && typeof value === 'object') {
+    Object.values(value).forEach(freezeJSON);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+test('all six converters use shared frozen JSON with metadata-only responses', async () => {
+  const cases = [
+    [new AnthropicToOpenAIConverter(), { id: 'chatcmpl-1', choices: [{ message: { content: 'hello', tool_calls: [{ id: 'call_1', function: { name: 'tool', arguments: '{}' } }] }, finish_reason: 'tool_calls' }], usage: {} }, 'message'],
+    [new GeminiToOpenAIConverter(), { choices: [{ message: { content: 'hello' }, finish_reason: 'stop' }], usage: {} }, 'candidates'],
+    [new AnthropicToGeminiConverter(), { candidates: [{ content: { parts: [{ text: 'hello' }] }, finishReason: 'STOP' }], usageMetadata: {} }, 'message'],
+    [new OpenAIToGeminiConverter(), { candidates: [{ content: { parts: [{ text: 'hello' }] }, finishReason: 'STOP' }], usageMetadata: {} }, 'choices'],
+    [new OpenAIToAnthropicConverter(), { id: 'msg_1', type: 'message', content: [{ type: 'text', text: 'hello' }], usage: {} }, 'choices'],
+    [new GeminiToAnthropicConverter(), { id: 'msg_1', type: 'message', content: [{ type: 'text', text: 'hello' }], usage: {} }, 'candidates'],
+  ] as const;
+  for (const [converter, payload, expectedKey] of cases) {
+    const frozen = freezeJSON(payload);
+    const before = JSON.stringify(frozen);
+    const response = new Response(null, { headers: { 'content-type': 'application/json', 'content-encoding': 'gzip' } });
+    // Reading the native response would parse an empty body and fail this contract.
+    const result = await converter.onResponse({ response, bodyHandle: { json: async () => frozen } });
+    expect(result).not.toBe(response);
+    const converted = await result!.json();
+    if (expectedKey === 'message') expect(converted.type).toBe('message');
+    else expect(converted[expectedKey]).toBeArray();
+    if (converter instanceof AnthropicToOpenAIConverter) expect(converted.reasoning_content).toBe('');
+    expect(JSON.stringify(frozen)).toBe(before);
+  }
 });

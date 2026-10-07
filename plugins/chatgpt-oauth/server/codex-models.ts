@@ -210,6 +210,7 @@ function isJsonContentType(response: Response): boolean {
   return contentType === 'application/json' || contentType?.endsWith('+json') === true;
 }
 
+/** Auxiliary models catalog fetch owned by this cache, not adapter rawResponse. */
 async function readBoundedBody(response: Response, maxBodyBytes: number, timeoutMs: number, signal: AbortSignal): Promise<string> {
   if (signal.aborted) throw new CodexModelsError('aborted');
   if (response.body === null) return '';

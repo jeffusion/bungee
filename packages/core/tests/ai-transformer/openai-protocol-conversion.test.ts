@@ -81,25 +81,19 @@ describe('OpenAIProtocolConversion', () => {
     ]);
   });
 
-  test('patches assistant tool_use response with reasoning_content', async () => {
-    const response = new Response(
-      JSON.stringify({
-        type: 'message',
-        role: 'assistant',
-        content: [
-          { type: 'thinking', thinking: 'Need to call a tool first.' },
-          { type: 'tool_use', id: 'toolu_1', name: 'get_weather', input: { city: 'Hangzhou' } }
-        ]
-      }),
-      {
-        headers: { 'Content-Type': 'application/json' }
-      }
-    );
-
-    const patched = await conversion.ensureAssistantToolUseReasoningContent(response);
-    const body = await patched.json() as Record<string, unknown>;
-
+  test('patches a frozen assistant tool_use object with reasoning_content', () => {
+    const payload = Object.freeze({
+      type: 'message',
+      role: 'assistant',
+      content: Object.freeze([
+        Object.freeze({ type: 'thinking', thinking: 'Need to call a tool first.' }),
+        Object.freeze({ type: 'tool_use', id: 'toolu_1', name: 'get_weather', input: { city: 'Hangzhou' } })
+      ])
+    });
+    const body = conversion.ensureAssistantToolUseReasoningContent(payload) as Record<string, unknown>;
     expect(body.reasoning_content).toBe('Need to call a tool first.');
+    expect(body).not.toBe(payload);
+    expect(payload).not.toHaveProperty('reasoning_content');
   });
 
   test('normalizes messages stream usage and reasoning_content', () => {

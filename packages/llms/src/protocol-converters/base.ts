@@ -7,6 +7,8 @@ export interface MutableRequestContext {
 
 export interface ResponseContext {
   response: Response;
+  /** Shared immutable JSON view owned by the gateway. */
+  bodyHandle: { json(): Promise<unknown> };
   [key: string]: any;
 }
 

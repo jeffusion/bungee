@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import type { ControlHostContext, ControlApiHandlerContext, PluginControl, ControlPlugin } from '../../../packages/core/src/plugin-control/contracts';
-import type { ManagementProvider, ManagementSubject } from '../../../packages/core/src/plugin-extensions';
-import { isDurableStateConflictError, type DurableJson, type PluginDurableState } from '../../../packages/core/src/plugin-durable-state';
+import type { ControlHostContext, ControlApiHandlerContext, PluginControl, ControlPlugin } from '@jeffusion/bungee-core/plugin';
+import type { ManagementProvider, ManagementSubject } from '@jeffusion/bungee-core/plugin';
+import { isDurableStateConflictError, type DurableJson, type PluginDurableState } from '@jeffusion/bungee-core/plugin';
 
 interface Administrator { id: string; username: string; disabled: boolean; passwordHash: string; temporary: boolean; generation: number }
 interface SessionPolicy { idleTimeoutMinutes: number; absoluteTimeoutMinutes: number }

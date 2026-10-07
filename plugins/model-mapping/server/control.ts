@@ -4,7 +4,7 @@ import type {
   ControlHostContext,
   ControlPlugin,
   PluginControl,
-} from '../../../packages/core/src/plugin-control/contracts';
+} from '@jeffusion/bungee-core/plugin';
 import { MODELS_DEV_CATALOG_CONTRACT_VERSION, MODELS_DEV_CATALOG_SERVICE_ID, type ModelsDevCatalogService } from '../../models-dev/contract';
 import { buildModelCatalogStatus, catalogQueryIsValid, type ModelCatalogStatus } from './catalog';
 

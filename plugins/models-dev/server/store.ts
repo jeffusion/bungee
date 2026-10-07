@@ -5,7 +5,7 @@
  * No consumer may import this module or read these keys.
  */
 
-import type { PluginStorage } from '../../../packages/core/src/plugin.types';
+import type { PluginStorage } from '@jeffusion/bungee-core/plugin';
 import type { CatalogRecord } from './catalog';
 
 export const MODELS_DEV_SETTINGS_KEY = 'catalog:settings:v2';

@@ -12,6 +12,7 @@
  * - 响应：OpenAI SSE → Anthropic SSE 事件序列
  */
 
+import { OpenAIProtocolConversion } from '../providers/openai/protocol-conversion';
 import type { AIConverter, MutableRequestContext, ResponseContext, StreamChunkContext } from './base';
 import {
   generateAnthropicMessageId,
@@ -21,6 +22,7 @@ import {
 export class AnthropicToOpenAIConverter implements AIConverter {
   readonly from = 'anthropic';
   readonly to = 'openai';
+  private readonly protocolConversion = new OpenAIProtocolConversion();
   private configuredApiMode?: 'chat_completions' | 'responses';
 
   setApiMode(mode: unknown): void {
@@ -857,8 +859,7 @@ export class AnthropicToOpenAIConverter implements AIConverter {
 
     let openaiBody: any;
     try {
-      const responseClone = ctx.response.clone();
-      openaiBody = await responseClone.json();
+      openaiBody = await ctx.bodyHandle.json();
     } catch {
       return ctx.response;
     }
@@ -918,7 +919,7 @@ export class AnthropicToOpenAIConverter implements AIConverter {
       ? this.convertOpenAIResponsesToAnthropic(openaiBody)
       : this.convertOpenAIResponseToAnthropic(openaiBody);
 
-    return new Response(JSON.stringify(anthropicBody), {
+    return new Response(JSON.stringify(this.protocolConversion.ensureAssistantToolUseReasoningContent(anthropicBody)), {
       status: ctx.response.status,
       statusText: ctx.response.statusText,
       headers: ctx.response.headers

@@ -16,14 +16,14 @@ test.each([null, [], 'gpt-4o', {}, {model: ''}, {model: 42}].map(body => ({body}
 test('malformed Gemini encoding fails closed instead of falling back to body', () => {
   expect(plugin.resolveAdmissionModel({url: 'https://example.test/models/%E0%A4:generateContent', body: {model: 'fallback'}})).toBeNull();
 });
-test('serialized final fetch bodies preserve the exact model', () => {
+test('serialized bodies are not reparsed outside the shared body service', () => {
   const text = JSON.stringify({model:'allowed-model',messages:[]});
   const bytes = new TextEncoder().encode(text);
   for (const body of [text, bytes, bytes.buffer]) {
-    expect(plugin.resolveAdmissionModel({url:'https://example.test/v1/chat/completions',body})).toBe('allowed-model');
+    expect(plugin.resolveAdmissionModel({url:'https://example.test/v1/chat/completions',body})).toBeNull();
   }
   const padded = new Uint8Array(bytes.length+2); padded.set(bytes,1);
-  expect(plugin.resolveAdmissionModel({url:'https://example.test/v1/chat/completions',body:padded.subarray(1,-1)})).toBe('allowed-model');
+  expect(plugin.resolveAdmissionModel({url:'https://example.test/v1/chat/completions',body:padded.subarray(1,-1)})).toBeNull();
 });
 test.each(['{broken', 'null', '[]', '42', '{"model":42}', new Uint8Array([0xff])])('invalid serialized bodies fail closed: %j', body => {
   expect(plugin.resolveAdmissionModel({url:'https://example.test/v1/chat/completions',body})).toBeNull();

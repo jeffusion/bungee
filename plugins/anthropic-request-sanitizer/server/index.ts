@@ -1,6 +1,6 @@
-import type { Plugin } from '../../../packages/core/src/plugin.types';
-import { definePlugin } from '../../../packages/core/src/plugin.types';
-import type { PluginHooks } from '../../../packages/core/src/hooks';
+import type { Plugin } from '@jeffusion/bungee-core/plugin';
+import { definePlugin } from '@jeffusion/bungee-core/plugin';
+import type { PluginHooks } from '@jeffusion/bungee-core/plugin';
 
 type SanitizeMode = 'none' | 'normal' | 'aggressive';
 type BetaMode = 'none' | 'passthrough' | 'allowlist' | 'strip';
@@ -297,7 +297,7 @@ export const AnthropicRequestSanitizerPlugin = definePlugin(
       this.shouldFilterOrphanToolResults = options?.filterOrphanToolResults === true;
     }
 
-    bodyRequirements(context: import('../../../packages/core/src/plugin.types').PluginBodyRequirementContext): import('../../../packages/core/src/plugin.types').PluginBodyRequirements {
+    bodyRequirements(context: import('@jeffusion/bungee-core/plugin').PluginBodyRequirementContext): import('@jeffusion/bungee-core/plugin').PluginBodyRequirements {
       return { request: ! /^(GET|HEAD)$/i.test(context.method) && (this.sanitizeMode !== 'none' || this.stripCacheControl || this.shouldFilterOrphanToolResults) ? 'json-write' : 'none' };
     }
 

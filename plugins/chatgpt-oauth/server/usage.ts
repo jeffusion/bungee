@@ -1,4 +1,4 @@
-import type { CredentialLease } from '../../../packages/core/src/plugin-control/contracts';
+import type { CredentialLease } from '@jeffusion/bungee-core/plugin';
 import type { FetchLike } from './oauth';
 
 export const USAGE_PATH = '/backend-api/wham/usage';
@@ -245,6 +245,7 @@ function parseResetCredits(value: unknown): Omit<ResetCreditsSummary, 'state' | 
   return { availableCount, credits };
 }
 
+/** Auxiliary account usage/reset RPC response; outside the proxy body pipeline. */
 async function readJson(response: Response, signal: AbortSignal, maxBytes: number): Promise<unknown> {
   if (!response.body) return undefined;
   if (signal.aborted) throw new UsageError(signal.reason === 'timeout' ? 'timeout' : 'cancelled');

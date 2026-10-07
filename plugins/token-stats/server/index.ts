@@ -1,10 +1,10 @@
-import type { PluginStorage, Plugin, TokenStatsAttempt } from '../../../packages/core/src/plugin.types';
-import { definePlugin } from '../../../packages/core/src/plugin.types';
-import type { PluginHooks, PluginInitContext, PluginLogger } from '../../../packages/core/src/hooks';
+import type { PluginStorage, Plugin, TokenStatsAttempt } from '@jeffusion/bungee-core/plugin';
+import { definePlugin } from '@jeffusion/bungee-core/plugin';
+import type { PluginHooks, PluginInitContext, PluginLogger } from '@jeffusion/bungee-core/plugin';
 import {
   TOKEN_METERING_SERVICE_ID, TOKEN_METERING_CONTRACT_VERSION, type TokenMeteringService, type TokenMeteringResult,
   TOKEN_PRICING_SERVICE_ID, TOKEN_PRICING_CONTRACT_VERSION, type TokenPricingService,
-} from '../../../packages/core/src/plugin-services';
+} from '@jeffusion/bungee-core/plugin';
 import { withReportingWriteTimeout } from './storage';
 import { TokenStatsRepository, REPORTING_INCOMPLETE_KEY } from './repository';
 import { TokenStatsPricing } from './pricing';
@@ -173,7 +173,7 @@ export const TokenStatsPlugin = definePlugin(
       this.logger.info('TokenStatsPlugin initialized');
     }
 
-    bodyRequirements(): import('../../../packages/core/src/plugin.types').PluginBodyRequirements { return { request: 'none' }; }
+    bodyRequirements(): import('@jeffusion/bungee-core/plugin').PluginBodyRequirements { return { request: 'none' }; }
 
     register(_hooks: PluginHooks): void {}
 

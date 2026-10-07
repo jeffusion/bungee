@@ -1,7 +1,7 @@
 import type { Database } from 'bun:sqlite';
 import type { PluginStorage, PluginObservationStorage, TokenStatsAttempt, TokenStatsGroupBy, TokenStatsMeteringStorage,
-  TokenStatsMetricName, TokenStatsSnapshotMetrics, TokenStatsValueSource, TokenStatsRange } from '../../../packages/core/src/plugin.types';
-import { TOKEN_STATS_RETENTION_MS, TOKEN_STATS_RANGES, tokenStatsWindow } from '../../../packages/core/src/token-stats-window';
+  TokenStatsMetricName, TokenStatsSnapshotMetrics, TokenStatsValueSource, TokenStatsRange } from '@jeffusion/bungee-core/plugin';
+import { TOKEN_STATS_RETENTION_MS, TOKEN_STATS_RANGES, tokenStatsWindow } from '@jeffusion/bungee-core/plugin';
 
 /** Explicit assembly for legacy fixtures and embedders; the host never checks a business name. */
 export function withTokenStatsMetering<T extends PluginStorage>(storage: T): T & { metering: TokenStatsMeteringStorage } {

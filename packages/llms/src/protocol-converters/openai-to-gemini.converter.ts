@@ -276,8 +276,7 @@ export class OpenAIToGeminiConverter implements AIConverter {
 
     if (!ctx.response.ok) {
       try {
-        const responseClone = ctx.response.clone();
-        const errorBody = await responseClone.json();
+        const errorBody = await ctx.bodyHandle.json();
         if (!this.isLikelyGeminiErrorBody(errorBody)) {
           return ctx.response;
         }
@@ -287,8 +286,7 @@ export class OpenAIToGeminiConverter implements AIConverter {
       }
     }
 
-    const responseClone = ctx.response.clone();
-    const geminiBody = await responseClone.json();
+    const geminiBody = await ctx.bodyHandle.json();
 
     const openaiBody = this.convertGeminiResponseToOpenAI(geminiBody);
 

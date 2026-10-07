@@ -164,6 +164,7 @@ function combinedSignal(signal: AbortSignal | undefined, timeoutMs: number): { s
   };
 }
 
+/** Auxiliary OAuth/token-exchange response; never a proxied request body. */
 async function readBounded(response: Response, maxBodyBytes: number, signal?: AbortSignal): Promise<string> {
   try {
     if (!response.body) {

@@ -48,6 +48,12 @@ function copyPluginUi(record: PluginManifestRecord, outputPath: string): void {
   }
 }
 
+function publicPluginSdkResolver(): Bun.BunPlugin {
+  return {name:'bungee-public-plugin-sdk',setup(build) {
+    build.onResolve({filter:/^@jeffusion\/bungee-core\/plugin$/}, () => ({path:path.join(ROOT_DIR,'packages/core/src/gateway/plugin.ts')}));
+  }};
+}
+
 async function buildPlugin(record: PluginManifestRecord, stagingDirectory: string): Promise<void> {
   const outputPath = path.join(stagingDirectory, record.name);
   fs.mkdirSync(outputPath, { recursive: true });
@@ -56,16 +62,18 @@ async function buildPlugin(record: PluginManifestRecord, stagingDirectory: strin
     const result = await Bun.build({
       entrypoints: [record.mainPath], outdir: outputPath, target: 'bun', format: 'esm',
       naming: 'index.js', minify: false, sourcemap: 'external',
+      plugins: [publicPluginSdkResolver()],
     });
     if (!result.success) throw new Error(result.logs.join('\n'));
     if (record.ingressPath !== undefined) {
-      const ingressResult = await Bun.build({entrypoints:[record.ingressPath],outdir:outputPath,target:'bun',format:'esm',naming:'ingress.js',minify:false,sourcemap:'external'});
+      const ingressResult = await Bun.build({entrypoints:[record.ingressPath],outdir:outputPath,target:'bun',format:'esm',naming:'ingress.js',minify:false,sourcemap:'external',plugins:[publicPluginSdkResolver()]});
       if (!ingressResult.success) throw new Error(ingressResult.logs.join('\n'));
     }
     if (record.controlPath !== undefined) {
       const controlResult = await Bun.build({
         entrypoints: [record.controlPath], outdir: outputPath, target: 'bun', format: 'esm',
         naming: 'control.js', minify: false, sourcemap: 'external',
+        plugins: [publicPluginSdkResolver()],
       });
       if (!controlResult.success) throw new Error(controlResult.logs.join('\n'));
     }

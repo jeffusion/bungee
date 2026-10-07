@@ -77,12 +77,12 @@ function installPhaseHooks(factory: (upstreamId?: string) => Omit<PhaseAwareHook
 }
 
 function createInboundChain(
-  onResponse?: (response: Response) => Promise<Response> | Response,
+  onResponse?: (response: Response, context: ResponseContext) => Promise<Response> | Response,
   onRawResponse?: (result: RawResponseResult, context: RawResponseContext) => Promise<RawResponseResult> | RawResponseResult,
   onError: () => Promise<void> = async () => {},
 ): PhaseAwareHooks['inbound'] {
   return {
-    onResponse: async (response) => onResponse ? await onResponse(response) : response,
+    onResponse: async (response, context) => onResponse ? await onResponse(response, context) : response,
     onRawResponse: async (result, context) => onRawResponse ? await onRawResponse(result, context) : result,
     onStreamChunk: async (chunk) => [chunk],
     onFlushStream: async (chunks) => chunks,
@@ -317,9 +317,9 @@ describe('phase-aware request pipeline', () => {
     const base=createFailoverConfig();const config:AppConfig={...base,services:base.services!.map(service=>({...service,failover:{enabled:false}})),routes:base.routes.map(route=>({...route,timeouts:{request_ms:30}}))};
     initializeRuntimeState(config);let abandon=true;
     const raw=async(result:RawResponseResult,context:RawResponseContext):Promise<RawResponseResult>=>{
-      const decoded=context.decodeResponseBody(result.response)!;
-      if(abandon){if(mode==='locked-throw')decoded.getReader();if(mode==='deadline')return new Promise(()=>{});throw new Error('raw decoder abandoned');}
-      const body=await new Response(decoded).text();return {...result,response:new Response(body,{headers:{'content-type':'text/event-stream'}})};
+      const decoded=context.bodyHandle!;
+      if(abandon){if(mode==='locked-throw')void decoded.decoded().catch(()=>undefined);if(mode==='deadline')return new Promise(()=>{});throw new Error('raw decoder abandoned');}
+      const body=new TextDecoder().decode(await decoded.decoded());return {...result,response:new Response(body,{headers:{'content-type':'text/event-stream'}})};
     };
     installPhaseHooks(()=>({routePhase:createPrecompiledHooks({onRawResponse:raw,responseDemand:true}),servicePhase:null,upstreamPhase:createPrecompiledHooks(),inbound:createInboundChain(undefined,raw)}));
     let coding:'gzip'|'zstd'='gzip';
@@ -814,12 +814,12 @@ describe('phase-aware request pipeline', () => {
 
   test('successful upstream responses use the explicit inbound chain', async () => {
     installPhaseHooks(() => ({
-      routePhase: createPrecompiledHooks(),
+      routePhase: createPrecompiledHooks({onResponse:async response=>response}),
       servicePhase: null,
       upstreamPhase: createPrecompiledHooks(),
-      inbound: createInboundChain(async (response) => new Response(`${await response.text()}>endpoint>service>route>global`, { status: response.status })),
+      inbound: createInboundChain(async (response,context) => new Response(`${await context.bodyHandle!.json({id:'inbound-test'})}>endpoint>service>route>global`, { status: response.status })),
     }));
-    setFetchMock(async () => new Response('origin', { status: 200 }));
+    setFetchMock(async () => Response.json('origin', { status: 200 }));
     const config = createSingleEndpointConfig();
 
     const response = await handleRequest(new Request('http://localhost/api/test'), config);

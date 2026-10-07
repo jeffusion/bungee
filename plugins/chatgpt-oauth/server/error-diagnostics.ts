@@ -1,4 +1,4 @@
-import type { RawResponseError } from '../../../packages/core/src/plugin-control/contracts';
+import type { RawResponseError } from '@jeffusion/bungee-core/plugin';
 
 const MAX_MESSAGE_CHARS = 1024;
 type Redactor = (message: string) => string;

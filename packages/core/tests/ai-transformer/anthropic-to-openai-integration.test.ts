@@ -114,9 +114,12 @@ const mockedFetch = mock(async (request: Request | string, options?: RequestInit
 });
 
 const originalFetch = global.fetch;
+const initialApiMode = process.env.ANTHROPIC_TO_OPENAI_API_MODE;
 
 describe('Anthropic to OpenAI - Integration Tests', () => {
   beforeEach(async () => {
+    if (initialApiMode === undefined) delete process.env.ANTHROPIC_TO_OPENAI_API_MODE;
+    else process.env.ANTHROPIC_TO_OPENAI_API_MODE = initialApiMode;
     global.fetch = mockedFetch as any;
     setMockEnv();
     mockedFetch.mockClear();
@@ -130,6 +133,8 @@ describe('Anthropic to OpenAI - Integration Tests', () => {
       await cleanupPluginRegistry();
     } finally {
       global.fetch = originalFetch;
+      if (initialApiMode === undefined) delete process.env.ANTHROPIC_TO_OPENAI_API_MODE;
+      else process.env.ANTHROPIC_TO_OPENAI_API_MODE = initialApiMode;
     }
   });
 

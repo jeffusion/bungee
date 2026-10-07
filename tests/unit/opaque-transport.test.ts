@@ -3,7 +3,8 @@ import { gzipSync, zstdCompressSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { handleRequest } from '../../packages/core/src/worker/request/handler';
 import { BodySource } from '../../packages/core/src/worker/request/body-source';
-import { createSSEEnvelopeTransform, prepareResponse } from '../../packages/core/src/worker/response/processor';
+import { prepareResponse } from '../../packages/core/src/worker/response/processor';
+import { sharedSSEResponse } from '../../packages/core/src/gateway/sse-response';
 import type { AppConfig } from '@jeffusion/bungee-types';
 const encoder = new TextEncoder();
 const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
@@ -48,8 +49,9 @@ describe('opaque transport',()=>{
   test('SSE frame splitting preserves event id retry comments and DONE',async()=>{
     const text=': hello\r\nevent: named\r\nid: 7\r\nretry: 12\r\ndata: {"type":"different","x":1}\r\n\r\ndata: [DONE]\r\n\r\n';
     const source=new ReadableStream<Uint8Array>({start(controller){for(const byte of encoder.encode(text))controller.enqueue(new Uint8Array([byte]));controller.close();}});
-    const transformed=source.pipeThrough(createSSEEnvelopeTransform({add:{x:2}}, {headers:{},body:{},url:{pathname:'/',search:'',host:'a',protocol:'http:'},method:'POST',env:{}},1024));
-    const result=await new Response(transformed).text();expect(result).toContain(': hello\nevent: named\nid: 7\nretry: 12\ndata: {"type":"different","x":2}\n\n');expect(result).toEndWith('data: [DONE]\r\n\r\n');expect(result).not.toContain('event: different');expect(result).not.toContain('_event');
+    const owner=new BodySource(source,1024);
+    const transformed=sharedSSEResponse(owner.take() as ReadableStream<Uint8Array>,owner.handle(),{add:{x:2}}, {headers:{},body:{},url:{pathname:'/',search:'',host:'a',protocol:'http:'},method:'POST',env:{}});
+    try{const result=await new Response(transformed).text();expect(result).toContain(': hello\nevent: named\nid: 7\nretry: 12\ndata: {"type":"different","x":2}\n\n');expect(result).toEndWith('data: [DONE]\r\n\r\n');expect(result).not.toContain('event: different');expect(result).not.toContain('_event');}finally{owner.dispose();}
   });
   test('false/null/zero/empty values survive readonly JSON',async()=>{for(const value of [false,null,0,'']){const bytes=encoder.encode(JSON.stringify(value));const source=new BodySource(new Response(bytes).body,1024);try{expect(await source.json('read')).toBe(value);expect(hash(new Uint8Array(await new Response(source.take()).arrayBuffer()))).toBe(hash(bytes));}finally{source.dispose();}}});
   test('necessary parsing enforces encoding, corruption and limits',async()=>{
@@ -88,9 +90,10 @@ test('Content-Length rejects before dispatch; raw chunked limit cancels source',
   let cancelled=false;const source=new BodySource(new ReadableStream({pull(controller){controller.enqueue(new Uint8Array(2048));},cancel(){cancelled=true;}}),1024);
   try{await expect(new Response(source.take()).arrayBuffer()).rejects.toMatchObject({status:413});expect(cancelled).toBe(true);}finally{source.dispose();}
 });
-test('two necessary async decoders reserve their slots and a third fails capacity',async()=>{
+test('necessary async decoders reserve configured slots and the next fails capacity',async()=>{
   const {decodeStream}=await import('../../packages/core/src/worker/request/body-source');
-  const sources=[0,1].map(()=>decodeStream(new ReadableStream<Uint8Array>(),'gzip',1024).getReader());
+  const {bodyResources}=await import('../../packages/core/src/gateway/body-resources');
+  const sources=Array.from({length:bodyResources.mandatoryDecoders},()=>decodeStream(new ReadableStream<Uint8Array>(),'gzip',1024).getReader());
   try{expect(()=>decodeStream(new ReadableStream<Uint8Array>(),'zstd',1024)).toThrow('body_decoder_capacity');}finally{await Promise.all(sources.map(reader=>reader.cancel()));}
 });
 test('generic raw completion records cancel and read failure without fabricating bytes',async()=>{
@@ -101,9 +104,12 @@ test('generic raw completion records cancel and read failure without fabricating
   const failed=completionStream(new ReadableStream<Uint8Array>({pull(controller){controller.error(new Error('upstream disconnected'));}}),state);
   await expect(new Response(failed).text()).rejects.toThrow('upstream disconnected');expect(outcome).toEqual({status:'failed',code:'stream_read_failed'});
 });
-test('shared body pool rejects concurrent retained payloads at 128MiB and releases capacity',async()=>{
-  const bytes=new Uint8Array(40*1024*1024);const owners=[0,1,2].map(()=>new BodySource(new Response(bytes).body,50*1024*1024));
-  try{await owners[0]!.buffer('replay');await owners[1]!.buffer('replay');await expect(owners[2]!.buffer('replay')).rejects.toMatchObject({status:503,code:'body_buffer_capacity'});}finally{for(const owner of owners)owner.dispose();}
+test('shared body pool rejects retained allocations at the configured worker budget and releases capacity',async()=>{
+  const {BodyBufferLease}=await import('../../packages/core/src/worker/request/body-source');
+  const {bodyResources}=await import('../../packages/core/src/gateway/body-resources');
+  const occupying=new BodyBufferLease();occupying.add(bodyResources.workerMemoryBytes-64*1024);
+  const owners=[new BodySource(new Response(new Uint8Array(128*1024)).body,50*1024*1024)];
+  try{await expect(owners[0]!.buffer('replay')).rejects.toMatchObject({status:503,code:'body_buffer_capacity'});}finally{for(const owner of owners)owner.dispose();occupying.dispose();}
   const after=new BodySource(new Response('{}').body,1024);try{expect(await after.json('after')).toEqual({});}finally{after.dispose();}
 });
 test('direct response rules ignore upstream body-demand configuration',async()=>{
@@ -119,8 +125,9 @@ test('typed SSE plugin N:M output and final flush retain explicit metadata',asyn
   const chain={async onStreamChunk(event:any,ctx:any){ctx.streamState.set('last',event);return [event,{...event,json:{...event.json,part:2}}];},
     async onFlushStream(_events:any[],ctx:any){return [{...ctx.streamState.get('last'),event:'explicit-final',json:{finished:true}}];}};
   const input='id: abc\nretry: 12\nevent: source\ndata: {"type":"do-not-infer","part":1}\n\n';
-  const body=new Response(input).body!.pipeThrough(createSSEEnvelopeTransform(undefined,{} as any,1024,chain as any));
-  const output=await new Response(body).text();
+  const owner=new BodySource(new Response(input).body,1024);
+  const body=sharedSSEResponse(owner.take() as ReadableStream<Uint8Array>,owner.handle(),undefined,{} as any,chain as any);
+  const output=await new Response(body).text();owner.dispose();
   expect(output.match(/data:/g)).toHaveLength(3);expect(output.match(/event: source/g)).toHaveLength(2);
   expect(output).toContain('event: explicit-final');expect(output).not.toContain('event: do-not-infer');
   expect(output.match(/id: abc/g)).toHaveLength(3);

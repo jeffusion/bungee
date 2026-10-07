@@ -5,9 +5,9 @@
  * reconciles it in the background; request-time lookups only use the local index.
  */
 
-import type { Plugin } from '../../../packages/core/src/plugin.types';
-import { definePlugin } from '../../../packages/core/src/plugin.types';
-import type { PluginHooks, PluginInitContext, PluginLogger } from '../../../packages/core/src/hooks';
+import type { Plugin } from '@jeffusion/bungee-core/plugin';
+import { definePlugin } from '@jeffusion/bungee-core/plugin';
+import type { PluginHooks, PluginInitContext, PluginLogger } from '@jeffusion/bungee-core/plugin';
 import { MODELS_DEV_CATALOG_CONTRACT_VERSION, MODELS_DEV_CATALOG_SERVICE_ID, MODELS_DEV_CATALOG_SNAPSHOT_CONTRACT } from '../contract';
 import { CatalogView, catalogServiceOf, reconcileCatalogView } from './local';
 

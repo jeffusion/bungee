@@ -14,6 +14,8 @@ import OAuth from '../../plugins/chatgpt-oauth/server';
 import Transformer from '../../plugins/ai-transformer/server';
 import Messages from '../../plugins/openai-messages-to-chat/server';
 import Signature from '../../plugins/signature-repair/server';
+import { BodySource } from '../../packages/core/src/gateway/body-service';
+import { RequestRetryAction } from '@jeffusion/bungee-core/plugin';
 import Metering from '../../plugins/token-metering/server';
 import { createIngress as budgetIngress } from '../../plugins/token-budget/server/policy';
 import { createIngress as accessIngress } from '../../plugins/key-access/server/policy';
@@ -71,25 +73,24 @@ describe('SDK 3 plugin body demands', () => {
   test('replay is explicit and independent from request mutation', () => {
     expect(new Signature().bodyRequirements(context())).toEqual({ request: 'json-read', response: ['json'], replay: true });
   });
-  test('signature repair replays decoded JSON with fresh representation headers', async () => {
+  test('signature repair requests one managed retry without privately fetching', async () => {
     const plugin = new Signature(); const hooks = createPluginHooks(); plugin.register(hooks);
-    const before = { ...streamContext, url: context().url, headers: { 'Content-Encoding': 'gzip', 'Content-Length': '92', 'Content-Type': 'application/json', 'Digest': 'old-digest', 'Content-MD5': 'old-md5', 'authorization': 'Bearer upstream' }, body: { contents: [{ parts: [{ thought: true, text: 'private' }, { functionCall: { name: 'tool' }, thoughtSignature: 'bad' }] }] } };
+    const before = { ...streamContext, url: context().url, headers: { 'Content-Encoding': 'gzip', authorization: 'Bearer upstream' }, body: { contents: [{ parts: [{ thought: true, text: 'private' }, { functionCall: { name: 'tool' }, thoughtSignature: 'bad' }] }] } };
     await hooks.onBeforeRequest.promise(before);
-    const mock = spyOn(globalThis, 'fetch').mockImplementation(Object.assign(async (_url: URL | RequestInfo, init?: RequestInit) => {
-      const headers = new Headers(init?.headers);
-      expect(headers.has('content-encoding')).toBe(false); expect(headers.has('content-length')).toBe(false);
-      expect(headers.has('digest')).toBe(false); expect(headers.has('content-md5')).toBe(false);
-      expect(headers.get('content-type')).toBe('application/json'); expect(headers.get('authorization')).toBe('Bearer upstream');
-      expect(JSON.parse(String(init?.body))).toMatchObject({ contents: [{ parts: [{ functionCall: { name: 'tool' }, thoughtSignature: 'skip_thought_signature_validator' }] }] });
-      return Response.json({ repaired: true });
-    }, { preconnect: globalThis.fetch.preconnect }));
+    const mock = spyOn(globalThis, 'fetch');
+    const response = Response.json({ error: { message: 'missing thought signature' } }, { status: 400 });
+    const source = new BodySource(response.body, 1024);
+    const responseContext = { ...streamContext, response, latencyMs: 0, bodyHandle: source.handle() };
     try {
-      const response = Response.json({ error: { message: 'missing thought signature' } }, { status: 400 });
-      expect(await (await hooks.onResponse.promise(response, { ...streamContext, response, latencyMs: 0 })).json()).toEqual({ repaired: true });
-      expect(mock).toHaveBeenCalledTimes(1);
+      let action: unknown;
+      try { await hooks.onResponse.promise(response, responseContext); } catch (error) { action = error; }
+      expect(action).toBeInstanceOf(RequestRetryAction);
+      expect(action).toMatchObject({ body: { contents: [{ parts: [{ functionCall: { name: 'tool' }, thoughtSignature: 'skip_thought_signature_validator' }] }] } });
+      expect(await hooks.onResponse.promise(response, responseContext)).toBe(response);
+      expect(mock).not.toHaveBeenCalled();
       expect(before.headers['Content-Encoding']).toBe('gzip');
       expect(before.body.contents[0]!.parts).toHaveLength(2);
-    } finally { mock.mockRestore(); }
+    } finally { source.dispose(); mock.mockRestore(); }
   });
   test('effective budget policy alone requires mandatory JSON; anonymous and no-policy remain opaque', () => {
     const ingress = budgetIngress();
@@ -125,7 +126,7 @@ describe('SDK 3 plugin body demands', () => {
     expect(session.finalizeCompletedStream()).toMatchObject({ inputTokens: 4, outputTokens: 5, inputAuthority: 'official', outputAuthority: 'official', outcome: 'completed' });
     expect(Object.keys(body)).toEqual(['response']);
   });
-  test('metering parses nothing without consumers; optional unknown observations still produce incomplete stats', async () => {
+  test('metering parses nothing without consumers and ignores unclassified optional observations', async () => {
     const host = new PluginServiceHost(); const provider = new Metering();
     await provider.init({ config: {}, storage: {} as PluginStorage, logger: { debug() {}, info() {}, warn() {}, error() {} }, services: host.createContext('token-metering') });
     host.markReady('token-metering');
@@ -138,7 +139,7 @@ describe('SDK 3 plugin body demands', () => {
     await send({ phase: 'selected' }); await send({ phase: 'incomplete', reason: 'unsupported-encoding' }); await send({ phase: 'end', outcome: 'completed', sent: true });
     await Promise.resolve();
     expect(provider.parsedResponses).toBe(0);
-    expect(results[0]).toMatchObject({ inputSource: 'none', outputSource: 'none', observationIncomplete: true, complete: false });
+    expect(results).toHaveLength(0);
     await provider.onDestroy();
   });
 });

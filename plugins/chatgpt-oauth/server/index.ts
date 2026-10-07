@@ -1,7 +1,7 @@
 import { businessRpc } from './rpc';
-import type { Plugin } from '../../../packages/core/src/plugin.types';
-import type { PluginHooks, RawResponseContext } from '../../../packages/core/src/hooks';
-import { definePlugin } from '../../../packages/core/src/plugin.types';
+import type { Plugin } from '@jeffusion/bungee-core/plugin';
+import type { PluginHooks, RawResponseContext } from '@jeffusion/bungee-core/plugin';
+import { definePlugin } from '@jeffusion/bungee-core/plugin';
 import { ChatgptOauthAdapter } from './adapter';
 
 function validAccountRef(value: unknown): value is string {
@@ -26,7 +26,7 @@ export const ChatgptOauthPlugin = definePlugin(
       this.adapter = new ChatgptOauthAdapter();
     }
 
-    bodyRequirements(context: import('../../../packages/core/src/plugin.types').PluginBodyRequirementContext): import('../../../packages/core/src/plugin.types').PluginBodyRequirements {
+    bodyRequirements(context: import('@jeffusion/bungee-core/plugin').PluginBodyRequirementContext): import('@jeffusion/bungee-core/plugin').PluginBodyRequirements {
       const path = context.url.pathname;
       if (path === '/v1/models' && context.method.toUpperCase() === 'GET') return { request: 'none', response: ['json'] };
       return context.method.toUpperCase() === 'POST' && ['/v1/chat/completions', '/v1/responses', '/backend-api/codex/responses'].includes(path) ? { request: 'json-write', response: path === '/backend-api/codex/responses' ? [] : ['json', 'sse-json'] } : { request: 'none' };

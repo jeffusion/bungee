@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { SecretStore } from '../../../packages/core/src/plugin-control/contracts';
+import type { SecretStore } from '@jeffusion/bungee-core/plugin';
 import type { CodexIdentity, CodexTokenSet } from './oauth';
 import type { ResetCredit } from './usage';
 import { validSiwcMetadata } from './siwc';

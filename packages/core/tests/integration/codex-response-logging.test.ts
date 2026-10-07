@@ -7,9 +7,11 @@ import { BodyStorageManager } from '../../src/logger/body-storage';
 import { ScopedPluginRegistry, setScopedPluginRegistry } from '../../src/scoped-plugin-registry';
 import { createIngressPublicListener } from '../../src/public-listener';
 import { restoreWorkerTransportRequest } from '../../src/config-worker/private-transport';
-import { CODEX_MAX_SSE_LINE_BYTES } from '../../../../plugins/chatgpt-oauth/server/codex-protocol';
 import { TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/config-worker-private-transport';
 import { localAdmissionSelector } from '../fixtures/public-listener';
+
+// The core body service owns SSE framing and uses the configured body limit.
+const SSE_FRAME_LIMIT_BYTES = 25 * 1024 * 1024;
 
 test('Codex large response and durable failure diagnostics survive with bounded independent body logging', async () => {
   await ensureDataPlaneSchema();
@@ -29,7 +31,7 @@ test('Codex large response and durable failure diagnostics survive with bounded 
     upstreamRequests++;
     const bytes = new TextEncoder().encode([
       'data: {"type":"response.created","response":{"id":"replay"}}\n\n',
-      eventSize > CODEX_MAX_SSE_LINE_BYTES ? ':'.repeat(eventSize) + '\n\n' : `data: ${JSON.stringify({ type: 'response.output_item.done', item: {
+      eventSize > SSE_FRAME_LIMIT_BYTES ? ':'.repeat(eventSize) + '\n\n' : `data: ${JSON.stringify({ type: 'response.output_item.done', item: {
         type: 'reasoning', encrypted_content: 'x'.repeat(eventSize),
       } })}\n\n`,
       'data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n',
@@ -73,7 +75,7 @@ test('Codex large response and durable failure diagnostics survive with bounded 
       } as any);
       setScopedPluginRegistry(registry);
       runtime.initializeRuntimeState(config);
-      eventSize = limited ? CODEX_MAX_SSE_LINE_BYTES + 1 : 20 * 1024 * 1024;
+      eventSize = limited ? SSE_FRAME_LIMIT_BYTES + 1 : 20 * 1024 * 1024;
       try {
         const response = await originalFetch(`http://127.0.0.1:${listener.port}${routeId}`, {
           method: 'POST', headers: { 'content-type': 'application/json' },

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ControlHostContext, PluginControl } from '../../../packages/core/src/plugin-control/contracts';
+import type { ControlHostContext, PluginControl } from '@jeffusion/bungee-core/plugin';
 import { validatePolicy } from './policy';
 
 export interface PolicyControlHost extends ControlHostContext {
