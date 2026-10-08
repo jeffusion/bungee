@@ -146,7 +146,9 @@ test('original-lab estimates and context tiers settle protected USD budgets acro
     await ready(1, 2);
     const issued = await api('/api/plugins/key-access/control/credentials', 'POST', { name: 'Estimate Acceptance' });
     keyId = issued.key.id; dataToken = issued.token;
-    await api('/api/plugins/key-access/control/route-key', 'PUT', { keyId, routeId: ROUTE, protect: true });
+    await api('/api/plugins/key-access/control/route-key', 'PUT', { keyId, routeId: ROUTE });
+    const protection = await api('/api/plugins/key-access/control/routes', 'PUT', { protectedRouteIds: [ROUTE] });
+    expect(protection.protectedRouteIds).toEqual([ROUTE]);
     await api(`/api/plugins/token-budget/control/keys/${keyId}`, 'PUT', { mode: 'cumulative', unit: 'usd', limit: 100 });
     const denied = await fetch(`${proxy}/pricing-estimate/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     expect(denied.status).toBe(401); await denied.text(); expect(calls).toBe(0);

@@ -387,8 +387,11 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
       const issued = await requestJson(`${management}/api/plugins/key-access/control/credentials`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({name: 'Peer Budget'})}, currentFixture);
       expect(issued.response.status).toBe(201);
       const keyId = (issued.body as any).key.id, token = (issued.body as any).token;
-      const binding = await requestJson(`${management}/api/plugins/key-access/control/route-key`, {method: 'PUT', headers: {'content-type': 'application/json'}, body: JSON.stringify({keyId, routeId: ROUTE_ID, protect: true})}, currentFixture);
+      const binding = await requestJson(`${management}/api/plugins/key-access/control/route-key`, {method: 'PUT', headers: {'content-type': 'application/json'}, body: JSON.stringify({keyId, routeId: ROUTE_ID})}, currentFixture);
       expect(binding.response.status).toBe(200);
+      const protection = await requestJson(`${management}/api/plugins/key-access/control/routes`, {method: 'PUT', headers: {'content-type': 'application/json'}, body: JSON.stringify({protectedRouteIds: [ROUTE_ID]})}, currentFixture);
+      expect(protection.response.status).toBe(200);
+      expect((protection.body as any).protectedRouteIds).toEqual([ROUTE_ID]);
       const policyUrl = `${management}/api/plugins/token-budget/control/keys/${keyId}`;
       const policy = await requestJson(policyUrl, {method: 'PUT', headers: {'content-type': 'application/json'}, body: JSON.stringify({mode: 'cumulative', limit: 10})}, currentFixture);
       expect(policy.response.status).toBe(200);
