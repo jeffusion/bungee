@@ -30,6 +30,8 @@
   let navigation = $state<HTMLUListElement>();
   let indicator = $state({ left: 0, width: 0 });
   const activeIndex = $derived(items.findIndex(item => item.isActive));
+  const headerActionClass = 'header-action flex min-h-[44px] min-w-[44px] items-center justify-center gap-2 whitespace-nowrap font-mono text-[11px] font-semibold uppercase tracking-command transition-colors hover:bg-carbon-800 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500';
+  const headerUtilityClass = `${headerActionClass} header-utility w-11 px-0`;
 
   $effect(() => {
     const index = items.findIndex(item => item.isActive);
@@ -100,7 +102,7 @@
   style="padding-top: env(safe-area-inset-top); padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right)">
   <div class="flex shrink-0 items-center pl-2 md:hidden">
     <Sheet.Root bind:open={menuOpen} preventScroll closeFocus={() => $confirmation ? null : desktop ? brand : document.getElementById('header-menu-trigger')}>
-      <Sheet.Trigger id="header-menu-trigger" aria-label={$_('header.menu')} title={$_('header.menu')} class="header-action header-utility text-zinc-400">
+      <Sheet.Trigger id="header-menu-trigger" aria-label={$_('header.menu')} title={$_('header.menu')} class={`${headerUtilityClass} text-zinc-400`}>
         <Menu aria-hidden="true" class="h-4 w-4" />
       </Sheet.Trigger>
       <Sheet.Content side="left" data-testid="header-menu" class="nx-bracketed flex !h-dvh flex-col !gap-0 overflow-hidden border-carbon-600 bg-carbon-900 !p-0 !shadow-industrial"
@@ -167,7 +169,7 @@
   <div class="ml-auto flex shrink-0 items-stretch border-l border-carbon-600">
     <DropdownMenu.Root bind:open={managementOpen} closeFocus={() => $confirmation ? null : document.getElementById('header-management-trigger')}>
       <DropdownMenu.Trigger id="header-management-trigger" aria-label={$_('header.management')} title={$_('header.management')}
-        class={`header-action ${managementPage || managementOpen ? 'bg-nexus-500/10 text-nexus-300' : 'text-zinc-400'}`}>
+        class={`${headerActionClass} px-3 md:px-4 ${managementPage || managementOpen ? 'bg-nexus-500/10 text-nexus-300' : 'text-zinc-400'}`}>
         <Settings aria-hidden="true" class="h-4 w-4" /><span class="hidden sm:inline">{$_('header.management')}</span><ChevronDown aria-hidden="true" class="hidden h-3 w-3 sm:block" />
       </DropdownMenu.Trigger>
       <DropdownMenu.Content data-testid="header-management-menu" align="end" sideOffset={8}
@@ -190,7 +192,7 @@
     <DropdownMenu.Root bind:open={languageOpen}>
       <DropdownMenu.Trigger id="header-language-trigger" aria-label={$_('header.language')}
         title={`${$_('header.language')} · ${SUPPORTED_LOCALES.find(item => item.code === $locale)?.name ?? $locale}`}
-        class={`header-action header-utility ${languageOpen ? 'bg-nexus-500/10 text-nexus-300' : 'text-zinc-500'}`}>
+        class={`${headerUtilityClass} ${languageOpen ? 'bg-nexus-500/10 text-nexus-300' : 'text-zinc-500'}`}>
         <Languages aria-hidden="true" class="h-4 w-4" />
       </DropdownMenu.Trigger>
       <DropdownMenu.Content data-testid="header-language-menu" align="end" sideOffset={8}
@@ -208,15 +210,13 @@
   {#if showLogout}
     <button id="header-logout-button" type="button" aria-label={$_('login.logout')} title={$_('login.logout')}
       disabled={logoutBusy} aria-busy={logoutBusy} onclick={() => { void onLogout(); }}
-      class="header-action header-utility shrink-0 border-l border-carbon-600 text-zinc-500 disabled:cursor-not-allowed disabled:opacity-50 md:border-l-0">
+      class={`${headerUtilityClass} shrink-0 border-l border-carbon-600 text-zinc-500 disabled:cursor-not-allowed disabled:opacity-50 md:border-l-0`}>
       <LogOut aria-hidden="true" class="h-4 w-4" />
     </button>
   {/if}
 </header>
 
 <style>
-  :global(.header-action) { @apply flex min-h-[44px] min-w-[44px] items-center justify-center gap-2 whitespace-nowrap px-3 font-mono text-[11px] font-semibold uppercase tracking-command transition-colors hover:bg-carbon-800 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500 md:px-4; }
-  :global(.header-utility) { @apply w-11 px-0 md:px-0; }
   .header-navigation { scrollbar-width: none; }
   .header-navigation::-webkit-scrollbar { display: none; }
   .header-tab.is-active { color: var(--nx-accent); }

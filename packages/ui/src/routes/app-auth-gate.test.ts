@@ -137,11 +137,20 @@ test('shell logout is host-owned, guards drafts and only navigates after verifie
   for (const forbidden of ['local-accounts', 'requestPluginControl', 'secureChannel', 'onRefresh', 'common.refresh']) expect(app).not.toContain(forbidden);
   const header = await read('../components/shell/AppHeader.svelte');
   for (const removed of ['secureChannel', 'StatusBadge', '>SECURE<', '>OPEN<']) expect(header).not.toContain(removed);
-  // Desktop and mobile share one System menu and one guarded logout action.
+  // Desktop and mobile share one independent button and the host's guarded action.
   expect(header.match(/disabled=\{logoutBusy\}/g)).toHaveLength(1);
   expect(header).toContain('data-testid="header-management-menu"');
   expect(header).toContain('use:managementLifecycle');
-  expect(header).toContain('if (logoutPending) { logoutPending = false; void onLogout(); }');
+  const logoutButton = header.match(/<button id="header-logout-button"[\s\S]*?<\/button>/)?.[0];
+  expect(logoutButton).toBeDefined();
+  expect(logoutButton).toContain('disabled={logoutBusy} aria-busy={logoutBusy}');
+  expect(logoutButton).toContain('onclick={() => { void onLogout(); }}');
+  expect(logoutButton).toContain("aria-label={$_('login.logout')}");
+  expect(header.match(/id="header-logout-button"/g)).toHaveLength(1);
+  const systemMenu = header.slice(header.indexOf('<DropdownMenu.Content data-testid="header-management-menu"'),
+    header.indexOf('</DropdownMenu.Content>', header.indexOf('<DropdownMenu.Content data-testid="header-management-menu"')));
+  expect(systemMenu).not.toContain('LogOut');
+  expect(systemMenu).not.toContain('onLogout');
 });
 
 test('shell separates plugin/business navigation from system administration', async () => {
