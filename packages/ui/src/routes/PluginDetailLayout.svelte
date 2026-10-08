@@ -44,7 +44,12 @@
       } else {
         const prefix = params.path !== undefined ? `/extensions/${name}` : `/plugins/${name}`;
         const internalPath = $location.replace(prefix, '');
-        if (!internalPath || internalPath === '/') redirectToDefaultTab();
+        const settingsPath = plugin.metadata?.contributes?.settings || plugin.metadata?.ui?.settings;
+        const page = plugin.metadata?.contributes?.navigation?.find(page => page.path === internalPath && page.component !== undefined);
+        // Navigation-only plugins have one canonical page, including old settings bookmarks.
+        if (params.path === undefined && !settingsPath && page) {
+          await replace(`/extensions/${name}${page.path}${$querystring ? `?${$querystring}` : ''}`);
+        } else if (!internalPath || internalPath === '/') redirectToDefaultTab();
       }
     } catch (e: any) {
       if (generation === loadGeneration) toast.show($_('pluginActivation.detailFailed'), 'error');
@@ -58,6 +63,9 @@
     if (plugin.metadata?.contributes?.settings || plugin.metadata?.ui?.settings) {
       const settingsPath = plugin.metadata?.contributes?.settings || plugin.metadata?.ui?.settings;
       replace(`/plugins/${plugin.name}${settingsPath}${$querystring ? `?${$querystring}` : ''}`);
+    } else {
+      const page = plugin.metadata?.contributes?.navigation?.[0];
+      if (page?.path) replace(`/extensions/${plugin.name}${page.path}${$querystring ? `?${$querystring}` : ''}`);
     }
   }
 

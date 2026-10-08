@@ -4,11 +4,22 @@ import { get } from 'svelte/store';
 import { addMessages, init, locale, _ } from 'svelte-i18n';
 import { IntlMessageFormat } from 'intl-messageformat';
 import { getPluginText } from '../../../packages/ui/src/utils/plugin-i18n';
+import { resolveNativeNavigation } from '../../../packages/ui/src/components/native-widgets/navigation-resolution';
 
 const manifest = await Bun.file(new URL('../manifest.json', import.meta.url)).json();
 const source = await Bun.file(new URL('../ui/KeyPolicy.svelte', import.meta.url)).text();
 const flow = await Bun.file(new URL('../ui/key-flow.ts', import.meta.url)).text();
 const languages = ['en', 'zh-CN'] as const;
+
+test('access control contributes an owned native menu page without a plugin settings entry', () => {
+  expect(manifest.contributes.settings).toBeUndefined();
+  expect(manifest.contributes.nativeSettingsComponent).toBeUndefined();
+  expect(manifest.contributes.navigation).toEqual([{ label: 'metadata.name', path: '/settings',
+    component: 'KeyAccessKeyPolicy', target: 'header', icon: 'shield' }]);
+  const component = () => {};
+  expect(resolveNativeNavigation({ name: manifest.name, enabled: true, metadata: { contributes: manifest.contributes } },
+    '/settings', { KeyAccessKeyPolicy: component }, { KeyAccessKeyPolicy: manifest.name })).toEqual({ kind: 'native', component });
+});
 
 test('access control metadata and every UI message have complete matching translations', () => {
   expect(manifest.metadata.name).toBe('metadata.name');

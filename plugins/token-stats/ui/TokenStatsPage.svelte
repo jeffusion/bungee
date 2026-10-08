@@ -97,9 +97,6 @@
       <span>{t('ui.loadFailed')}</span><Button variant="ghost" size="sm" onclick={refresh} disabled={busy}>{t('page.retry')}</Button>
     </div>
   {/if}
-  {#if models.data?.reportingIncomplete || time.data?.reportingIncomplete}
-    <p role="status" class="border-l-2 border-amber-500 px-3 py-2 text-xs text-amber-300">{t('ui.reportingIncomplete')}</p>
-  {/if}
   {#if models.busy && !models.data}
     <LoadingIndicator label={t('ui.loading')} height="sm" />
   {:else if models.data}

@@ -110,8 +110,15 @@
         "path": "/keys/:keyId"
       }
     ],
-    "settings": "/settings",
-    "nativeSettingsComponent": "KeyAccessKeyPolicy"
+    "navigation": [
+      {
+        "label": "metadata.name",
+        "path": "/settings",
+        "component": "KeyAccessKeyPolicy",
+        "target": "header",
+        "icon": "shield"
+      }
+    ]
   },
   "ingress": {
     "entry": "server/policy.ts"

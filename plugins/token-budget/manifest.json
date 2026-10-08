@@ -58,8 +58,15 @@
         "path": "/keys/:keyId"
       }
     ],
-    "settings": "/settings",
-    "nativeSettingsComponent": "TokenBudgetKeyPolicy"
+    "navigation": [
+      {
+        "label": "metadata.name",
+        "path": "/settings",
+        "component": "TokenBudgetKeyPolicy",
+        "target": "header",
+        "icon": "shield"
+      }
+    ]
   },
   "dependencies": {
     "token-metering": "^1.0.0",
@@ -178,7 +185,7 @@
       "status.exhausted": "Budget exhausted"
     },
     "zh-CN": {
-      "metadata.name": "Token 预算",
+      "metadata.name": "Token预算",
       "plugin.description": "按 Key 设置 UTC 每日、每周、每月或累计 Token 与美元预算，并查看计量账本。",
       "ui.key": "API Key",
       "ui.search": "搜索 API Key",
@@ -205,7 +212,7 @@
       "status.unlimited": "不限制",
       "reason.notReady": "插件尚未就绪，暂不可修改。",
       "ui.title": "API Key 预算",
-      "ui.tag": "Token 预算",
+      "ui.tag": "Token预算",
       "ui.description": "为每个 API Key 设置 Token 或 USD 预算，按每日、每周、每月或累计限制。未配置的 Key 不受预算限制。",
       "ui.behavior": "额度用尽后拒绝新请求；已接纳请求继续，最终用量可能超过额度。",
       "ui.loading": "正在读取预算",

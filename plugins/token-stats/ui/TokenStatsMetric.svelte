@@ -3,10 +3,9 @@
   import { isLoading } from 'svelte-i18n';
   import { _, formatCompactNumber, type TimeRange } from '@bungee/plugin-sdk';
   import { getPluginText } from '$utils/plugin-i18n';
-  import { LoadingIndicator } from '$components/industrial';
   import KpiTrendValue from '$components/industrial/KpiTrendValue.svelte';
   import type { NativeWidgetHeaderChange } from '$components/native-widgets/widget-header';
-  import { estimatedTokens, formatEstimatedUsd, formatTokenCount, usagePresentation } from './labels';
+  import { formatEstimatedUsd, formatTokenCount, usagePresentation } from './labels';
   import { getStatsResource } from './stats';
   import type { StatsState, StatsResource } from './stats-resource';
   import { overviewTrends } from './overview-trends';
@@ -40,6 +39,11 @@
 </script>
 
 {#snippet trendFooter()}
+  {#if state.error}
+    <p role="alert" class="text-xs text-red-300">{t('ui.loadFailed')}</p>
+  {:else if usage?.state === 'empty'}
+    <p class="text-[10px] text-zinc-400" data-testid="token-stats-empty">{t('ui.noData')}</p>
+  {:else}
   <div class="overview-trends w-full" data-testid="token-stats-overview-trends">
     {#each trends as item}
       {@const value = item.isNew ? t('ui.newActivity') : item.percent == null ? '—' : `${item.percent >= 0 ? '+' : ''}${item.percent.toFixed(1)}%`}
@@ -50,14 +54,13 @@
       </div>
     {/each}
   </div>
+  {/if}
 {/snippet}
 
-<div class="kpi-metric-row w-full min-w-0" data-testid="token-stats-overview">
-  {#if state.busy && !state.data}
-    <LoadingIndicator size="sm" height="sm" label={t('ui.loading')} />
-  {:else if state.error && !state.data}
-    <p role="alert" class="text-xs text-red-300">{t('ui.loadFailed')}</p>
-  {:else}
+<!-- Keep the same intrinsic metric geometry while requests are pending or fail.
+     Desktop GridStack derives its shared row height from this content. -->
+<div class="kpi-metric-row w-full min-w-0" data-testid="token-stats-overview" aria-busy={state.busy}>
+  {#if state.busy && !state.data}<span role="status" class="sr-only">{t('ui.loading')}</span>{/if}
     <div class="kpi-metric-row overview-metrics">
       {#each ['input', 'output', 'cost'] as metric}
         {@const fullValue = metric === 'cost' ? formatEstimatedUsd(state.data?.estimatedCostUsd)
@@ -69,16 +72,9 @@
         <div class="min-w-0" data-testid={`token-stats-metric-${metric}`}>
           <div class="nx-label mb-2">{t(metric === 'cost' ? 'ui.estimatedCostUsd' : `ui.${metric}`)}</div>
           <div class="overview-value nx-metric text-zinc-50" title={fullValue} aria-label={fullValue}>{value}</div>
-          {#if metric !== 'cost' && state.data && (estimatedTokens(state.data, metric as 'input' | 'output') ?? 0) > 0}
-            <p class="mt-1 text-[10px] text-zinc-400">{t('ui.includesEstimate')}</p>
-          {/if}
         </div>
       {/each}
     </div>
-    {#if state.data?.reportingIncomplete}<p role="status" class="mt-2 text-xs text-amber-300">{t('ui.reportingIncomplete')}</p>{/if}
-    {#if state.error}<p role="alert" class="mt-2 text-xs text-red-300">{t('ui.loadFailed')}</p>
-    {:else if usage?.state === 'empty'}<p class="mt-2 text-[10px] text-zinc-400" data-testid="token-stats-empty">{t('ui.noData')}</p>{/if}
-  {/if}
 </div>
 
 <style>

@@ -53,10 +53,10 @@ export const generatedPluginTranslations = {
   "zh-CN": {
     "plugins": {
       "local-accounts": {
-        "metadata.name": "管理认证",
+        "metadata.name": "认证管理",
         "metadata.description": "可选的单管理员账号密码认证",
         "login.title": "账号登录",
-        "login.description": "使用管理认证插件中设置的唯一管理员账号。",
+        "login.description": "使用认证管理插件中设置的唯一管理员账号。",
         "login.username": "账号",
         "login.password": "密码",
         "login.busy": "正在建立登录会话…",
@@ -87,7 +87,7 @@ export const generatedPluginTranslations = {
         "settings.accountTag": "账号",
         "settings.passwordTag": "密码",
         "settings.loading": "正在读取管理员账号",
-        "settings.accountDescription": "管理认证使用此唯一管理员账号。停用插件后恢复匿名管理访问。",
+        "settings.accountDescription": "认证管理使用此唯一管理员账号。停用插件后恢复匿名管理访问。",
         "settings.passwordTitle": "修改登录密码",
         "settings.passwordDescription": "修改后当前登录会话失效，需要重新登录。",
         "settings.currentPassword": "当前密码",
@@ -120,7 +120,7 @@ export const generatedPluginTranslations = {
   "en": {
     "plugins": {
       "local-accounts": {
-        "metadata.name": "Management authentication",
+        "metadata.name": "Authentication Management",
         "metadata.description": "Optional username and password authentication for a single administrator",
         "login.title": "Account sign-in",
         "login.description": "Use the sole administrator account configured in the management authentication plugin.",
