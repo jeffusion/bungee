@@ -1,3 +1,10 @@
+# [5.16.0](https://github.com/jeffusion/bungee/compare/v5.15.2...v5.16.0) (2026-10-08)
+
+
+### Features
+
+* **ui:** add per-card token stats loading and trends ([a0fbca6](https://github.com/jeffusion/bungee/commit/a0fbca6e43c4f68c83a2e747cd427a2331a5df0f))
+
 ## [5.15.2](https://github.com/jeffusion/bungee/compare/v5.15.1...v5.15.2) (2026-10-08)
 
 
