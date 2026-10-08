@@ -11,10 +11,15 @@ function current(state: ReadState): AccessPublication {
   return value === undefined ? empty() : validatePublication(value);
 }
 function routeKeyBindings(value: AccessPublication) {
-  return Object.fromEntries(value.protectedRouteIds.map(routeId => [routeId, value.credentials.filter(key => {
+  const routeIds = [...new Set([...value.protectedRouteIds, ...Object.values(value.byKey).flatMap(scope => scope?.routes ?? [])])];
+  return Object.fromEntries(routeIds.map(routeId => [routeId, value.credentials.filter(key => {
     const scope = validatePolicy(value.byKey[key.id] ?? null);
     return scope?.routes == null || scope.routes.includes(routeId);
   }).map(key => ({id: key.id, name: key.name}))]));
+}
+function routeAccess(value: AccessPublication) {
+  return {protectedRouteIds: value.protectedRouteIds, routeKeyBindings: routeKeyBindings(value),
+    unrestrictedKeyIds: value.credentials.filter(key => validatePolicy(value.byKey[key.id] ?? null)?.routes == null).map(key => key.id)};
 }
 function metadata(key: AccessCredential) { const {digest: _digest, ...value} = key; return value; }
 function json(value: unknown, status = 200) { return Response.json(value, {status, headers: {'cache-control': 'no-store'}}); }
@@ -123,36 +128,33 @@ export function createControl(host: ControlHostContext): PluginControl {
       });
     }},
     {path: '/routes', methods: ['GET', 'PUT'], handler: 'routeProtection', async invoke(ctx) {
-      if (ctx.request.method === 'GET') { const value = current(state); return json({protectedRouteIds: value.protectedRouteIds, routeKeyBindings: routeKeyBindings(value), version: policy().version, ready: ready(), published: ready()}); }
+      if (ctx.request.method === 'GET') { const value = current(state); return json({...routeAccess(value), version: policy().version, ready: ready(), published: ready()}); }
       return write(async () => {
         const input = await ctx.request.json();
         if (!input || Object.keys(input).join() !== 'protectedRouteIds') return json({error: 'invalid_routes'}, 422);
         const protectedRouteIds = stringIds(input.protectedRouteIds);
         if (!host.validateRouteReferences) return json({error: 'reference_validator_unavailable'}, 503);
         if (!await host.validateRouteReferences(protectedRouteIds)) return json({error: 'invalid_references'}, 422);
-        const value = current(state), bindings = routeKeyBindings(value);
-        const blockedRouteIds = value.protectedRouteIds.filter(id => !protectedRouteIds.includes(id) && bindings[id]!.length > 0);
-        if (blockedRouteIds.length) return json({error:'route_has_api_keys', blockedRouteIds, routeKeyBindings: bindings},409);
-        const next = {...value, protectedRouteIds};
-        return save(next, {protectedRouteIds, routeKeyBindings: routeKeyBindings(next)});
+        const next = {...current(state), protectedRouteIds};
+        return save(next, routeAccess(next));
       });
     }},
     {path: '/route-key', methods: ['PUT'], handler: 'applyRouteKey', async invoke(ctx) {
       return write(async () => {
         const input = await ctx.request.json();
         if (!input || Object.keys(input).some(k => !['routeId','keyId','protect'].includes(k))
-          || typeof input.routeId !== 'string' || typeof input.keyId !== 'string' || typeof input.protect !== 'boolean') return json({error:'invalid_binding'},422);
+          || typeof input.routeId !== 'string' || typeof input.keyId !== 'string'
+          || (input.protect !== undefined && typeof input.protect !== 'boolean')) return json({error:'invalid_binding'},422);
         const next = current(state);
         if (!next.credentials.some(key => key.id === input.keyId && key.revokedAt === null)) return json({error:'key_not_found'},404);
         if (!host.validateRouteReferences || !host.validateKeyPolicyReferences) return json({error:'reference_validator_unavailable'},503);
         if (!await host.validateRouteReferences([input.routeId])) return json({error:'invalid_references'},422);
-        if (!next.protectedRouteIds.includes(input.routeId) && !input.protect) return json({error:'route_protection_confirmation_required'},409);
         const previous = validatePolicy(next.byKey[input.keyId] ?? null);
         const value = {routes: previous?.routes == null ? null : [...new Set([...previous.routes,input.routeId])], models:previous?.models ?? null};
         if (!await host.validateKeyPolicyReferences(input.keyId,value)) return json({error:'invalid_references'},422);
         next.byKey[input.keyId] = value;
-        next.protectedRouteIds = [...new Set([...next.protectedRouteIds,input.routeId])];
-        return save(next,{protectedRouteIds:next.protectedRouteIds,routeKeyBindings:routeKeyBindings(next)});
+        // Legacy callers may send protect; Key grants never change route public access.
+        return save(next,routeAccess(next));
       });
     }},
     {path: '/keys/:keyId', methods: ['GET', 'PUT'], handler: 'keyPolicy', async invoke(ctx) {
