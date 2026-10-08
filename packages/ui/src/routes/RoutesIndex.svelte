@@ -219,6 +219,7 @@
   // Feature → editor section deep-link
   // ------------------------------------------------------------------
   function getEditorSectionForFeature(section: string): string {
+    if (section === 'websocket') return 'forward';
     if (section === 'retry' || section === 'modification') return 'processing';
     if (section === 'rateLimit' || section === 'cors') return 'policy';
     if (section === 'directResponse') return 'response';
@@ -385,6 +386,7 @@
 		<BSelect
 			options={[
 				{ value: 'all', label: $_('routes.filters.feature.all') },
+				{ value: 'websocket', label: $_('routeFeatures.websocket') },
 				{ value: 'cors', label: $_('routeFeatures.cors') },
 				{ value: 'rateLimit', label: $_('routeFeatures.rateLimit') },
 				{ value: 'retry', label: $_('routeFeatures.retry') },

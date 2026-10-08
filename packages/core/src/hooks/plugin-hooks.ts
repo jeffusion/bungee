@@ -1,3 +1,4 @@
+import type { WebSocketObservationEvent, WebSocketHandshakeContext, GatewayWebSocketInput, GatewayWebSocketResult } from '../gateway/websocket-contracts';
 /**
  * Bungee Plugin Hooks 定义
  *
@@ -120,6 +121,16 @@ class AttemptObservationHook extends AsyncParallelHook<[AttemptObservationEvent]
   }
 }
 
+/** Strict, isolated WebSocket observers use the same plugin registration contract. */
+class WebSocketObservationHook extends AsyncParallelHook<[WebSocketObservationEvent]> {
+  override async promise(...args: [WebSocketObservationEvent]): Promise<void> {
+    this.callCount++;
+    const started = performance.now();
+    try { await Promise.all(this.taps.map(tap => this.executeTap(tap, args))); }
+    finally { this.totalTimeMs += performance.now() - started; }
+  }
+}
+
 /**
  * 错误上下文
  */
@@ -236,6 +247,9 @@ export interface PluginLogger {
  */
 export function createPluginHooks(): PluginHooks {
   return {
+    onGatewayWebSocket: new AsyncSeriesBailHook<[GatewayWebSocketInput], GatewayWebSocketResult>('onGatewayWebSocket'),
+    onWebSocketHandshake: new AsyncSeriesWaterfallHook<WebSocketHandshakeContext>('onWebSocketHandshake'),
+    onWebSocketObservation: new WebSocketObservationHook('onWebSocketObservation'),
     onGatewayBody: new SyncBailHook<GatewayBodyArguments, BodySource>('onGatewayBody'),
     onGatewayRequest: new AsyncSeriesBailHook<GatewayRequestArguments, Response>('onGatewayRequest'),
     onGatewayRoute: new AsyncSeriesBailHook<[GatewayRouteInput], GatewayRouteDecision>('onGatewayRoute'),
@@ -345,6 +359,9 @@ export function createPluginHooks(): PluginHooks {
  * Plugin Hooks 类型
  */
 export interface PluginHooks {
+  onGatewayWebSocket: AsyncSeriesBailHook<[GatewayWebSocketInput], GatewayWebSocketResult>;
+  onWebSocketHandshake: AsyncSeriesWaterfallHook<WebSocketHandshakeContext>;
+  onWebSocketObservation: WebSocketObservationHook;
   onGatewayBody: SyncBailHook<GatewayBodyArguments, BodySource>;
   onGatewayHeaderRules: AsyncSeriesBailHook<GatewayHeaderRuleArguments, true>;
   onGatewayCors: AsyncSeriesBailHook<GatewayCorsArguments, Response>;

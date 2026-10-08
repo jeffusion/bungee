@@ -130,6 +130,8 @@ function validateRetry(value: unknown, path: string, context: ValidationContext)
 export function validateRoutePolicies(object: JsonObject, path: string, context: ValidationContext): void {
   validatePathRewrite(object.path_rewrite, `${path}.path_rewrite`, context);
   validateAuth(object.auth, `${path}.auth`, context);
+  const websocket = objectField(object.websocket, `${path}.websocket`, ['enabled'], context);
+  if (websocket) booleanField(websocket, 'enabled', `${path}.websocket`, context);
   const timeouts = objectField(object.timeouts, `${path}.timeouts`, ['request_ms', 'first_response_ms'], context);
   if (timeouts) {
     const timeoutPath = `${path}.timeouts`;

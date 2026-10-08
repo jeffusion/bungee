@@ -267,7 +267,7 @@ from the management listener at `http://localhost:8089/`; its API is under
 - [x] Streaming Support
 - [x] API Transformers
 - [x] Plugin System
-- [ ] WebSocket Proxying
+- [x] WebSocket Proxying — opt-in per route, with Responses Token metering ([design and validation boundaries](docs/websocket-proxy-design.md))
 - [ ] gRPC Proxying
 - [ ] Automatic TLS/SSL
 - [ ] Prometheus Metrics

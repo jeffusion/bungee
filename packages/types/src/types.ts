@@ -256,6 +256,8 @@ export interface RouteConfig extends DirectionalModificationRules {
   auth?: AuthConfig;
   plugins?: Array<PluginConfig | string>;
   timeouts?: RouteTimeoutsConfig;
+  /** Explicitly enable WebSocket upgrades alongside HTTP; omitted means disabled. */
+  websocket?: { enabled: boolean };
   rate_limit?: RateLimitConfig;
   cors?: CorsConfig;
   response_rules?: ResponseRuleConfig[];

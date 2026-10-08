@@ -46,7 +46,7 @@ function modules(node: ts.Node): string[] {
   return [];
 }
 const gatewayStages:Record<string,string>={
-  'request-plugin.ts':'onGatewayRequest','forward-plugin.ts':'onGatewayForward','routing-plugin.ts':'onGatewayRoute',
+  'websocket-plugin.ts':'onGatewayWebSocket','request-plugin.ts':'onGatewayRequest','forward-plugin.ts':'onGatewayForward','routing-plugin.ts':'onGatewayRoute',
   'admission-plugin.ts':'onGatewayAdmission','selection-plugin.ts':'onGatewaySelect','retry-plugin.ts':'onGatewayRetry',
   'request-rules-plugin.ts':'onGatewayBodyRules','response-plugin.ts':'onGatewayResponseRules','logging-plugin.ts':'onGatewayLog',
 };
@@ -80,6 +80,7 @@ export function checkArchitectureSource(file:string, source:string, root=process
   const bodyView=(n:ts.Expression,seen=new Set<string>()):boolean=>{
     if(ts.isNonNullExpression(n)||ts.isParenthesizedExpression(n)||ts.isAsExpression(n)||ts.isTypeAssertionExpression(n))return bodyView(n.expression,seen);
     if(ts.isPropertyAccessExpression(n))return ['bodyHandle','bodySource'].includes(n.name.text);
+
     if(ts.isCallExpression(n))return n.expression.getText()==='createBodySource'||member(n.expression)==='handle';
     if(ts.isBinaryExpression(n))return bodyView(n.left,seen)||bodyView(n.right,seen);
     if(ts.isIdentifier(n)&&!seen.has(n.text)){
@@ -87,6 +88,24 @@ export function checkArchitectureSource(file:string, source:string, root=process
       if(declaration?.type&&/\b(BodyHandle|BodySource)\b/.test(declaration.type.getText()))return true;
       if(declaration&&ts.isParameter(declaration)&&n.text==='bodyHandle'&&declaration.type&&ts.isTypeLiteralNode(declaration.type)&&declaration.type.members.every(m=>m.name&&['json','decoded','bytes','events'].includes(m.name.getText())))return true;
       if(declaration?.initializer)return bodyView(declaration.initializer,seen);
+    }
+    return false;
+  };
+  const websocketMessageView=(node:ts.Expression,seen=new Set<string>()):boolean=>{
+    if(ts.isIdentifier(node)&&!seen.has(node.text)) {
+      seen.add(node.text);const declaration=declarations.get(node.text);
+      if(declaration?.type?.getText()==='WebSocketMessageView')return true;
+      if(declaration?.initializer)return websocketMessageView(declaration.initializer,seen);
+    }
+    if(!ts.isPropertyAccessExpression(node)||node.name.text!=='message'||!ts.isIdentifier(node.expression))return false;
+    const declaration=declarations.get(node.expression.text);
+    if(declaration?.type?.getText()==='WebSocketObservationEvent')return true;
+    if(declaration&&ts.isParameter(declaration)) {
+      const callback=declaration.parent;
+      const call=callback.parent;
+      return (ts.isArrowFunction(callback)||ts.isFunctionExpression(callback))&&ts.isCallExpression(call)
+        && ts.isPropertyAccessExpression(call.expression)&&['tap','tapPromise','tapAsync'].includes(call.expression.name.text)
+        && ts.isPropertyAccessExpression(call.expression.expression)&&call.expression.expression.name.text==='onWebSocketObservation';
     }
     return false;
   };
@@ -150,7 +169,8 @@ export function checkArchitectureSource(file:string, source:string, root=process
       if(['json','text','arrayBuffer','bytes','blob','formData'].includes(method??'')&&owner) {
         const expr=owner.getText();
         // Public BodyHandle/owned source methods and Response.json output assembly are distinct.
-        const allowed=expr==='Response'||bodyView(owner);
+        const websocketView = method==='json' && websocketMessageView(owner);
+        const allowed=expr==='Response'||bodyView(owner)||websocketView;
         if(!allowed)add(node,'native-http-body-read');
       }
       if(node.expression.getText()==='decodeStream')add(node,'central-body-decoder');

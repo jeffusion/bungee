@@ -6,6 +6,7 @@ import type { CanonicalTokenAccountingEventV2 as CanonicalEvent } from '@jeffusi
 import { TOKEN_METERING_SERVICE_ID, TOKEN_METERING_CONTRACT_VERSION, type TokenMeteringResult, type TokenMeteringService, type TokenMeteringSubscription } from '@jeffusion/bungee-core/plugin';
 
 import { classifyRequest, classifyResponse, type SupportedProvider } from './classifier';
+import { ResponsesWebSocketMetering } from './websocket';
 
 type JsonRecord = Record<string, unknown>;
 type TokenAccountingSession = ReturnType<typeof createTokenAccountingSession>;
@@ -214,6 +215,12 @@ export const TokenMeteringPlugin = definePlugin(
     private pending = new Set<Promise<void>>();
     private requiredPending = new Map<string, Set<Promise<void>>>();
     private closed = false;
+    private websocket = new ResponsesWebSocketMetering({
+      emit: event => this.handleAttemptObservation(event, true),
+      prepareRequest: requestId => this.prepareRequest(requestId),
+      discardRequest: (requestId, attemptId) => { this.attempts.delete(attemptId); this.requests.delete(requestId); this.droppedAttempts.delete(attemptId); },
+      hasDemand: () => !this.closed && this.subscriptions.size > 0,
+    });
     parsedResponses = 0;
     get activeAttempts(): number { return this.attempts.size; }
     async init(context: PluginInitContext): Promise<void> {
@@ -275,6 +282,7 @@ export const TokenMeteringPlugin = definePlugin(
       // Demand is captured before attempt selection; raw observation remains a framework hook.
       hooks.onRequestInit.tapPromise('token-metering-demand', async event => this.prepareRequest(event.requestId));
       hooks.onAttemptObservation.tapPromise('token-metering', async event => this.handleAttemptObservation(event));
+      hooks.onWebSocketObservation.tapPromise('token-metering-websocket', async event => this.websocket.observe(event));
     }
     private prepareRequest(requestId: string): void {
       if (!this.requests.has(requestId)) this.requests.set(requestId, Object.freeze([...this.subscriptions].filter(s => !s.requestId || s.requestId === requestId)));
@@ -313,7 +321,7 @@ export const TokenMeteringPlugin = definePlugin(
         });
       }
     }
-    private async handleAttemptObservation(event: AttemptObservationEvent): Promise<void> {
+    private async handleAttemptObservation(event: AttemptObservationEvent, websocket = false): Promise<void> {
       if (!event.isActive()) {
         this.attempts.delete(event.attemptId);
         return;
@@ -345,7 +353,7 @@ export const TokenMeteringPlugin = definePlugin(
         if (attempt.session) return;
         const body = parseRequestBody(event.body);
         if (!body) return;
-        const classification = classifyRequest(url, body);
+        const classification = websocket ? { llm: true, provider: 'openai' as const } : classifyRequest(url, body);
         attempt.llm ||= classification.llm;
         if (!classification.llm) return;
         attempt.model = detectModel(body, url) ?? attempt.model;
@@ -360,6 +368,13 @@ export const TokenMeteringPlugin = definePlugin(
       if (event.phase === 'response') {
         attempt.responseSeen = true;
         const body = event.body;
+        if (websocket && isRecord(body.response)) {
+          const model = detectModel(body.response);
+          if (model) {
+            attempt.model = model;
+            attempt.session?.consumeRequest({ body: { model } });
+          }
+        }
         attempt.responseFailed ||= event.status >= 400 || body.error !== undefined;
         const provider = attempt.provider === 'unknown' ? classifyResponse(body, attempt.llm, event.envelope?.event) : attempt.provider;
         if (!provider) return;
@@ -436,6 +451,7 @@ export const TokenMeteringPlugin = definePlugin(
 
     async onDestroy(): Promise<void> {
       this.closed = true;
+      this.websocket.dispose();
       await Promise.allSettled([...this.pending]);
       this.subscriptions.clear(); this.requests.clear(); this.attempts.clear(); this.droppedAttempts.clear(); this.requiredPending.clear();
     }

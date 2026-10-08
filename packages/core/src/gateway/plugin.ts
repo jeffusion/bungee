@@ -6,6 +6,7 @@ export type * from '../plugin-extensions';
 export type * from '../plugin-services';
 export type * from './contracts';
 export type * from './body-contracts';
+export type * from './websocket-contracts';
 export { protocolSSEOutput } from '../plugins/sse-envelope';
 export { logger } from '../plugin-logger';
 export { ANONYMOUS_PRINCIPAL } from '../plugin-extensions';

@@ -12,6 +12,8 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@bungee/ws-client": "npm:ws@8.22.0",
+    "@types/ws": "^8.18.1",
     "@jeffusion/bungee-types": "workspace:*",
     "@types/lodash-es": "^4.17.12",
     "acorn": "^8.15.0",

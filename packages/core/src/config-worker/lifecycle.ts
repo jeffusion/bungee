@@ -1,3 +1,5 @@
+import { createWebSocketBridge, isWebSocketUpgradeRequest, type WebSocketBridge, type WebSocketBridgeData } from '../websocket';
+import { runGatewayWebSocket } from '../gateway/runtime';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import type { Server } from 'bun';
 import {
@@ -15,6 +17,9 @@ type LifecycleServer = Pick<Server<unknown>, 'port' | 'stop'>;
 
 export type ConfigWorkerServingHandle = {
   readonly server: LifecycleServer;
+  readonly websocket?: WebSocketBridge;
+  readonly sessions?: Set<Promise<void>>;
+  closeTimer?: ReturnType<typeof setTimeout>;
   readonly cleanup: () => Promise<void>;
   drainPromise: Promise<void> | null;
   drainComplete: boolean;
@@ -24,6 +29,7 @@ export type ConfigWorkerServingHandle = {
 };
 
 type LifecycleFetch = (request: Request) => Response | Promise<Response>;
+type WebSocketFetch = (request:Request,server?:Bun.Server<any>) => Response|undefined|Promise<Response|undefined>;
 
 export type ServingRequestContext = {
   readonly servingRevision: number;
@@ -44,6 +50,7 @@ export type ProductionResources = {
   cleanupPluginRuntime(): Promise<void>;
   handleRequest(request: Request, config: AppConfig, context: ServingRequestContext): Promise<Response>;
   serve(fetch: LifecycleFetch): LifecycleServer;
+  serveWebSocket?(fetch: WebSocketFetch, websocket: Bun.WebSocketHandler<WebSocketBridgeData>): LifecycleServer;
   closeAccessLog(): Promise<void>;
   closeFileLog(): Promise<void>;
 };
@@ -108,6 +115,8 @@ export function createConfigWorkerLifecycle(
       let cleanupPromise: Promise<void> | null = null;
       const cleanup = () => cleanupPromise ??= cleanupAll(resources);
       let server: LifecycleServer | null = null;
+      const websocket = createWebSocketBridge();
+      const sessions = new Set<Promise<void>>();
       try {
         resources.configureBodyStorage(config);
         resources.initializeRuntimeState(config);
@@ -131,14 +140,23 @@ export function createConfigWorkerLifecycle(
         if (readiness.failed.length > 0) {
           throw new ConfigWorkerLifecycleReadinessError(readiness.failed);
         }
-        server = resources.serve(async (request) => {
+        const fetchHandler: WebSocketFetch = async (request, nativeServer) => {
           const restored = restoreWorkerTransportRequest(request, transportSecret);
           if (!restored.ok) return new Response(null, { status: restored.status });
+          if (isWebSocketUpgradeRequest(request)) {
+            if (!nativeServer) return Response.json({error:'websocket_unavailable'},{status:503});
+            const result = await runGatewayWebSocket({request:restored.request,nativeRequest:request,server:nativeServer,bridge:websocket,
+              config,servingRevision:command.revision,retain:completion=>{sessions.add(completion);void completion.finally(()=>sessions.delete(completion));}});
+            return result.response;
+          }
           return resources.handleRequest(restored.request, config, {
             servingRevision: command.revision,
             logging: resources.requestLogging,
           });
-        });
+        };
+        server = resources.serveWebSocket
+          ? resources.serveWebSocket(fetchHandler,websocket.websocket)
+          : resources.serve(request=>fetchHandler(request) as Promise<Response>);
         const boundPort = server.port;
         if (!Number.isSafeInteger(boundPort) || boundPort === undefined || boundPort <= 0) {
           throw new Error('Bun server did not bind a positive port');
@@ -146,6 +164,8 @@ export function createConfigWorkerLifecycle(
         return {
           handle: {
             server,
+            websocket,
+            sessions,
             cleanup,
             drainPromise: null,
             drainComplete: false,
@@ -172,13 +192,21 @@ export function createConfigWorkerLifecycle(
         throw error;
       }
     },
-    async stopAccepting(handle) {
+    async stopAccepting(handle, drainTimeoutMs) {
       if (handle.drainPromise !== null || handle.stopped) return;
       // Real drain admission point: retire peer admission and every host owner
       // synchronously, BEFORE the HTTP drain window starts, so no new
       // background/bootstrap work can be admitted while old leases drain.
       try { options.onDrainStart?.(); } catch { /* retirement is best-effort; the drain still proceeds */ }
-      handle.drainPromise = handle.server.stop(false).then(() => {
+      handle.websocket?.stopAccepting();
+      if (drainTimeoutMs !== undefined && handle.websocket) {
+        // Reserve close confirmation and bounded observer cleanup inside the existing drain window.
+        handle.closeTimer = setTimeout(()=>{void handle.websocket!.stop().catch(()=>undefined);},
+          Math.max(0,drainTimeoutMs-handle.websocket.limits.closeTimeoutMs-1500));
+      }
+      handle.drainPromise = handle.server.stop(false).then(async () => {
+        await Promise.all(handle.sessions ?? []);
+        clearTimeout(handle.closeTimer);
         handle.drainComplete = true;
       });
     },
@@ -187,7 +215,10 @@ export function createConfigWorkerLifecycle(
     },
     async forceStop(handle) {
       if (!handle.stopped && !handle.drainComplete && !handle.forceStopped) {
+        await handle.websocket?.stop();
         await handle.server.stop(true);
+        await Promise.all(handle.sessions ?? []);
+        clearTimeout(handle.closeTimer);
         handle.forceStopped = true;
       }
     },
@@ -198,7 +229,10 @@ export function createConfigWorkerLifecycle(
         let stopError: unknown;
         if (!handle.drainComplete && !handle.forceStopped) {
           try {
+            await handle.websocket?.stop();
             await handle.server.stop(true);
+            await Promise.all(handle.sessions ?? []);
+            clearTimeout(handle.closeTimer);
             handle.forceStopped = true;
           } catch (error) { stopError = error; }
         }
@@ -268,7 +302,7 @@ export async function loadProductionResources(): Promise<ProductionResources> {
         request: Request, config: AppConfig, context: ServingRequestContext,
       ) => Promise<Response>)(request, config, context);
     },
-    serve(fetch) {
+    serveWebSocket(fetch, websocket) {
       return Bun.serve({
         hostname: '127.0.0.1',
         port: 0,
@@ -278,7 +312,11 @@ export async function loadProductionResources(): Promise<ProductionResources> {
         // reasons pass through normal request logging, including chunked bodies.
         maxRequestBodySize: Number.MAX_SAFE_INTEGER,
         fetch,
+        websocket,
       });
+    },
+    serve(fetch) {
+      return Bun.serve({hostname:'127.0.0.1',port:0,reusePort:false,idleTimeout:0,maxRequestBodySize:Number.MAX_SAFE_INTEGER,fetch});
     },
     closeAccessLog: async () => {
       const { flushBodyCaptures } = await import('../logger/body-capture');

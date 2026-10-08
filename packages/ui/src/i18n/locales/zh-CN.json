@@ -671,6 +671,9 @@
     "retry": "重试策略",
     "retryHelp": "配置失败请求的重试行为",
     "enableRetry": "启用重试策略",
+    "enableWebsocket": "启用 WebSocket",
+    "websocketHelp": "此路由可同时处理 HTTP 请求和 WebSocket 双向连接。启用 Token 统计插件后，可记录 Responses 用量。",
+    "websocketBudgetHelp": "WebSocket 连接暂不支持设置了 Token 预算的 API Key。",
     "directResponse": "直接响应/重定向",
     "directResponseHelp": "无需代理到后端即可返回响应，或重定向到其他 URL",
     "responseRulesHelp": "为当前路由下的特定 path 配置直接响应或重定向。只有命中规则的请求会短路，其他请求仍会转发到上游目标。",
@@ -732,6 +735,7 @@
     "endpointCount": "{count} 个端点"
   },
   "routeFeatures": {
+    "websocket": "WebSocket",
     "auth": "认证",
     "cors": "CORS",
     "rateLimit": "限流",
