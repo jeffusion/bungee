@@ -23,7 +23,7 @@
   $effect(() => {
     const report = onHeaderChange;
     const header = { summary: selectedRange, refresh: { label: t('ui.refresh'), busy: state.busy,
-      disabled: !resource, run: () => { void resource?.refresh(); } } };
+      disabled: !resource, run: () => { void resource?.refresh(); } }, actions: headerActions };
     untrack(() => report?.(header));
   });
   onMount(() => {
@@ -31,6 +31,10 @@
     return () => report?.(null);
   });
 </script>
+
+{#snippet headerActions()}
+  <a href={`/#/extensions/${pluginName}/statistics`} class="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-[11px] text-zinc-400 hover:text-nexus-300 hover:underline">{t('page.viewModels')} <span>→</span></a>
+{/snippet}
 
 <div class="flex h-full min-h-0 flex-col gap-2" data-testid="plugin-widget-token-stats">
   {#if state.error}<p role="alert" class="shrink-0 text-xs text-red-300">{t('ui.loadFailed')}</p>{/if}
@@ -45,5 +49,4 @@
       <div class="min-h-0 flex-1"><UsageTimeChart stats={state.data} range={selectedRange} refreshedAt={state.refreshedAt} {pluginName} /></div>
     {/if}
   {/if}
-  <a href={`/#/extensions/${pluginName}/statistics`} class="shrink-0 self-end text-[11px] text-zinc-400 hover:text-nexus-300 hover:underline">{t('page.viewModels')} →</a>
 </div>

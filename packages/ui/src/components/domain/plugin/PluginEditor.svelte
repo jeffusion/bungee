@@ -289,7 +289,7 @@
       <PanelCard title={editingPluginIndex !== null ? $_('plugin.editPlugin') : $_('plugin.addPlugin')} tag="PLUGIN">
         <svelte:fragment slot="title-extra"><Dialog.Title class="sr-only">{editingPluginIndex !== null ? $_('plugin.editPlugin') : $_('plugin.addPlugin')}</Dialog.Title></svelte:fragment>
         <div class="space-y-4">
-          <label class="block space-y-1.5">
+          <div class="space-y-1.5">
             <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400">// {$_('plugin.selectPlugin')}</span>
             <BSelect
               options={pluginOptions.map(o => ({
@@ -297,11 +297,12 @@
                 label: `${getPluginText(o.metaName, o.name, $_)} ${o.version ? `(v${o.version})` : ''}`
               }))}
               value={selectedPluginName || ''}
+              ariaLabel={$_('plugin.selectPlugin')}
               placeholder={availablePlugins.length === 0 ? $_('plugin.noEnabledPlugins') + '...' : $_('plugin.selectPluginPrompt')}
               onchange={handlePluginSelect}
               disabled={editingPluginIndex !== null || availablePlugins.length === 0}
             />
-          </label>
+          </div>
 
           {#if availablePlugins.length === 0}
             <div class="border-l-2 border-l-amber-500 bg-amber-500/5 px-3 py-2 font-mono text-[11px] uppercase tracking-command text-amber-200">

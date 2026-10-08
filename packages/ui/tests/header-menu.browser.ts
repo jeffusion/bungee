@@ -25,7 +25,7 @@ const stableMenu = async (page: Page) => {
   await page.getByTestId('header-menu').waitFor();
   await page.waitForFunction(() => {
     const menu = document.querySelector('[data-testid="header-menu"]');
-    return menu && Math.abs(menu.getBoundingClientRect().right - innerWidth) < 1;
+    return menu && Math.abs(menu.getBoundingClientRect().left) < 1;
   });
 };
 const noOverflow = async (page: Page) => {
@@ -44,7 +44,7 @@ const noOverflow = async (page: Page) => {
     });
   }), false);
 };
-const neutral = 'rgb(55, 61, 74)', accent = 'rgb(249, 115, 22)';
+const accent = 'rgb(249, 115, 22)';
 try {
   for (const language of ['zh-CN', 'en']) {
     for (const [name, width, height] of matrix) {
@@ -74,16 +74,19 @@ try {
         await context.close();
         continue;
       }
-      assert.deepEqual(await trigger.evaluate(el => ({ height: el.getBoundingClientRect().height, font: getComputedStyle(el).fontSize })), referenceStyle);
-      assert.equal(await trigger.evaluate(el => getComputedStyle(el).borderColor), neutral);
+      assert.deepEqual(await trigger.evaluate(el => ({
+        height: el.getBoundingClientRect().height, width: el.getBoundingClientRect().width,
+        border: getComputedStyle(el).borderWidth, separator: getComputedStyle(el.parentElement!).borderRightWidth,
+      })), { height: 44, width: 44, border: '0px', separator: '0px' });
       await trigger.hover();
-      await page.waitForFunction(color => getComputedStyle(document.getElementById('header-menu-trigger')!).borderColor === color, accent);
+      await page.waitForFunction(() => getComputedStyle(document.getElementById('header-menu-trigger')!).backgroundColor === 'rgb(26, 29, 36)');
       await page.mouse.move(0, height - 1);
       await trigger.focus();
       await page.keyboard.press('Tab');
       await page.keyboard.press('Shift+Tab');
       assert.equal(await trigger.evaluate(el => el.matches(':focus-visible')), true);
-      assert.ok(await trigger.evaluate(el => getComputedStyle(el).boxShadow.includes('249, 115, 22')));
+      assert.equal(await trigger.evaluate(el => getComputedStyle(el).outlineColor), accent);
+      assert.equal(await trigger.evaluate(el => getComputedStyle(el).outlineWidth), '2px');
       await page.screenshot({ path: resolve(evidence, `${id}-trigger-focus.png`) });
       await page.keyboard.press('Enter');
       await stableMenu(page);
@@ -100,24 +103,21 @@ try {
       await page.keyboard.press('Escape');
       await menu.waitFor({ state: 'detached' });
       assert.equal(await trigger.evaluate(el => document.activeElement === el), true);
-      // Language selection now belongs to the separate System menu, not the Pages Sheet.
+      // Language selection has its own header entry, separate from both navigation menus.
       const alternate = language === 'en' ? '中文' : 'English';
       const alternateCode = language === 'en' ? 'zh-CN' : 'en';
-      const systemTrigger = page.locator('#header-management-trigger');
-      const systemMenu = page.getByTestId('header-management-menu');
-      await systemTrigger.click();
-      await systemMenu.getByRole('menuitem', { name: /语言|Language/ }).click();
+      const languageTrigger = page.locator('#header-language-trigger');
+      const languageMenu = page.getByTestId('header-language-menu');
+      await languageTrigger.click();
       await page.getByRole('menuitemradio', { name: alternate, exact: true }).click();
-      await systemMenu.waitFor({ state: 'detached' });
+      await languageMenu.waitFor({ state: 'detached' });
       assert.equal(await page.evaluate(() => localStorage.getItem('locale')), alternateCode);
-      assert.equal(await systemTrigger.getAttribute('aria-label'), alternateCode === 'en' ? 'System' : '系统管理');
-      await systemTrigger.click();
-      await systemMenu.getByRole('menuitem', { name: /语言|Language/ }).click();
+      assert.equal(await languageTrigger.getAttribute('aria-label'), alternateCode === 'en' ? 'Language' : '语言');
+      await languageTrigger.click();
       assert.equal(await page.getByRole('menuitemradio', { name: alternate, exact: true }).getAttribute('aria-checked'), 'true');
       await page.keyboard.press('Escape');
-      await page.keyboard.press('Escape');
-      await systemMenu.waitFor({ state: 'detached' });
-      assert.equal(await systemTrigger.evaluate(el => document.activeElement === el), true);
+      await languageMenu.waitFor({ state: 'detached' });
+      assert.equal(await languageTrigger.evaluate(el => document.activeElement === el), true);
       await trigger.click();
       await stableMenu(page);
       await menu.locator('a[href="/#/services"]').focus();
@@ -135,7 +135,7 @@ try {
       assert.equal(await trigger.evaluate(el => document.activeElement === el), true);
       await trigger.click();
       await stableMenu(page);
-      await page.mouse.click(4, Math.floor(height / 2));
+      await page.mouse.click(width - 4, Math.floor(height / 2));
       await menu.waitFor({ state: 'detached' });
       await trigger.click();
       await stableMenu(page);

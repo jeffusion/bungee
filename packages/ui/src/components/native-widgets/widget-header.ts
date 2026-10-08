@@ -3,6 +3,8 @@ import type { Snippet } from 'svelte';
 export type NativeWidgetHeader = {
   summary: string;
   refresh: { label: string; busy: boolean; disabled: boolean; run: () => void };
+  /** Optional actions displayed alongside the summary and refresh control. */
+  actions?: Snippet;
   /** Optional content for the dashboard KPI chassis's existing footer slot. */
   footer?: Snippet;
 };

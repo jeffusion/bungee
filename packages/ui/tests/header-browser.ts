@@ -21,6 +21,9 @@ page.on('requestfailed', request => {
 const header = page.getByTestId('app-header');
 const trigger = page.locator('#header-management-trigger');
 const menu = page.getByTestId('header-management-menu');
+const languageTrigger = page.locator('#header-language-trigger');
+const languageMenu = page.getByTestId('header-language-menu');
+const logoutButton = page.locator('#header-logout-button');
 async function settled() {
   await page.evaluate(async () => { await document.fonts.ready; await Promise.all(document.getAnimations().map(a => a.finished.catch(() => {}))); });
 }
@@ -53,7 +56,9 @@ try {
   await trigger.focus(); await shot('desktop-focus');
   await trigger.press('Enter'); await expect(menu).toBeVisible();
   await shot('desktop-system-menu');
-  await expect(menu.getByRole('menuitem', { name: /退出登录/ })).toHaveCount(mode.mode === 'plugin' ? 1 : 0);
+  await expect(menu.getByRole('menuitem', { name: /语言|退出登录/ })).toHaveCount(0);
+  await expect(logoutButton).toHaveCount(mode.mode === 'plugin' ? 1 : 0);
+  await expect(languageTrigger).toBeVisible();
   await page.keyboard.press('Escape'); await expect(menu).toHaveCount(0); await expect(trigger).toBeFocused();
   await openSystem(); await page.locator('h1').click(); await expect(menu).toHaveCount(0);
   checks.push('business/admin separation; real enabled plugin contributions; hover/focus; Enter/Escape/outside dismissal');
@@ -93,13 +98,14 @@ try {
   }
   checks.push('unsaved draft preserved and confirmation focus restored at 1440/768/390');
 
-  await openSystem(); await menu.getByRole('menuitem', { name: /语言/ }).focus();
-  await page.keyboard.press('ArrowRight');
+  await languageTrigger.focus();
+  await page.keyboard.press('Enter');
   const english = page.getByRole('menuitemradio', { name: 'English', exact: true });
   await expect(english).toBeVisible();
   await expect(page.getByRole('menuitemradio', { name: '中文', exact: true })).toBeFocused();
   await page.keyboard.press('ArrowDown');
   await expect(english).toBeFocused(); await page.keyboard.press('Enter');
+  await expect(languageMenu).toHaveCount(0);
   await expect(trigger).toHaveAttribute('aria-label', 'System');
   await page.setViewportSize({ width: 768, height: 844 });
   await page.goto(`${base}/#/routes`);
@@ -111,7 +117,7 @@ try {
     if (!rect || !buttonRect || rect.x + rect.width > buttonRect.x + 1) throw new Error('Active plugin navigation hidden behind administration');
   }
   await shot('tablet-english-plugin');
-  await openSystem(); await menu.getByRole('menuitem', { name: /Language/ }).click();
+  await languageTrigger.click();
   await page.getByRole('menuitemradio', { name: '中文', exact: true }).click();
   await expect(trigger).toHaveAttribute('aria-label', '系统管理');
   checks.push('real plugin navigation with overflow; Chinese/English language selection');
@@ -130,7 +136,8 @@ try {
     await openSystem(); await shot(`mobile-system-${viewport.width}`);
     const box = await menu.boundingBox();
     if (!box || box.x < 0 || box.y < 0 || box.x + box.width > viewport.width || box.y + box.height > viewport.height) throw new Error(`Menu overflow at ${viewport.width}`);
-    await menu.getByRole('menuitem', { name: /语言/ }).click();
+    await page.keyboard.press('Escape');
+    await languageTrigger.click();
     await expect(page.getByRole('menuitemradio', { name: 'English', exact: true })).toBeVisible();
     await page.getByRole('menuitemradio', { name: '中文', exact: true }).click();
   }
@@ -144,14 +151,14 @@ try {
       await page.goto(`${base}/#/config`);
       await expect(page.locator('#config-request-limit')).toBeVisible();
       await page.locator('#config-request-limit').fill('51mb');
-      await openSystem(); await menu.getByRole('menuitem', { name: '退出登录', exact: true }).click();
+      await logoutButton.click();
       const confirmation = page.getByRole('dialog');
       await expect(confirmation).toBeVisible(); await expect(menu).toHaveCount(0);
       await expect(confirmation).toContainText('草稿');
       await shot(`logout-confirmation-${width}`);
       await confirmation.getByTestId('confirmation-cancel').click();
-      await expect(trigger).toBeFocused(); await expect(page.locator('#config-request-limit')).toHaveValue('51mb');
-      await openSystem(); await menu.getByRole('menuitem', { name: '退出登录', exact: true }).click();
+      await expect(logoutButton).toBeFocused(); await expect(page.locator('#config-request-limit')).toHaveValue('51mb');
+      await logoutButton.click();
       await confirmation.getByRole('button', { name: '确认', exact: true }).click();
       await expect(header).toHaveCount(0); await expect(page.getByTestId('page-login')).toBeVisible();
       await login();
@@ -173,10 +180,9 @@ try {
       await touchPage.locator('form button').tap();
     }
     await expect(touchPage.getByTestId('app-header')).toBeVisible();
-    await touchPage.locator('#header-management-trigger').tap();
-    const touchMenu = touchPage.getByTestId('header-management-menu');
+    await touchPage.locator('#header-language-trigger').tap();
+    const touchMenu = touchPage.getByTestId('header-language-menu');
     await expect(touchMenu).toBeVisible();
-    await touchMenu.getByRole('menuitem', { name: /语言/ }).tap();
     await touchPage.getByRole('menuitemradio', { name: 'English', exact: true }).tap();
     await expect(touchPage.locator('#header-management-trigger')).toHaveAttribute('aria-label', 'System');
     await expect(touchMenu).toHaveCount(0);
@@ -184,7 +190,7 @@ try {
     await expect(touchPage.getByTestId('header-menu')).toBeVisible();
     await touchPage.getByTestId('header-menu').locator('a[href="/#/services"]').tap();
     await expect(touchPage.getByTestId('page-services')).toBeVisible();
-    checks.push('touch-enabled mobile: tap opens language submenu, selects locale and navigates business pages; keyboard submenu arrows');
+    checks.push('touch-enabled mobile: tap opens language menu, selects locale and navigates business pages; keyboard language selection');
   } finally { await touchContext.close(); }
   expect(errors).toEqual([]);
   console.log('HEADER_BROWSER_PASS', JSON.stringify(checks));

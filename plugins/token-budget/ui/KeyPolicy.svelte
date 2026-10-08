@@ -82,7 +82,7 @@
       <div class="flex flex-wrap items-center gap-3">
         <label class="flex-1 min-w-0"><span class="sr-only">{t('ui.search')}</span><Input placeholder={t('ui.searchPlaceholder')} bind:value={search} /></label>
         <button class="nx-btn-ghost" disabled={loading || saving} onclick={refresh}>{t('ui.refresh')}</button>
-        <a class="nx-btn-ghost" href="/#/plugins/key-access/settings">{t('ui.manageKeys')}</a>
+        <a class="nx-btn-ghost" href="/#/extensions/key-access/settings">{t('ui.manageKeys')}</a>
       </div>
     </div>
     {#if feedback}<p role="status" class="text-sm text-emerald-400 mb-3">{t(feedback)}</p>{/if}

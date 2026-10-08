@@ -24,8 +24,8 @@
 
   let menuOpen = $state(false);
   let managementOpen = $state(false);
+  let languageOpen = $state(false);
   let desktop = $state(false);
-  let logoutPending = false;
   let brand: HTMLAnchorElement;
   let navigation = $state<HTMLUListElement>();
   let indicator = $state({ left: 0, width: 0 });
@@ -59,6 +59,7 @@
       // Close through the primitive, not CSS hiding: release its focus trap and scroll lock.
       menuOpen = false;
       managementOpen = false;
+      languageOpen = false;
     };
     update();
     breakpoint.addEventListener('change', update);
@@ -77,16 +78,13 @@
     if (!$confirmation) returnFocus?.focus({ preventScroll: true });
   }
 
-  // Wait for the menu transition and focus/scroll lock release before confirming logout.
+  // Navigation guards may capture an administration link that is about to detach.
   function managementLifecycle() {
     return { destroy() {
       const trigger = document.getElementById('header-management-trigger');
       if ($confirmation?.opener?.closest('[data-testid="header-management-menu"]')) {
         confirmation.update(request => request ? { ...request, opener: trigger } : request);
       }
-      void tick().then(() => {
-        if (logoutPending) { logoutPending = false; void onLogout(); }
-      });
     } };
   }
 
@@ -96,50 +94,18 @@
 </script>
 
 <!-- Also close when the existing unsaved-changes guard intercepts the link click. -->
-<svelte:window onhashchange={() => { menuOpen = false; managementOpen = false; }} />
+<svelte:window onhashchange={() => { menuOpen = false; managementOpen = false; languageOpen = false; }} />
 
 <header data-testid="app-header" class="sticky top-0 z-50 flex h-[var(--app-header-height)] shrink-0 items-stretch border-b border-carbon-600 bg-carbon-950"
   style="padding-top: env(safe-area-inset-top); padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right)">
-  <a bind:this={brand} href="/#/" class="flex min-w-0 shrink-0 items-center gap-3 px-4 transition-colors hover:bg-carbon-800 xl:px-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500">
-    <span class="relative flex h-9 w-9 shrink-0 items-center justify-center border border-nexus-500/60 bg-carbon-900">
-      <svg aria-hidden="true" viewBox="0 0 24 24" class="h-5 w-5 text-nexus-500" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 3L5 13h6l-1 8l8-11h-6l1-7z" /></svg>
-      <span class="absolute -bottom-1 -right-1 h-1.5 w-1.5 bg-nexus-500 shadow-glow-orange"></span>
-    </span>
-    <span class="flex flex-col leading-none">
-      <span class="nx-display text-base tracking-[0.04em] text-zinc-50">BUNGEE</span>
-      <span class="mt-1 font-mono text-[9px] uppercase tracking-chiseled text-zinc-500">REVERSE PROXY</span>
-    </span>
-  </a>
-
-  <!-- Scroll plugin contributions horizontally to keep the header height fixed. -->
-  <nav aria-label={$_('header.navigation')} class="header-navigation hidden min-w-0 flex-1 overflow-x-auto border-l border-carbon-600 md:flex">
-    <ul bind:this={navigation} class="relative flex min-w-full shrink-0 items-stretch">
-      {#each items as item (item.href)}
-        <li class="shrink-0">
-          <a href={item.href} aria-current={item.isActive ? 'page' : undefined}
-            class="header-tab relative flex h-full items-center justify-center whitespace-nowrap px-[calc(1rem+(5px+0.375rem)/2)] font-mono text-[11px] font-semibold uppercase tracking-command text-zinc-400 transition-colors hover:bg-nexus-500/5 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500"
-            class:is-active={item.isActive}>
-            <!-- Split the original 5px caret + gap-1.5 across both sides: same hitbox, centered label. -->
-            <span class="nx-caret-left absolute left-[calc(1rem-(5px+0.375rem)/2)]" class:invisible={!item.isActive} aria-hidden="true"></span>
-            <span title={item.label}>{item.label}</span>
-          </a>
-        </li>
-      {/each}
-      <li aria-hidden="true" class="pointer-events-none absolute bottom-0 left-0 h-0.5 bg-nexus-500 motion-safe:transition-[transform,width] motion-safe:duration-200 motion-safe:ease-out"
-        style:width={`${indicator.width}px`} style:transform={`translateX(${indicator.left}px)`} style:visibility={desktop && activeIndex >= 0 ? 'visible' : 'hidden'}></li>
-    </ul>
-  </nav>
-
-  <div class="hidden shrink-0 items-center border-l border-carbon-600 px-4 xl:flex"><HudClock /></div>
-
-  <div class="ml-auto flex shrink-0 items-center border-l border-carbon-600 px-2 md:hidden">
+  <div class="flex shrink-0 items-center pl-2 md:hidden">
     <Sheet.Root bind:open={menuOpen} preventScroll closeFocus={() => $confirmation ? null : desktop ? brand : document.getElementById('header-menu-trigger')}>
-      <Sheet.Trigger id="header-menu-trigger" class={buttonVariants({ variant: 'ghost', className: 'gap-2' })}>
-        <Menu aria-hidden="true" class="h-4 w-4" /><span>{$_('header.menu')}</span>
+      <Sheet.Trigger id="header-menu-trigger" aria-label={$_('header.menu')} title={$_('header.menu')} class="header-action header-utility text-zinc-400">
+        <Menu aria-hidden="true" class="h-4 w-4" />
       </Sheet.Trigger>
-      <Sheet.Content side="right" data-testid="header-menu" class="nx-bracketed flex !h-dvh flex-col !gap-0 overflow-hidden border-carbon-600 bg-carbon-900 !p-0 !shadow-industrial"
-        style="width: min(24rem, calc(100vw - 24px)); max-width: none; padding-top: env(safe-area-inset-top); padding-right: env(safe-area-inset-right); padding-bottom: env(safe-area-inset-bottom)"
-        inTransitionConfig={{ x: '100%', duration: 180, opacity: 1 }} outTransitionConfig={{ x: '100%', duration: 200, opacity: 1 }}
+      <Sheet.Content side="left" data-testid="header-menu" class="nx-bracketed flex !h-dvh flex-col !gap-0 overflow-hidden border-carbon-600 bg-carbon-900 !p-0 !shadow-industrial"
+        style="width: min(24rem, calc(100vw - 24px)); max-width: none; padding-top: env(safe-area-inset-top); padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); padding-bottom: env(safe-area-inset-bottom)"
+        inTransitionConfig={{ x: '-100%', duration: 180, opacity: 1 }} outTransitionConfig={{ x: '-100%', duration: 200, opacity: 1 }}
         closeLabel={$_('header.closeMenu')} closeClass={buttonVariants({ variant: 'ghost', size: 'icon', className: '!right-3 !top-[calc(7px+env(safe-area-inset-top))] !opacity-100' })} onClosed={menuClosed}>
         <CornerBrackets />
         <div class="nx-panel-head min-h-[48px] shrink-0 pr-16">
@@ -166,48 +132,91 @@
     </Sheet.Root>
   </div>
 
-  <div class="flex shrink-0 items-stretch border-l border-carbon-600">
+  <a bind:this={brand} href="/#/" aria-label="BUNGEE" class="flex min-w-0 shrink-0 items-center gap-3 px-2 transition-colors hover:bg-carbon-800 md:px-4 xl:px-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500">
+    <span class="relative flex h-9 w-9 shrink-0 items-center justify-center border border-nexus-500/60 bg-carbon-900">
+      <svg aria-hidden="true" viewBox="0 0 24 24" class="h-5 w-5 text-nexus-500" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 3L5 13h6l-1 8l8-11h-6l1-7z" /></svg>
+      <span class="absolute -bottom-1 -right-1 h-1.5 w-1.5 bg-nexus-500 shadow-glow-orange"></span>
+    </span>
+    <span class="hidden flex-col leading-none sm:flex">
+      <span class="nx-display text-base tracking-[0.04em] text-zinc-50">BUNGEE</span>
+      <span class="mt-1 font-mono text-[9px] uppercase tracking-chiseled text-zinc-500">REVERSE PROXY</span>
+    </span>
+  </a>
+
+  <!-- Scroll plugin contributions horizontally to keep the header height fixed. -->
+  <nav aria-label={$_('header.navigation')} class="header-navigation hidden min-w-0 flex-1 overflow-x-auto border-l border-carbon-600 md:flex">
+    <ul bind:this={navigation} class="relative flex min-w-full shrink-0 items-stretch">
+      {#each items as item (item.href)}
+        <li class="shrink-0">
+          <a href={item.href} aria-current={item.isActive ? 'page' : undefined}
+            class="header-tab relative flex h-full items-center justify-center whitespace-nowrap px-[calc(1rem+(5px+0.375rem)/2)] font-mono text-[11px] font-semibold uppercase tracking-command text-zinc-400 transition-colors hover:bg-nexus-500/5 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500"
+            class:is-active={item.isActive}>
+            <!-- Split the original 5px caret + gap-1.5 across both sides: same hitbox, centered label. -->
+            <span class="nx-caret-left absolute left-[calc(1rem-(5px+0.375rem)/2)]" class:invisible={!item.isActive} aria-hidden="true"></span>
+            <span title={item.label}>{item.label}</span>
+          </a>
+        </li>
+      {/each}
+      <li aria-hidden="true" class="pointer-events-none absolute bottom-0 left-0 h-0.5 bg-nexus-500 motion-safe:transition-[transform,width] motion-safe:duration-200 motion-safe:ease-out"
+        style:width={`${indicator.width}px`} style:transform={`translateX(${indicator.left}px)`} style:visibility={desktop && activeIndex >= 0 ? 'visible' : 'hidden'}></li>
+    </ul>
+  </nav>
+
+  <div class="hidden shrink-0 items-center border-l border-carbon-600 px-4 xl:flex"><HudClock /></div>
+
+  <div class="ml-auto flex shrink-0 items-stretch border-l border-carbon-600">
     <DropdownMenu.Root bind:open={managementOpen} closeFocus={() => $confirmation ? null : document.getElementById('header-management-trigger')}>
       <DropdownMenu.Trigger id="header-management-trigger" aria-label={$_('header.management')} title={$_('header.management')}
-        class={`flex min-h-[44px] min-w-[44px] items-center justify-center gap-2 px-3 font-mono text-[11px] font-semibold uppercase tracking-command transition-colors hover:bg-carbon-800 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500 md:px-4 ${managementPage || managementOpen ? 'bg-nexus-500/10 text-nexus-300' : 'text-zinc-400'}`}>
+        class={`header-action ${managementPage || managementOpen ? 'bg-nexus-500/10 text-nexus-300' : 'text-zinc-400'}`}>
         <Settings aria-hidden="true" class="h-4 w-4" /><span class="hidden sm:inline">{$_('header.management')}</span><ChevronDown aria-hidden="true" class="hidden h-3 w-3 sm:block" />
       </DropdownMenu.Trigger>
       <DropdownMenu.Content data-testid="header-management-menu" align="end" sideOffset={8}
         class="z-[60] max-h-[calc(100dvh-64px)] w-64 max-w-[calc(100vw-24px)] overflow-y-auto overscroll-contain border-carbon-500 bg-carbon-900 !p-1.5 text-zinc-200 shadow-industrial">
-        <DropdownMenu.Label class="px-3 py-2 font-mono text-[11px] uppercase tracking-command text-zinc-400"><span use:managementLifecycle>{$_('header.management')}</span></DropdownMenu.Label>
         <DropdownMenu.Item href="/#/config" aria-current={managementPage === 'configuration' ? 'page' : undefined}
           class={`min-h-[44px] gap-3 px-3 py-3 ${managementPage === 'configuration' ? 'bg-nexus-500/10 text-nexus-300' : ''}`}>
           <SlidersHorizontal aria-hidden="true" class="h-4 w-4 shrink-0" />
-          <span class="flex min-w-0 flex-col gap-1"><span class="font-mono font-semibold">{$_('nav.configuration')}</span><span class="text-xs text-zinc-400">{$_('header.configurationDescription')}</span></span>
+          <span use:managementLifecycle class="flex min-w-0 flex-col gap-1"><span class="font-mono font-semibold">{$_('nav.configuration')}</span><span class="text-xs text-zinc-400">{$_('header.configurationDescription')}</span></span>
         </DropdownMenu.Item>
         <DropdownMenu.Item href="/#/plugins" aria-current={managementPage === 'plugins' ? 'page' : undefined}
           class={`min-h-[44px] gap-3 px-3 py-3 ${managementPage === 'plugins' ? 'bg-nexus-500/10 text-nexus-300' : ''}`}>
           <Blocks aria-hidden="true" class="h-4 w-4 shrink-0" />
           <span class="flex min-w-0 flex-col gap-1"><span class="font-mono font-semibold">{$_('nav.plugins')}</span><span class="text-xs text-zinc-400">{$_('header.pluginsDescription')}</span></span>
         </DropdownMenu.Item>
-        <DropdownMenu.Separator class="my-1.5 bg-carbon-600" />
-        <DropdownMenu.Sub>
-          <DropdownMenu.SubTrigger class="min-h-[44px] gap-3 px-3 font-mono"><Languages aria-hidden="true" class="h-4 w-4" /><span>{$_('header.language')}</span><span class="ml-auto text-xs text-zinc-400">{($locale || '').toUpperCase()}</span></DropdownMenu.SubTrigger>
-          <DropdownMenu.SubContent class="z-[60] min-w-36 border-carbon-500 bg-carbon-900 text-zinc-200 shadow-industrial">
-            <DropdownMenu.RadioGroup value={$locale || ''}>
-              {#each SUPPORTED_LOCALES as supportedLocale}
-                <DropdownMenu.RadioItem value={supportedLocale.code} class="min-h-[44px] font-mono" onclick={() => { switchLocale(supportedLocale.code); managementOpen = false; }}>{supportedLocale.name}</DropdownMenu.RadioItem>
-              {/each}
-            </DropdownMenu.RadioGroup>
-          </DropdownMenu.SubContent>
-        </DropdownMenu.Sub>
-        {#if showLogout}
-          <DropdownMenu.Separator class="my-1.5 bg-carbon-600" />
-          <DropdownMenu.Item disabled={logoutBusy} aria-busy={logoutBusy} class="min-h-[44px] gap-3 px-3 font-mono" onclick={() => { logoutPending = true; managementOpen = false; }}>
-            <LogOut aria-hidden="true" class="h-4 w-4" />{$_('login.logout')}
-          </DropdownMenu.Item>
-        {/if}
       </DropdownMenu.Content>
     </DropdownMenu.Root>
   </div>
+
+  <div class="flex shrink-0 items-stretch border-l border-carbon-600 md:border-l-0">
+    <DropdownMenu.Root bind:open={languageOpen}>
+      <DropdownMenu.Trigger id="header-language-trigger" aria-label={$_('header.language')}
+        title={`${$_('header.language')} · ${SUPPORTED_LOCALES.find(item => item.code === $locale)?.name ?? $locale}`}
+        class={`header-action header-utility ${languageOpen ? 'bg-nexus-500/10 text-nexus-300' : 'text-zinc-500'}`}>
+        <Languages aria-hidden="true" class="h-4 w-4" />
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Content data-testid="header-language-menu" align="end" sideOffset={8}
+        class="z-[60] min-w-36 border-carbon-500 bg-carbon-900 text-zinc-200 shadow-industrial">
+        <DropdownMenu.RadioGroup value={$locale || ''}>
+          {#each SUPPORTED_LOCALES as supportedLocale}
+            <DropdownMenu.RadioItem value={supportedLocale.code} class="min-h-[44px] font-mono"
+              onclick={() => { switchLocale(supportedLocale.code); languageOpen = false; }}>{supportedLocale.name}</DropdownMenu.RadioItem>
+          {/each}
+        </DropdownMenu.RadioGroup>
+      </DropdownMenu.Content>
+    </DropdownMenu.Root>
+  </div>
+
+  {#if showLogout}
+    <button id="header-logout-button" type="button" aria-label={$_('login.logout')} title={$_('login.logout')}
+      disabled={logoutBusy} aria-busy={logoutBusy} onclick={() => { void onLogout(); }}
+      class="header-action header-utility shrink-0 border-l border-carbon-600 text-zinc-500 disabled:cursor-not-allowed disabled:opacity-50 md:border-l-0">
+      <LogOut aria-hidden="true" class="h-4 w-4" />
+    </button>
+  {/if}
 </header>
 
 <style>
+  :global(.header-action) { @apply flex min-h-[44px] min-w-[44px] items-center justify-center gap-2 whitespace-nowrap px-3 font-mono text-[11px] font-semibold uppercase tracking-command transition-colors hover:bg-carbon-800 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500 md:px-4; }
+  :global(.header-utility) { @apply w-11 px-0 md:px-0; }
   .header-navigation { scrollbar-width: none; }
   .header-navigation::-webkit-scrollbar { display: none; }
   .header-tab.is-active { color: var(--nx-accent); }

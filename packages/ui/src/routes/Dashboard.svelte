@@ -75,6 +75,7 @@
         || typeof header.refresh.busy !== 'boolean' || typeof header.refresh.disabled !== 'boolean' || typeof header.refresh.run !== 'function')) return;
       widgetHeaders = { ...widgetHeaders, [key]: header === null ? null : {
         summary: header.summary, refresh: { label: header.refresh.label, busy: header.refresh.busy, disabled: header.refresh.disabled, run: header.refresh.run },
+        ...(typeof header.actions === 'function' ? { actions: header.actions } : {}),
         ...(typeof header.footer === 'function' ? { footer: header.footer } : {}),
       } };
     } };
@@ -518,7 +519,9 @@
       {:else if definition.id.startsWith('plugin:native:')}
         {@const panel = nativeWidgetPanels.find(panel => `plugin:native:${panel.pluginName}:${panel.id}` === definition.id)}
         {@const header = panel && widgetHeaders[`${panel.pluginName}:${panel.id}`]}
-        {#if header}<span class="max-w-[140px] truncate text-xs text-zinc-400" title={header.summary} role="status" data-testid="native-widget-summary">{header.summary}</span>
+        {#if header}
+          {#if header.actions}{@render header.actions()}{/if}
+          <span class="max-w-[140px] truncate text-xs text-zinc-400" title={header.summary} role="status" data-testid="native-widget-summary">{header.summary}</span>
           <Button variant="link" size="icon" class="!h-6 !w-6 !p-0" aria-label={header.refresh.label} title={header.refresh.label} aria-busy={header.refresh.busy}
             disabled={header.refresh.busy || header.refresh.disabled} onclick={header.refresh.run}>
             {#if header.refresh.busy}<LoadingIndicator size="xs" centered={false} label="" />{:else}<RefreshCw class="h-3.5 w-3.5" />{/if}
