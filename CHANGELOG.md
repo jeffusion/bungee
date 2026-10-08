@@ -1,3 +1,10 @@
+## [5.15.2](https://github.com/jeffusion/bungee/compare/v5.15.1...v5.15.2) (2026-10-08)
+
+
+### Bug Fixes
+
+* **key-access:** decouple public routes from key permissions ([edc4a1a](https://github.com/jeffusion/bungee/commit/edc4a1a7c0cec44d745cbb29155285077575c19c))
+
 ## [5.15.1](https://github.com/jeffusion/bungee/compare/v5.15.0...v5.15.1) (2026-10-08)
 
 
