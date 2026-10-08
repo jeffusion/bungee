@@ -1,3 +1,14 @@
+## [5.14.1](https://github.com/jeffusion/bungee/compare/v5.14.0...v5.14.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **core:** format SSE body logs as event-data arrays ([3248e51](https://github.com/jeffusion/bungee/commit/3248e51eb72e5069143b411082ad4503254bdc42))
+* **core:** recognize negotiated SSE logs without response media type ([bfd1035](https://github.com/jeffusion/bungee/commit/bfd1035ac372ed5d02cd181f4c3ca651febe37ee))
+* **core:** record body logs independently of payload transformations ([bbb0f2a](https://github.com/jeffusion/bungee/commit/bbb0f2a15524ad0b5afa9075a31ad69123b2b8a6))
+* **core:** retain streamed diagnostics in final logs ([7986d8a](https://github.com/jeffusion/bungee/commit/7986d8a271d25dac9a6086d0d8ae2b1a715d4b6b))
+* **core:** serialize compressed body log decoding ([5307faf](https://github.com/jeffusion/bungee/commit/5307faf4a1c864d27a410d974acc73b9e8f55560))
+
 # [5.14.0](https://github.com/jeffusion/bungee/compare/v5.13.0...v5.14.0) (2026-10-07)
 
 
