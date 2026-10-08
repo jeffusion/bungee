@@ -1,3 +1,10 @@
+# [5.15.0](https://github.com/jeffusion/bungee/compare/v5.14.1...v5.15.0) (2026-10-08)
+
+
+### Features
+
+* **core:** unify gateway hooks and shared body processing ([48f041f](https://github.com/jeffusion/bungee/commit/48f041f77e6815736053d3ca66120be7536ca5e9))
+
 ## [5.14.1](https://github.com/jeffusion/bungee/compare/v5.14.0...v5.14.1) (2026-10-08)
 
 
