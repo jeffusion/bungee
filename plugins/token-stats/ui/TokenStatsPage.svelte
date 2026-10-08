@@ -11,6 +11,8 @@
   import { Input } from '$components/ui/input';
   import UsageTimeChart from './UsageTimeChart.svelte';
   import { getStatsResource } from './stats';
+  import KpiTrendValue from '$components/industrial/KpiTrendValue.svelte';
+  import { overviewTrends, PAGE_METRICS } from './overview-trends';
   import { formatCacheInputPercentage, formatEstimatedUsd, formatTokenCount, modelTokenTotal, tokenComposition, usagePresentation, type TokenPageRange } from './labels';
   import type { StatsState, StatsResource } from './stats-resource';
 
@@ -21,11 +23,12 @@
   let keysFailed = $state(false);
   let sort = $state('tokens');
   let search = $state('');
-  let models: StatsState = $state({ data: null, busy: false, error: '', refreshedAt: 0 });
-  let time: StatsState = $state({ data: null, busy: false, error: '', refreshedAt: 0 });
+  let models: StatsState = $state({ data: null, busy: true, error: '', refreshedAt: 0 });
+  let time: StatsState = $state({ data: null, busy: true, error: '', refreshedAt: 0 });
   let modelResource: StatsResource | undefined = $state();
   let timeResource: StatsResource | undefined = $state();
-  const t = (key: string) => $isLoading ? '' : getPluginText(key, pluginName, (id, options) => $_(id, options));
+  const t = (key: string, values?: Record<string, string>) => $isLoading ? '' : getPluginText(key, pluginName,
+    (id, options) => $_(id, { ...options, values }));
   const display = formatCompactNumber;
   const fullCount = (value: unknown) => formatTokenCount(value, $locale ?? undefined);
   const displayCost = (value: unknown) => typeof value === 'number' && value >= 1000
@@ -47,6 +50,16 @@
     .filter(row => modelLabel(row.dimension).toLowerCase().includes(search.trim().toLowerCase()))
     .sort((a, b) => rankAmount(b) - rankAmount(a) || a.dimension.localeCompare(b.dimension)));
   const maxTokens = $derived(Math.max(0, ...rows.map(row => modelTokenTotal(row) ?? 0)));
+  const modelsLoading = $derived(models.busy && !models.data);
+  const trends = $derived(overviewTrends(time.error || time.data?.reportingIncomplete ? null : time.data, PAGE_METRICS));
+  const comparisonCaption = $derived(t('ui.previousInterval', { interval: ['day', '1d'].includes(range)
+    ? `1${t('ui.hours')}` : `1${t('ui.days')}` }));
+  const summaryMetrics = $derived([
+    { metric: 'input', label: t('ui.input'), value: display(usage?.input), title: fullCount(usage?.input) },
+    { metric: 'output', label: t('ui.output'), value: display(usage?.output), title: fullCount(usage?.output) },
+    { metric: 'tokens', label: t('page.tokens'), value: display(models.data ? modelTokenTotal(models.data) : null), title: fullCount(models.data ? modelTokenTotal(models.data) : null) },
+    { metric: 'cost', label: t('ui.estimatedCostUsd'), value: displayCost(models.data?.estimatedCostUsd), title: formatEstimatedUsd(models.data?.estimatedCostUsd) },
+  ] as const);
   const busy = $derived(models.busy || time.busy);
   const refreshedAt = $derived(Math.min(models.refreshedAt, time.refreshedAt));
   const ranges = $derived(['day', 'week', 'month', '1d', '7d', '30d'].map(value => ({ value, label: t(`page.range.${value}`) })));
@@ -76,6 +89,10 @@
   function refresh() { void modelResource?.refresh(); void timeResource?.refresh(); }
 </script>
 
+{#snippet loadingKpi()}
+  <LoadingIndicator label={t('ui.loading')} size="sm" height="none" class="h-9 w-full" />
+{/snippet}
+
 <div class="min-w-0 space-y-4" data-testid="token-stats-page">
   <div class="flex flex-wrap items-center justify-between gap-3">
     <div class="flex flex-wrap items-center gap-3">
@@ -97,29 +114,40 @@
       <span>{t('ui.loadFailed')}</span><Button variant="ghost" size="sm" onclick={refresh} disabled={busy}>{t('page.retry')}</Button>
     </div>
   {/if}
-  {#if models.busy && !models.data}
-    <LoadingIndicator label={t('ui.loading')} height="sm" />
-  {:else if models.data}
-    <div class="grid grid-cols-2 gap-3 xl:grid-cols-4" data-testid="token-stats-page-summary">
-      <KpiCard class="min-w-0 [container-type:inline-size]" label={t('ui.input')} value={display(usage?.input)} valueTitle={fullCount(usage?.input)} />
-      <KpiCard class="min-w-0 [container-type:inline-size]" label={t('ui.output')} value={display(usage?.output)} valueTitle={fullCount(usage?.output)} />
-      <KpiCard class="min-w-0 [container-type:inline-size]" label={t('page.tokens')} value={display(modelTokenTotal(models.data))} valueTitle={fullCount(modelTokenTotal(models.data))} />
-      <KpiCard class="min-w-0 [container-type:inline-size]" label={t('ui.estimatedCostUsd')} value={displayCost(models.data.estimatedCostUsd)} valueTitle={formatEstimatedUsd(models.data.estimatedCostUsd)} />
-    </div>
-    {#if usage?.state === 'empty'}<p class="py-8 text-center text-sm text-zinc-400" data-testid="token-stats-page-empty">{t('ui.noData')}</p>{/if}
-  {/if}
+  <div class="grid grid-cols-2 gap-3 xl:grid-cols-4" data-testid="token-stats-page-summary" aria-busy={modelsLoading}>
+    {#each summaryMetrics as item, index (item.metric)}
+      {@const trend = trends[index]!}
+      <KpiCard fillHeight reserveFooter class="h-[144px] min-w-0 [container-type:inline-size] xl:h-[168px]"
+        label={item.label} value={item.value} valueTitle={item.title} children={modelsLoading ? loadingKpi : undefined}>
+        {#snippet foot()}
+          <div class="flex h-full min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5" data-testid={`token-stats-page-trend-${item.metric}`} title={t('page.trendHint')}>
+            {#if time.busy && !time.data}
+              <LoadingIndicator size="xs" centered={false} height="none" label={t('ui.loading')} />
+            {:else}
+              <KpiTrendValue value={trend.isNew ? t('ui.newActivity') : trend.percent == null ? '—' : `${trend.percent >= 0 ? '+' : ''}${trend.percent.toFixed(1)}%`}
+                change={trend.change} direction={item.metric === 'cost' ? 'down' : 'up'} clamp />
+              <span class="nx-label-sm">{comparisonCaption}</span>
+            {/if}
+          </div>
+        {/snippet}
+      </KpiCard>
+    {/each}
+  </div>
+  {#if usage?.state === 'empty'}<p class="py-8 text-center text-sm text-zinc-400" data-testid="token-stats-page-empty">{t('ui.noData')}</p>{/if}
 
   <PanelCard title={t('page.activity')} tag="TOKEN / TIME">
     <div class="h-[240px] min-w-0 sm:h-[300px]">
-      {#if time.busy && !time.data}<LoadingIndicator label={t('ui.loading')} />
+      {#if time.busy && !time.data}<LoadingIndicator label={t('ui.loading')} height="none" class="h-full" />
       {:else if time.data && usagePresentation(time.data).positive}
         <UsageTimeChart stats={time.data} {range} refreshedAt={time.refreshedAt} {pluginName} presentation="page" />
       {:else}<p class="flex h-full items-center justify-center text-sm text-zinc-400">{t(time.data && usagePresentation(time.data).state === 'empty' ? 'ui.noData' : 'ui.noBreakdown')}</p>{/if}
     </div>
   </PanelCard>
 
-  {#if models.data}
-    <PanelCard title={t('page.models')} tag={`${rows.length} / ${models.data.data.length}`}>
+  <PanelCard title={t('page.models')} tag={models.data ? `${rows.length} / ${models.data.data.length}` : ''}>
+    {#if modelsLoading}
+      <LoadingIndicator label={t('ui.loading')} />
+    {:else if models.data}
       <div class="mb-3 flex flex-wrap items-center gap-3">
         <BSegmentedControl options={sorts} bind:value={sort} ariaLabel={t('page.sort')} class="shrink-0" />
         <Input bind:value={search} aria-label={t('page.searchModels')} placeholder={t('page.searchModels')} class="min-w-[140px] flex-1 sm:max-w-64" />
@@ -143,6 +171,8 @@
           </li>
         {:else}<li class="py-6 text-center text-xs text-zinc-400">{t(search ? 'page.noModels' : 'ui.noData')}</li>{/each}
       </ol>
-    </PanelCard>
-  {/if}
+    {:else}
+      <p class="py-6 text-center text-xs text-zinc-400">{t(models.error ? 'ui.loadFailed' : 'ui.noData')}</p>
+    {/if}
+  </PanelCard>
 </div>
