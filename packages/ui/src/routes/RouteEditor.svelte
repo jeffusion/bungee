@@ -27,7 +27,7 @@
   import { v4 as uuidv4 } from 'uuid';
   import { isModifierPressed } from '$utils/platform';
   import { DEFAULT_REQUEST_MS } from '$utils/route-timeouts';
-  import { LoadingIndicator, PanelCard, StatusBadge, StatusDot } from '$components/industrial';
+  import { BSwitch, LoadingIndicator, PanelCard, StatusBadge, StatusDot } from '$components/industrial';
 
   let { params = {} }: { params?: { path?: string } } = $props();
   const handoffText = (key: string) => $isLoading ? '' : getPluginText(key, 'chatgpt-oauth', $_);
@@ -402,7 +402,7 @@
       id: 'forward'    as RouteEditorSection,
       label: $_('routeEditor.builder.forward'),
       icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z',
-      badge: (route.timeouts?.request_ms !== undefined || route.timeouts?.first_response_ms !== undefined || route.retry?.enabled) ? '✓' : '',
+      badge: (route.timeouts?.request_ms !== undefined || route.timeouts?.first_response_ms !== undefined || route.retry?.enabled || route.websocket?.enabled) ? '✓' : '',
     },
     {
       id: 'processing' as RouteEditorSection,
@@ -522,6 +522,13 @@
 
         {:else if activeSection === 'forward'}
           <div data-testid="section-forward" class="space-y-4">
+            <PanelCard title="WebSocket" tag={route.websocket?.enabled ? 'ENABLED' : 'IDLE'} stripe={route.websocket?.enabled ? 'orange' : 'zinc'}>
+              <div class="space-y-3" data-testid="route-websocket-setting">
+                <BSwitch checked={route.websocket?.enabled ?? false} onchange={(enabled) => (route.websocket = { enabled })} label={$_('routeEditor.enableWebsocket')} />
+                <p class="text-xs text-zinc-500">{$_('routeEditor.websocketHelp')}</p>
+                <p class="text-xs text-zinc-500">{$_('routeEditor.websocketBudgetHelp')}</p>
+              </div>
+            </PanelCard>
             <PanelCard title={$_('routeEditor.timeoutSettings')} tag="TO-01">
               <BasicInfoSection bind:route {errors} showOnly="timeouts" />
             </PanelCard>
@@ -630,6 +637,7 @@
                   </div>
                   <div class="mt-2">
                     {#if route.retry?.enabled}<StatusBadge variant="active" dot>{$_('routeEditor.review.retry')}</StatusBadge>{:else}<StatusBadge variant="muted">{$_('routeEditor.review.retry')}</StatusBadge>{/if}
+                    {#if route.websocket?.enabled}<StatusBadge variant="active" dot>WebSocket</StatusBadge>{:else}<StatusBadge variant="muted">WebSocket</StatusBadge>{/if}
                   </div>
                 </div>
 

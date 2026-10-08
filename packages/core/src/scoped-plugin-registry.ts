@@ -411,6 +411,8 @@ export class ScopedPluginRegistry {
 
   /** Phase-aware Hooks 缓存：`phase-aware:${routeId}#${upstreamId}#${serviceName}` → PhaseAwareHooks */
   private phaseAwareCache: Map<string, PhaseAwareHooks> = new Map();
+  private websocketHandshakeHooks = new WeakMap<ScopedPluginInstance, PluginHooks['onWebSocketHandshake']>();
+  private websocketObservationHooks = new WeakMap<ScopedPluginInstance, PluginHooks['onWebSocketObservation']>();
   private attemptObservationHooks = new WeakMap<ScopedPluginInstance, PluginHooks['onAttemptObservation']>();
 
   // ========== 其他字段 ==========
@@ -1046,6 +1048,42 @@ export class ScopedPluginRegistry {
     return result;
   }
 
+  /** Retain every instance actually executed by handshake phases; observer precedence is different. */
+  getWebSocketHandshakeOwners(routeId:string,upstreamId:string,serviceName?:string):Array<{pluginName:string;scopeKey:string}> {
+    if (!this.precompiled) this.precompileAllHooks();
+    const routeInstances=this.routeInstances.get(routeId) ?? [];
+    const routeNames=new Set(routeInstances.map(instance=>instance.handler.pluginName));
+    const instances=[
+      ...this.globalInstances.filter(instance=>!routeNames.has(instance.handler.pluginName)),
+      ...routeInstances,
+      ...(serviceName ? this.serviceInstances.get(`${routeId}#${serviceName}`) ?? [] : []),
+      ...(this.upstreamInstances.get(`${routeId}#${upstreamId}`) ?? []),
+    ];
+    return instances.filter(instance=>this.websocketHandshakeHooks.get(instance)?.hasCallbacks())
+      .map(instance=>({pluginName:instance.handler.pluginName,scopeKey:getScopeKey(instance.scope)}));
+  }
+
+  getWebSocketOwners(routeId: string, upstreamId?: string, serviceName?: string): Array<{pluginName:string;scopeKey:string;hooks:PluginHooks['onWebSocketObservation']}> {
+    if (!this.precompiled) this.precompileAllHooks();
+    const candidates = [
+      ...(upstreamId ? this.upstreamInstances.get(`${routeId}#${upstreamId}`) ?? [] : []),
+      ...(serviceName ? this.serviceInstances.get(`${routeId}#${serviceName}`) ?? [] : []),
+      ...(this.routeInstances.get(routeId) ?? []),
+      ...this.globalInstances,
+    ];
+    const seen = new Set<string>();
+    const owners: Array<{pluginName:string;scopeKey:string;hooks:PluginHooks['onWebSocketObservation']}> = [];
+    for (const instance of candidates) {
+      const name = instance.handler.pluginName;
+      if (seen.has(name)) continue;
+      seen.add(name);
+      const hooks = this.websocketObservationHooks.get(instance);
+      if (!hooks?.hasCallbacks()) continue;
+      owners.push({ pluginName: name, scopeKey: getScopeKey(instance.scope), hooks });
+    }
+    return owners;
+  }
+
   getAttemptObservationOwners(routeId: string, upstreamId?: string, serviceName?: string, context?: PluginBodyRequirementContext): AttemptObservationOwner[] {
     if (!this.precompiled) this.precompileAllHooks();
     const candidates = [
@@ -1139,6 +1177,8 @@ export class ScopedPluginRegistry {
       const isolatedHooks = createPluginHooks();
       instance.handler.register(isolatedHooks);
       this.attemptObservationHooks.set(instance, isolatedHooks.onAttemptObservation);
+      this.websocketObservationHooks.set(instance, isolatedHooks.onWebSocketObservation);
+      this.websocketHandshakeHooks.set(instance, isolatedHooks.onWebSocketHandshake);
     }
 
     // 4. 清空组合缓存（下次请求时按需创建）

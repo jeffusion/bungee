@@ -14,10 +14,13 @@ import { ResponseRulesPlugin } from './response-plugin';
 import { BodyServicePlugin } from './body-plugin';
 import { LoggingPlugin } from './logging-plugin';
 
+import { WebSocketGatewayPlugin } from './websocket-plugin';
+import type { GatewayWebSocketInput, GatewayWebSocketResult } from './websocket-contracts';
+
 const requestHooks = new AsyncLocalStorage<PluginHooks>();
 let standaloneHooks: PluginHooks | undefined;
 export function gatewayBuiltins(): Plugin[] {
-  return [new BodyServicePlugin(),new HttpRequestPlugin(),new RoutingPlugin(),new AdmissionPlugin(),new SelectionPlugin(),
+  return [new WebSocketGatewayPlugin(),new BodyServicePlugin(),new HttpRequestPlugin(),new RoutingPlugin(),new AdmissionPlugin(),new SelectionPlugin(),
     new RetryPlugin(),new RequestRulesPlugin(),new ForwardPlugin(),new ResponseRulesPlugin(),new LoggingPlugin()];
 }
 /** The host only owns registration; providers use the existing Plugin contract and Hook executor. */
@@ -57,3 +60,9 @@ export const runGatewayRequest: typeof executeHttpRequest = async (...args) => {
   return requestHooks.run(hooks, async () =>
     requireGatewayResult(await hooks.onGatewayRequest.promise(...args), 'onGatewayRequest'));
 };
+
+export async function runGatewayWebSocket(input: GatewayWebSocketInput): Promise<GatewayWebSocketResult> {
+  const hooks = gatewayHooks();
+  return requestHooks.run(hooks, async () => requireGatewayResult(
+    await hooks.onGatewayWebSocket.promise(input), 'onGatewayWebSocket'));
+}

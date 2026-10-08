@@ -5,6 +5,7 @@ import { sortBy } from 'lodash-es';
 export type RouteTargetSummaryKind = 'service' | 'custom_endpoints' | 'direct_response' | 'missing_service' | 'empty';
 
 export type RouteFeatureBadgeSection =
+  | 'websocket'
   | 'cors'
   | 'rateLimit'
   | 'retry'
@@ -134,6 +135,9 @@ export function getRouteTargetSummary(route: Partial<Route>, services: Service[]
 export function getRouteFeatureBadges(route: Partial<Route>): RouteFeatureBadgeDescriptor[] {
   const badges: RouteFeatureBadgeDescriptor[] = [];
 
+  if (route.websocket?.enabled) {
+    badges.push({ id: 'websocket', section: 'websocket', label: 'WebSocket', labelKey: 'routeFeatures.websocket' });
+  }
 
   if (route.cors?.enabled) {
     badges.push({ id: 'cors', section: 'cors', label: 'CORS', labelKey: 'routeFeatures.cors' });

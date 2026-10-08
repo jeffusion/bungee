@@ -1,3 +1,5 @@
+import { createWebSocketBridge, isWebSocketUpgradeRequest } from '../websocket';
+import { forwardPublicWebSocket } from './websocket';
 import { ANONYMOUS_PRINCIPAL, type DataPrincipal } from '../plugin-extensions';
 import { createPublicRequestForwarder, type AdmittedWorkerSelector } from './forwarding';
 
@@ -25,6 +27,7 @@ export function createIngressPublicListener(options: IngressPublicListenerOption
     || options.port < 0 || options.port > 65_535) {
     throw new PublicListenerLifecycleError('public listener address is invalid');
   }
+  const bridge = createWebSocketBridge();
   const forward = createPublicRequestForwarder(options);
   let server: ReturnType<typeof Bun.serve> | null = null;
   let started = false;
@@ -41,13 +44,16 @@ export function createIngressPublicListener(options: IngressPublicListenerOption
         // The serving worker enforces its ACKed body_parser_limit while reading
         // the stream, so Bun's transport default must not reject it first.
         maxRequestBodySize: Number.MAX_SAFE_INTEGER,
-        fetch: (request, server) => forward(request, server.requestIP(request)?.address),
+        websocket: bridge.websocket,
+        fetch: (request, server) => isWebSocketUpgradeRequest(request)
+          ? forwardPublicWebSocket(request,server,bridge,options,server.requestIP(request)?.address)
+          : forward(request, server.requestIP(request)?.address),
       });
     },
     async stop() {
       const current = server;
       server = null;
-      if (current !== null) await current.stop(false);
+      if (current !== null) { await bridge.stop(); await current.stop(false); }
     },
   };
 }

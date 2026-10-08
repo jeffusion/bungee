@@ -74,6 +74,11 @@ describe('gateway architecture AST guard',()=>{
     expect(rules(plugin,"import {definePlugin} from '@jeffusion/bungee-core/plugin'; const body=await ctx.bodyHandle.json(); const tool=JSON.parse(body.arguments); return Response.json(tool);")).toEqual([]);
     expect(rules(plugin,'// response.json();\nconst diagnostic="response.body.getReader()";')).toEqual([]);
   });
+  test('allows typed and hook-inferred WebSocket views without allowing arbitrary HTTP readers',()=>{
+    expect(rules(plugin,'function observe(event:WebSocketObservationEvent){return event.message.json();}')).toEqual([]);
+    expect(rules(plugin,"hooks.onWebSocketObservation.tap('observe',event=>{const view=event.message;return view.json();});")).toEqual([]);
+    expect(rules(plugin,'function read(event:Response){return event.message.json();}')).toEqual(['native-http-body-read']);
+  });
   test('auxiliary network and management boundaries are explicit',()=>{
     expect(rules('plugins/chatgpt-oauth/server/oauth.ts','await response.text();')).toEqual([]);
     expect(rules('plugins/example/server/control.ts','await ctx.request.json();')).toEqual([]);

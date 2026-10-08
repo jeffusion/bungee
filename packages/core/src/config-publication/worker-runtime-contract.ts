@@ -18,7 +18,7 @@ export interface ConfigWorkerLifecycle<ServingHandle> {
     readonly plugin_status: PluginRuntimeOrchestratorStatusReport;
   }>;
   stop(handle: ServingHandle): Promise<void>;
-  stopAccepting(handle: ServingHandle): Promise<void>;
+  stopAccepting(handle: ServingHandle, drainTimeoutMs?: number): Promise<void>;
   drain(handle: ServingHandle): Promise<void>;
   forceStop?(handle: ServingHandle): Promise<void>;
 }

@@ -26,9 +26,9 @@ export class WorkerRequestAdmission {
   private grant: AdmissionGrant | null = null;
   private admittedBody: unknown;
   constructor(private readonly plugins: readonly WorkerAdmissionPlugin[], private readonly targetBase: Omit<AdmissionTarget,'attemptId'|'upstreamId'|'url'|'model'|'now'>, private readonly invokeBudget: (plugin: string, method: string, payload: unknown, target: AdmissionTarget) => Promise<unknown>) {}
-  async prepare(input: { attemptId: string; upstreamId: string; url: string; model: string | null; body: unknown },signal: AbortSignal, loadBody?: () => Promise<unknown>): Promise<PreparedAdmissionAttempt[]> {
+  async prepare(input: { attemptId: string; upstreamId: string; url: string; model: string | null; body: unknown; transport?: 'websocket' },signal: AbortSignal, loadBody?: () => Promise<unknown>): Promise<PreparedAdmissionAttempt[]> {
     if (!session) throw new DataAdmissionError(503,'admission_unavailable');
-    const {body: _body,...targetInput}=input;
+    const {body: _body,transport,...targetInput}=input;
     let body = input.body === undefined && this.grant ? this.admittedBody : input.body;
     for(let revisionAttempt=0;revisionAttempt<3;revisionAttempt++) {
       let target = Object.freeze({...this.targetBase,...targetInput,now:Date.now()});
@@ -38,6 +38,7 @@ export class WorkerRequestAdmission {
         : await session.admission('inspect',target,signal) as {policyVersion:number;requirements:Record<string,{request:'none'|'json-read'}>};
       if (!inspected || !Number.isSafeInteger(inspected.policyVersion) || !inspected.requirements) throw new DataAdmissionError(503,'admission_inspect_failed');
       if (Object.values(inspected.requirements).some(requirement=>requirement.request === 'json-read') && body === undefined) {
+        if (transport === 'websocket') throw new DataAdmissionError(422,'websocket_budget_unsupported');
         if (!loadBody) throw new DataAdmissionError(503,'admission_body_unavailable'); body = await loadBody();
       }
       for (const plugin of this.plugins) if (plugin.resolveAdmissionModel) targetInput.model = plugin.resolveAdmissionModel({...input,body});

@@ -652,6 +652,9 @@
     "retry": "Retry Policy",
     "retryHelp": "Configure retry behavior for failed requests",
     "enableRetry": "Enable Retry Policy",
+    "enableWebsocket": "Enable WebSocket",
+    "websocketHelp": "Allow bidirectional WebSocket connections alongside HTTP on this route. With Token metering enabled, Responses usage is recorded.",
+    "websocketBudgetHelp": "API Keys with Token budgets are currently unsupported for WebSocket connections.",
     "directResponse": "Direct Response / Redirect",
     "directResponseHelp": "Return a response without proxying to upstream, or redirect to another URL",
     "responseRulesHelp": "Configure direct responses or redirects for specific paths under this route. Only matched requests short-circuit; other requests still use the upstream target.",
@@ -713,6 +716,7 @@
     "endpointCount": "{count} endpoint(s)"
   },
   "routeFeatures": {
+    "websocket": "WebSocket",
     "auth": "Auth",
     "cors": "CORS",
     "rateLimit": "Rate limit",

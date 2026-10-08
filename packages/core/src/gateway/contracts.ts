@@ -69,7 +69,7 @@ export interface GatewayLogResult { readonly logger?: RequestLogger }
 
 /** Provider stages are fixed, required, and registered exactly once at startup. */
 export const GATEWAY_PROVIDER_STAGES = [
-  'onGatewayBody','onGatewayRequest', 'onGatewayRoute', 'onGatewayAdmission', 'onGatewayAdmissionSession',
+  'onGatewayWebSocket','onGatewayBody','onGatewayRequest', 'onGatewayRoute', 'onGatewayAdmission', 'onGatewayAdmissionSession',
   'onGatewayAdmissionPrepare', 'onGatewaySelect', 'onGatewayFailover', 'onGatewayRetry',
   'onGatewayForward', 'onGatewayHeaderRules', 'onGatewayCors', 'onGatewayBodyRules', 'onGatewayQueryRules', 'onGatewayResponseRules', 'onGatewayLog',
 ] as const;

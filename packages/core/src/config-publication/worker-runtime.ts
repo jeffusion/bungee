@@ -323,7 +323,7 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
         options.requestShutdown?.();
       };
       try {
-        const acceptingStopped = lifecycle.stopAccepting(serving!.handle);
+        const acceptingStopped = lifecycle.stopAccepting(serving!.handle, command.policy.drain_timeout_ms);
         const timedOut = new Promise<false>((resolve) => {
           timer = setTimeout(() => resolve(false), command.policy.drain_timeout_ms);
           serving!.drainTimeout = timer;
