@@ -6,6 +6,14 @@ const MAX_CAPTURES = 64;
 let retainedBytes = 0;
 let captures = 0;
 const pending = new Set<Promise<void>>();
+let logDecoderTail = Promise.resolve();
+
+/** Capture admission bounds this queue; only log copies wait, never the transport. */
+function withLogDecoder<Result>(run: () => Promise<Result>): Promise<Result> {
+  const task = logDecoderTail.then(run);
+  logDecoderTail = task.then(() => undefined, () => undefined);
+  return task;
+}
 
 /** Register only independent logging work, so shutdown can flush it without delaying HTTP. */
 export function trackBodyLogTask(task: Promise<void>): void {
@@ -61,32 +69,38 @@ export function captureBody(
         let encoded = false;
         const normalized = coding.trim().toLowerCase();
         if (normalized === 'gzip' || normalized === 'zstd') {
-          let index = 0;
-          const input = new ReadableStream<Uint8Array>({ pull(controller) {
-            if (index < chunks.length) controller.enqueue(chunks[index++]); else controller.close();
-          } });
-          const deadline = new AbortController();
-          const timer = setTimeout(() => deadline.abort(), 1000);
-          let decoded: ReturnType<typeof decodeStream> | undefined;
-          try {
-            decoded = decodeStream(input, normalized, maxBytes, deadline.signal, true);
-            const reader = decoded.getReader(); const parts: Uint8Array[] = []; let count = 0;
+          // Original/final request and response copies can finish simultaneously.
+          // Acquire the observer decoder in turn instead of treating capacity as bad input.
+          bytes = await withLogDecoder(async () => {
+            let decodedBytes: Uint8Array;
+            let index = 0;
+            const input = new ReadableStream<Uint8Array>({ pull(controller) {
+              if (index < chunks.length) controller.enqueue(chunks[index++]); else controller.close();
+            } });
+            const deadline = new AbortController();
+            const timer = setTimeout(() => deadline.abort(), 1000);
+            let decoded: ReturnType<typeof decodeStream> | undefined;
             try {
-              while (true) {
-                const part = await reader.read(); if (part.done) break;
-                if (!reserve(part.value.byteLength)) throw new BodyProcessingError(503, 'body_buffer_capacity');
-                count += part.value.byteLength; parts.push(part.value);
-              }
-              if (!reserve(count)) throw new BodyProcessingError(503, 'body_buffer_capacity');
-              bytes = Buffer.concat(parts, count);
-            } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
-          } catch (error) {
-            if (error instanceof BodyProcessingError && (error.status === 413 || error.code === 'body_buffer_capacity')) throw error;
-            if (!reserve(size)) throw new BodyProcessingError(503, 'body_buffer_capacity');
-            bytes = Buffer.concat(chunks, size);
-            encoded = true;
-            try { incomplete('decode_failed'); } catch { /* isolated */ }
-          } finally { clearTimeout(timer); decoded?.dispose(); }
+              decoded = decodeStream(input, normalized, maxBytes, deadline.signal, true);
+              const reader = decoded.getReader(); const parts: Uint8Array[] = []; let count = 0;
+              try {
+                while (true) {
+                  const part = await reader.read(); if (part.done) break;
+                  if (!reserve(part.value.byteLength)) throw new BodyProcessingError(503, 'body_buffer_capacity');
+                  count += part.value.byteLength; parts.push(part.value);
+                }
+                if (!reserve(count)) throw new BodyProcessingError(503, 'body_buffer_capacity');
+                decodedBytes = Buffer.concat(parts, count);
+              } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
+            } catch (error) {
+              if (error instanceof BodyProcessingError && (error.status === 413 || error.code === 'body_buffer_capacity')) throw error;
+              if (!reserve(size)) throw new BodyProcessingError(503, 'body_buffer_capacity');
+              decodedBytes = Buffer.concat(chunks, size);
+              encoded = true;
+              try { incomplete('decode_failed'); } catch { /* isolated */ }
+            } finally { clearTimeout(timer); decoded?.dispose(); }
+            return decodedBytes;
+          });
         } else {
           if (!reserve(size)) throw new BodyProcessingError(503, 'body_buffer_capacity');
           bytes = Buffer.concat(chunks, size);
