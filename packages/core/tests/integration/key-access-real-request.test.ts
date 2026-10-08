@@ -115,6 +115,20 @@ test('real master/ingress/worker enforces model policy and honors Authorization 
     const rejected=await send('allowed-model-suffix'); expect(rejected.status).toBe(403);
     expect(await rejected.json()).toEqual({error:'key-access.scope_denied'});
     expect(calls).toBe(5);
+    // Reopen while the credential and its model/route restrictions still exist.
+    const publicAgain=await fetch(base+'/api/plugins/key-access/control/routes',{method:'PUT',headers,body:JSON.stringify({protectedRouteIds:[stripRouteId]})});
+    expect(publicAgain.status).toBe(200);
+    const rebound=await fetch(base+'/api/plugins/key-access/control/route-key',{method:'PUT',headers,body:JSON.stringify({routeId,keyId:key.id})});
+    expect(rebound.status).toBe(200);
+    expect((await rebound.json()).protectedRouteIds).toEqual([stripRouteId]);
+    const publicWithGrant=await fetch(`http://127.0.0.1:${ports[0]}/v1/chat/completions`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'public-model'})});
+    expect(publicWithGrant.status).toBe(200);
+    expect(await publicWithGrant.json()).toEqual({model:'public-model',authorization:'Bearer upstream-service-secret',safeHeader:'service-header'});
+    const storedPolicy=await (await fetch(base+`/api/plugins/key-access/control/keys/${key.id}`)).json();
+    expect(storedPolicy.value).toEqual({routes:[routeId,stripRouteId],models:['allowed-model']});
+    const protectAgain=await fetch(base+'/api/plugins/key-access/control/routes',{method:'PUT',headers,body:JSON.stringify({protectedRouteIds:[routeId,stripRouteId]})});
+    expect(protectAgain.status).toBe(200);
+    expect((await send('allowed-model-suffix')).status).toBe(403);
     const revoked=await fetch(base+`/api/plugins/key-access/control/credentials/${key.id}`,{method:'DELETE',headers});
     expect(revoked.status).toBe(200);
     expect((await send('allowed-model')).status).toBe(401);

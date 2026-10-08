@@ -50,20 +50,13 @@ test('stored nested notices and Key lists are translated again when locale chang
     return new Function('t', '$locale', new Bun.Transpiler({ loader: 'ts' }).transformSync(`${helper}\nreturn displayMessage;`))(t, language)(notice);
   };
   const notice = { key: 'ui.createdIncomplete', values: { stage: { key: 'ui.stageSavePolicy' }, reason: { key: 'ui.expirationFuture' } }, append: { key: 'ui.clipboardUnavailable' } };
-  expect(render(notice, 'en')).toContain('Saving allowed routes and route protection');
+  expect(render(notice, 'en')).toContain('Saving Key permissions');
   expect(render(notice, 'en')).toContain('Clipboard unavailable');
-  expect(render(notice, 'zh-CN')).toContain('保存 Key 允许路由与路由保护');
+  expect(render(notice, 'zh-CN')).toContain('保存 Key 权限');
   expect(render(notice, 'zh-CN')).toContain('剪贴板不可用');
-  const names = { key: 'ui.publicBlockedReason', values: { keys: ['alpha', 'beta'] } };
-  expect(render(names, 'en')).toContain('alpha and beta');
-  expect(render(names, 'zh-CN')).toContain('alpha和beta');
   expect(render({ key: 'ui.publicationPending' }, 'en')).toContain('publication is still pending');
   expect(render({ key: 'ui.publicationPending' }, 'zh-CN')).toContain('发布尚未完成');
-  for (const language of languages) {
-    for (const count of [1, 2]) {
-      expect(new IntlMessageFormat(manifest.translations[language]['ui.reviewWarning'], language).format({ count })).toContain(String(count === 1 && language === 'en' ? 'following route' : count));
-    }
-  }
+
 });
 
 test('access control compiles for client and SSR without warnings', () => {

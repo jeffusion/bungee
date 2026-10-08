@@ -42,7 +42,7 @@ Management surface:
 
 - The plugin center preserves the existing BSwitch appearance. Dependencies or guards disable the switch and show the exact reason.
 - 管理认证 establishes or verifies one administrator, then hands off to a Cookie session. There are no member or role screens. Disabling it requires the current session and returns to anonymous management.
-- 访问控制 provides API Key and route-protection tabs in its settings page. Creating a Key can select allowed routes and explicitly protect the selected public routes. Key permissions and protection are separate; revoking the final Key keeps routes protected.
+- 访问控制 provides API Key and route-protection tabs in its settings page. Creating, editing, or applying a Key saves its allowed routes without changing public access. The route switch controls public access independently, including routes with Key grants; revoking the final Key keeps routes protected.
 - Route and Service editors contain proxy configuration only. Public requests remain anonymous even when carrying a Key, and do not consume Key rate or token budgets.
 - Key rate limits depend on access control; token budgets depend on access control and metering; statistics depend only on metering. Metering is a global service and cannot bind to routes or services.
 - Plugin resource extensions show retained policies read-only when disabled. Publication-pending messages distinguish persisted state from confirmed enforcement.

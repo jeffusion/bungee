@@ -91,7 +91,7 @@ test('plugin manages credentials and protections; publication failures preserve 
   } finally {await control.dispose(); db.close();}
 });
 
-test('routes with explicit or arbitrary Key grants cannot become public, including expired keys', async () => {
+test('public access changes preserve explicit and arbitrary Key grants, including expired keys', async () => {
   const db = new Database(':memory:'); db.exec(PLUGIN_DURABLE_STATE_SCHEMA_SQL);
   const state = new PluginDurableStateStore(db).forNamespace('key-access');
   const credential = (id:string, expiresAt:number|null) => ({id,domain:'data',name:id,prefix:'bng_data_',digest:'a'.repeat(64),createdAt:1,expiresAt,revokedAt:null,credentialVersion:1});
@@ -106,25 +106,24 @@ test('routes with explicit or arbitrary Key grants cannot become public, includi
     expect(read.routeKeyBindings.r.map((key:any)=>key.id)).toEqual(['expired','any']);
     expect(read.routeKeyBindings.s.map((key:any)=>key.id)).toEqual(['any']);
     const version = state.get('policies')!.version;
-    const rejected = await invoke('routeProtection','PUT','/routes',{protectedRouteIds:[]});
-    expect(rejected.status).toBe(409);
-    expect(await rejected.json()).toMatchObject({error:'route_has_api_keys',blockedRouteIds:['r','s']});
-    expect(state.get('policies')!.version).toBe(version); expect(publications).toBe(1);
-    // Remove the arbitrary grant; the expired key's explicit binding still blocks r.
-    expect((await invoke('keyPolicy','PUT','/keys/any',{routes:[],models:null})).status).toBe(200);
-    expect((await invoke('routeProtection','PUT','/routes',{protectedRouteIds:['r']})).status).toBe(200);
-    expect((await invoke('routeProtection','PUT','/routes',{protectedRouteIds:[]})).status).toBe(409);
-    expect((await invoke('keyPolicy','PUT','/keys/expired',{routes:[],models:null})).status).toBe(200);
-    expect((await invoke('routeProtection','PUT','/routes',{protectedRouteIds:[]})).status).toBe(200);
-    // Concurrent API requests cannot bypass a newly stored Key binding.
+    const before = state.get('policies')!.value as any;
+    const opened = await invoke('routeProtection','PUT','/routes',{protectedRouteIds:[]});
+    expect(opened.status).toBe(200);
+    expect((await opened.json()).routeKeyBindings.r.map((key:any)=>key.id)).toEqual(['expired','any']);
+    expect(state.get('policies')!.version).toBe(version+1); expect(publications).toBe(2);
+    expect(readAdmissionRequirements(state)).toEqual([]);
+    expect((state.get('policies')!.value as any).byKey).toEqual(before.byKey);
+    expect((state.get('policies')!.value as any).credentials).toEqual(before.credentials);
+    // Independent concurrent writes preserve both the Key scope and public access choice.
     await invoke('routeProtection','PUT','/routes',{protectedRouteIds:['r']});
-    const results = await Promise.all([invoke('keyPolicy','PUT','/keys/any',{routes:null,models:null}),invoke('routeProtection','PUT','/routes',{protectedRouteIds:[]})]);
-    expect(results.map(result=>result.status)).toEqual([200,409]);
-    expect(readAdmissionRequirements(state)).toEqual(['r']);
+    const results = await Promise.all([invoke('keyPolicy','PUT','/keys/any',{routes:['s'],models:null}),invoke('routeProtection','PUT','/routes',{protectedRouteIds:[]})]);
+    expect(results.map(result=>result.status)).toEqual([200,200]);
+    expect(readAdmissionRequirements(state)).toEqual([]);
+    expect((state.get('policies')!.value as any).byKey.any).toEqual({routes:['s'],models:null});
   } finally {await control.dispose();db.close();}
 });
 
-test('quick route binding confirms public routes and atomically preserves existing scopes', async () => {
+test('quick route binding preserves public access and existing scopes, including legacy protect requests', async () => {
   const db = new Database(':memory:'); db.exec(PLUGIN_DURABLE_STATE_SCHEMA_SQL);
   const state = new PluginDurableStateStore(db).forNamespace('key-access');
   const credential = (id:string) => ({id,domain:'data',name:id,prefix:'bng_data_',digest:'a'.repeat(64),createdAt:1,expiresAt:null,revokedAt:null,credentialVersion:1});
@@ -132,27 +131,50 @@ test('quick route binding confirms public routes and atomically preserves existi
   let fail = false;
   const host = {signal:new AbortController().signal,durableState:state,validateRouteReferences:(ids:string[])=>ids.every(id=>['r','s','t'].includes(id)),validateKeyPolicyReferences:()=>true,publishPolicy:async()=>{if(fail)throw Error('offline');}} as unknown as ControlHostContext;
   const control = createControl(host);
-  const apply = (keyId:string,routeId:string,protect=false) => control.api.find(api=>api.handler==='applyRouteKey')!.invoke({...host,requestSignal:host.signal,request:new Request('http://localhost/route-key',{method:'PUT',body:JSON.stringify({keyId,routeId,protect})})});
+  const apply = (keyId:string,routeId:string,protect?:boolean) => control.api.find(api=>api.handler==='applyRouteKey')!.invoke({...host,requestSignal:host.signal,request:new Request('http://localhost/route-key',{method:'PUT',body:JSON.stringify({keyId,routeId,protect})})});
   const value = () => state.get('policies')!.value as any;
   try {
     await control.start(); const version = state.get('policies')!.version;
-    expect((await apply('one','s')).status).toBe(409);
     expect((await apply('missing','s',true)).status).toBe(404);
     expect((await apply('one','missing',true)).status).toBe(422);
     expect(state.get('policies')!.version).toBe(version);
     expect((await apply('one','s',true)).status).toBe(200);
     expect(value().byKey.one).toEqual({routes:['r','s'],models:['gpt-*']});
-    expect(value().protectedRouteIds).toEqual(['r','s']);
+    expect(value().protectedRouteIds).toEqual(['r']);
     expect(state.get('policies')!.version).toBe(version+1);
     expect((await apply('one','s')).status).toBe(200);
+    expect(value().protectedRouteIds).toEqual(['r']);
     expect(value().byKey.one.routes).toEqual(['r','s']);
     expect((await apply('any','s')).status).toBe(200);
     expect(value().byKey.any).toEqual({routes:null,models:[]});
+    expect(value().protectedRouteIds).toEqual(['r']);
+    const bindings = (await (await control.api.find(api=>api.handler==='routeProtection')!.invoke({...host,requestSignal:host.signal,request:new Request('http://localhost/routes')})).json()).routeKeyBindings;
+    expect(bindings.s.map((key:any)=>key.id)).toEqual(['one','any']);
     fail = true;
     const pending = await apply('one','t',true);
     expect(pending.status).toBe(503); expect(await pending.json()).toMatchObject({persisted:true,ready:false});
-    expect(value().protectedRouteIds).toEqual(['r','s','t']);
+    expect(value().protectedRouteIds).toEqual(['r']);
     expect(value().byKey.one.routes).toEqual(['r','s','t']);
+  } finally {await control.dispose();db.close();}
+});
+
+test('unrestricted grants are returned for public routes with no explicit bindings',async()=>{
+  const db = new Database(':memory:'); db.exec(PLUGIN_DURABLE_STATE_SCHEMA_SQL);
+  const state = new PluginDurableStateStore(db).forNamespace('key-access');
+  state.execute({commandId:'seed',mutations:[{key:'policies',expectedVersion:0,value:{protectedRouteIds:[],credentials:[{id:'any',domain:'data',name:'any',prefix:'bng_data_',digest:'a'.repeat(64),createdAt:1,expiresAt:null,revokedAt:null,credentialVersion:1}],byKey:{any:{routes:null,models:null}}}}]});
+  const host = {signal:new AbortController().signal,durableState:state,validateRouteReferences:()=>true,validateKeyPolicyReferences:()=>true,publishPolicy:async()=>{}} as unknown as ControlHostContext;
+  const control = createControl(host);
+  const invoke = (handler:string,method:string,body?:unknown) => control.api.find(api=>api.handler===handler)!.invoke({...host,requestSignal:host.signal,request:new Request('http://localhost/routes',{method,...(body===undefined?{}:{body:JSON.stringify(body)})})});
+  try {
+    await control.start();
+    const expectAccess = async(response:Response) => {
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({protectedRouteIds:[],routeKeyBindings:{},unrestrictedKeyIds:['any']});
+    };
+    await expectAccess(await invoke('routeProtection','GET'));
+    await expectAccess(await invoke('applyRouteKey','PUT',{routeId:'public',keyId:'any'}));
+    await expectAccess(await invoke('routeProtection','GET'));
+    expect((state.get('policies')!.value as any).byKey.any).toEqual({routes:null,models:null});
   } finally {await control.dispose();db.close();}
 });
 
