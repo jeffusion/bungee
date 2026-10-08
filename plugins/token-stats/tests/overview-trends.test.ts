@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { overviewTrends } from '../ui/overview-trends';
+import { overviewTrends, PAGE_METRICS } from '../ui/overview-trends';
 import type { StatsResponse } from '../ui/stats-resource';
 
 const bucketMs = 300_000;
@@ -46,4 +46,43 @@ test('an exact server boundary includes the just-completed bucket; missing metad
   for (const invalid of [null, { ...value, asOfMs: undefined }, { ...value, bucketMs: 0 }, { ...value, groupBy: 'model' as const }]) {
     expect(overviewTrends(invalid).every(item => item.percent === null && item.change === null)).toBe(true);
   }
+});
+
+test('page total-token trend combines input and output without counting cache again', () => {
+  const value = snapshot([
+    { ...row(8, 100, 20, 0.02), cacheReadTokens: 70, cacheWriteTokens: 10 },
+    { ...row(9, 100, 80, 0.01), cacheReadTokens: 30, cacheWriteTokens: 20 },
+  ]);
+  expect(overviewTrends(value, PAGE_METRICS)).toEqual([
+    { metric: 'input', percent: 0, change: 'flat', isNew: false },
+    { metric: 'output', percent: 300, change: 'up', isNew: false },
+    { metric: 'tokens', percent: 50, change: 'up', isNew: false },
+    { metric: 'cost', percent: -50, change: 'down', isNew: false },
+  ]);
+});
+
+test('page trends use server boundaries instead of rounding rolling windows to UTC', () => {
+  const starts = [123, 3_600_123, 7_200_123, 10_800_123];
+  const value: StatsResponse = { ...snapshot([]), bucketMs: 3_600_000,
+    asOfMs: 10_800_123, bucketStarts: starts, bucketEndMs: 14_400_123,
+    data: starts.map((bucketStartMs, index) => ({ ...row(0, [10, 20, 30, 9999][index]!, 1, 1), bucketStartMs })) };
+  expect(overviewTrends(value, PAGE_METRICS)[0]).toMatchObject({ percent: 50, change: 'up' });
+  expect(overviewTrends({ ...value, asOfMs: value.bucketEndMs }, PAGE_METRICS)[0]?.percent).toBe(33230);
+});
+
+test('calendar trends compare adjacent complete local days across a 25-hour DST day', () => {
+  const starts = ['2026-10-31T04:00:00Z', '2026-11-01T04:00:00Z', '2026-11-02T05:00:00Z', '2026-11-03T05:00:00Z'].map(Date.parse);
+  const value: StatsResponse = { ...snapshot([]), bucketMs: 86_400_000,
+    bucketStarts: starts, bucketEndMs: Date.parse('2026-11-04T05:00:00Z'), asOfMs: starts[2]! + 3_600_000,
+    data: starts.map((bucketStartMs, index) => ({ ...row(0, [100, 150, 9999, 9999][index]!, 1, 1), bucketStartMs })) };
+  expect(overviewTrends(value, PAGE_METRICS)[0]).toMatchObject({ percent: 50, change: 'up' });
+});
+
+test('a page period with fewer than two complete buckets has no comparison', () => {
+  const value = { ...snapshot([row(0, 10, 20, 1)]), bucketStarts: [0, bucketMs, bucketMs * 2] };
+  for (const asOfMs of [0, bucketMs - 1, bucketMs, bucketMs * 2 - 1]) {
+    expect(overviewTrends({ ...value, asOfMs }, PAGE_METRICS).every(trend => trend.percent === null && trend.change === null && !trend.isNew)).toBe(true);
+  }
+  expect(overviewTrends({ ...value, asOfMs: bucketMs * 2 }, PAGE_METRICS)[0]?.percent).toBe(-100);
+  expect(overviewTrends({ ...value, bucketStarts: [], asOfMs: bucketMs * 2 }, PAGE_METRICS).every(trend => trend.percent === null)).toBe(true);
 });
