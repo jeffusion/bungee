@@ -298,6 +298,25 @@ test('all SSE body directions use the same array format while preserving compres
   } finally { await server.stop(true); }
 });
 
+test('simultaneous compressed log copies preserve every SSE body direction', async () => {
+  const text = 'event: named\ndata: {"x":1}\n\ndata: [DONE]\n\n';
+  const expected = [{ event: 'named', data: { x: 1 } }, { event: 'message', data: '[DONE]' }];
+  for (const coding of ['gzip', 'zstd']) {
+    const wire = coding === 'gzip' ? gzipSync(encoder.encode(text)) : zstdCompressSync(encoder.encode(text));
+    const saved: unknown[] = [];
+    const failures: string[] = [];
+    const copies = Array.from({ length: 3 }, (_, index) => captureBody(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(wire); controller.close(); },
+    }), maxBytes, coding, async value => { saved[index] = value; }, reason => { failures.push(reason); },
+    undefined, 'text/event-stream'));
+    const forwarded = await Promise.all(copies.map(copy => new Response(copy.body).arrayBuffer()));
+    await Promise.all(copies.map(copy => copy.completion));
+    for (const bytes of forwarded) expect(new Uint8Array(bytes)).toEqual(new Uint8Array(wire));
+    expect(failures).toEqual([]);
+    expect(saved).toEqual([expected, expected, expected]);
+  }
+});
+
 test('SSE array expansion obeys the log size limit without affecting the response', async () => {
   const { logging, config, rows } = await setup(64);
   const text = 'data:\n\n'.repeat(4);
