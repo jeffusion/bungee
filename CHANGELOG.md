@@ -1,3 +1,11 @@
+## [5.15.1](https://github.com/jeffusion/bungee/compare/v5.15.0...v5.15.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **ui:** honor style isolation and update logout guard regression ([5c56b1b](https://github.com/jeffusion/bungee/commit/5c56b1b4fe88411e588f6fc9788dac97c883a4af))
+* **ui:** refine navigation and stabilize dashboard loading ([22c6781](https://github.com/jeffusion/bungee/commit/22c67810a74b830a052b35cff770949b579afdce))
+
 # [5.15.0](https://github.com/jeffusion/bungee/compare/v5.14.1...v5.15.0) (2026-10-08)
 
 
