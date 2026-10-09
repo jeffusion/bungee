@@ -1,46 +1,152 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount, onDestroy } from 'svelte';
+  import { createEventDispatcher, onMount } from 'svelte';
+  import { _, isLoading } from '$i18n';
+  import { getPluginText } from '$utils/plugin-i18n';
   import { getConfigSnapshot } from '$api/config';
-  import { api } from '$api/client';
-  export let value: any[] = [];
-  const dispatch = createEventDispatcher();
-  let search = '', models: any[] = [], targets: any[] = [], error = '', page = 1, total = 0;
-  let request: AbortController | undefined, timer: ReturnType<typeof setTimeout>;
-  let generation=0;
-  function publish() {value=[...value];dispatch('change',value);}
-  async function load() {
-    const version=++generation;request?.abort();request=new AbortController();
-    try {
-      const data:any=await api.get(`/plugins/codex-router/control/catalog?search=${encodeURIComponent(search)}&page=${page}`,{signal:request.signal});
-      if(version!==generation) return;
-      models=data.models;total=data.total;error='';
-    } catch {if(version===generation && !request.signal.aborted) error='目录不可用，请检查 models-dev';}
+  import { requestPluginControl } from '$api/client';
+  import { BSelect, BCheckbox, LoadingIndicator } from '$components/industrial';
+  import { Input } from '$components/ui/input';
+  import { NumberInput } from '$components/ui/number-input';
+  import { Label } from '$components/ui/label';
+  import { Button } from '$components/ui/button';
+  import PriceModelPicker from '@plugins/token-stats/ui/PriceModelPicker.svelte';
+  import { createModelSearch, type ModelSearchState } from '@plugins/token-stats/ui/model-search';
+  import type { ModelsDevModelOption, ModelsDevProviderSummary, ModelsDevCatalogStatus } from '@plugins/models-dev/contract';
+  import type { ModelBinding } from '@plugins/codex-router/server/config';
+
+  export let value: ModelBinding[] = [];
+  export let catalogOnly = false;
+  const dispatch = createEventDispatcher<{ change: ModelBinding[] }>();
+  const componentId = `codex-bindings-${Math.random().toString(36).slice(2, 10)}`;
+  let rowIds: number[] = [], nextRowId = 0;
+  let providers: ModelsDevProviderSummary[] = [];
+  let catalogVersion: number | null = null;
+  let modelCount = 0, loading = true, catalogError = false, targetsError = false;
+  let targets: { type: 'route' | 'service'; id: string; label: string; protocol?: string }[] = [];
+  let search = '';
+  let results: ModelSearchState<ModelsDevModelOption> = { models: [], total: 0, page: 1, pageSize: 50, loading: false, error: false };
+  let alive = false;
+  const controller = new AbortController();
+  const modelSearch = createModelSearch<ModelsDevModelOption, string>(
+    (path, signal) => requestPluginControl('codex-router', path, 'GET', undefined, signal),
+    state => { results = state; },
+    (query, page) => `/catalog?${new URLSearchParams({ search: query, page: String(page) })}`,
+  );
+  const t = (key: string) => $isLoading ? '' : getPluginText(`editor.${key}`, 'codex-router', (id, options) => $_(id, options));
+  $: providerOptions = providers.map(provider => ({ value: provider.provider, label: `${provider.name} · ${provider.provider}` }));
+  $: targetOptions = targets.map(target => ({ value: JSON.stringify([target.type, target.id]), label: `${target.label} · ${target.type} · ${target.protocol ?? t('protocolMissing')}` }));
+  $: pages = Math.max(1, Math.ceil(results.total / results.pageSize));
+  $: if (rowIds.length !== value.length) rowIds = value.map((_, index) => rowIds[index] ?? nextRowId++);
+
+  function publish(next: ModelBinding[]) { value = next; dispatch('change', value); }
+  function update(index: number, patch: Partial<ModelBinding>) {
+    publish(value.map((binding, i) => {
+      if (i !== index) return binding;
+      const { alias, ...rest } = binding;
+      return { ...rest, source: binding.source ?? alias ?? binding.model, ...patch };
+    }));
   }
-  function query() {page=1;clearTimeout(timer);timer=setTimeout(load,250);}
-  function add(model:any) {value=[...value,{provider:model.provider,model:model.model,target:{type:'route',id:''}}];publish();}
-  function targetChanged(index:number, encoded:string) {const [type,id]=encoded.split(':');value[index].target={type,id};publish();}
-  onMount(async () => {
-    try {const config=(await getConfigSnapshot()).config.logical_configuration;
-      targets=[...config.routes.map(route=>({type:'route',id:route.id,label:route.path,protocol:route.llm_protocol})),...config.services.map(service=>({type:'service',id:service.id,label:service.name,protocol:service.llm_protocol}))];
-    } catch {error='无法读取目标配置';}
-    void load();
+  function limit(index: number, key: keyof NonNullable<ModelBinding['capabilityOverrides']>, next: boolean | number | undefined) {
+    const overrides = { ...value[index].capabilityOverrides };
+    if (next === undefined) delete overrides[key]; else (overrides as Record<string, unknown>)[key] = next;
+    update(index, { capabilityOverrides: overrides });
+  }
+  function add() {
+    rowIds = [...rowIds, nextRowId++];
+    publish([...value, { source: '', provider: '', model: '', target: { type: 'route', id: '' } }]);
+  }
+  function remove(index: number) {
+    rowIds = rowIds.filter((_, i) => i !== index);
+    publish(value.filter((_, i) => i !== index));
+  }
+  async function loadCatalog() {
+    loading = true; catalogError = false;
+    try {
+      const data = await requestPluginControl<{ providers: ModelsDevProviderSummary[]; status: ModelsDevCatalogStatus }>('codex-router', '/catalog', 'GET', undefined, controller.signal);
+      if (!alive) return;
+      providers = data.providers; catalogVersion = data.status.version; modelCount = data.status.modelCount;
+    } catch { if (alive) catalogError = true; }
+    finally { if (alive) loading = false; }
+  }
+  async function loadTargets() {
+    targetsError = false;
+    try {
+      const config = (await getConfigSnapshot()).config.logical_configuration;
+      if (!alive) return;
+      targets = [...config.routes.map(route => ({ type: 'route' as const, id: route.id, label: route.path, protocol: route.llm_protocol })), ...config.services.map(service => ({ type: 'service' as const, id: service.id, label: service.name, protocol: service.llm_protocol }))];
+    } catch { if (alive) targetsError = true; }
+  }
+  onMount(() => {
+    alive = true;
+    if (catalogOnly) modelSearch.search('', 1, false);
+    else { void loadCatalog(); void loadTargets(); }
+    return () => { alive = false; controller.abort(); modelSearch.destroy(); };
   });
-  onDestroy(()=>{generation++;request?.abort();clearTimeout(timer);});
 </script>
-<div class="space-y-3">
-  <label class="block text-xs">搜索 models.dev<input aria-label="搜索模型" class="nx-input mt-1 w-full" bind:value={search} on:input={query}/></label>
-  {#if error}<p role="alert" class="text-red-300 text-xs">{error}</p>{/if}
-  <div class="max-h-48 overflow-auto border border-carbon-600">
-    {#each models as model}<button type="button" class="block w-full text-left p-2 text-xs hover:bg-carbon-800" on:click={()=>add(model)}>{model.name} · {model.provider} / {model.model}</button>{/each}
-  </div>
-  <div class="flex gap-3 text-xs"><button type="button" disabled={page<=1} on:click={()=>{page--;void load();}}>上一页</button><span>{page} / {Math.max(1,Math.ceil(total/50))}</span><button type="button" disabled={page*50>=total} on:click={()=>{page++;void load();}}>下一页</button></div>
-  {#each value as model,index}
-    <div class="border border-carbon-600 p-3 space-y-2 text-xs">
-      <div>{model.provider} / {model.model}</div>
-      <label class="block">公开别名（留空使用原始标识）<input class="nx-input w-full" value={model.alias ?? ''} on:input={e=>{const alias=e.currentTarget.value;if(alias) model.alias=alias;else delete model.alias;publish();}}/></label>
-      <label class="block">目标<select class="nx-input w-full" value={`${model.target.type}:${model.target.id}`} on:change={e=>targetChanged(index,e.currentTarget.value)}><option value="route:">选择已有路由或服务</option>{#each targets as target}<option value={`${target.type}:${target.id}`}>{target.type} · {target.label} · {target.protocol ?? '尚未声明接收协议'}</option>{/each}</select></label>
-      <label class="block">能力修正（JSON，仅填写部署需要限制的能力）<textarea class="nx-input w-full" rows="2" value={JSON.stringify(model.capabilityOverrides ?? {})} on:change={e=>{try {model.capabilityOverrides=JSON.parse(e.currentTarget.value);publish();error='';}catch{error='能力修正需要有效 JSON';}}}></textarea></label>
-      <button type="button" on:click={()=>{value=value.filter((_,i)=>i!==index);publish();}}>移除</button>
+
+{#if catalogOnly}
+  <div class="space-y-4" data-testid="codex-model-catalog">
+    <div class="space-y-2"><Label for={`${componentId}-search`}>{t('search')}</Label>
+      <Input id={`${componentId}-search`} aria-label={t('search')} value={search} on:input={(event) => { search = event.currentTarget.value; modelSearch.search(search); }} />
     </div>
-  {/each}
-</div>
+    {#if results.loading}<LoadingIndicator label={t('loading')} />
+    {:else if results.error}<p role="alert" class="text-sm text-red-400">{t('error')}</p><Button variant="outline" onclick={() => modelSearch.search(search, results.page, false)}>{t('retry')}</Button>
+    {:else if !results.models.length}<p role="status" class="text-sm text-zinc-400">{t('empty')}</p>
+    {:else}<div class="divide-y divide-carbon-600">
+      {#each results.models as model (`${model.provider}:${model.model}`)}<div class="grid min-w-0 gap-1 py-3 text-sm sm:grid-cols-2"><span class="break-words text-zinc-200">{model.name}</span><span class="break-all font-mono text-xs text-zinc-400">{model.provider} / {model.model}</span></div>{/each}
+    </div>{/if}
+    <div class="flex flex-wrap items-center gap-3 border-t border-carbon-600 pt-4">
+      <Button variant="outline" disabled={results.loading || results.page <= 1} onclick={() => modelSearch.search(search, results.page - 1, false)}>{t('previous')}</Button>
+      <span class="text-xs text-zinc-400">{results.page} / {pages}</span>
+      <Button variant="outline" disabled={results.loading || results.page >= pages} onclick={() => modelSearch.search(search, results.page + 1, false)}>{t('next')}</Button>
+    </div>
+  </div>
+{:else}
+  <div class="space-y-5" data-testid="codex-model-bindings">
+    <p class="text-sm text-zinc-400">{t('description')}</p>
+    {#if loading}<LoadingIndicator label={t('loading')} />{/if}
+    {#if catalogError}<p role="alert" class="text-sm text-red-400">{t('error')}</p><Button variant="outline" onclick={() => void loadCatalog()}>{t('retry')}</Button>
+    {:else if !loading && !modelCount}<p role="status" class="text-sm text-amber-400">{t('noCatalog')}</p>{/if}
+    {#if targetsError}<p role="alert" class="text-sm text-red-400">{t('targetsError')}</p><Button variant="outline" onclick={() => void loadTargets()}>{t('retry')}</Button>{/if}
+    {#if !value.length}<p class="text-sm text-zinc-400">{t('noBindings')}</p>{/if}
+    {#each value as binding, index (rowIds[index])}
+      {@const id = `${componentId}-${rowIds[index]}`}
+      <div class="min-w-0 space-y-3 border-b border-carbon-600 pb-4" data-testid="codex-model-binding">
+        <div class="grid min-w-0 gap-3 sm:grid-cols-2">
+          <div class="min-w-0 space-y-2"><Label for={`${id}-source`}>{t('source')}</Label>
+            <Input id={`${id}-source`} aria-label={t('source')} value={binding.source ?? binding.alias ?? binding.model} maxlength={512} placeholder={t('sourcePlaceholder')} required on:input={event => update(index, { source: event.currentTarget.value })} />
+            <p class="text-xs leading-relaxed text-zinc-400">{t('sourceHint')}</p>
+          </div>
+          <div class="min-w-0 space-y-2"><span class="nx-field-label block">{t('provider')}</span>
+            <BSelect value={binding.provider} options={providerOptions} ariaLabel={t('provider')} placeholder={t('provider')} disabled={loading || catalogError} onchange={provider => update(index, { provider: String(provider), model: '' })} />
+          </div>
+          <div class="min-w-0 space-y-2"><span class="nx-field-label block">{t('model')}</span>
+            <PriceModelPicker value={binding.model} provider={binding.provider} {catalogVersion} catalogPlugin="codex-router" catalogPath="/catalog" disabled={!binding.provider || !modelCount} label={t('model')} placeholder={t('model')} searchLabel={t('search')} emptyLabel={t('empty')} loadingLabel={t('loading')} errorLabel={t('error')} retryLabel={t('retry')} previousLabel={t('previous')} nextLabel={t('next')} onchange={model => update(index, { model })} />
+          </div>
+          <div class="min-w-0 space-y-2"><span class="nx-field-label block">{t('target')}</span>
+            <BSelect value={JSON.stringify([binding.target.type, binding.target.id])} options={targetOptions} ariaLabel={t('target')} placeholder={t('targetPlaceholder')} disabled={targetsError} onchange={encoded => { const [type, id] = JSON.parse(String(encoded)); update(index, { target: { type, id } }); }} />
+          </div>
+        </div>
+        <details class="border border-carbon-600 p-3">
+          <summary class="cursor-pointer text-xs text-zinc-400 focus-visible:outline focus-visible:outline-nexus-500">{t('advanced')}</summary>
+          <div class="mt-4 grid gap-4 sm:grid-cols-2">
+            <div class="space-y-2"><Label for={`${id}-context`}>{t('context')}</Label>
+              <NumberInput id={`${id}-context`} min={1} max={Number.MAX_SAFE_INTEGER}
+                bind:value={() => binding.capabilityOverrides?.contextWindow, next => limit(index, 'contextWindow', next)}
+                increaseLabel={t('increase')} decreaseLabel={t('decrease')} invalidMessage={t('contextInvalid')} />
+              <p class="text-xs text-zinc-400">{t('contextHint')}</p>
+            </div>
+            <div class="space-y-3">
+              <BCheckbox label={t('toolsOff')} bind:checked={() => binding.capabilityOverrides?.tools === false, checked => limit(index, 'tools', checked ? false : undefined)} />
+              <BCheckbox label={t('imagesOff')} bind:checked={() => binding.capabilityOverrides?.images === false, checked => limit(index, 'images', checked ? false : undefined)} />
+              <BCheckbox label={t('reasoningOff')} bind:checked={() => binding.capabilityOverrides?.reasoning === false, checked => limit(index, 'reasoning', checked ? false : undefined)} />
+              <BCheckbox label={t('reasoningEffort')} bind:checked={() => binding.capabilityOverrides?.reasoningEffort === true, checked => limit(index, 'reasoningEffort', checked ? true : undefined)} />
+            </div>
+          </div>
+        </details>
+        <Button variant="ghost" onclick={() => remove(index)}>{t('remove')}</Button>
+      </div>
+    {/each}
+    <Button variant="outline" disabled={value.length >= 100} onclick={add}>{t('add')}</Button>
+  </div>
+{/if}

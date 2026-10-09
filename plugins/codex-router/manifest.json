@@ -14,9 +14,10 @@
     "hooks",
     "api",
     "dynamicRuntimeLoad",
-    "controlPlane"
+    "controlPlane",
+    "nativeWidgetsStatic"
   ],
-  "uiExtensionMode": "none",
+  "uiExtensionMode": "native-static",
   "engines": {
     "bungee": "^4.2.0 || ^5.0.0"
   },
@@ -79,7 +80,7 @@
     {
       "name": "models",
       "type": "array",
-      "label": "models.label",
+      "label": "plugins.codex-router.models.label",
       "default": [],
       "validation": {
         "max": 100
@@ -90,9 +91,19 @@
         "label": "Model",
         "properties": [
           {
+            "name": "source",
+            "type": "string",
+            "label": "plugins.codex-router.editor.source",
+            "required": false,
+            "validation": {
+              "trimmed": true,
+              "max": 512
+            }
+          },
+          {
             "name": "provider",
             "type": "string",
-            "label": "provider",
+            "label": "plugins.codex-router.editor.provider",
             "required": true,
             "validation": {
               "trimmed": true,
@@ -102,7 +113,7 @@
           {
             "name": "model",
             "type": "string",
-            "label": "model",
+            "label": "plugins.codex-router.editor.model",
             "required": true,
             "validation": {
               "trimmed": true,
@@ -122,13 +133,13 @@
           {
             "name": "target",
             "type": "gateway_target",
-            "label": "Target",
+            "label": "plugins.codex-router.editor.target",
             "required": true
           },
           {
             "name": "capabilityOverrides",
             "type": "json",
-            "label": "Capabilities"
+            "label": "plugins.codex-router.editor.capabilityOverrides"
           }
         ]
       }
@@ -136,6 +147,7 @@
   ],
   "contributes": {
     "settings": "/catalog",
+    "nativeSettingsComponent": "CodexRouterSettings",
     "api": [
       {
         "path": "/catalog",
@@ -152,12 +164,96 @@
     "zh-CN": {
       "metadata.name": "Codex 模型路由",
       "plugin.description": "从共享目录选择模型并绑定已有路由或服务",
-      "models.label": "模型绑定"
+      "models.label": "模型绑定",
+      "settings.catalog": "模型目录",
+      "settings.bindings": "配置模型绑定",
+      "settings.description": "模型绑定随 Codex 入口路由保存。在路由管理中编辑入口路由，添加此插件，填写原始模型、目标提供商、目标模型和转发路由或服务。",
+      "settings.routes": "打开路由管理",
+      "settings.modelsDev": "管理 models.dev 目录",
+      "editor.description": "按原始模型匹配请求，将目标模型转发到指定路由或服务。",
+      "editor.source": "原始模型",
+      "editor.sourceHint": "匹配 Codex 请求中的模型标识，可填写原生模型或新增标识。",
+      "editor.sourcePlaceholder": "例如 gpt-5.4",
+      "editor.provider": "目标提供商",
+      "editor.model": "目标模型",
+      "editor.target": "转发路由 / 服务",
+      "editor.targetPlaceholder": "选择已有路由或服务",
+      "editor.search": "搜索模型",
+      "editor.empty": "没有匹配的模型",
+      "editor.loading": "正在加载模型目录",
+      "editor.error": "目录不可用，请检查 models.dev 或重试。",
+      "editor.targetsError": "无法读取转发目标，请重试。",
+      "editor.retry": "重试",
+      "editor.previous": "上一页",
+      "editor.next": "下一页",
+      "editor.add": "添加模型绑定",
+      "editor.remove": "移除",
+      "editor.noBindings": "尚未配置模型绑定。",
+      "editor.noCatalog": "目录为空，请先启用 models.dev 并刷新目录。",
+      "editor.protocolMissing": "未声明接收协议",
+      "editor.advanced": "能力限制（可选）",
+      "editor.context": "上下文长度上限",
+      "editor.contextHint": "留空使用目标模型的上下文长度。",
+      "editor.toolsOff": "禁用工具调用",
+      "editor.imagesOff": "禁用图片输入",
+      "editor.reasoningOff": "禁用推理能力",
+      "editor.reasoningEffort": "传递推理强度（目标需支持）",
+      "editor.catalogCount": "模型数量",
+      "editor.total": "共 {count} 个模型",
+      "editor.increase": "增加上下文上限",
+      "editor.decrease": "减少上下文上限",
+      "editor.contextInvalid": "请输入正整数。"
     },
     "en": {
       "metadata.name": "Codex Router",
       "plugin.description": "Bind catalog models to existing routes or services",
-      "models.label": "Model bindings"
+      "models.label": "Model bindings",
+      "settings.catalog": "Model catalog",
+      "settings.bindings": "Configure model bindings",
+      "settings.description": "Model bindings are saved with the Codex entry route. Edit that route, add this plugin, then choose the original model, target provider, target model and forwarding route or service.",
+      "settings.routes": "Open Routes",
+      "settings.modelsDev": "Manage models.dev catalog",
+      "editor.description": "Match the original model and forward the target model through an existing route or service.",
+      "editor.source": "Original model",
+      "editor.sourceHint": "Match the model ID in Codex requests, including native models or new IDs.",
+      "editor.sourcePlaceholder": "For example, gpt-5.4",
+      "editor.provider": "Target provider",
+      "editor.model": "Target model",
+      "editor.target": "Forwarding route / service",
+      "editor.targetPlaceholder": "Select an existing route or service",
+      "editor.search": "Search models",
+      "editor.empty": "No matching models",
+      "editor.loading": "Loading model catalog",
+      "editor.error": "Catalog unavailable. Check models.dev or retry.",
+      "editor.targetsError": "Unable to load forwarding targets. Please retry.",
+      "editor.retry": "Retry",
+      "editor.previous": "Previous page",
+      "editor.next": "Next page",
+      "editor.add": "Add model binding",
+      "editor.remove": "Remove",
+      "editor.noBindings": "No model bindings configured.",
+      "editor.noCatalog": "The catalog is empty. Enable models.dev and refresh it first.",
+      "editor.protocolMissing": "Receiving protocol not declared",
+      "editor.advanced": "Capability limits (optional)",
+      "editor.context": "Context length limit",
+      "editor.contextHint": "Leave empty to use the target model context length.",
+      "editor.toolsOff": "Disable tool calls",
+      "editor.imagesOff": "Disable image input",
+      "editor.reasoningOff": "Disable reasoning",
+      "editor.reasoningEffort": "Forward reasoning effort (requires target support)",
+      "editor.catalogCount": "Model count",
+      "editor.total": "{count} models",
+      "editor.increase": "Increase context limit",
+      "editor.decrease": "Decrease context limit",
+      "editor.contextInvalid": "Enter a positive whole number."
     }
+  },
+  "ui": {
+    "components": [
+      {
+        "name": "CodexRouterSettings",
+        "entry": "ui/CodexRouterSettings.svelte"
+      }
+    ]
   }
 }

@@ -126,7 +126,7 @@
           <p role="alert" class="p-4 text-sm text-red-300">{settings.message}</p>
         {:else if plugin.name === 'model-mapping' && activeTabPath === '/catalog'}
           <ModelMappingCatalogManager />
-        {:else if activeTabPath}
+        {:else if settings?.kind === 'sandbox' && activeTabPath}
           {#key plugin.name}<PluginHost pluginName={plugin.name} path={activeTabPath} height="calc(100dvh - 220px)" />{/key}
         {:else}
           <div class="flex justify-center items-center h-64 font-mono text-[11px] uppercase tracking-command text-zinc-500">

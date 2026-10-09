@@ -8,6 +8,7 @@ import type { ComponentType, SvelteComponent } from 'svelte';
 
 import ChatgptAccountsPage from '@plugins/chatgpt-oauth/ui/AccountsPage.svelte';
 import ChatgptQuotaWidget from '@plugins/chatgpt-oauth/ui/ChatgptQuotaWidget.svelte';
+import CodexRouterSettings from '@plugins/codex-router/ui/CodexRouterSettings.svelte';
 import KeyAccessKeyPolicy from '@plugins/key-access/ui/KeyPolicy.svelte';
 import KeyRateLimitKeyPolicy from '@plugins/key-rate-limit/ui/KeyPolicy.svelte';
 import LocalAccountsSettings from '@plugins/local-accounts/ui/Settings.svelte';
@@ -22,6 +23,7 @@ import TokenStatsPage from '@plugins/token-stats/ui/TokenStatsPage.svelte';
 export const generatedWidgetRegistry: Record<string, ComponentType<SvelteComponent>> = {
   ChatgptAccountsPage,
   ChatgptQuotaWidget,
+  CodexRouterSettings,
   KeyAccessKeyPolicy,
   KeyRateLimitKeyPolicy,
   LocalAccountsSettings,
@@ -37,6 +39,7 @@ export const generatedWidgetRegistry: Record<string, ComponentType<SvelteCompone
 export const componentSourceMap: Record<string, string> = {
   ChatgptAccountsPage: 'chatgpt-oauth',
   ChatgptQuotaWidget: 'chatgpt-oauth',
+  CodexRouterSettings: 'codex-router',
   KeyAccessKeyPolicy: 'key-access',
   KeyRateLimitKeyPolicy: 'key-rate-limit',
   LocalAccountsSettings: 'local-accounts',

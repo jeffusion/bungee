@@ -1,5 +1,19 @@
 # Codex Router 实施记录
 
+## 界面与模型替换语义修正（2026-10-09）
+
+以下阶段记录中的“未部署”是当时状态：`f91ac4c` 已按用户要求更新到本地服务。本轮修复暂不继续部署正式服务。
+
+原设置路径 `/catalog` 没有原生组件声明，导致页面回退 iframe 并被 `uiExtensionMode: none` 拒绝。现按 models-dev/chatgpt-oauth 的 native-static 契约注册设置页；原生页面解析尚未完成时也禁止临时回退 iframe。
+
+模型绑定表单参照 Token 统计的映射布局，复用其分页目标模型选择器及搜索取消状态机，使用项目 Label/Input/BSelect/Button/NumberInput/BCheckbox。原始模型与目标模型分开显示，route/service 仅负责转发链路；能力限制使用类型化控件。设置页浏览目录，绑定仍随入口路由配置保存。
+
+新增 `source`，精确匹配请求中的原始模型；`provider`/`model` 仍是目标模型。匹配后请求改写为目标 `model`，返回目录和生成结果使用 `source`。显式 source 可替换原生同名目录项，按目标能力重新描述并保留位置；未绑定的目录项不变。旧 `alias ?? model` 语义保持兼容和原冲突检查，source 与 alias 同时出现或重复原始标识均拒绝。
+
+独立复核的 P2 finding：目标模型不可用时，目录可能保留已被替换的原生能力描述。已对模型缺失、上下文长度缺失和不支持文本三类情况关闭失败：目录隐藏占用标识，请求在上游前返回 503；目录与真实 HTTP 流水线专项验证分别覆盖这三类情况。同轴复审确认该 finding 已关闭，直接修复范围没有新增 P1/P2。此前设置页复核的分页竞态通过复用 Token 统计的共享搜索状态机解决，真实浏览器延迟响应验证通过。
+
+验证包含 native Responses 的 route/service 转发、Chat/Anthropic JSON/SSE 的不同原始与目标模型、原生 WS 的上游模型替换与客户端标识恢复、目录替换与旧配置兼容。真实 Chromium 加载构建后的管理界面和实际路由插件编辑器，验证模型选择、编辑状态保留、能力限制、分页竞态与 1440/768/390/320px 无横向溢出；业务 API 均为 fixtures，不代表正式配置写入或真实提供商验收。
+
 基线：PR #76，`a570e6b946bee886249d0daef35e4ae8488d1adc`。开发从独立 `codex/codex-router` 分支开始，原工作区无改动。未部署，未激活生产配置。
 
 依赖恢复：Bun 1.4.2，`BUN_TMPDIR=/tmp BUN_INSTALL_CACHE_DIR=/tmp/bungee-bun-cache bun install --frozen-lockfile`，锁文件未改。受限沙箱不能修改外部 Git 元数据，分支操作经授权执行；依赖 prepare 中 husky 无法写入 Git config，不影响锁定依赖恢复。

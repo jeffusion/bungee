@@ -8,7 +8,8 @@
   import { createPricingModelSearch, type PricingModelSearchState } from './pricing-catalog';
 
   let { provider, catalogVersion, value, disabled = false, label, placeholder, searchLabel, emptyLabel,
-    loadingLabel, errorLabel, retryLabel, previousLabel, nextLabel, onchange }: {
+    loadingLabel, errorLabel, retryLabel, previousLabel, nextLabel, onchange,
+    catalogPlugin = 'token-stats', catalogPath = '/pricing/models' }: {
     provider: string;
     catalogVersion: number | null;
     value: string;
@@ -23,14 +24,17 @@
     previousLabel: string;
     nextLabel: string;
     onchange: (model: string) => void;
+    catalogPlugin?: string;
+    catalogPath?: string;
   } = $props();
   let open = $state(false);
   let width = $state(0);
   let search = $state('');
   let results = $state<PricingModelSearchState>({ models: [], total: 0, page: 1, pageSize: 50, loading: false, error: false });
   const modelSearch = createPricingModelSearch(
-    (path, signal) => requestPluginControl('token-stats', path, 'GET', undefined, signal),
+    (path, signal) => requestPluginControl(catalogPlugin, path, 'GET', undefined, signal),
     state => { results = state; },
+    250, catalogPath,
   );
   const pages = $derived(Math.max(1, Math.ceil(results.total / results.pageSize)));
   $effect(() => {

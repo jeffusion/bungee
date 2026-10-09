@@ -1,7 +1,7 @@
 import {expect,test} from 'bun:test';
 import {CatalogView,capabilitiesServiceOf} from '../../models-dev/server/local';
 import {buildCatalogIndex} from '../../models-dev/server/catalog';
-import {parseBindings} from '../server/config';
+import {parseBindings,bindingSource} from '../server/config';
 import {mergeCatalog,catalogEtag} from '../server/catalog';
 const view=new CatalogView();
 view.apply(buildCatalogIndex({version:1,fetchedAt:1,catalog:{lab:{models:{'org/model':{name:'Model',limit:{context:32000,output:4000},tool_call:true,reasoning:true,modalities:{input:['text','image']}}}}}}));
@@ -27,4 +27,33 @@ test('aliases are optional, duplicate and native-conflicting identifiers fail cl
 test('catalog validators reject malformed inputs and ETag includes catalog/client versions',()=>{
   expect(()=>parseBindings([{...bindings[0],capabilityOverrides:{images:'yes'}}])).toThrow();
   expect(catalogEtag({},1,'a')).not.toBe(catalogEtag({},2,'a'));expect(catalogEtag({},1,'a')).not.toBe(catalogEtag({},1,'b'));
+});
+test('explicit source replaces one native model using target capabilities while preserving other entries',()=>{
+  const binding=parseBindings([{...bindings[0],source:'gpt-native'}]);
+  const native={models:[{slug:'gpt-native',context_window:999999,supports_search_tool:true},{slug:'untouched',extra:'keep'}],other:'keep'};
+  const result=mergeCatalog(native,binding,service) as any;
+  expect(result.models).toHaveLength(2);
+  expect(result.models[0]).toMatchObject({slug:'gpt-native',context_window:16000,supports_search_tool:false});
+  expect(result.models[0].display_name).toContain('Model');
+  expect(result.models[1]).toEqual(native.models[1]);expect(result.other).toBe('keep');
+  expect(native.models[0].context_window).toBe(999999);
+  expect((mergeCatalog({data:[{id:'gpt-native'}]},binding,service) as any).data).toEqual([{id:'gpt-native',object:'model',owned_by:'lab'}]);
+});
+test('source is explicit and legacy alias/model bindings retain their match without ambiguity',()=>{
+  expect(bindingSource(parseBindings([{...bindings[0],source:'original'}])[0])).toBe('original');
+  expect(bindingSource(parseBindings([{...bindings[0],alias:'legacy'}])[0])).toBe('legacy');
+  expect(bindingSource(bindings[0])).toBe('org/model');
+  expect(()=>parseBindings([{...bindings[0],source:'same'},{...bindings[0],alias:'same'}])).toThrow('conflict');
+  expect(()=>parseBindings([{...bindings[0],source:'a',alias:'b'}])).toThrow('invalid_bindings');
+  expect(()=>parseBindings([{...bindings[0],source:' '}])).toThrow('invalid_bindings');
+});
+test('unavailable explicit replacements cannot advertise native capabilities or restore native routing',()=>{
+  const binding=parseBindings([{...bindings[0],source:'gpt-native'}]);
+  for(const info of [null,{...service.model(bindings[0])!,contextWindow:null},{...service.model(bindings[0])!,inputModalities:['audio']}]){
+    const unavailable={...service,model:()=>info} as any;
+    const original={models:[{slug:'gpt-native',context_window:999999,input_modalities:['text','image'],supports_search_tool:true},{slug:'untouched'}]};
+    expect((mergeCatalog(original,binding,unavailable) as any).models).toEqual([{slug:'untouched'}]);
+    expect((mergeCatalog({data:[{id:'gpt-native'},{id:'untouched'}]},binding,unavailable) as any).data).toEqual([{id:'untouched'}]);
+    expect(original.models).toHaveLength(2);
+  }
 });
