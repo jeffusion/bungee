@@ -100,9 +100,28 @@ try {
     await page.setViewportSize({ width, height: 1000 });
     expect(await row.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
     await expect(row.getByRole('textbox', { name: '原始模型', exact: true })).toBeVisible();
+    const source = (await row.getByRole('textbox', { name: '原始模型', exact: true }).boundingBox())!;
+    const provider = (await row.getByRole('combobox', { name: '目标提供商', exact: true }).boundingBox())!;
+    const model = (await row.getByRole('button', { name: '目标模型', exact: true }).boundingBox())!;
+    const target = (await row.getByRole('combobox', { name: '转发路由 / 服务', exact: true }).boundingBox())!;
+    expect(provider.y).toBeGreaterThan(source.y + source.height);
+    expect(target.y).toBeGreaterThan(model.y + model.height);
+    expect(Math.abs(source.x - provider.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(source.x - target.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(source.width - target.width)).toBeLessThanOrEqual(1);
+    if (width >= 768) {
+      expect(Math.abs(provider.y - model.y)).toBeLessThanOrEqual(1);
+      expect(Math.abs(provider.height - model.height)).toBeLessThanOrEqual(1);
+    } else {
+      expect(model.y).toBeGreaterThan(provider.y + provider.height);
+      expect(Math.abs(source.x - model.x)).toBeLessThanOrEqual(1);
+      await page.screenshot({ path: `/tmp/codex-router-layout-${width}.png`, fullPage: true });
+    }
   }
-  await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.screenshot({ path: '/tmp/codex-router-bindings-redesign.png', fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1049 });
+  await page.screenshot({ path: '/tmp/codex-router-layout-expanded.png', fullPage: true });
+  await row.getByText('能力限制（可选）', { exact: true }).click();
+  await page.screenshot({ path: '/tmp/codex-router-layout.png', fullPage: true });
   await dialog.getByTestId('plugin-config-save-button').click();
   await expect(dialog).toHaveCount(0);
   await page.getByTestId('section-plugins').getByRole('button', { name: '编辑', exact: true }).click();
@@ -113,7 +132,7 @@ try {
   await expect(dialog.getByRole('spinbutton', { name: '上下文长度上限', exact: true })).toHaveValue('16001');
   await expect(dialog.getByRole('checkbox', { name: '禁用图片输入', exact: true })).toBeChecked();
   expect(errors).toEqual([]);
-  console.log('Codex Router UI passed: native settings; search/pagination race; separate source/provider/model/route-service binding retained in actual plugin editor; Token Stats picker; no overflow at 1440/768/390/320px. All APIs are fixtures.');
+  console.log('Codex Router UI passed: native settings; search/pagination race; binding values retained; source, destination and forwarding vertically grouped; destination controls aligned; no overflow at 1440/768/390/320px. All APIs are fixtures.');
 } finally {
   await browser.close();
   server.stop(true);
