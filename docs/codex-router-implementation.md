@@ -68,7 +68,7 @@ CLI 兼容调整复审没有新增 P0–P2；独立执行 33 项测试及 42 项
 | codex/codex-router | 8a93db0 / [#77](https://github.com/jeffusion/bungee/pull/77) | codex/websocket-responses-metering |
 | codex/codex-router-dispatch | ade7d15 / [#78](https://github.com/jeffusion/bungee/pull/78) | codex/codex-router |
 | codex/codex-router-protocol | 2d62c99 / [#79](https://github.com/jeffusion/bungee/pull/79) | codex/codex-router-dispatch |
-| codex/codex-router-websocket | 最终集成 PR | codex/codex-router-protocol |
+| codex/codex-router-websocket | ff3ced9 / [#80](https://github.com/jeffusion/bungee/pull/80) | codex/codex-router-protocol |
 
 功能只有指定入口挂载并启用插件才生效。按 native Responses、Chat、Anthropic 的顺序逐个启用并做提供商验收；关闭插件并恢复入口配置即可回退，目标 route/service 原用途不变，临时历史允许失效。此次没有部署或激活生产配置。
 
