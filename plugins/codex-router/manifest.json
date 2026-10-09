@@ -57,6 +57,21 @@
         "version": 1,
         "process": "worker",
         "kind": "local"
+      },
+      {
+        "plugin": "codex-router",
+        "id": "codex-router.history.v1",
+        "version": 1,
+        "process": "worker",
+        "kind": "rpc"
+      }
+    ],
+    "provides": [
+      {
+        "id": "codex-router.history.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "rpc"
       }
     ]
   },

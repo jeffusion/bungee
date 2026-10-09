@@ -911,11 +911,11 @@ async function executeHttpRequestInternal(
       }, invoke:(plugin, method, payload, target) => requestRegistry!.invokeAdmissionRpc(plugin, method, payload, target, ownerLeases.get(`${plugin}\0global`)!)}), 'onGatewayAdmissionSession');
     }
 
-    const demandHooks = requestRegistry?.getPrecompiledHooks(currentRouteId, undefined, routeServiceName);
+    const demandHooks = requestRegistry?.getPrecompiledHooks(currentRouteId, undefined, routeServiceName, dispatch.adapter);
     const demandContext = createPhaseContext(requestSnapshot,requestId,currentRouteId,routeServiceName);
     if (dispatch.target) demandContext.url = new URL(dispatch.context.url);
     applyRoutePathRewriteToContext(demandContext,route,requestLog);
-    const routeDemand = collectPluginBodyRequirements([demandHooks?.routePhase,demandHooks?.servicePhase], {
+    const routeDemand = collectPluginBodyRequirements([demandHooks?.routePhase,demandHooks?.servicePhase,demandHooks?.dispatchAdapter], {
       requestId,method:req.method,url:demandContext.url,routeId:currentRouteId,serviceId:routeServiceName,stage:'route',
     });
     const selectionNeedsBody = analyzeExpressionDependencies({
@@ -979,7 +979,7 @@ async function executeHttpRequestInternal(
     }
 
     const scopedRegistry = requestRegistry;
-    const requestPhaseHooks = scopedRegistry?.getPrecompiledHooks(currentRouteId, undefined, routeServiceName) ?? null;
+    const requestPhaseHooks = scopedRegistry?.getPrecompiledHooks(currentRouteId, undefined, routeServiceName, dispatch.adapter) ?? null;
     const phaseContext = createPhaseContext(requestSnapshot, requestId, currentRouteId, routeServiceName);
     phaseContext.bodyWrite = !!dispatch.target || routeDemand.request === 'json-write';
     if (dispatch.target) phaseContext.url = new URL(dispatch.context.url);
@@ -1108,7 +1108,7 @@ async function executeHttpRequestInternal(
       selectedUpstream: RuntimeUpstream,
       attemptLogger: RequestLogger
     ): Promise<ProxyRequestResult> => {
-      const phaseAwareHooks = scopedRegistry?.getPrecompiledHooks(currentRouteId, selectedUpstream.upstream_id, routeServiceName) ?? null;
+      const phaseAwareHooks = scopedRegistry?.getPrecompiledHooks(currentRouteId, selectedUpstream.upstream_id, routeServiceName, dispatch.adapter) ?? null;
       const attemptLoggers=new Map<ProxyRequestResult,RequestLogger>();
       const runAttempt = async (requestOverride?:import('./contracts').GatewayRequestOverride): Promise<ProxyRequestResult> => {
         const currentLogger=requestOverride?await createRequestLogger(req,{isFailoverAttempt:true,parentRequestId:reqLogger.getRequestId(),attemptUpstream:selectedUpstream.target,requestType:'final'}):attemptLogger;

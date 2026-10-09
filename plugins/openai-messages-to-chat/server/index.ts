@@ -9,7 +9,9 @@ import {
   type JsonRecord,
   type OpenAIMessagesCompatibilityBodyValidationResult,
   OpenAIMessagesCompatibilityNormalizer,
-  OpenAIProtocolConversion
+  OpenAIProtocolConversion,
+  encodeResponsesResult,
+  ResponsesEventEncoder
 } from '@jeffusion/bungee-llms/plugin-api';
 
 interface OpenAIMessagesToChatOptions {
@@ -23,33 +25,6 @@ const RESPONSE_STATE_REFERENCE_FIELDS = [
   'conversation',
   'response_id'
 ] as const;
-
-type ResponsesTerminalEventType = 'response.completed' | 'response.incomplete' | 'response.failed';
-
-interface ResponsesStreamToolCallState {
-  id: string;
-  name: string;
-  arguments: string;
-}
-
-interface ResponsesStreamState {
-  responseId: string;
-  messageId: string;
-  createdAt: number;
-  model: string;
-  messageText: string;
-  finishReason: string;
-  usage: {
-    input_tokens: number;
-    output_tokens: number;
-    total_tokens: number;
-  };
-  hasTextContentPart: boolean;
-  toolCalls: ResponsesStreamToolCallState[];
-  toolCallIndexToId: Map<number, string>;
-  terminalEventType: ResponsesTerminalEventType | null;
-  terminalReason: string;
-}
 
 interface ResponsesStateReference {
   hasStateFields: boolean;
@@ -73,7 +48,7 @@ class implements Plugin {
     private readonly adaptedRequestIds = new Set<string>();
     private readonly responsesAdaptedRequestIds = new Set<string>();
     private readonly streamConversionRequestIds = new Set<string>();
-    private readonly responsesStreamConversionRequestIds = new Set<string>();
+    private readonly responsesRequestModels = new Map<string, string>();
     private readonly responsesRequestMessages = new Map<string, JsonRecord[]>();
     private readonly responsesRequestConversationIds = new Map<string, string>();
     private readonly responsesHistoryByResponseId = new Map<string, JsonRecord[]>();
@@ -108,7 +83,7 @@ class implements Plugin {
           this.adaptedRequestIds.delete(ctx.requestId);
           this.responsesAdaptedRequestIds.delete(ctx.requestId);
           this.streamConversionRequestIds.delete(ctx.requestId);
-          this.responsesStreamConversionRequestIds.delete(ctx.requestId);
+          this.responsesRequestModels.delete(ctx.requestId);
           this.responsesRequestMessages.delete(ctx.requestId);
           this.responsesRequestConversationIds.delete(ctx.requestId);
           this.validationErrors.delete(ctx.requestId);
@@ -145,6 +120,7 @@ class implements Plugin {
             ctx.url.pathname = '/v1/chat/completions';
             ctx.body = this.normalizeAssistantToolCallReasoningContent(validation.body);
             this.responsesAdaptedRequestIds.add(ctx.requestId);
+            this.responsesRequestModels.set(ctx.requestId, String(validation.body.model));
             this.responsesRequestMessages.set(
               ctx.requestId,
               this.extractMessagesFromDowngradedBody(validation.body)
@@ -189,26 +165,22 @@ class implements Plugin {
               return response;
             }
 
-            const converted = this.convertChatCompletionToResponsesPayload(parsedBody);
-            if (!converted) {
-              return response;
+            const converted = this.convertChatCompletionToResponsesPayload(parsedBody, this.responsesRequestModels.get(ctx.requestId) ?? '');
+            if (converted.status !== 'failed') {
+              const conversationId = this.responsesRequestConversationIds.get(ctx.requestId);
+              const baseMessages = this.responsesRequestMessages.get(ctx.requestId) ?? [];
+              const assistantMessage = this.extractAssistantMessageFromChatCompletionPayload(parsedBody);
+              const history = assistantMessage ? [...baseMessages, assistantMessage] : baseMessages;
+              this.storeResponsesState(String(converted.id), history, conversationId);
             }
 
-            const responseId = typeof converted.id === 'string'
-              ? converted.id
-              : this.toResponsesId(parsedBody.id);
-            const conversationId = this.responsesRequestConversationIds.get(ctx.requestId);
-            const baseMessages = this.responsesRequestMessages.get(ctx.requestId) ?? [];
-            const assistantMessage = this.extractAssistantMessageFromChatCompletionPayload(parsedBody);
-            const history = assistantMessage
-              ? [...baseMessages, assistantMessage]
-              : baseMessages;
-            this.storeResponsesState(responseId, history, conversationId);
-
+            const headers = new Headers(response.headers);
+            headers.delete('content-length');
+            headers.delete('content-encoding');
             return new Response(JSON.stringify(converted), {
               status: response.status,
               statusText: response.statusText,
-              headers: response.headers
+              headers
             });
           }
 
@@ -235,21 +207,24 @@ class implements Plugin {
         { name: 'openai-messages-to-chat', stage: 10 },
         async (envelope, ctx) => {
           const chunk = structuredClone(envelope.json);
-          if (chunk === undefined) return null;
           const converterContext = { ...ctx, sseEvent: envelope };
           if (this.responsesAdaptedRequestIds.has(ctx.requestId)) {
-            if (!this.messagesCompatibilityNormalizer.isOpenAIStreamChunk(chunk)) {
-              return null;
+            if (envelope.data === '[DONE]') return [];
+            const encoder = this.getResponsesEncoder(ctx, isRecord(chunk) ? chunk.model : undefined);
+            // Legacy clients expect an assistant item even when the response only calls tools.
+            // This normalization delegates all output indexing and terminal semantics to the codec.
+            let normalized = chunk;
+            if (!ctx.streamState.has('responses_legacy_message') && isRecord(chunk)
+              && Array.isArray(chunk.choices) && chunk.choices.length === 1 && isRecord(chunk.choices[0])) {
+              const choice = chunk.choices[0];
+              const delta = isRecord(choice.delta) ? choice.delta : {};
+              normalized = { ...chunk, choices: [{ ...choice, delta: { ...delta, content: delta.content ?? '' } }] };
+              ctx.streamState.set('responses_legacy_message', true);
             }
-
-            const converted = this.convertChatCompletionChunkToResponsesEvents(chunk, ctx);
-            if (converted.length > 0) {
-              this.responsesStreamConversionRequestIds.add(ctx.requestId);
-            }
-            return protocolSSEOutput(converted, 'responses', envelope);
+            return protocolSSEOutput(encoder.push(normalized), 'responses', envelope);
           }
 
-          if (!this.adaptedRequestIds.has(ctx.requestId)) {
+          if (chunk === undefined || !this.adaptedRequestIds.has(ctx.requestId)) {
             return null;
           }
 
@@ -270,10 +245,13 @@ class implements Plugin {
       hooks.onFlushStream.tapPromise(
         { name: 'openai-messages-to-chat', stage: 10 },
         async (chunks, ctx) => {
-          if (this.responsesStreamConversionRequestIds.has(ctx.requestId)) {
-            this.responsesStreamConversionRequestIds.delete(ctx.requestId);
-            const completionEvents = this.buildResponsesStreamCompletionEvents(ctx);
-            this.persistResponsesStateFromStream(ctx);
+          if (this.responsesAdaptedRequestIds.has(ctx.requestId)) {
+            const completionEvents = this.getResponsesEncoder(ctx).finish();
+            for (const event of completionEvents) {
+              if (isRecord(event.response) && event.response.status !== 'failed') {
+                this.persistResponsesStateFromResult(ctx.requestId, event.response);
+              }
+            }
             return [...chunks, ...protocolSSEOutput(completionEvents, 'responses')];
           }
 
@@ -294,7 +272,7 @@ class implements Plugin {
           this.adaptedRequestIds.delete(ctx.requestId);
           this.responsesAdaptedRequestIds.delete(ctx.requestId);
           this.streamConversionRequestIds.delete(ctx.requestId);
-          this.responsesStreamConversionRequestIds.delete(ctx.requestId);
+          this.responsesRequestModels.delete(ctx.requestId);
           this.responsesRequestMessages.delete(ctx.requestId);
           this.responsesRequestConversationIds.delete(ctx.requestId);
           this.validationErrors.delete(ctx.requestId);
@@ -306,7 +284,7 @@ class implements Plugin {
       this.adaptedRequestIds.clear();
       this.responsesAdaptedRequestIds.clear();
       this.streamConversionRequestIds.clear();
-      this.responsesStreamConversionRequestIds.clear();
+      this.responsesRequestModels.clear();
       this.responsesRequestMessages.clear();
       this.responsesRequestConversationIds.clear();
       this.responsesHistoryByResponseId.clear();
@@ -365,6 +343,8 @@ class implements Plugin {
       return pathname;
     }
 
+    // Compatibility boundary: keep legacy input/messages fallbacks, thinking normalization,
+    // and local reference resolution. Codex uses the stricter shared request decoder instead.
     private validateAndNormalizeResponsesBody(rawBody: unknown): OpenAIMessagesCompatibilityBodyValidationResult {
       if (!isRecord(rawBody)) {
         return {
@@ -571,37 +551,31 @@ class implements Plugin {
       return null;
     }
 
-    private persistResponsesStateFromStream(ctx: { requestId: string; streamState: Map<string, unknown> }): void {
-      const streamState = ctx.streamState.get('responses_stream_state') as ResponsesStreamState | undefined;
-      if (!streamState) {
-        return;
-      }
-
-      const baseMessages = this.responsesRequestMessages.get(ctx.requestId) ?? [];
-      const conversationId = this.responsesRequestConversationIds.get(ctx.requestId);
-
-      let history = baseMessages;
-      if (streamState.messageText.length > 0 || streamState.toolCalls.length > 0) {
-        const assistantMessage: JsonRecord = {
-          role: 'assistant',
-          content: streamState.messageText.length > 0 ? streamState.messageText : null
-        };
-
-        if (streamState.toolCalls.length > 0) {
-          assistantMessage.tool_calls = streamState.toolCalls.map((toolCall) => ({
-            id: toolCall.id,
-            type: 'function',
-            function: {
-              name: toolCall.name,
-              arguments: toolCall.arguments
-            }
-          }));
+    private persistResponsesStateFromResult(requestId: string, response: JsonRecord): void {
+      if (response.status === 'failed' || !Array.isArray(response.output)) return;
+      const assistant: JsonRecord = { role: 'assistant', content: null };
+      const text: string[] = [];
+      const reasoning: string[] = [];
+      const tools: JsonRecord[] = [];
+      for (const item of response.output) {
+        if (!isRecord(item)) continue;
+        if (item.type === 'message' && Array.isArray(item.content)) {
+          for (const part of item.content) {
+            if (isRecord(part) && part.type === 'output_text' && typeof part.text === 'string') text.push(part.text);
+            if (isRecord(part) && part.type === 'refusal' && typeof part.refusal === 'string') assistant.refusal = part.refusal;
+          }
+        } else if (item.type === 'function_call') {
+          tools.push({ id: item.call_id, type: 'function', function: { name: item.name, arguments: item.arguments } });
+        } else if (item.type === 'reasoning' && Array.isArray(item.summary)) {
+          for (const part of item.summary) if (isRecord(part) && typeof part.text === 'string') reasoning.push(part.text);
         }
-
-        history = [...baseMessages, assistantMessage];
       }
-
-      this.storeResponsesState(streamState.responseId, history, conversationId);
+      if (text.length) assistant.content = text.join('');
+      if (tools.length) assistant.tool_calls = tools;
+      if (reasoning.length) assistant.reasoning_content = reasoning.join('');
+      const base = this.responsesRequestMessages.get(requestId) ?? [];
+      const history = text.length || tools.length || reasoning.length || assistant.refusal ? [...base, assistant] : base;
+      this.storeResponsesState(String(response.id), history, this.responsesRequestConversationIds.get(requestId));
     }
 
     private storeResponsesState(responseId: string, history: JsonRecord[], conversationId?: string): void {
@@ -769,625 +743,44 @@ class implements Plugin {
       return { message: rawMessage, changed: false };
     }
 
-    private convertChatCompletionToResponsesPayload(payload: JsonRecord): JsonRecord | null {
-      if (payload.object === 'response') {
-        return payload;
+    private convertChatCompletionToResponsesPayload(payload: JsonRecord, requestModel: string): JsonRecord {
+      if (payload.object === 'response') return payload;
+      const model = typeof payload.model === 'string' ? payload.model : requestModel;
+      if (!Array.isArray(payload.choices) || payload.choices.length === 0) {
+        return encodeResponsesResult(payload, 'chat_completions', model);
       }
-
-      if (!Array.isArray(payload.choices)) {
-        return null;
-      }
-
-      const choices = payload.choices
-        .filter((choice): choice is JsonRecord => isRecord(choice) && isRecord(choice.message));
-      if (choices.length === 0) {
-        return null;
-      }
-
-      const responseId = this.toResponsesId(payload.id);
-      const createdAt = typeof payload.created === 'number'
-        ? payload.created
-        : Math.floor(Date.now() / 1000);
-      const model = typeof payload.model === 'string' ? payload.model : '';
-
-      const output: JsonRecord[] = [];
-      const finishReasons: string[] = [];
-
-      for (let choiceIndex = 0; choiceIndex < choices.length; choiceIndex += 1) {
-        const choice = choices[choiceIndex];
-        const message = choice.message as JsonRecord;
-        const content = this.normalizeChatMessageContentToResponseOutputText(message.content);
-        const messageId = choices.length === 1
-          ? `${responseId}_msg`
-          : `${responseId}_msg_${choiceIndex}`;
-        const messageContent = content
-          ? [
-            {
-              type: 'output_text',
-              text: content,
-              annotations: []
-            }
-          ]
-          : [];
-
-        output.push({
-          id: messageId,
-          type: 'message',
-          role: 'assistant',
-          status: 'completed',
-          content: messageContent
-        });
-
-        const toolCalls = this.normalizeToolCalls(message.tool_calls) ?? [];
-        for (let toolCallIndex = 0; toolCallIndex < toolCalls.length; toolCallIndex += 1) {
-          const toolCall = toolCalls[toolCallIndex];
-          const toolFunction = isRecord(toolCall.function) ? toolCall.function : undefined;
-          const toolCallId = typeof toolCall.id === 'string' && toolCall.id.trim().length > 0
-            ? toolCall.id.trim()
-            : `${responseId}_choice_${choiceIndex}_call_${toolCallIndex}`;
-          const argumentsPayload = typeof toolFunction?.arguments === 'string'
-            ? toolFunction.arguments
-            : JSON.stringify(toolFunction?.arguments ?? {});
-
-          output.push({
-            id: toolCallId,
-            type: 'function_call',
-            call_id: toolCallId,
-            name: typeof toolFunction?.name === 'string' ? toolFunction.name : '',
-            arguments: argumentsPayload,
-            status: 'completed'
-          });
+      // Preserve the old JSON multi-choice envelope through per-candidate shared encoding.
+      // Each candidate is independently validated; no output or terminal state machine lives here.
+      const candidates = payload.choices.map((rawChoice) => {
+        if (!isRecord(rawChoice) || !isRecord(rawChoice.message)) {
+          return encodeResponsesResult({ ...payload, choices: [rawChoice] }, 'chat_completions', model);
         }
-
-        if (typeof choice.finish_reason === 'string' && choice.finish_reason.length > 0) {
-          finishReasons.push(choice.finish_reason);
-        }
+        const message: JsonRecord = { ...rawChoice.message, content: rawChoice.message.content ?? '' };
+        const toolCalls = this.normalizeToolCalls(message.tool_calls);
+        if (toolCalls !== undefined) message.tool_calls = toolCalls;
+        return encodeResponsesResult({ ...payload, choices: [{ ...rawChoice, index: 0, message }] }, 'chat_completions', model);
+      });
+      const priority = (status: unknown): number => status === 'failed' ? 3 : status === 'incomplete' ? 2 : 1;
+      const terminal = candidates.reduce((selected, candidate) => priority(candidate.status) > priority(selected.status) ? candidate : selected);
+      const converted: JsonRecord = { ...terminal, id: candidates[0].id, output: candidates.flatMap((candidate) => candidate.output as JsonRecord[]) };
+      const finishReasons = payload.choices.filter(isRecord).map((choice) => choice.finish_reason);
+      converted.metadata = { finish_reason: finishReasons[0], finish_reasons: finishReasons };
+      if (converted.status === 'failed' && isRecord(converted.error)) {
+        converted.error = { ...converted.error, code: 'completion_terminated' };
       }
-
-      const usage = isRecord(payload.usage) ? payload.usage : {};
-      const terminal = this.aggregateTerminalFromFinishReasons(finishReasons);
-
-      const converted: JsonRecord = {
-        id: responseId,
-        object: 'response',
-        created_at: createdAt,
-        model,
-        status: this.terminalStatusFromType(terminal.type),
-        output,
-        usage: {
-          input_tokens: typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : 0,
-          output_tokens: typeof usage.completion_tokens === 'number' ? usage.completion_tokens : 0,
-          total_tokens: typeof usage.total_tokens === 'number'
-            ? usage.total_tokens
-            : (
-              (typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : 0)
-              + (typeof usage.completion_tokens === 'number' ? usage.completion_tokens : 0)
-            )
-        }
-      };
-
-      if (terminal.type === 'response.incomplete') {
-        converted.incomplete_details = {
-          reason: terminal.reason
-        };
-      }
-
-      if (terminal.type === 'response.failed') {
-        converted.error = {
-          code: 'completion_terminated',
-          message: terminal.reason
-        };
-      }
-
-      if (finishReasons.length > 0) {
-        converted.metadata = {
-          finish_reason: finishReasons[0],
-          finish_reasons: finishReasons
-        };
-      }
-
       return converted;
     }
 
-    private convertChatCompletionChunkToResponsesEvents(
-      chunk: unknown,
-      ctx: { streamState: Map<string, unknown> }
-    ): JsonRecord[] {
-      if (!isRecord(chunk) || !Array.isArray(chunk.choices)) {
-        return [];
-      }
-
-      const state = this.getOrCreateResponsesStreamState(chunk, ctx.streamState);
-      const events: JsonRecord[] = [];
-
-      if (ctx.streamState.get('responses_stream_started') !== true) {
-        events.push({
-          type: 'response.created',
-          response: {
-            id: state.responseId,
-            object: 'response',
-            created_at: state.createdAt,
-            model: state.model,
-            status: 'in_progress',
-            output: []
-          }
-        });
-        events.push({
-          type: 'response.in_progress',
-          response: {
-            id: state.responseId,
-            object: 'response',
-            created_at: state.createdAt,
-            model: state.model,
-            status: 'in_progress',
-            output: []
-          }
-        });
-        events.push({
-          type: 'response.output_item.added',
-          response_id: state.responseId,
-          output_index: 0,
-          item: {
-            id: state.messageId,
-            type: 'message',
-            role: 'assistant',
-            status: 'in_progress',
-            content: []
-          }
-        });
-        ctx.streamState.set('responses_stream_started', true);
-      }
-
-      for (const choice of chunk.choices) {
-        if (!isRecord(choice)) {
-          continue;
-        }
-
-        const delta = isRecord(choice.delta) ? choice.delta : undefined;
-        if (delta) {
-          if (typeof delta.content === 'string' && delta.content.length > 0) {
-            if (!state.hasTextContentPart) {
-              events.push({
-                type: 'response.content_part.added',
-                response_id: state.responseId,
-                item_id: state.messageId,
-                output_index: 0,
-                content_index: 0,
-                part: {
-                  type: 'output_text',
-                  text: '',
-                  annotations: []
-                }
-              });
-              state.hasTextContentPart = true;
-            }
-
-            state.messageText += delta.content;
-            events.push({
-              type: 'response.output_text.delta',
-              response_id: state.responseId,
-              item_id: state.messageId,
-              output_index: 0,
-              content_index: 0,
-              delta: delta.content
-            });
-          }
-
-          if (Array.isArray(delta.tool_calls)) {
-            for (const rawToolCall of delta.tool_calls) {
-              if (!isRecord(rawToolCall)) {
-                continue;
-              }
-
-              const toolCallIndex = typeof rawToolCall.index === 'number' ? rawToolCall.index : state.toolCalls.length;
-              const functionData = isRecord(rawToolCall.function) ? rawToolCall.function : {};
-              const idFromDelta = typeof rawToolCall.id === 'string' && rawToolCall.id.trim().length > 0
-                ? rawToolCall.id.trim()
-                : undefined;
-              const existingId = state.toolCallIndexToId.get(toolCallIndex);
-              const toolCallId = existingId
-                ?? idFromDelta
-                ?? `${state.responseId}_call_${toolCallIndex}`;
-
-              let toolCall = state.toolCalls.find((item) => item.id === toolCallId);
-              const firstSeen = !toolCall;
-              if (!toolCall) {
-                toolCall = {
-                  id: toolCallId,
-                  name: '',
-                  arguments: ''
-                };
-                state.toolCalls.push(toolCall);
-                state.toolCallIndexToId.set(toolCallIndex, toolCallId);
-              }
-
-              if (typeof functionData.name === 'string' && functionData.name.length > 0) {
-                toolCall.name = functionData.name;
-              }
-
-              if (firstSeen) {
-                events.push({
-                  type: 'response.output_item.added',
-                  response_id: state.responseId,
-                  output_index: state.toolCalls.length,
-                  item: {
-                    id: toolCall.id,
-                    type: 'function_call',
-                    call_id: toolCall.id,
-                    name: toolCall.name,
-                    arguments: '',
-                    status: 'in_progress'
-                  }
-                });
-              }
-
-              if (typeof functionData.arguments === 'string' && functionData.arguments.length > 0) {
-                toolCall.arguments += functionData.arguments;
-                const toolOutputIndex = state.toolCalls.indexOf(toolCall) + 1;
-                events.push({
-                  type: 'response.function_call_arguments.delta',
-                  response_id: state.responseId,
-                  item_id: toolCall.id,
-                  output_index: toolOutputIndex,
-                  delta: functionData.arguments
-                });
-              }
-            }
-          }
-        }
-
-        if (typeof choice.finish_reason === 'string' && choice.finish_reason.length > 0) {
-          state.finishReason = choice.finish_reason;
-          const terminal = this.mapFinishReasonToTerminalEvent(choice.finish_reason);
-          if (terminal) {
-            state.terminalEventType = terminal.type;
-            state.terminalReason = terminal.reason;
-          }
-        }
-      }
-
-      if (isRecord(chunk.usage)) {
-        state.usage = {
-          input_tokens: typeof chunk.usage.prompt_tokens === 'number' ? chunk.usage.prompt_tokens : state.usage.input_tokens,
-          output_tokens: typeof chunk.usage.completion_tokens === 'number'
-            ? chunk.usage.completion_tokens
-            : state.usage.output_tokens,
-          total_tokens: typeof chunk.usage.total_tokens === 'number'
-            ? chunk.usage.total_tokens
-            : state.usage.total_tokens
-        };
-      }
-
-      return events;
-    }
-
-    private buildResponsesStreamCompletionEvents(
-      ctx: { streamState: Map<string, unknown> }
-    ): JsonRecord[] {
-      const state = ctx.streamState.get('responses_stream_state') as ResponsesStreamState | undefined;
-      if (!state) {
-        return [];
-      }
-
-      const events: JsonRecord[] = [];
-      const output: JsonRecord[] = [];
-
-      const messageContentPart: JsonRecord = {
-        type: 'output_text',
-        text: state.messageText,
-        annotations: []
-      };
-      const messageContent = state.hasTextContentPart ? [messageContentPart] : [];
-      const messageItem: JsonRecord = {
-        id: state.messageId,
-        type: 'message',
-        role: 'assistant',
-        status: 'completed',
-        content: messageContent
-      };
-
-      output.push(messageItem);
-
-      if (state.hasTextContentPart) {
-        events.push({
-          type: 'response.output_text.done',
-          response_id: state.responseId,
-          item_id: state.messageId,
-          output_index: 0,
-          content_index: 0,
-          text: state.messageText
-        });
-
-        events.push({
-          type: 'response.content_part.done',
-          response_id: state.responseId,
-          item_id: state.messageId,
-          output_index: 0,
-          content_index: 0,
-          part: messageContentPart
-        });
-      }
-
-      events.push({
-        type: 'response.output_item.done',
-        response_id: state.responseId,
-        output_index: 0,
-        item: messageItem
-      });
-
-      for (const toolCall of state.toolCalls) {
-        const toolOutputIndex = output.length;
-        const toolItem: JsonRecord = {
-          id: toolCall.id,
-          type: 'function_call',
-          call_id: toolCall.id,
-          name: toolCall.name,
-          arguments: toolCall.arguments,
-          status: 'completed'
-        };
-
-        events.push({
-          type: 'response.function_call_arguments.done',
-          response_id: state.responseId,
-          item_id: toolCall.id,
-          output_index: toolOutputIndex,
-          arguments: toolCall.arguments
-        });
-
-        events.push({
-          type: 'response.output_item.done',
-          response_id: state.responseId,
-          output_index: toolOutputIndex,
-          item: toolItem
-        });
-
-        output.push(toolItem);
-      }
-
-      const normalizedUsage = {
-        input_tokens: state.usage.input_tokens,
-        output_tokens: state.usage.output_tokens,
-        total_tokens: state.usage.total_tokens > 0
-          ? state.usage.total_tokens
-          : state.usage.input_tokens + state.usage.output_tokens
-      };
-
-      const terminal = this.resolveTerminalEvent(state);
-      const responsePayload: JsonRecord = {
-        id: state.responseId,
-        object: 'response',
-        created_at: state.createdAt,
-        model: state.model,
-        status: terminal.status,
-        output,
-        usage: normalizedUsage,
-        metadata: {
-          finish_reason: state.finishReason || terminal.reason
-        }
-      };
-
-      if (terminal.type === 'response.incomplete') {
-        responsePayload.incomplete_details = {
-          reason: terminal.reason
-        };
-      }
-
-      if (terminal.type === 'response.failed') {
-        responsePayload.error = {
-          code: 'stream_terminated',
-          message: terminal.reason
-        };
-      }
-
-      events.push({
-        type: terminal.type,
-        response: responsePayload
-      });
-
-      return events;
-    }
-
-    private getOrCreateResponsesStreamState(
-      chunk: JsonRecord,
-      streamState: Map<string, unknown>
-    ): ResponsesStreamState {
-      const existing = streamState.get('responses_stream_state') as ResponsesStreamState | undefined;
-      if (existing) {
-        return existing;
-      }
-
-      const responseId = this.toResponsesId(chunk.id);
-      const createdAt = typeof chunk.created === 'number'
-        ? chunk.created
-        : Math.floor(Date.now() / 1000);
-      const model = typeof chunk.model === 'string' ? chunk.model : '';
-
-      const created: ResponsesStreamState = {
-        responseId,
-        messageId: `${responseId}_msg`,
-        createdAt,
-        model,
-        messageText: '',
-        finishReason: '',
-        usage: {
-          input_tokens: 0,
-          output_tokens: 0,
-          total_tokens: 0
-        },
-        hasTextContentPart: false,
-        toolCalls: [],
-        toolCallIndexToId: new Map<number, string>(),
-        terminalEventType: null,
-        terminalReason: ''
-      };
-
-      streamState.set('responses_stream_state', created);
-      return created;
-    }
-
-    private resolveTerminalEvent(
-      state: ResponsesStreamState
-    ): {
-      type: ResponsesTerminalEventType;
-      status: 'completed' | 'incomplete' | 'failed';
-      reason: string;
-    } {
-      if (state.terminalEventType) {
-        return {
-          type: state.terminalEventType,
-          status: this.terminalStatusFromType(state.terminalEventType),
-          reason: state.terminalReason || state.finishReason || (state.terminalEventType === 'response.incomplete' ? 'unknown' : 'stop')
-        };
-      }
-
-      const mappedByFinishReason = this.mapFinishReasonToTerminalEvent(state.finishReason);
-      if (mappedByFinishReason) {
-        return {
-          type: mappedByFinishReason.type,
-          status: this.terminalStatusFromType(mappedByFinishReason.type),
-          reason: mappedByFinishReason.reason
-        };
-      }
-
-      if (state.messageText.length === 0 && state.toolCalls.length === 0) {
-        return {
-          type: 'response.failed',
-          status: 'failed',
-          reason: 'empty_stream_output'
-        };
-      }
-
-      return {
-        type: 'response.incomplete',
-        status: 'incomplete',
-        reason: 'unknown'
-      };
-    }
-
-    private mapFinishReasonToTerminalEvent(
-      finishReason: string
-    ): { type: ResponsesTerminalEventType; reason: string } | undefined {
-      const normalizedFinishReason = finishReason.trim();
-      if (!normalizedFinishReason) {
-        return undefined;
-      }
-
-      if (normalizedFinishReason === 'stop' || normalizedFinishReason === 'tool_calls') {
-        return {
-          type: 'response.completed',
-          reason: normalizedFinishReason
-        };
-      }
-
-      if (normalizedFinishReason === 'length') {
-        return {
-          type: 'response.incomplete',
-          reason: 'max_output_tokens'
-        };
-      }
-
-      if (normalizedFinishReason === 'content_filter') {
-        return {
-          type: 'response.incomplete',
-          reason: 'content_filter'
-        };
-      }
-
-      if (normalizedFinishReason === 'error') {
-        return {
-          type: 'response.failed',
-          reason: 'upstream_error'
-        };
-      }
-
-      return {
-        type: 'response.completed',
-        reason: normalizedFinishReason
-      };
-    }
-
-    private aggregateTerminalFromFinishReasons(
-      finishReasons: string[]
-    ): { type: ResponsesTerminalEventType; reason: string } {
-      let selectedTerminal: { type: ResponsesTerminalEventType; reason: string } | undefined;
-      let selectedPriority = -1;
-
-      for (const finishReason of finishReasons) {
-        const mapped = this.mapFinishReasonToTerminalEvent(finishReason);
-        if (!mapped) {
-          continue;
-        }
-
-        const priority = this.terminalPriority(mapped.type);
-        if (priority > selectedPriority) {
-          selectedTerminal = mapped;
-          selectedPriority = priority;
-        }
-      }
-
-      return selectedTerminal ?? {
-        type: 'response.completed',
-        reason: 'stop'
-      };
-    }
-
-    private terminalPriority(type: ResponsesTerminalEventType): number {
-      if (type === 'response.failed') {
-        return 3;
-      }
-
-      if (type === 'response.incomplete') {
-        return 2;
-      }
-
-      return 1;
-    }
-
-    private terminalStatusFromType(type: ResponsesTerminalEventType): 'completed' | 'incomplete' | 'failed' {
-      if (type === 'response.completed') {
-        return 'completed';
-      }
-
-      if (type === 'response.incomplete') {
-        return 'incomplete';
-      }
-
-      return 'failed';
-    }
-
-    private normalizeChatMessageContentToResponseOutputText(content: unknown): string {
-      if (typeof content === 'string') {
-        return content;
-      }
-
-      if (!Array.isArray(content)) {
-        return '';
-      }
-
-      const textSegments: string[] = [];
-      for (const item of content) {
-        if (!isRecord(item)) {
-          continue;
-        }
-
-        if (typeof item.text === 'string') {
-          textSegments.push(item.text);
-        }
-      }
-
-      return textSegments.join('');
-    }
-
-    private toResponsesId(rawId: unknown): string {
-      if (typeof rawId !== 'string' || rawId.trim().length === 0) {
-        return `resp_${Date.now()}`;
-      }
-
-      if (rawId.startsWith('resp_')) {
-        return rawId;
-      }
-
-      return `resp_${rawId}`;
+    private getResponsesEncoder(
+      ctx: { requestId: string; streamState: Map<string, unknown> },
+      upstreamModel?: unknown
+    ): ResponsesEventEncoder {
+      const existing = ctx.streamState.get('responses_shared_encoder') as ResponsesEventEncoder | undefined;
+      if (existing) return existing;
+      const model = typeof upstreamModel === 'string' ? upstreamModel : this.responsesRequestModels.get(ctx.requestId) ?? '';
+      const encoder = new ResponsesEventEncoder('chat_completions', model);
+      ctx.streamState.set('responses_shared_encoder', encoder);
+      return encoder;
     }
 
     private normalizeAssistantToolCallReasoningContent(body: JsonRecord): JsonRecord {

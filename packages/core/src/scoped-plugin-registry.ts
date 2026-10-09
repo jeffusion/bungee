@@ -264,6 +264,7 @@ export interface InboundChain {
 }
 
 export interface PhaseAwareHooks {
+  dispatchAdapter?: PrecompiledHooks;
   routePhase: PrecompiledHooks;
   servicePhase: PrecompiledHooks | null;
   upstreamPhase: PrecompiledHooks;
@@ -312,6 +313,7 @@ export class ScopedPluginRegistry {
    * same canonical owner/lifecycle/lease registry as every other consumer.
    */
   readonly serviceHost: PluginServiceHost;
+  private dispatchConfig?: {routes?: any[];services?: Service[]};
   private readonly rpcContexts = new Map<string, import('./plugin-services').PluginServices>();
   private readonly requestLeases = new AsyncLocalStorage<ReadonlyMap<string, () => void>>();
 
@@ -915,6 +917,7 @@ export class ScopedPluginRegistry {
     scope?: PluginScope
   ): Promise<PluginInitContext> {
     const scopeInfo = scope ? toPluginScopeInfo(scope) : undefined;
+    const dispatchTargets = scope?.type === 'route' ? declaredDispatchTargets(config,this.pluginClasses.get(pluginName)?.configSchema ?? []).map(target => ({...target,protocol:(target.type === 'route' ? this.dispatchConfig?.routes : this.dispatchConfig?.services)?.find(entity => entity.id === target.id)?.llm_protocol})) : [];
     const services = this.serviceHost.createContext(pluginName, scope ? getScopeKey(scope) : 'global', this.serviceDependencies.get(pluginName) ?? {});
     this.rpcContexts.set(`${pluginName}\0${scope ? getScopeKey(scope) : 'global'}`, services);
 
@@ -927,13 +930,13 @@ export class ScopedPluginRegistry {
           ...existingContext,
           config,
           scope: scopeInfo,
-          services,
+          services,dispatchTargets,
         };
       }
 
       // 创建新的 context
       const newContext = contextManager.getOrCreateContext(pluginName, '', config);
-      return { ...newContext, scope: scopeInfo, services };
+      return { ...newContext, scope: scopeInfo, services,dispatchTargets };
     }
 
     // 降级：创建简单的 context
@@ -942,7 +945,7 @@ export class ScopedPluginRegistry {
       storage: this.createDummyStorage(),
       logger: this.createPluginLogger(pluginName),
       scope: scopeInfo,
-      services,
+      services,dispatchTargets,
     };
   }
 
@@ -1027,14 +1030,14 @@ export class ScopedPluginRegistry {
    * }
    * ```
    */
-  getPrecompiledHooks(routeId: string, upstreamId?: string, serviceName?: string): PhaseAwareHooks {
+  getPrecompiledHooks(routeId: string, upstreamId?: string, serviceName?: string, adapter?: import('./plugin.types').Plugin): PhaseAwareHooks {
     // 确保已预编译
     if (!this.precompiled) {
       this.precompileAllHooks();
     }
 
     const cacheKey = `phase-aware:${routeId}#${upstreamId || ''}#${serviceName || ''}`;
-    const cached = this.phaseAwareCache.get(cacheKey);
+    const cached = adapter ? undefined : this.phaseAwareCache.get(cacheKey);
     if (cached) {
       return cached;
     }
@@ -1042,10 +1045,12 @@ export class ScopedPluginRegistry {
     const routePhase = this.buildRoutePhaseHooks(routeId);
     const servicePhase = serviceName ? this.buildServicePhaseHooks(routeId, serviceName) : null;
     const upstreamPhase = upstreamId ? this.buildUpstreamPhaseHooks(routeId, upstreamId) : this.buildEmptyPrecompiledHooks();
-    const inbound = this.buildInboundChain(routeId, upstreamId || '', serviceName);
-    const result: PhaseAwareHooks = { routePhase, servicePhase, upstreamPhase, inbound, globalPrecompiled: this.globalPrecompiled, routePrecompiled: this.routePrecompiled.get(routeId) ?? null };
+    const dispatchAdapter = adapter ? this.buildPrecompiledHooks([{scope:{type:'route',routeId},config:{name:'gateway-dispatch-adapter'},priority:0,
+      handler:{pluginName:'gateway-dispatch-adapter',config:{},bodyRequirements:adapter.bodyRequirements.bind(adapter),register:adapter.register.bind(adapter)}}], 'dispatch-adapter') : undefined;
+    const inbound = this.buildInboundChain(routeId, upstreamId || '', serviceName, dispatchAdapter);
+    const result: PhaseAwareHooks = { dispatchAdapter, routePhase, servicePhase, upstreamPhase, inbound, globalPrecompiled: this.globalPrecompiled, routePrecompiled: this.routePrecompiled.get(routeId) ?? null };
 
-    this.phaseAwareCache.set(cacheKey, result);
+    if (!adapter) this.phaseAwareCache.set(cacheKey, result);
     return result;
   }
 
@@ -1317,7 +1322,7 @@ export class ScopedPluginRegistry {
     return this.buildPrecompiledHooks(instances, `upstream-phase:${key}`, true);
   }
 
-  buildInboundChain(routeId: string, upstreamId: string, serviceName?: string): InboundChain {
+  buildInboundChain(routeId: string, upstreamId: string, serviceName?: string, adapter?: PrecompiledHooks): InboundChain {
     const upstreamHooks = this.upstreamPrecompiled.get(`${routeId}#${upstreamId}`);
     const serviceHooks = serviceName ? this.servicePrecompiled.get(`${routeId}#${serviceName}`) : null;
     const routeHooks = this.routePrecompiled.get(routeId);
@@ -1330,6 +1335,7 @@ export class ScopedPluginRegistry {
         if (serviceHooks) response = await serviceHooks.hooks.onResponse.promise(response, ctx);
         if (routeHooks) response = await routeHooks.hooks.onResponse.promise(response, ctx);
         if (globalHooks) response = await globalHooks.hooks.onResponse.promise(response, ctx);
+        if (adapter) response = await adapter.hooks.onResponse.promise(response, ctx);
         return response;
       },
       onRawResponse: async (result, ctx) => {
@@ -1338,11 +1344,12 @@ export class ScopedPluginRegistry {
         if (serviceHooks) current = await serviceHooks.hooks.onRawResponse.promise(current, ctx);
         if (routeHooks) current = await routeHooks.hooks.onRawResponse.promise(current, ctx);
         if (globalHooks) current = await globalHooks.hooks.onRawResponse.promise(current, ctx);
+        if (adapter) current = await adapter.hooks.onRawResponse.promise(current, ctx);
         return current;
       },
       onStreamChunk: async (chunk: any, ctx: any) => {
         let chunks: any[] = [chunk];
-        const phaseHooks = [upstreamHooks, serviceHooks, routeHooks, globalHooks];
+        const phaseHooks = [upstreamHooks, serviceHooks, routeHooks, globalHooks, adapter];
         for (const precompiledHooks of phaseHooks) {
           if (!precompiledHooks) continue;
 
@@ -1361,6 +1368,7 @@ export class ScopedPluginRegistry {
         if (serviceHooks) result = await serviceHooks.hooks.onFlushStream.promise(result, ctx);
         if (routeHooks) result = await routeHooks.hooks.onFlushStream.promise(result, ctx);
         if (globalHooks) result = await globalHooks.hooks.onFlushStream.promise(result, ctx);
+        if (adapter) result = await adapter.hooks.onFlushStream.promise(result, ctx);
         return result;
       },
       onError: async (ctx: any) => {
@@ -1368,6 +1376,7 @@ export class ScopedPluginRegistry {
         if (serviceHooks) await serviceHooks.hooks.onError.promise(ctx);
         if (routeHooks) await routeHooks.hooks.onError.promise(ctx);
         if (globalHooks) await globalHooks.hooks.onError.promise(ctx);
+        if (adapter) await adapter.hooks.onError.promise(ctx);
       }
     };
   }
@@ -1477,6 +1486,7 @@ export class ScopedPluginRegistry {
     services?: Service[];
     [key: string]: any; // 允许额外字段
   }, dependencies?: PluginDependencyGraph): Promise<{ success: number; failed: number }> {
+    this.dispatchConfig = config;
     this.dependencies = dependencies;
     if (dependencies) {
       this.setServiceDependencies(dependencies.declarations());

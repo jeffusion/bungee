@@ -30,7 +30,7 @@ export class DispatchPlugin implements Plugin {
         if (!service) throw new DataAdmissionError(422,'dispatch_target_unavailable');
         route = {...entry,service:service.name,service_id:service.id,endpoints:undefined} as RouteConfig;
       }
-      return {route,effective:resolveEffectiveRoute(config,route),context,entryRouteId:entry.id ?? entry.path,target:dispatch.target};
+      return {route,effective:resolveEffectiveRoute(config,route),context,entryRouteId:entry.id ?? entry.path,target:dispatch.target,adapter:dispatch.adapter};
     });
   }
 }

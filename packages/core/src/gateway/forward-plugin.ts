@@ -1275,7 +1275,7 @@ export async function executeForward(
       }
     }
 
-    const responseDemand = collectPluginBodyRequirements([phaseAwareHooks?.upstreamPhase,phaseAwareHooks?.servicePhase,phaseAwareHooks?.routePhase], {
+    const responseDemand = collectPluginBodyRequirements([phaseAwareHooks?.upstreamPhase,phaseAwareHooks?.servicePhase,phaseAwareHooks?.routePhase,phaseAwareHooks?.dispatchAdapter], {
       requestId,method:requestSnapshot.method,url:finalTargetUrl,routeId,serviceId:route.service,upstreamId:upstream_id,stage:'selected',
     });
     // Strict raw response hooks run before all legacy response processing.
@@ -1458,7 +1458,7 @@ export async function executeForward(
           phaseAwareHooks.globalPrecompiled?.hasStreamCallbacks ||
           phaseAwareHooks.upstreamPhase.hasStreamCallbacks ||
           phaseAwareHooks.servicePhase?.hasStreamCallbacks ||
-          phaseAwareHooks.routePhase.hasStreamCallbacks
+          phaseAwareHooks.routePhase.hasStreamCallbacks || phaseAwareHooks.dispatchAdapter?.hasStreamCallbacks
         )),
         hasRawResponseCallbacks,
         attemptSignal,
