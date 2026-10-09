@@ -1,5 +1,11 @@
 # Codex Router 实施记录
 
+## PR #76 合并后的基线更新（2026-10-09）
+
+#76 以 squash 提交 `8fc891dd5d37df3197a00dce17ba1506f047fa0f` 合入 main，随后发布 5.17.0。将 #77 的功能提交从原 #76 head 重放到最新 main `01b0f2f`，再依次重放 #78、#79、#80，保留四阶段依赖关系。#77 重放无需人工源码合并；#80 的冲突仅在自动生成的 UI bundle，最终从源代码完整重建资源。重放前后功能源码一致，额外包含 main 的版本号与发布记录更新。
+
+#77 完整构建、架构检查及目录、OAuth、配置、WebSocket 回归 346 pass / 0 fail；最终依赖链完整构建及专项 156 pass / 0 fail。构建后 master＋双 worker＋CLI mock 工具闭环 6 pass / 0 fail / 198 assertions。没有再次替换本地服务，既有真实提供商验收对应此前已部署镜像。
+
 ## Codex 请求协议修复（2026-10-09）
 
 起点为 `codex/codex-router-websocket` 的 `090937b965d2d7d94555fa045021a40a4e4166f7`，继续 PR #80 的既有依赖链。没有新增 UI 选项、数据库迁移或旧配置兼容层。
