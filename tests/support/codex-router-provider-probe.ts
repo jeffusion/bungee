@@ -13,9 +13,9 @@ export async function probeCodexProvider(input:{model:string;baseUrl:string}) {
   const expected=initial.replace(before,after), path=join(root,'probe.txt'), audit=join(root,'mcp-audit.jsonl');
   const script=join(root,'echo-mcp.mjs');await writeFile(path,initial);await writeFile(script,echoMcpScript);
   const executable=Bun.which('codex');if(!executable)throw new Error('codex executable unavailable');
-  const child=spawn(executable,['--ignore-user-config','--ignore-rules','app-server','--stdio',
+  const child=spawn(executable,['app-server','--stdio',
     '-c',`openai_base_url=${JSON.stringify(input.baseUrl)}`,'-c','model_provider="openai"',
-    '-c',`mcp_servers.codex_fixture={command=${JSON.stringify(process.execPath)},args=${JSON.stringify([script,audit])},startup_timeout_sec=10,tool_timeout_sec=10}`],
+    '-c',`mcp_servers={codex_fixture={command=${JSON.stringify(process.execPath)},args=${JSON.stringify([script,audit])},startup_timeout_sec=10,tool_timeout_sec=10}}`],
     {cwd:root,stdio:['pipe','pipe','pipe']});
   let buffer='',closed=false;const pending=new Map<number,{resolve(value:any):void;reject(error:Error):void}>();
   const messages:any[]=[];

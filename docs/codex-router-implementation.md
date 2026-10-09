@@ -1,5 +1,51 @@
 # Codex Router 实施记录
 
+## Codex 请求协议修复（2026-10-09）
+
+起点为 `codex/codex-router-websocket` 的 `090937b965d2d7d94555fa045021a40a4e4166f7`，继续 PR #80 的既有依赖链。没有新增 UI 选项、数据库迁移或旧配置兼容层。
+
+两份完整脱敏 Desktop 请求保留工具定义、grammar、结构化输出和输入顺序，修复前可复现 additional_tools/stream_options 拒绝。CLI 版本为 0.160.1，Desktop 发出请求的版本无法从日志确认。样本位于 `plugins/codex-router/tests/fixtures/captured-app-*.json`。
+
+### 字段与工具处理
+
+| 输入 | 转换规则 |
+|---|---|
+| 顶层 tools / additional_tools.tools | 转换前合并注册，载体不生成聊天消息；namespace 内 function/custom 共用编码与回程映射 |
+| 重复声明 | 同身份、相同规范定义去重；类型或定义冲突拒绝；重复项仍计入工具项数预算 |
+| custom | 包装为单个字符串 input，回程恢复原文；不声称目标执行原生 grammar |
+| reasoning_summary_delivery=sequential_cutoff | 校验后省略，记录源交付偏好不适用于目标 |
+| include_usage | 校验布尔值；Chat 流式强制 usage，Anthropic 使用自身 usage 事件 |
+| access_programs 缺省 / {} / cyber=standard | 接受；有字段时省略并记录目标使用自己的访问策略 |
+| cyber=daybreak_blue/red | 明确拒绝，不降级为普通外部模型调用 |
+| reasoning.effort | 仅明确支持时映射，否则记录省略；不猜测 thinking budget |
+| reasoning.summary / context=all_turns / text.verbosity | 验证后作为生成偏好省略并记录 |
+| text.format | 保留实际格式约束；Chat 映射，目标不可表示时拒绝 |
+| 加密/compaction/未解析引用/未知类型或字段 | 明确拒绝，返回具体 param，不丢弃语义继续生成 |
+
+完整 base 样本包含严格 JSON Schema，完整 preferences 样本包含中途 developer 指令。二者在 Chat 路径通过；当前 Anthropic 无法无损表示对应约束，仍分别在 text.format / input[6].role 拒绝。较小但包含同种工具声明和生成偏好的 Anthropic 样本及真实 CLI 工具闭环通过。这是已知范围限制，不能报告任意 Codex 请求都兼容 Anthropic。
+
+原生 Responses 沿用透传，不执行偏好降级。转换历史使用 codec 返回的 canonicalInput；原生 WS 引用续聊保留工具声明。失败、取消、截断和 incomplete 不写入成功连接历史。工具列表变化和跨 worker、跨协议续聊继续使用原始逻辑工具身份。
+
+诊断只含字段路径、mapped/omitted 动作、稳定原因码，通过 dispatch 写入已有请求步骤 codex_router_conversion，并携带逻辑 requestId；HTTP、WS 共用 worker 的请求日志依赖。没有独立统计或新日志表。错误详情经跨 bundle 归一化保留安全 message/param，正文和参数值不回显。
+
+### 参考与许可
+
+以 cc-switch `b4a079430ce85a604e10d97d4b7530774e00e112` 的工具提取和测试场景作为行为参考；new-api `7aa3531ef4c247ad4891c06cc8ed9d0ffb73fecc`、sub2api `3a6fd1c9db07203ca308aaba69e502bc1f35b307` 用于核对转换损耗和历史边界。未复制这些项目的协议源码，未增加依赖或第二套网关。后续若移植实质 cc-switch 源码需保留 MIT 版权和许可。访问模式依据 [OpenAI Daybreak 文档](https://developers.openai.com/api/docs/guides/daybreak)，不授予目标权限。
+
+### 本轮证据
+
+- 最终 codec、插件历史、核心 HTTP/WS 与安全错误专项：147 pass / 0 fail。
+- 架构检查、llms/core 构建通过；完整 types/UI/CLI 构建在本轮早期通过，UI 无改动。
+- 构建插件＋真实 master＋双 worker＋真实 CLI：6 pass / 0 fail / 197 assertions；Chat、Anthropic 都实际执行 printf、custom 文件补丁和本地 MCP。mock 必须收到三项对应工具结果才返回最终答案；补丁文件、执行事件、MCP 审计、call_id、出站历史及计量均断言通过。
+- 完整 Desktop fixtures 经公共 HTTP、WS 到达 Chat mock；跨 worker 的 Chat→Anthropic 规范历史和工具声明变化通过；WS 生成的诊断已查询既有 access.db processing_steps 确认落盘。
+- 独立复核 P2：无条件清理 WS 工具声明破坏原生引用续聊。改为只使用转换路径的 canonicalInput，补绑定/未绑定原生续聊测试（9 pass），同轴复审确认修复。诊断宿主依赖补充复审无新增 P0–P2。
+- 全量源文件精确路径回归：4111 pass / 0 fail / 32078 assertions，386 文件。Bun 未加 ./ 的过滤器会额外收集 dist 下复制的测试，首次两次运行因此有两项模块路径错误；最终精确源文件运行退出 0。
+- 镜像 a8208ab6b6819e52a19a10ab19baa2a19b6d81c5 构建期间旧实例持续运行，随后 compose up --no-deps --force-recreate 直接替换，无 compose down、预先停服或额外备份。Compose 返回后 8.55 秒 /health 恢复 200，容器 healthy；这不是精确停机时长测量。配置版本切换前后均为 132，现有 gpt-6-luna→zai/glm-5.3-flash 绑定不变。
+- 真实 CLI probe 使用现有认证能列出 gpt-6-luna，但生成入口返回 unauthorized/401，未到模型上游。两轮状态均 failed，无文件修改、命令或 MCP 执行，不报告 GLM 工具链已验收。已请求用户让本机 CLI 使用既有授权访问方式，不索取或复制凭据。
+- 当前没有已绑定的真实 Anthropic 目标；真实 Anthropic、跨真实提供商续聊与 Desktop 人工验收仍有缺口。上述 fixture/model mock 证据不代替这些验收。
+
+真实提供商 probe：`BUNGEE_REAL_CODEX_PROBE=1 bun tests/support/codex-router-provider-probe.ts <现有公开模型> <现有入口URL>`。仅在明确授权后使用；由 Codex 自己使用现有认证，不读取或复制凭据，不写用户配置，不修改服务绑定。随机临时目录包含三行文本和本地 MCP，验证读取→修改第二行→重读→MCP→无工具续聊两个 nonce，保留临时目录用于核验。
+
 ## 协议字段清理（2026-10-09）
 
 删除本轮开发新增的 route/service 协议字段、校验、SDK 元数据和运行时回退，不保留兼容格式。Codex 绑定的 `target.protocol` 是唯一目标协议来源；缺少时配置发布与插件初始化均拒绝。表单选择转发目标不再自动预填协议。
