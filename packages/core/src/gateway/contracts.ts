@@ -27,7 +27,7 @@ export type GatewayQueryRuleArguments = [params:URLSearchParams,rules:Modificati
 export interface GatewayDispatchTarget { readonly type: 'route' | 'service'; readonly id: string }
 export interface DispatchRequestInput {
   readonly context: import('../hooks').MutableRequestContext;
-  readonly targets: readonly (GatewayDispatchTarget & {readonly protocol?: LLMProtocol})[];
+  readonly targets: readonly GatewayDispatchTarget[];
   readonly principal?: import('../plugin-extensions').DataPrincipal;
   readonly signal: AbortSignal;
   readonly servingRevision?: number;

@@ -11,7 +11,10 @@
   import { Button } from '$components/ui/button';
   import PriceModelPicker from '@plugins/token-stats/ui/PriceModelPicker.svelte';
   import type { ModelsDevProviderSummary, ModelsDevCatalogStatus } from '@plugins/models-dev/contract';
-  import type { ModelBinding } from '@plugins/codex-router/server/config';
+  import type { ModelBinding as SavedModelBinding } from '@plugins/codex-router/server/config';
+
+  // Drafts may omit the protocol until the user selects it; published bindings require it.
+  type ModelBinding = Omit<SavedModelBinding, 'target'> & { target: Omit<SavedModelBinding['target'], 'protocol'> & { protocol?: SavedModelBinding['target']['protocol'] } };
 
   let { value = $bindable([]), onchange }: { value?: ModelBinding[]; onchange?: (value: ModelBinding[]) => void } = $props();
   const componentId = `codex-bindings-${Math.random().toString(36).slice(2, 10)}`;
@@ -22,7 +25,7 @@
   let providers = $state<ModelsDevProviderSummary[]>([]);
   let catalogVersion = $state<number | null>(null);
   let modelCount = $state(0), loading = $state(true), catalogError = $state(false), targetsError = $state(false), targetsLoading = $state(true);
-  let targets = $state<{ type: 'route' | 'service'; id: string; label: string; protocol?: ModelBinding['target']['protocol'] }[]>([]);
+  let targets = $state<{ type: 'route' | 'service'; id: string; label: string }[]>([]);
   let alive = false;
   const controller = new AbortController();
   const t = (key: string) => $isLoading ? '' : getPluginText(`editor.${key}`, 'codex-router', (id, options) => $_(id, options));
@@ -38,7 +41,6 @@
   });
   const protocolOptions = [{ value: 'responses', label: 'Responses' }, { value: 'chat_completions', label: 'Chat Completions' }, { value: 'anthropic_messages', label: 'Anthropic Messages' }];
   $effect(() => { if (rowIds.length !== value.length) rowIds = value.map((_, index) => rowIds[index] ?? nextRowId++); });
-  function targetProtocol(binding: ModelBinding) { return binding.target.protocol ?? targets.find(target => target.type === binding.target.type && target.id === binding.target.id)?.protocol; }
 
   function publish(next: ModelBinding[]) { value = next; onchange?.(value); }
   function update(index: number, patch: Partial<ModelBinding>) {
@@ -91,7 +93,7 @@
     try {
       const config = (await getConfigSnapshot()).config.logical_configuration;
       if (!alive) return;
-      targets = [...config.routes.map(route => ({ type: 'route' as const, id: route.id, label: route.path, protocol: route.llm_protocol })), ...config.services.map(service => ({ type: 'service' as const, id: service.id, label: service.name, protocol: service.llm_protocol }))];
+      targets = [...config.routes.map(route => ({ type: 'route' as const, id: route.id, label: route.path })), ...config.services.map(service => ({ type: 'service' as const, id: service.id, label: service.name }))];
     } catch { if (alive) targetsError = true; }
     finally { if (alive) targetsLoading = false; }
   }
@@ -153,11 +155,11 @@
         </div>
         <div class="min-w-0 space-y-2" data-testid="codex-binding-target">
           <Label class="block" id={`${id}-target-label`}>{t('target')}</Label>
-            <BSelect searchable searchLabels={{ empty: t('noOptions') }} value={binding.target.id ? JSON.stringify([binding.target.type, binding.target.id]) : ''} options={targetOptions} ariaLabel={t('target')} placeholder={t('targetPlaceholder')} disabled={targetsLoading || targetsError} onchange={encoded => { const [type, id] = JSON.parse(String(encoded)); const selected = targets.find(target => target.type === type && target.id === id); update(index, { target: { type, id, ...(binding.target.protocol ?? selected?.protocol ? { protocol: binding.target.protocol ?? selected?.protocol } : {}) } }); }} />
+            <BSelect searchable searchLabels={{ empty: t('noOptions') }} value={binding.target.id ? JSON.stringify([binding.target.type, binding.target.id]) : ''} options={targetOptions} ariaLabel={t('target')} placeholder={t('targetPlaceholder')} disabled={targetsLoading || targetsError} onchange={encoded => { const [type, id] = JSON.parse(String(encoded)); update(index, { target: { ...binding.target, type, id } }); }} />
         </div>
         <div class="space-y-2">
           <Label class="block">{t('targetProtocol')}</Label>
-          <BSelect searchable searchLabels={{ empty: t('noOptions') }} value={targetProtocol(binding) ?? ''} options={protocolOptions} ariaLabel={t('targetProtocol')} placeholder={t('targetProtocolPlaceholder')} onchange={protocol => update(index, { target: { ...binding.target, protocol: String(protocol) as ModelBinding['target']['protocol'] } })} />
+          <BSelect searchable searchLabels={{ empty: t('noOptions') }} value={binding.target.protocol ?? ''} options={protocolOptions} ariaLabel={t('targetProtocol')} placeholder={t('targetProtocolPlaceholder')} onchange={protocol => update(index, { target: { ...binding.target, protocol: String(protocol) as ModelBinding['target']['protocol'] } })} />
         </div>
         <details class="border-t border-carbon-600 pt-3">
           <summary class="cursor-pointer text-xs text-zinc-400 focus-visible:outline focus-visible:outline-nexus-500">{t('advanced')}</summary>

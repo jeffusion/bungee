@@ -12,15 +12,15 @@
 
 目标模型缺失、缺少上下文长度或不支持文本时，目录隐藏该绑定占用的标识，请求返回模型不可用；不会恢复原生能力或悄悄转回原生上游。models.dev 刷新失败时仍使用最后有效资料。
 
-插件设置页使用与 models-dev、chatgpt-oauth 相同的 `native-static` 原生组件注册机制，浏览共享目录并提供路由管理入口；具体模型绑定在入口路由的插件配置表单中编辑并随该路由保存。设置页和表单复用模型目录组件，不使用 iframe。
+模型绑定直接在入口路由的插件配置表单中编辑并随该路由保存。插件不提供独立设置页，目录管理使用 models-dev 插件。
 
 ```json
-{"models":[{"source":"gpt-native","provider":"anthropic","model":"claude-sonnet-4","target":{"type":"service","id":"目标服务的 UUID"}}]}
+{"models":[{"source":"gpt-native","sourceProtocol":"responses","provider":"anthropic","model":"claude-sonnet-4","target":{"type":"service","id":"目标服务的 UUID","protocol":"anthropic_messages"}}]}
 ```
 
 上游地址、API Key、模型映射、重试均使用目标原配置。Codex base URL 已指向入口即可；ChatGPT 登录的模型目录请求可发现新增模型，API Key 模式不承诺自动列入选择器。
 
-入口使用 WebSocket 时开启 route.websocket.enabled。目标接收协议必须声明 llm_protocol；Responses 目标也开启 websocket 时使用原生 WS 上游，否则使用 HTTP/SSE。每个连接串行生成，断开取消活动请求。WS 首版沿用握手限流；需要未支持的逐生成硬预算时，目标生成在连接上游前拒绝。
+入口使用 WebSocket 时开启 route.websocket.enabled。目标接收协议必须在插件绑定的 `target.protocol` 中声明；Responses 目标也开启 websocket 时使用原生 WS 上游，否则使用 HTTP/SSE。缺少协议时拒绝保存，不从 route/service 推断。每个连接串行生成，断开取消活动请求。WS 首版沿用握手限流；需要未支持的逐生成硬预算时，目标生成在连接上游前拒绝。
 
 普通与工具历史可跨 worker/模型重编码；可信身份的临时缓存默认 10 分钟失效，不持久化正文。丢失引用、不可还原的压缩/加密历史要求新建对话；原生加密引用只能回到经验证的相同上游。首版不启用 Anthropic thinking 或模拟服务端搜索，强制搜索明确报错。
 

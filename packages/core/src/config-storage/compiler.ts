@@ -26,8 +26,8 @@ import {
 } from './validation';
 
 const GLOBAL_KEYS = ['log_level', 'body_parser_limit', 'auth', 'logging', 'publication'] as const;
-const SERVICE_KEYS = ['llm_protocol', 'health_check', 'failover', 'load_balancing'] as const;
-const ROUTE_KEYS = ['llm_protocol', 'request', 'response', 'path_rewrite', 'auth', 'timeouts', 'rate_limit', 'cors',
+const SERVICE_KEYS = ['health_check', 'failover', 'load_balancing'] as const;
+const ROUTE_KEYS = ['request', 'response', 'path_rewrite', 'auth', 'timeouts', 'rate_limit', 'cors',
   'response_rules', 'direct_response', 'redirect', 'retry', 'websocket'] as const;
 const UPSTREAM_KEYS = ['request', 'response', 'description', 'condition'] as const;
 const ENTITY_KEYS = ['id', 'position', 'plugins'] as const;

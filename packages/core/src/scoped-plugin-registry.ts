@@ -917,7 +917,7 @@ export class ScopedPluginRegistry {
     scope?: PluginScope
   ): Promise<PluginInitContext> {
     const scopeInfo = scope ? toPluginScopeInfo(scope) : undefined;
-    const dispatchTargets = scope?.type === 'route' ? declaredDispatchTargets(config,this.pluginClasses.get(pluginName)?.configSchema ?? []).map(target => ({...target,protocol:(target.type === 'route' ? this.dispatchConfig?.routes : this.dispatchConfig?.services)?.find(entity => entity.id === target.id)?.llm_protocol})) : [];
+    const dispatchTargets = scope?.type === 'route' ? declaredDispatchTargets(config,this.pluginClasses.get(pluginName)?.configSchema ?? []) : [];
     const services = this.serviceHost.createContext(pluginName, scope ? getScopeKey(scope) : 'global', this.serviceDependencies.get(pluginName) ?? {});
     this.rpcContexts.set(`${pluginName}\0${scope ? getScopeKey(scope) : 'global'}`, services);
 

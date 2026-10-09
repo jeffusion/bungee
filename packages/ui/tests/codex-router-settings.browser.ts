@@ -8,7 +8,7 @@ const manifest = await Bun.file(new URL('../../../plugins/codex-router/manifest.
 const runtime = configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null,
   retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 }));
 const entryId = '10000000-0000-4000-8000-000000000001', serviceId = '20000000-0000-4000-8000-000000000001';
-runtime.config.logical_configuration.services = [{ id: serviceId, position: 0, name: 'fixture-service', llm_protocol: 'responses', plugins: [], endpoints: [{ id: '30000000-0000-4000-8000-000000000001', position: 0, url: 'https://fixture.invalid', plugins: [] }] }];
+runtime.config.logical_configuration.services = [{ id: serviceId, position: 0, name: 'fixture-service', plugins: [], endpoints: [{ id: '30000000-0000-4000-8000-000000000001', position: 0, url: 'https://fixture.invalid', plugins: [] }] }];
 runtime.config.logical_configuration.routes = [{ id: entryId, position: 0, path: '/codex', service_id: serviceId, plugins: [{ id: '40000000-0000-4000-8000-000000000001', position: 0, name: 'codex-router', enabled: true, options: { models: [] } }] }];
 const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request) {
   const path = new URL(request.url).pathname;
@@ -64,6 +64,7 @@ try {
   await expect(row.getByRole('combobox', { name: '转发路由 / 服务', exact: true })).toHaveAttribute('placeholder', '选择已有路由或服务');
   await expect(row).not.toContainText('["route",""]');
   await expect(row.getByRole('combobox', { name: '源模型协议', exact: true })).toHaveValue('Responses');
+  await expect(row.getByRole('combobox', { name: '目标模型协议', exact: true })).toHaveAttribute('placeholder', '选择目标接收协议');
   await row.getByRole('button', { name: '手动输入', exact: true }).click();
   await row.getByRole('textbox', { name: '原始模型', exact: true }).fill('manual-draft');
   await row.getByRole('button', { name: '从目录选择', exact: true }).click();
@@ -91,7 +92,7 @@ try {
   await page.getByRole('option', { name: 'org/model-1', exact: true }).click();
   await row.getByRole('combobox', { name: '转发路由 / 服务', exact: true }).click();
   await page.getByRole('option', { name: '服务 · fixture-service', exact: true }).click();
-  await expect(row.getByRole('combobox', { name: '目标模型协议', exact: true })).toHaveValue('Responses');
+  await expect(row.getByRole('combobox', { name: '目标模型协议', exact: true })).toHaveValue('');
   await row.getByRole('combobox', { name: '目标模型协议', exact: true }).click();
   await page.getByRole('option', { name: 'Chat Completions', exact: true }).click();
   // Source provider changes only reset the source selection, preserving the destination.

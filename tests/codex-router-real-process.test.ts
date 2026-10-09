@@ -181,18 +181,18 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       plugin_activations: ['models-dev', 'codex-router', 'key-access', 'token-metering', 'token-stats', CODEX_PROCESS_PROBE].map(plugin_name => ({plugin_name})),
       logical_configuration: {
         plugins: [binding(CODEX_PROCESS_PROBE, 22)],
-        services: [{id: CHAT, position: 1, name: 'Chat fixture', llm_protocol: 'chat_completions', plugins: [], endpoints: [endpoint(13)]}],
+        services: [{id: CHAT, position: 1, name: 'Chat fixture', plugins: [], endpoints: [endpoint(13)]}],
         routes: [
           {id: ENTRY, position: 1, path: '/codex', websocket: {enabled: true}, endpoints: [endpoint(11)],
             path_rewrite: {'^/codex': ''}, plugins: [binding(CODEX_PROCESS_PROBE, 20, {priority: -1000}), binding('codex-router', 21, {models: [
-              {provider: 'lab', model: CODEX_MODELS[0], target: {type: 'route', id: NATIVE}},
-              {provider: 'lab', model: CODEX_MODELS[1], target: {type: 'service', id: CHAT}},
-              {provider: 'lab', model: CODEX_MODELS[2], target: {type: 'route', id: ANTHROPIC}},
-              {provider: 'lab', model: CODEX_MODELS[3], target: {type: 'route', id: NATIVE_WS}},
+              {provider: 'lab', model: CODEX_MODELS[0], target: {type: 'route', id: NATIVE, protocol: 'responses'}},
+              {provider: 'lab', model: CODEX_MODELS[1], target: {type: 'service', id: CHAT, protocol: 'chat_completions'}},
+              {provider: 'lab', model: CODEX_MODELS[2], target: {type: 'route', id: ANTHROPIC, protocol: 'anthropic_messages'}},
+              {provider: 'lab', model: CODEX_MODELS[3], target: {type: 'route', id: NATIVE_WS, protocol: 'responses'}},
             ]})]},
-          {id: NATIVE, position: 2, path: '/native-target', llm_protocol: 'responses', endpoints: [endpoint(12)], path_rewrite: {'^/native-target': ''}, plugins: []},
-          {id: ANTHROPIC, position: 3, path: '/anthropic-target', llm_protocol: 'anthropic_messages', endpoints: [endpoint(14)], path_rewrite: {'^/anthropic-target': ''}, plugins: []},
-          {id: NATIVE_WS, position: 4, path: '/native-ws-target', llm_protocol: 'responses', websocket: {enabled: true}, endpoints: [endpoint(15)], path_rewrite: {'^/native-ws-target': ''}, plugins: []},
+          {id: NATIVE, position: 2, path: '/native-target', endpoints: [endpoint(12)], path_rewrite: {'^/native-target': ''}, plugins: []},
+          {id: ANTHROPIC, position: 3, path: '/anthropic-target', endpoints: [endpoint(14)], path_rewrite: {'^/anthropic-target': ''}, plugins: []},
+          {id: NATIVE_WS, position: 4, path: '/native-ws-target', websocket: {enabled: true}, endpoints: [endpoint(15)], path_rewrite: {'^/native-ws-target': ''}, plugins: []},
         ],
       },
     };
@@ -254,6 +254,16 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     expect(new Set(rows.map(row => row.attempt_id)).size).toBe(selected.length);
     if (completed) for (const row of rows) expect(row).toMatchObject({input_tokens: 4, output_tokens: 2, outcome: 'completed'});
   }
+
+  test('publication rejects a missing binding protocol without changing the revision', async () => {
+    const invalid=structuredClone(aggregate);
+    delete invalid.logical_configuration.routes[0].plugins.find((plugin:any)=>plugin.name==='codex-router').options.models[0].target.protocol;
+    const result=await fetch(`${management}/api/config`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({expected_revision:revision,mutation_id:randomUUID(),aggregate:invalid}),signal:AbortSignal.timeout(5000)});
+    expect(result.status).toBe(422);
+    expect((await result.json() as any).errors).toContainEqual({code:'invalid_value',path:'logical_configuration.routes[0].plugins[1].options.models[0].target',message:'Dispatch target requires an explicit receiving protocol'});
+    expect((await control('/api/config')).body.revision).toBe(revision);
+    expect((await control('/api/config/runtime')).body.publication.serving_revision).toBe(revision);
+  });
 
   test('public models retain metadata; long tool history crosses real workers via canonical RPC and rejects another identity', async () => {
     const catalog = await fetch(`${proxy}/codex/models?client_version=0.160.1`, {headers: {authorization: `Bearer ${token}`}});

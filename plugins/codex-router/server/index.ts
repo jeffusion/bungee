@@ -15,12 +15,10 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
   static readonly configSchema = manifest.configSchema as unknown as PluginConfigField[];
   private readonly bindings;
   private history!:HistoryClient;
-  private targets:PluginInitContext['dispatchTargets']=[];
   private catalog!: ModelsDevCapabilitiesService;
   constructor(options?: { models?: unknown }) { this.bindings = parseBindings(options?.models); }
   async init(context: PluginInitContext) {
     if (context.scope?.type !== 'route') throw new Error('codex_router_requires_route_scope');
-    this.targets=context.dispatchTargets ?? [];
     this.history=historyClient(context.services!.rpc!.consume('codex-router',historyRpc));
     this.catalog = context.services!.consume('models-dev', MODELS_DEV_CAPABILITIES_SERVICE_ID, MODELS_DEV_CAPABILITIES_CONTRACT_VERSION);
   }
@@ -33,9 +31,8 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       if (context.method !== 'POST' || !/\/responses$/.test(context.originalUrl.pathname)) return;
       const binding = this.bindings.find(binding => bindingSource(binding) === context.body?.model);
       if (!binding) return;
-      const target = targets.find(target => target.type === binding.target.type && target.id === binding.target.id);
-      const protocol = binding.target.protocol ?? target?.protocol;
-      if (!protocol) throw new DataAdmissionError(422,'codex_router_target_protocol_required');
+      if (!targets.some(target => target.type === binding.target.type && target.id === binding.target.id)) throw new DataAdmissionError(422,'codex_router_target_unavailable');
+      const protocol = binding.target.protocol;
       const capabilities=this.catalog.model(binding);
       if(!capabilities || capabilities.contextWindow === null || !capabilities.inputModalities.includes('text'))throw new DataAdmissionError(503,'codex_router_model_unavailable');
       const scope=principal?.domain !== 'anonymous' && principal?.keyId ? createHash('sha256').update(JSON.stringify([principal,context.routeId,servingRevision ?? null,this.bindings])).digest('hex') : null;
@@ -83,10 +80,10 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       if (context.method !== 'GET' || !/\/models$/.test(context.originalUrl.pathname) || !response.ok) return response;
       const native = await context.bodyHandle!.json({id:'codex-router.catalog',mandatory:true});
       const bindings=this.bindings.map(binding=>{
-        const protocol=binding.target.protocol ?? this.targets?.find(target=>target.type===binding.target.type && target.id===binding.target.id)?.protocol;
+        const protocol=binding.target.protocol;
         return {...binding,capabilityOverrides:{...binding.capabilityOverrides,
           ...(protocol==='anthropic_messages'?{images:false}:{}),
-          ...(protocol && protocol!=='responses' ? {reasoning:protocol==='chat_completions' ? binding.capabilityOverrides?.reasoningEffort===true : false}:{}),
+          ...(protocol!=='responses' ? {reasoning:protocol==='chat_completions' ? binding.capabilityOverrides?.reasoningEffort===true : false}:{}),
         }};
       });
       const body = mergeCatalog(native, bindings, this.catalog);
