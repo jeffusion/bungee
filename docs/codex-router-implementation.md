@@ -6,6 +6,10 @@
 
 #77 完整构建、架构检查及目录、OAuth、配置、WebSocket 回归 346 pass / 0 fail；最终依赖链完整构建及专项 156 pass / 0 fail。构建后 master＋双 worker＋CLI mock 工具闭环 6 pass / 0 fail / 198 assertions。没有再次替换本地服务，既有真实提供商验收对应此前已部署镜像。
 
+#77 随后的双平台 CI 暴露三项目录断言失败：外部插件构建名单、生产目录名单和目录数量仍预期新增插件前的 15 项。将这些断言在 #77 提交 `91c35b7` 补齐为包含 codex-router 的完整 16 项，保留精确名单及构建产物检查；后续分支同步重放，最终功能源码未变。独立相关回归 26 pass / 0 fail；在 #77 隔离工作树按 CI 顺序执行完整构建和 `bun test`，4319 pass / 3 skip / 0 fail，432 文件。上一轮专项检查未覆盖这三处断言，不能替代阶段 PR 的全量 CI。
+
+修复提交的 [CI run 37929643399](https://github.com/jeffusion/bungee/actions/runs/37929643399) 在 Linux、macOS 均为 success；Linux 的 Playwright smoke、路由编辑器、原生滚动及仪表盘 ownership 回归也全部通过。此次只修正测试断言所在阶段，没有更新运行中的服务。
+
 ## Codex 请求协议修复（2026-10-09）
 
 起点为 `codex/codex-router-websocket` 的 `090937b965d2d7d94555fa045021a40a4e4166f7`，继续 PR #80 的既有依赖链。没有新增 UI 选项、数据库迁移或旧配置兼容层。
