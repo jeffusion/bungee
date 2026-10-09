@@ -1586,7 +1586,15 @@ export class ScopedPluginRegistry {
       }
 
       // 3. 加载上游级插件
-      const endpoints = [...new Map([...resolveEffectiveRouteEndpoints(route, config.services),...dispatchServices.flatMap(service => service.endpoints)].map(endpoint => [endpoint.id ?? endpoint.target,endpoint])).values()];
+      // Positional legacy endpoints can share a URL while owning different plugins.
+      // Preserve their order/identity; only explicit endpoint IDs deduplicate dispatch prewarming.
+      const endpoints = [...resolveEffectiveRouteEndpoints(route, config.services)];
+      const endpointIds = new Set(endpoints.flatMap(endpoint => endpoint.id ? [endpoint.id] : []));
+      for(const endpoint of dispatchServices.flatMap(service=>service.endpoints)){
+        if(endpoint.id && endpointIds.has(endpoint.id))continue;
+        if(endpoint.id)endpointIds.add(endpoint.id);
+        endpoints.push(endpoint);
+      }
 
       for (const [upstreamIndex, upstream] of endpoints.entries()) {
         const upstreamId = upstream.id || String(upstreamIndex); // Use config id or fallback to index
