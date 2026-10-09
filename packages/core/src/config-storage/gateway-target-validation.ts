@@ -11,10 +11,10 @@ export function validateGatewayTargets(config: LogicalConfigurationV2, schemas: 
   const edges = new Map<string, Set<string>>();
   const visit = (value: unknown, field: ReadonlyPluginConfigField, owner: string, path: string): void => {
     if (field.type === 'gateway_target' && value && typeof value === 'object') {
-      const target = value as {type:string;id:string};
+      const target = value as {type:string;id:string;protocol?:string};
       const entity = (target.type === 'route' ? routes : services).get(target.id);
       if (!entity) context.add('invalid_value',path,'Dispatch target does not exist');
-      else if (!entity.llm_protocol) context.add('invalid_value',path,'Dispatch target requires an explicit receiving protocol');
+      else if (!target.protocol && !entity.llm_protocol) context.add('invalid_value',path,'Dispatch target requires an explicit receiving protocol');
       const refs = edges.get(owner) ?? new Set<string>(); refs.add(`${target.type}:${target.id}`); edges.set(owner,refs);
     } else if (field.type === 'array' && field.items && Array.isArray(value)) value.forEach((item,index) => visit(item,field.items!,owner,`${path}[${index}]`));
     else if (field.type === 'object' && field.properties && value && typeof value === 'object') {

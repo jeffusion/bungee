@@ -16,9 +16,9 @@ for(const unavailable of ['missing','context','text'])test(`explicit source with
   }finally{await registry.destroy();}
 });
 for(const type of ['route','service'] as const)test(`explicit source forwards the destination model through a native Responses ${type}`,async()=>{
-  const config:any={routes:[{id:'entry',path:'/codex',plugins:[{name:'codex-router',path,options:{models:[{source:'original',provider:'p',model:'destination',target:{type,id:'target'}}]}}],endpoints:[{target:'http://unused'}]},
-    {id:'target',path:'/target',llm_protocol:'responses',endpoints:[{target:'http://route.test'}]}],
-    services:[{id:'target',name:'target',llm_protocol:'responses',endpoints:[{target:'http://service.test'}]}]};
+  const config:any={routes:[{id:'entry',path:'/codex',plugins:[{name:'codex-router',path,options:{models:[{source:'original',sourceProtocol:'responses',provider:'p',model:'destination',target:{type,id:'target',protocol:'responses'}}]}}],endpoints:[{target:'http://unused'}]},
+    {id:'target',path:'/target',endpoints:[{target:'http://route.test'}]}],
+    services:[{id:'target',name:'target',endpoints:[{target:'http://service.test'}]}]};
   const registry=new ScopedPluginRegistry(import.meta.dir);expect((await registry.initializeFromConfig(config)).failed).toBe(0);setScopedPluginRegistry(registry);
   const calls:any[]=[];globalThis.fetch=Object.assign(async(url:any,init:any)=>{calls.push({url:String(url),body:JSON.parse(await new Response(init.body).text())});return Response.json({id:'r',object:'response',status:'completed',model:'destination',output:[]});},{preconnect(){}}) as any;
   try{
@@ -43,9 +43,9 @@ test('empty Codex bindings retain a formal dispatch lease and preserve native ca
     expect(calls).toHaveLength(2);
   }finally{await registry.destroy();}
 });
-for(const protocol of ['chat_completions','anthropic_messages'] as const)for(const streaming of [false,true])test(`actual pipeline ${protocol} ${streaming?'SSE':'JSON'}`,async()=>{
-  const config:any={routes:[{id:'e',path:'/codex',plugins:[{name:'codex-router',path,options:{models:[{source:'client-model',provider:'p',model:'m',target:{type:'route',id:'t'}}]}}],endpoints:[{target:'http://unused'}]},
-    {id:'t',path:'/target',llm_protocol:protocol,path_rewrite:{'^/target':''},endpoints:[{id:'u',target:'http://upstream.test'}]}]};
+for(const bindingProtocol of [false,true])for(const protocol of ['chat_completions','anthropic_messages'] as const)for(const streaming of [false,true])test(`actual pipeline ${bindingProtocol?'binding':'legacy'} ${protocol} ${streaming?'SSE':'JSON'}`,async()=>{
+  const config:any={routes:[{id:'e',path:'/codex',plugins:[{name:'codex-router',path,options:{models:[{source:'client-model',provider:'p',model:'m',target:{type:'route',id:'t',...(bindingProtocol?{protocol}:{})}}]}}],endpoints:[{target:'http://unused'}]},
+    {id:'t',path:'/target',llm_protocol:bindingProtocol?'responses':protocol,path_rewrite:{'^/target':''},endpoints:[{id:'u',target:'http://upstream.test'}]}]};
   const registry=new ScopedPluginRegistry(import.meta.dir);expect((await registry.initializeFromConfig(config)).failed).toBe(0);setScopedPluginRegistry(registry);const calls:any[]=[];
   globalThis.fetch=Object.assign(async(url:any,init:any)=>{
     calls.push({url:String(url),body:JSON.parse(await new Response(init.body).text())});

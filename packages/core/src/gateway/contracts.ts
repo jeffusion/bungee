@@ -32,7 +32,7 @@ export interface DispatchRequestInput {
   readonly signal: AbortSignal;
   readonly servingRevision?: number;
 }
-export interface DispatchRequestDecision { readonly target: GatewayDispatchTarget; readonly requiredUpstreamId?: string; readonly adapter?: import('../plugin.types').Plugin }
+export interface DispatchRequestDecision { readonly target: GatewayDispatchTarget; readonly protocol?: LLMProtocol; readonly requiredUpstreamId?: string; readonly adapter?: import('../plugin.types').Plugin }
 export interface GatewayDispatchInput extends Omit<DispatchRequestInput,'targets'> { readonly config: AppConfig; readonly entry: RouteConfig }
 export interface GatewayDispatchDecision {
   readonly route: RouteConfig; readonly effective: EffectiveRouteConfig;

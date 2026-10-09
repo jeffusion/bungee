@@ -1,10 +1,13 @@
+import type { LLMProtocol } from '@jeffusion/bungee-types';
+
 export interface ModelBinding {
   provider: string;
   model: string;
   source?: string;
   sourceProvider?: string;
+  sourceProtocol?: 'responses';
   alias?: string;
-  target: { type: 'route' | 'service'; id: string };
+  target: { type: 'route' | 'service'; id: string; protocol?: LLMProtocol };
   capabilityOverrides?: { contextWindow?: number; tools?: boolean; reasoning?: boolean; images?: boolean; reasoningEffort?: boolean; anthropicThinkingBudget?: number };
 }
 /** The model in the client request; model itself is the upstream destination. */
@@ -15,15 +18,17 @@ export function parseBindings(value: unknown): readonly ModelBinding[] {
   const ids = new Set<string>();
   return Object.freeze(value.map(entry => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)
-      || Object.keys(entry).some(key => !['provider','model','source','sourceProvider','alias','target','capabilityOverrides'].includes(key))
+      || Object.keys(entry).some(key => !['provider','model','source','sourceProvider','sourceProtocol','alias','target','capabilityOverrides'].includes(key))
       || (entry.source !== undefined && entry.alias !== undefined)
       || (entry.sourceProvider !== undefined && entry.source === undefined)) throw new Error('codex_router_invalid_bindings');
     for (const text of [entry.provider, entry.model, ...(entry.source === undefined ? [] : [entry.source]), ...(entry.sourceProvider === undefined ? [] : [entry.sourceProvider]), ...(entry.alias === undefined ? [] : [entry.alias])]) {
       if (typeof text !== 'string' || !text || text !== text.trim() || text.length > 512 || /[\x00-\x1f\x7f]/.test(text)) throw new Error('codex_router_invalid_bindings');
     }
+    if (entry.sourceProtocol !== undefined && entry.sourceProtocol !== 'responses') throw new Error('codex_router_source_protocol_unsupported');
     const target = entry.target;
     if (!target || !['route','service'].includes(target.type) || typeof target.id !== 'string' || !target.id
-      || Object.keys(target).some(key => !['type','id'].includes(key))) throw new Error('codex_router_invalid_target');
+      || Object.keys(target).some(key => !['type','id','protocol'].includes(key))) throw new Error('codex_router_invalid_target');
+    if (target.protocol !== undefined && !['responses','chat_completions','anthropic_messages'].includes(target.protocol)) throw new Error('codex_router_target_protocol_invalid');
     const publicId = bindingSource(entry);
     if (ids.has(publicId)) throw new Error('codex_router_model_conflict');
     ids.add(publicId);

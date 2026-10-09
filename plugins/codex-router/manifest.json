@@ -14,10 +14,8 @@
     "hooks",
     "api",
     "dynamicRuntimeLoad",
-    "controlPlane",
-    "nativeWidgetsStatic"
+    "controlPlane"
   ],
-  "uiExtensionMode": "native-static",
   "engines": {
     "bungee": "^4.2.0 || ^5.0.0"
   },
@@ -111,6 +109,17 @@
             }
           },
           {
+            "name": "sourceProtocol",
+            "type": "select",
+            "label": "plugins.codex-router.editor.sourceProtocol",
+            "options": [
+              {
+                "value": "responses",
+                "label": "Responses"
+              }
+            ]
+          },
+          {
             "name": "provider",
             "type": "string",
             "label": "plugins.codex-router.editor.provider",
@@ -156,8 +165,6 @@
     }
   ],
   "contributes": {
-    "settings": "/catalog",
-    "nativeSettingsComponent": "CodexRouterSettings",
     "api": [
       {
         "path": "/catalog",
@@ -178,11 +185,6 @@
       "metadata.name": "Codex 模型路由",
       "plugin.description": "从共享目录选择模型并绑定已有路由或服务",
       "models.label": "模型绑定",
-      "settings.catalog": "模型目录",
-      "settings.bindings": "配置模型绑定",
-      "settings.description": "模型绑定随入口路由保存。在路由管理中添加此插件，选择原始提供商与模型、目标提供商与模型，以及转发路由或服务。原始模型也可手动填写。",
-      "settings.routes": "打开路由管理",
-      "settings.modelsDev": "管理 models.dev 目录",
       "editor.description": "按原始模型匹配请求，将目标模型转发到指定路由或服务。",
       "editor.binding": "绑定",
       "editor.match": "匹配请求",
@@ -202,13 +204,10 @@
       "editor.error": "目录不可用，请检查 models.dev 或重试。",
       "editor.targetsError": "无法读取转发目标，请重试。",
       "editor.retry": "重试",
-      "editor.previous": "上一页",
-      "editor.next": "下一页",
       "editor.add": "添加模型绑定",
       "editor.remove": "移除",
       "editor.noBindings": "尚未配置模型绑定。",
       "editor.noCatalog": "目录为空，请先启用 models.dev 并刷新目录。",
-      "editor.protocolMissing": "未声明接收协议",
       "editor.advanced": "能力限制（可选）",
       "editor.context": "上下文长度上限",
       "editor.contextHint": "留空使用目标模型的上下文长度。",
@@ -216,11 +215,17 @@
       "editor.imagesOff": "禁用图片输入",
       "editor.reasoningOff": "禁用推理能力",
       "editor.reasoningEffort": "传递推理强度（目标需支持）",
-      "editor.catalogCount": "模型数量",
-      "editor.total": "共 {count} 个模型",
       "editor.increase": "增加上下文上限",
       "editor.decrease": "减少上下文上限",
-      "editor.contextInvalid": "请输入正整数。"
+      "editor.contextInvalid": "请输入正整数。",
+      "editor.sourceProtocol": "源模型协议",
+      "editor.sourceProtocolHint": "当前入口支持 Responses；目标可转换为下列协议。",
+      "editor.targetProtocol": "目标模型协议",
+      "editor.targetProtocolPlaceholder": "选择目标接收协议",
+      "editor.route": "路由",
+      "editor.service": "服务",
+      "editor.targetUnavailable": "目标不可用",
+      "editor.noOptions": "没有匹配的选项"
     },
     "en": {
       "editor.loaded": "Loaded",
@@ -229,11 +234,6 @@
       "metadata.name": "Codex Router",
       "plugin.description": "Bind catalog models to existing routes or services",
       "models.label": "Model bindings",
-      "settings.catalog": "Model catalog",
-      "settings.bindings": "Configure model bindings",
-      "settings.description": "Model bindings are saved with the entry route. Choose the original provider and model, target provider and model, and forwarding route or service. Original model IDs can also be entered manually.",
-      "settings.routes": "Open Routes",
-      "settings.modelsDev": "Manage models.dev catalog",
       "editor.description": "Match the original model and forward the target model through an existing route or service.",
       "editor.binding": "Binding",
       "editor.match": "Match request",
@@ -253,13 +253,10 @@
       "editor.error": "Catalog unavailable. Check models.dev or retry.",
       "editor.targetsError": "Unable to load forwarding targets. Please retry.",
       "editor.retry": "Retry",
-      "editor.previous": "Previous page",
-      "editor.next": "Next page",
       "editor.add": "Add model binding",
       "editor.remove": "Remove",
       "editor.noBindings": "No model bindings configured.",
       "editor.noCatalog": "The catalog is empty. Enable models.dev and refresh it first.",
-      "editor.protocolMissing": "Receiving protocol not declared",
       "editor.advanced": "Capability limits (optional)",
       "editor.context": "Context length limit",
       "editor.contextHint": "Leave empty to use the target model context length.",
@@ -267,19 +264,18 @@
       "editor.imagesOff": "Disable image input",
       "editor.reasoningOff": "Disable reasoning",
       "editor.reasoningEffort": "Forward reasoning effort (requires target support)",
-      "editor.catalogCount": "Model count",
-      "editor.total": "{count} models",
       "editor.increase": "Increase context limit",
       "editor.decrease": "Decrease context limit",
-      "editor.contextInvalid": "Enter a positive whole number."
+      "editor.contextInvalid": "Enter a positive whole number.",
+      "editor.sourceProtocol": "Source protocol",
+      "editor.sourceProtocolHint": "The entry currently supports Responses; it can convert to the target protocols below.",
+      "editor.targetProtocol": "Target protocol",
+      "editor.targetProtocolPlaceholder": "Select the target receiving protocol",
+      "editor.route": "Route",
+      "editor.service": "Service",
+      "editor.targetUnavailable": "Target unavailable",
+      "editor.noOptions": "No matching options"
     }
   },
-  "ui": {
-    "components": [
-      {
-        "name": "CodexRouterSettings",
-        "entry": "ui/CodexRouterSettings.svelte"
-      }
-    ]
-  }
+  "uiExtensionMode": "none"
 }

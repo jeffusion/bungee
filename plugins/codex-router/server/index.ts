@@ -34,7 +34,8 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       const binding = this.bindings.find(binding => bindingSource(binding) === context.body?.model);
       if (!binding) return;
       const target = targets.find(target => target.type === binding.target.type && target.id === binding.target.id);
-      if (!target?.protocol) throw new DataAdmissionError(422,'codex_router_target_protocol_required');
+      const protocol = binding.target.protocol ?? target?.protocol;
+      if (!protocol) throw new DataAdmissionError(422,'codex_router_target_protocol_required');
       const capabilities=this.catalog.model(binding);
       if(!capabilities || capabilities.contextWindow === null || !capabilities.inputModalities.includes('text'))throw new DataAdmissionError(503,'codex_router_model_unavailable');
       const scope=principal?.domain !== 'anonymous' && principal?.keyId ? createHash('sha256').update(JSON.stringify([principal,context.routeId,servingRevision ?? null,this.bindings])).digest('hex') : null;
@@ -48,7 +49,7 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
         const delta=typeof input.input === 'string' ? [{role:'user',content:input.input}] : input.input;
         if(!Array.isArray(delta))throw new DataAdmissionError(422,'codex_router_invalid_history');
         if(prior.items.some((item:any)=>item.encrypted_content || item.type==='compaction')){
-          if(target.protocol!=='responses' || JSON.stringify(prior.target)!==JSON.stringify(binding.target) || prior.origin?.provider!==binding.provider || prior.origin?.model!==binding.model || !prior.origin?.upstreamId)throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
+          if(protocol!=='responses' || JSON.stringify(prior.target)!==JSON.stringify(binding.target) || prior.origin?.provider!==binding.provider || prior.origin?.model!==binding.model || !prior.origin?.upstreamId)throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
           requiredUpstreamId=prior.origin.upstreamId;opaqueRestored=true;
         }
         input.input=[...prior.items,...delta];delete input.previous_response_id;
@@ -60,17 +61,17 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       if(!opaqueRestored && logicalInput.some((item:any)=>item?.encrypted_content || item?.type==='compaction'))throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
       if(input.tools?.length && (!capabilities.toolCall || binding.capabilityOverrides?.tools===false))throw new DataAdmissionError(422,'codex_router_tools_unsupported');
       let toolNames;
-      if(target.protocol!=='responses'){
+      if(protocol!=='responses'){
         try {
-          const decoded=decodeResponsesRequest(input,target.protocol,{omitOptionalWebSearch:true,reasoningEffort:capabilities.reasoning && binding.capabilityOverrides?.reasoningEffort===true,
+          const decoded=decodeResponsesRequest(input,protocol,{omitOptionalWebSearch:true,reasoningEffort:capabilities.reasoning && binding.capabilityOverrides?.reasoningEffort===true,
             anthropicThinkingBudget:undefined,maxOutputTokens:capabilities.outputLimit ?? undefined});
           context.body=decoded.body;toolNames=decoded.toolNames;
         }catch(error){if(error instanceof ResponsesCodecError)throw new DataAdmissionError(422,`codex_router_${error.code}`);throw error;}
-        context.url.pathname=context.url.pathname.replace(/\/responses$/,target.protocol==='chat_completions'?'/chat/completions':'/messages');
+        context.url.pathname=context.url.pathname.replace(/\/responses$/,protocol==='chat_completions'?'/chat/completions':'/messages');
       }else context.body=input;
-      const adapter=protocolAdapter({protocol:target.protocol==='responses'?undefined:target.protocol,model:bindingSource(binding),toolNames,signal,
+      const adapter=protocolAdapter({protocol:protocol==='responses'?undefined:protocol,model:bindingSource(binding),toolNames,signal,
         save:async(response,responseContext)=>{if(scope && typeof response.id==='string')await this.history.put({scope,id:response.id,value:{target:binding.target,origin:{provider:binding.provider,model:binding.model,upstreamId:responseContext?.upstreamId},items:[...logicalInput,...response.output]}},{signal,operationId:crypto.randomUUID()});}});
-      return {target:binding.target,requiredUpstreamId,adapter};
+      return {target:binding.target,protocol,requiredUpstreamId,adapter};
     });
     hooks.onBeforeRequest.tap('codex-router.catalog-validator', context => {
       if (context.method === 'GET' && /\/models$/.test(context.originalUrl.pathname)) {
@@ -82,7 +83,7 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       if (context.method !== 'GET' || !/\/models$/.test(context.originalUrl.pathname) || !response.ok) return response;
       const native = await context.bodyHandle!.json({id:'codex-router.catalog',mandatory:true});
       const bindings=this.bindings.map(binding=>{
-        const protocol=this.targets?.find(target=>target.type===binding.target.type && target.id===binding.target.id)?.protocol;
+        const protocol=binding.target.protocol ?? this.targets?.find(target=>target.type===binding.target.type && target.id===binding.target.id)?.protocol;
         return {...binding,capabilityOverrides:{...binding.capabilityOverrides,
           ...(protocol==='anthropic_messages'?{images:false}:{}),
           ...(protocol && protocol!=='responses' ? {reasoning:protocol==='chat_completions' ? binding.capabilityOverrides?.reasoningEffort===true : false}:{}),

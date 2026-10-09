@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
   collectSchemaFieldNames,
+  displayConfigValue,
+  displayModelBindings,
   hasDisplayValue,
   shouldRenderFallbackField,
   shouldShowField,
@@ -64,4 +66,12 @@ describe('plugin-config-display-utils', () => {
       shouldRenderFallbackField('unknownEmpty', '', processed, schemaFieldNames)
     ).toBe(false);
   });
+});
+
+test('structured plugin summaries show model bindings and translated target kinds without object coercion', () => {
+  const binding = { source: 'client', provider: 'lab', model: 'org/model', target: { type: 'service', id: 'upstream', protocol: 'chat_completions' } };
+  expect(displayModelBindings([binding], () => '服务')).toBe('client → lab/org/model · Chat Completions · 服务: upstream');
+  expect(displayModelBindings([{ ...binding, source: undefined, alias: 'old' }], () => 'Service')).toContain('old →');
+  expect(displayConfigValue([{ x: 1 }])).toBe('[{"x":1}]');
+  expect(displayConfigValue({ x: 1 })).not.toContain('[object Object]');
 });
