@@ -60,6 +60,7 @@ describe('PluginManifestCatalog filesystem snapshot', () => {
       'anthropic-request-sanitizer',
       'anthropic-tool-name-transformer',
       'chatgpt-oauth',
+      'codex-router',
       'deepseek-reasoning-fix',
       'key-access',
       'key-rate-limit',
@@ -296,7 +297,7 @@ describe('PluginManifestCatalog filesystem snapshot', () => {
     const catalog = await buildPluginManifestCatalog({
       pathResolver: { getScanRoots: () => [optional, required] },
     });
-    expect(catalog.names()).toHaveLength(15);
+    expect(catalog.names()).toHaveLength(16);
   });
 
   test('resolves catalogPlugin references only after the complete catalog is built', async () => {
