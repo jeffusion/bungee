@@ -1,3 +1,10 @@
+# [5.17.0](https://github.com/jeffusion/bungee/compare/v5.16.0...v5.17.0) (2026-10-09)
+
+
+### Features
+
+* **gateway:** support websocket proxying and responses metering ([8fc891d](https://github.com/jeffusion/bungee/commit/8fc891dd5d37df3197a00dce17ba1506f047fa0f))
+
 # [5.16.0](https://github.com/jeffusion/bungee/compare/v5.15.2...v5.16.0) (2026-10-08)
 
 
