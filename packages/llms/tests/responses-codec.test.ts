@@ -302,3 +302,19 @@ test('real CLI optional encrypted-output and metadata preferences remain compati
     expectCode(() => decodeResponsesRequest({...raw,input:[{type:'reasoning',encrypted_content:'sealed'}]},protocol,{omitOptionalWebSearch:true}),'unsupported_content');
   }
 });
+
+test('Codex null encrypted placeholder retains plain reasoning without enabling effort mapping',()=>{
+  const reasoning={type:'reasoning',id:'reason-id',summary:[{type:'summary_text',text:'plain thought'}],content:null,encrypted_content:null,internal_chat_message_metadata_passthrough:{turn_id:'fixture-turn'}};
+  const input=[{role:'user',content:'hello'},reasoning,{type:'function_call',name:'f',call_id:'call',arguments:'{}'},{type:'function_call_output',call_id:'call',output:'done'}];
+  const raw=request({input,reasoning:{effort:'high'}});
+  const decoded=decodeResponsesRequest(raw,'chat_completions',{reasoningHistory:true});
+  expect(decoded.body.messages[1]).toMatchObject({role:'assistant',reasoning_content:'plain thought',tool_calls:[{id:'call'}]});
+  expect(decoded.body).not.toHaveProperty('reasoning_effort');expect(decoded.canonicalInput[1]).toEqual(reasoning);
+  for(const encrypted_content of ['sealed',{},0,''])expectCode(()=>decodeResponsesRequest({...raw,input:[{...reasoning,encrypted_content}]},'chat_completions',{reasoningHistory:true}),'unsupported_content');
+  for(const content of [[{type:'reasoning_text',text:'must survive'}],{unexpected:'must survive'}]) {
+    try{decodeResponsesRequest({...raw,input:[{...reasoning,content}]},'chat_completions',{reasoningHistory:true});throw new Error('expected rejection');}
+    catch(error){expect(error).toBeInstanceOf(ResponsesCodecError);expect((error as ResponsesCodecError).param).toBe('input[0].content');}
+  }
+  expectCode(()=>decodeResponsesRequest(raw,'chat_completions'),'unsupported_reasoning');
+  expectCode(()=>decodeResponsesRequest(raw,'anthropic_messages',{reasoningHistory:true}),'unsupported_reasoning');
+});

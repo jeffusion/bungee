@@ -167,10 +167,11 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     messageParam = `input[${inputIndex}]`;
     const item = record(rawItem, 'input item');
     if (item.type === 'additional_tools') return;
-    if (item.encrypted_content !== undefined || item.type === 'compaction') fail('unsupported_content', 'Encrypted reasoning and compaction cannot be restored');
+    if (item.encrypted_content != null || item.type === 'compaction') fail('unsupported_content', 'Encrypted reasoning and compaction cannot be restored');
     if (item.type === 'item_reference') fail('unresolved_reference', 'Input item references must be resolved before conversion');
     if (item.type === 'reasoning') {
-      if (protocol !== 'chat_completions' || !capabilities.reasoningEffort) fail('unsupported_reasoning', 'Reasoning history requires an explicit compatible reasoning capability');
+      if (protocol !== 'chat_completions' || !(capabilities.reasoningHistory || capabilities.reasoningEffort)) fail('unsupported_reasoning', 'Reasoning history requires an explicit compatible reasoning capability');
+      if (item.content != null) fail('unsupported_reasoning', 'Reasoning content requires an explicit history mapping', `${messageParam}.content`);
       const summary = list(item.summary, 'reasoning summary');
       pendingReasoning += summary.map(part => { const p = record(part, 'reasoning summary'); if (p.type !== 'summary_text') fail('unsupported_reasoning', 'Unknown reasoning summary'); return string(p.text, 'summary text'); }).join('');
       return;

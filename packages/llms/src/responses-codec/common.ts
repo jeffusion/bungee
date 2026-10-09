@@ -17,6 +17,8 @@ export const DEFAULT_RESPONSES_CODEC_LIMITS: Readonly<ResponsesCodecLimits> = Ob
 });
 export interface ResponsesCodecCapabilities {
   reasoningEffort?: boolean;
+  /** Plain reasoning history support is independent of effort parameter mapping. */
+  reasoningHistory?: boolean;
   /** Codex declares optional hosted search even when the selected model has no search backend. */
   omitOptionalWebSearch?: boolean;
   /** Explicit provider-approved thinking budget; do not guess budgets from effort labels. */

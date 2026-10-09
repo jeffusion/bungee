@@ -144,13 +144,14 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
               {type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:2}},{type:'message_stop'},
             ]);
             return sse([
-              {choices: [{index: 0, delta: {role: 'assistant', tool_calls: requested.map((item, index) => ({index, id: item.id, type: 'function',
+              {choices: [{index: 0, delta: {role: 'assistant', reasoning_content:'fixture tool reasoning', tool_calls: requested.map((item, index) => ({index, id: item.id, type: 'function',
                 function: {name: item.tool.name, arguments: JSON.stringify(item.arguments)}}))}, finish_reason: null}]},
               {choices: [{index: 0, delta: {}, finish_reason: 'tool_calls'}]},
               {choices: [], usage: {prompt_tokens: 4, completion_tokens: 2, total_tokens: 6}},
             ]);
           }
           cliToolRoundTrip.followupRequestId = call.requestId;
+          if(!anthropic)expect(body.messages.find((message:any)=>message.tool_calls?.length)?.reasoning_content).toBe('fixture tool reasoning');
           cliToolRoundTrip.outputs = anthropic ? body.messages.flatMap((message:any)=>Array.isArray(message.content)?message.content:[])
             .filter((block:any)=>block.type==='tool_result').map((block:any)=>({callId:block.tool_use_id,content:block.content}))
             : body.messages.filter((message: any) => message.role === 'tool').map((message: any) => ({callId: message.tool_call_id, content: message.content}));

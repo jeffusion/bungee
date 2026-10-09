@@ -51,6 +51,6 @@ export async function seedCodexRouterCatalog(fixture: GatewayFixture): Promise<v
         {owner: 'models-dev', id: 'models-dev.catalog.v1', schemaVersion: 1, maxVersions: 3});
       store.publish(1, {version: 1, fetchedAt: Date.now(), catalog: {lab: {id: 'lab', name: 'Local protocol fixture', models:
         Object.fromEntries(CODEX_MODELS.map(id => [id, {id, name: id, limit: {context: 200000, output: 4096}, tool_call: true,
-          reasoning: false, modalities: {input: ['text'], output: ['text']}, cost: {input: 1, output: 2}}]))}}});
+          reasoning: id===CODEX_MODELS[1], modalities: {input: ['text'], output: ['text']}, cost: {input: 1, output: 2}}]))}}});
     } finally {accessDb.close(); configDb.close();}
 }
