@@ -78,7 +78,7 @@
     {
       "name": "models",
       "type": "array",
-      "label": "plugins.codex-router.models.label",
+      "label": "models.label",
       "default": [],
       "validation": {
         "max": 100
@@ -91,7 +91,7 @@
           {
             "name": "source",
             "type": "string",
-            "label": "plugins.codex-router.editor.source",
+            "label": "editor.source",
             "required": false,
             "validation": {
               "trimmed": true,
@@ -101,7 +101,7 @@
           {
             "name": "sourceProvider",
             "type": "string",
-            "label": "plugins.codex-router.editor.sourceProvider",
+            "label": "editor.sourceProvider",
             "required": false,
             "validation": {
               "trimmed": true,
@@ -111,7 +111,7 @@
           {
             "name": "sourceProtocol",
             "type": "select",
-            "label": "plugins.codex-router.editor.sourceProtocol",
+            "label": "editor.sourceProtocol",
             "options": [
               {
                 "value": "responses",
@@ -122,7 +122,7 @@
           {
             "name": "provider",
             "type": "string",
-            "label": "plugins.codex-router.editor.provider",
+            "label": "editor.provider",
             "required": true,
             "validation": {
               "trimmed": true,
@@ -132,7 +132,7 @@
           {
             "name": "model",
             "type": "string",
-            "label": "plugins.codex-router.editor.model",
+            "label": "editor.model",
             "required": true,
             "validation": {
               "trimmed": true,
@@ -152,13 +152,13 @@
           {
             "name": "target",
             "type": "gateway_target",
-            "label": "plugins.codex-router.editor.target",
+            "label": "editor.target",
             "required": true
           },
           {
             "name": "capabilityOverrides",
             "type": "json",
-            "label": "plugins.codex-router.editor.capabilityOverrides"
+            "label": "editor.advanced"
           }
         ]
       }

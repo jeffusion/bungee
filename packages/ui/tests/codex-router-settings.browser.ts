@@ -1,10 +1,14 @@
 // Built management UI; all business APIs are fixtures, no production configuration writes.
 import { chromium, expect } from 'playwright/test';
 import { resolve, extname } from 'node:path';
+import { createMasterPluginCatalogApi } from '../../core/src/master-runtime/master-plugin-catalog-api';
+import type { PluginManifestRecord } from '../../core/src/plugin-manifest-catalog/types';
 import { configurationRuntimeFixture, publicationFixture } from './fixtures/publication';
 
 const dist = resolve(import.meta.dir, '../dist');
 const manifest = await Bun.file(new URL('../../../plugins/codex-router/manifest.json', import.meta.url)).json();
+const catalogApi = createMasterPluginCatalogApi({ catalog: { records: () => [{ name: manifest.name, manifest, configSchema: manifest.configSchema } as PluginManifestRecord] } });
+const catalogSnapshot = { aggregate: { plugin_activations: [{ plugin_name: manifest.name }] } } as never;
 const runtime = configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null,
   retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 }));
 const entryId = '10000000-0000-4000-8000-000000000001', serviceId = '20000000-0000-4000-8000-000000000001';
@@ -31,11 +35,10 @@ await page.route('**/api/**', async route => {
   if (url.pathname === '/api/auth/verify') return json({ success: true, mode: 'anonymous' });
   if (url.pathname === '/api/config/runtime') return json(runtime);
   if (url.pathname === '/api/config') return json({ revision: runtime.revision, content_hash: runtime.content_hash, config: runtime.config });
-  if (url.pathname === '/api/plugins/schemas') return json({ 'codex-router': { ...manifest, metadata: manifest.metadata } });
-  if (url.pathname === '/api/plugins') return json([{ name: manifest.name, enabled: true,
-    version: manifest.version, metadata: { ...manifest.metadata, contributes: manifest.contributes } }]);
-  if (url.pathname === '/api/plugin-translations') return json(Object.fromEntries(
-    Object.entries(manifest.translations).map(([language, messages]) => [language, { plugins: { [manifest.name]: messages } }])));
+  if (catalogApi.matches(url.pathname)) {
+    const response = await catalogApi.handle(new Request(url), catalogSnapshot);
+    return route.fulfill({ status: response.status, contentType: 'application/json', body: await response.text() });
+  }
   if (url.pathname === '/api/plugins/codex-router/control/catalog') {
     catalogQueries.push(url.searchParams);
     const search = url.searchParams.get('search') ?? '';
