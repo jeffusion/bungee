@@ -115,8 +115,8 @@ async function selectPrice(row: Locator, target: { provider: string; model: stri
   await provider.click();
   const providerSuffix = new RegExp(`·\\s${target.provider.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
   await page!.getByRole('option', { name: providerSuffix }).click();
-  await row.locator('button[aria-haspopup="listbox"]').last().click();
-  await page!.locator('[data-cmdk-input], [cmdk-input]').fill(target.model);
+  await row.getByTestId('price-model-picker').getByRole('combobox').click();
+  await row.getByTestId('price-model-picker').getByRole('combobox').fill(target.model);
   await page!.getByRole('option', { name: target.model, exact: true }).click();
 }
 async function saveAliases(expected: any[]) {
@@ -353,20 +353,20 @@ try {
     await page!.getByRole('option', { name: suffix }).click();
     const [first] = await Promise.all([
       page!.waitForResponse(r => r.url().includes('/token-stats/control/pricing/models?') && new URL(r.url()).searchParams.get('page') === '1'),
-      row.locator('button[aria-haspopup="listbox"]').last().click(),
+      row.getByTestId('price-model-picker').getByRole('combobox').click(),
     ]);
     assert.equal(first.status(), 200);
     assert.equal((await first.json()).models.length, 50);
     const [next] = await Promise.all([
       page!.waitForResponse(r => r.url().includes('/token-stats/control/pricing/models?') && new URL(r.url()).searchParams.get('page') === '2'),
-      page!.getByTestId('price-model-next-page').click(),
+      page!.getByTestId('search-select-viewport').evaluate(element => { element.scrollTop = element.scrollHeight; }),
     ]);
     assert.equal(next.status(), 200);
     await page!.getByRole('option', { name: target.model, exact: true }).click();
-    assert.equal(await row.locator('button[aria-haspopup="listbox"]').last().innerText(), target.model);
+    assert.equal(await row.getByTestId('price-model-picker').getByRole('combobox').inputValue(), target.model);
     // A real directory publication must requery an open picker without changing the saved value.
-    await row.locator('button[aria-haspopup="listbox"]').last().click();
-    await page!.getByTestId('price-model-next-page').waitFor();
+    await row.getByTestId('price-model-picker').getByRole('combobox').click();
+    await page!.getByTestId('search-select-footer').waitFor();
     const before = await get('/api/plugins/models-dev/control/catalog/status');
     const requery = page!.waitForResponse(r => r.url().includes('/token-stats/control/pricing/models?')
       && new URL(r.url()).searchParams.get('provider') === provider.provider
@@ -382,8 +382,8 @@ try {
     const requeried = await requery;
     assert.equal(requeried.status(), 200);
     assert((await requeried.json()).models.every((model: any) => model.provider === provider.provider));
-    await page!.getByTestId('price-model-next-page').waitFor();
-    assert.equal(await row.locator('button[aria-haspopup="listbox"]').last().innerText(), target.model);
+    await page!.getByTestId('search-select-footer').waitFor();
+    assert.equal(await row.getByTestId('price-model-picker').getByRole('combobox').getAttribute('placeholder'), target.model);
     await page!.keyboard.press('Escape');
     await row.getByRole('button', { name: /Remove|删除|移除/ }).click();
     settingsPerformance = { ...settingsPerformance, provider: provider.provider, selectedSecondPageModel: target.model, openPickerRequeriedAfterRefresh: true };
@@ -394,21 +394,24 @@ try {
     // A backend refusal is a business failure, not a reason to hide assertions.
     await get('/api/plugins/token-stats/control/pricing');
     await page!.getByRole('button', { name: /Add alias|添加映射/ }).click();
+    const trigger = page!.getByTestId('client-model-picker').first().getByRole('combobox');
+    await trigger.click();
     const input = page!.getByTestId('client-model-input').first();
     await input.fill('browsercase');
     const option = page!.getByRole('option', { name: originals[0], exact: true }); await option.waitFor();
     await input.press('ArrowDown'); await input.press('Enter');
-    assert.equal(await input.inputValue(), originals[0], 'original case must survive selection');
+    assert.equal(await trigger.inputValue(), originals[0], 'original case must survive selection');
+    await trigger.click();
     await input.fill('BrowserPage-');
-    await page!.getByTestId('client-model-next-page').waitFor();
+    await page!.getByRole('option', { name: 'BrowserPage-000', exact: true }).waitFor();
     const [next] = await Promise.all([
       page!.waitForResponse(r => r.url().includes('/token-stats/control/models?') && new URL(r.url()).searchParams.get('page') === '2'),
-      page!.getByTestId('client-model-next-page').click(),
+      page!.getByTestId('search-select-viewport').evaluate(element => { element.scrollTop = element.scrollHeight; }),
     ]); assert.equal((await next.json()).page, 2);
     await page!.getByRole('option', { name: 'BrowserPage-050', exact: true }).waitFor();
     await input.fill('this-query-must-be-superseded'); await input.fill('browsercase');
     await page!.getByRole('option', { name: originals[0], exact: true }).click();
-    assert.equal(await input.inputValue(), originals[0]);
+    assert.equal(await trigger.inputValue(), originals[0]);
     assert.equal((await get('/api/plugins/token-stats/control/models?search=BROWSERCASE')).models[0], originals[0]);
   });
   let target: { provider: string; model: string } | undefined;
@@ -422,7 +425,9 @@ try {
     target = { provider: preferred.provider, model: model.model };
     const row = page!.getByTestId('price-model-mapping').first();
     assert.equal(await row.count(), 1, 'authenticated alias editor was not rendered');
-    await row.getByTestId('client-model-input').fill(originals[0]); await row.getByTestId('client-model-input').press('Escape');
+    await row.getByTestId('client-model-picker').getByRole('combobox').click();
+    await row.getByTestId('client-model-input').fill(originals[0]);
+    await page!.getByRole('option', { name: originals[0], exact: true }).click();
     await selectPrice(row, target);
     beforeMappingStats = await get(`/api/plugins/token-stats/control/stats?range=1h&groupBy=model&search=${encodeURIComponent(originals[0]!)}`);
     await saveAliases([{ source: originals[0], ...target }]);
@@ -432,13 +437,16 @@ try {
     await get('/api/plugins/token-stats/control/pricing');
     await page!.getByRole('button', { name: /Add alias|添加映射/ }).click();
     const row = page!.getByTestId('price-model-mapping').last();
-    await row.getByTestId('client-model-input').fill(freeAlias); await row.getByTestId('client-model-input').press('Escape');
+    await row.getByTestId('client-model-picker').getByRole('combobox').click();
+    await row.getByTestId('client-model-input').fill(freeAlias);
+    await page!.getByRole('button', { name: /Use custom ID:|使用自定义标识：/ }).click();
     await selectPrice(row, target);
     await saveAliases([{ source: originals[0], ...target }, { source: freeAlias, ...target }]);
     const records = await get(`/api/plugins/token-stats/control/models?search=${encodeURIComponent(freeAlias)}`);
     assert.deepEqual(records.models, []); assert.equal(records.total, 0);
-    await page!.reload({ waitUntil: 'domcontentloaded' }); await page!.getByTestId('client-model-input').last().waitFor();
-    assert.equal(await page!.getByTestId('client-model-input').last().inputValue(), freeAlias);
+    await page!.reload({ waitUntil: 'domcontentloaded' });
+    const saved = page!.getByTestId('client-model-picker').last().getByRole('combobox');
+    await saved.waitFor(); assert.equal(await saved.inputValue(), freeAlias);
   });
   await step('historical-cost-and-worker-reconciliation', async () => {
     assert(target && beforeMappingStats, 'real mappings must exist');
