@@ -32,12 +32,15 @@ export interface DispatchRequestInput {
   readonly signal: AbortSignal;
   readonly servingRevision?: number;
 }
-export interface DispatchRequestDecision { readonly target: GatewayDispatchTarget; readonly protocol?: LLMProtocol; readonly requiredUpstreamId?: string; readonly adapter?: import('../plugin.types').Plugin }
+export interface DispatchConversionDiagnostic {readonly param:string;readonly action:'mapped'|'omitted';readonly reason:string}
+export interface DispatchRequestDecision { readonly target: GatewayDispatchTarget; readonly protocol?: LLMProtocol; readonly requiredUpstreamId?: string; readonly adapter?: import('../plugin.types').Plugin; /** Canonical logical input after a protocol conversion; absent for native passthrough. */ readonly canonicalInput?: readonly unknown[]; readonly diagnostics?: readonly DispatchConversionDiagnostic[] }
 export interface GatewayDispatchInput extends Omit<DispatchRequestInput,'targets'> { readonly config: AppConfig; readonly entry: RouteConfig }
 export interface GatewayDispatchDecision {
   readonly route: RouteConfig; readonly effective: EffectiveRouteConfig;
   readonly context: import('../hooks').MutableRequestContext;
   readonly entryRouteId?: string; readonly target?: GatewayDispatchTarget; readonly requiredUpstreamId?: string; readonly protocol?: LLMProtocol; readonly adapter?: import('../plugin.types').Plugin;
+  readonly canonicalInput?: readonly unknown[];
+  readonly diagnostics?: readonly DispatchConversionDiagnostic[];
 }
 export interface GatewayRouteInput { readonly request: Request; readonly config: AppConfig }
 export interface GatewayRouteDecision { readonly route?: RouteConfig; readonly effective?: EffectiveRouteConfig; readonly response?: Response; readonly responseKind?: 'rule' | 'local' }

@@ -146,7 +146,7 @@ export function createConfigWorkerLifecycle(
           if (isWebSocketUpgradeRequest(request)) {
             if (!nativeServer) return Response.json({error:'websocket_unavailable'},{status:503});
             const result = await runGatewayWebSocket({request:restored.request,nativeRequest:request,server:nativeServer,bridge:websocket,
-              config,servingRevision:command.revision,retain:completion=>{sessions.add(completion);void completion.finally(()=>sessions.delete(completion));}});
+              config,servingRevision:command.revision,logging:resources.requestLogging,retain:completion=>{sessions.add(completion);void completion.finally(()=>sessions.delete(completion));}});
             return result.response;
           }
           return resources.handleRequest(restored.request, config, {

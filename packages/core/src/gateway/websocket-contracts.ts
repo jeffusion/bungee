@@ -49,6 +49,7 @@ export interface GatewayWebSocketInput {
   readonly bridge: import('../websocket').WebSocketBridge;
   readonly config: import('@jeffusion/bungee-types').AppConfig;
   readonly servingRevision: number;
+  readonly logging?: import('../logger/request-logger').RequestLoggerDependencies;
   /** Host shutdown barrier; retains observer/credential owners until close cleanup. */
   readonly retain: (completion: Promise<void>) => void;
 }

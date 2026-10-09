@@ -55,6 +55,8 @@ export interface HandleRequestRuntimeContext {
   transport?: 'websocket';
   websocketBridge?: import('../websocket').WebSocketBridge;
   skipEntryRate?: boolean;
+  /** Host session receives the codec's logical history without re-reading the request body. */
+  onCanonicalInput?: (input: readonly unknown[]) => void;
   logging?: RequestLoggerDependencies;
 }
 
@@ -834,7 +836,7 @@ async function executeHttpRequestInternal(
     config.logging?.body?.enabled ? finalizeRootStreamingResponse(response) : response;
 
   const prepareProcessingErrorResponse = (error: DataAdmissionError | BodyProcessingError): Response => {
-    if (error instanceof DataAdmissionError) return finalizeLocalResponse(Response.json({ error: error.code }, {
+    if (error instanceof DataAdmissionError) return finalizeLocalResponse(Response.json({ error: error.code, ...error.details }, {
       status: error.status,
       headers: error.retryAfter === undefined ? {} : { 'retry-after': String(error.retryAfter) },
     }));
@@ -898,6 +900,8 @@ async function executeHttpRequestInternal(
     const dispatchWork=()=>gatewayHooks().onGatewayDispatch.promise({config,entry:entryRoute,context:dispatchContext,
       signal:processingSignal,principal:trustedIdentity?.principal,servingRevision:runtimeContext?.servingRevision});
     const dispatch = requireGatewayResult(await (requestRegistry ? requestRegistry.runWithRequestLeases(ownerLeases,dispatchWork) : dispatchWork()), 'onGatewayDispatch');
+    if (dispatch.canonicalInput) runtimeContext?.onCanonicalInput?.(dispatch.canonicalInput);
+    if (dispatch.diagnostics?.length) reqLogger.addStep('codex_router_conversion',{requestId,protocol:dispatch.protocol,diagnostics:dispatch.diagnostics});
     route = dispatch.route;
     if (dispatch.target) {
       requestSnapshot.body = dispatch.context.body;

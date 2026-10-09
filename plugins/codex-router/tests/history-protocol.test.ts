@@ -70,5 +70,33 @@ test('opaque native references pin provider/model and actual upstream',async()=>
 test('Anthropic thinking overrides cannot enable a capability without restorable history',async()=>{
   const plugin=new CodexRouterPlugin({models:[{provider:'p',model:'m',target:{type:'route',id:'a',protocol:'anthropic_messages'},capabilityOverrides:{anthropicThinkingBudget:1024}}]});await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:()=>({...caps,model:()=>({...caps.model(),reasoning:true})}),rpc:{consume:()=>({get:async()=>null,put:async()=>null})}}} as any);
   const hooks=createPluginHooks();plugin.register(hooks);
-  await expect(hooks.onDispatchRequest.promise({context:{method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},body:{model:'m',input:'hello',reasoning:{effort:'high'}},requestId:crypto.randomUUID(),clientIP:'local'},targets:[{type:'route',id:'a'}],signal:new AbortController().signal})).rejects.toThrow('unsupported_reasoning');
+  const context:any={method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},body:{model:'m',input:'hello',reasoning:{effort:'high'}},requestId:crypto.randomUUID(),clientIP:'local'};
+  await hooks.onDispatchRequest.promise({context,targets:[{type:'route',id:'a'}],signal:new AbortController().signal});
+  expect(context.body).not.toHaveProperty('thinking');
+});
+
+test('converted shared history removes carriers and next request can change its declarations',async()=>{
+  cache.clear();const models=[{source:'client',provider:'p',model:'m',target:{type:'route',id:'t',protocol:'chat_completions'}}];
+  const plugin=new CodexRouterPlugin({models});await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:()=>caps,rpc:{consume:()=>({get:async(input:any)=>transport.get(input),put:async(input:any)=>transport.put(input)})}}} as any);
+  const hooks=createPluginHooks();plugin.register(hooks);
+  const makeContext=(body:any)=>({method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},body,requestId:crypto.randomUUID(),clientIP:'local'});
+  const dispatch=(context:any)=>hooks.onDispatchRequest.promise({context,targets:[{type:'route',id:'t'}],signal:new AbortController().signal,principal:{domain:'data',keyId:'carriers',credentialVersion:1},servingRevision:1});
+  const declaration=(description:string)=>({type:'additional_tools',tools:[{type:'namespace',name:'files',tools:[{type:'custom',name:'patch',description,format:{type:'text'}}]}]});
+  const one=makeContext({model:'client',input:[declaration('old'),{role:'user',content:'patch'}],text:{verbosity:'low'}});
+  const decision=await dispatch(one);const resultHooks=createPluginHooks();decision!.adapter!.register(resultHooks);
+  const response=await resultHooks.onResponse.promise(Response.json({}),{bodyHandle:{json:async()=>({choices:[{message:{tool_calls:[{id:'p',function:{name:'bungee_tool_0',arguments:'{"input":"original patch"}'}}]},finish_reason:'tool_calls'}]})}} as any);
+  const result:any=await response.json();expect(result.output[0]).toMatchObject({namespace:'files',type:'custom_tool_call'});
+  expect(decision!.diagnostics).toMatchObject([{param:'text.verbosity',action:'omitted'}]);
+  const two=makeContext({model:'client',previous_response_id:result.id,input:[declaration('new'),{type:'custom_tool_call_output',call_id:'p',output:'patched'}]});
+  await dispatch(two);expect(two.body.tools).toHaveLength(1);expect(two.body.tools[0].function.description).toContain('new');
+  expect(two.body.messages.map((m:any)=>m.role)).toEqual(['user','assistant','tool']);
+  expect(two.body.messages[2]).toMatchObject({tool_call_id:'p',content:'patched'});
+});
+
+test('additional tools cannot bypass target tool capability limits',async()=>{
+  const plugin=new CodexRouterPlugin({models:[{source:'client',provider:'p',model:'m',capabilityOverrides:{tools:false},target:{type:'route',id:'t',protocol:'chat_completions'}}]});
+  await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:()=>caps,rpc:{consume:()=>({get:async()=>null,put:async()=>null})}}} as any);
+  const hooks=createPluginHooks();plugin.register(hooks);
+  const context:any={method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},requestId:'capability',clientIP:'local',body:{model:'client',input:[{type:'additional_tools',tools:[{type:'function',name:'f',parameters:{type:'object'}}]}]}};
+  await expect(hooks.onDispatchRequest.promise({context,targets:[{type:'route',id:'t'}],signal:new AbortController().signal})).rejects.toThrow('codex_router_tools_unsupported');
 });

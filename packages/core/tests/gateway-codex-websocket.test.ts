@@ -2,6 +2,8 @@ import {afterEach,expect,test} from 'bun:test';
 import {ScopedPluginRegistry,setScopedPluginRegistry,getScopedPluginRegistry} from '../src/scoped-plugin-registry';
 import {runGatewayWebSocket} from '../src/gateway/runtime';
 import {createWebSocketBridge,isWebSocketUpgradeRequest} from '../src/websocket';
+import capturedBase from '../../../plugins/codex-router/tests/fixtures/captured-app-base.json';
+import capturedPreferences from '../../../plugins/codex-router/tests/fixtures/captured-app-preferences.json';
 const path=new URL('./fixtures/codex-dispatch-plugin.ts',import.meta.url).pathname;
 const previous=getScopedPluginRegistry();afterEach(()=>setScopedPluginRegistry(previous));
 async function waitUntil(predicate:()=>boolean){for(let i=0;i<200;i++){if(predicate())return;await Bun.sleep(10);}throw new Error('Timeout');}
@@ -18,6 +20,24 @@ async function setup(endpoints:any[], bindModels=true){
 const chat=(text:string)=>[{choices:[{index:0,delta:{content:text},finish_reason:null}]},{choices:[{index:0,delta:{},finish_reason:'stop'}]},{choices:[],usage:{prompt_tokens:2,completion_tokens:1}}];
 const anthropic=(text:string)=>[{type:'message_start',message:{usage:{input_tokens:2,output_tokens:0}}},{type:'content_block_start',index:0,content_block:{type:'text',text:''}},{type:'content_block_delta',index:0,delta:{type:'text_delta',text}},{type:'content_block_stop',index:0},{type:'message_delta',delta:{stop_reason:'end_turn'},usage:{output_tokens:1}},{type:'message_stop'}];
 function sse(events:any[]){return new Response(events.map(e=>`data: ${JSON.stringify(e)}\n\n`).join(''),{headers:{'content-type':'text/event-stream'}});}
+test('captured full WS requests preserve tools, canonical continuation and actionable errors',async()=>{
+  const calls:any[]=[];
+  const upstream=Bun.serve({hostname:'127.0.0.1',port:0,async fetch(request){calls.push(await request.json());return sse(chat('{"title":"fixture","description":"fixture"}'));}});
+  const env=await setup([{protocol:'chat_completions',target:`http://127.0.0.1:${upstream.port}`}]);
+  try{
+    for(const [captured,count] of [[capturedBase,11],[capturedPreferences,13]] as const){
+      const start=env.events.length;env.client.send(JSON.stringify({...captured,type:'response.create',model:'m0'}));
+      const first=(await env.terminal(start)).at(-1);expect(first.type).toBe('response.completed');expect(calls.at(-1).tools).toHaveLength(count);
+    }
+    await Bun.sleep(20);
+    let start=env.events.length;const id=env.events.at(-1).response.id;
+    env.client.send(JSON.stringify({type:'response.create',model:'m0',previous_response_id:id,input:[{type:'additional_tools',role:'developer',tools:[{type:'function',name:'current_only',parameters:{type:'object'}}]},{role:'user',content:'continue'}]}));
+    expect((await env.terminal(start)).at(-1).type).toBe('response.completed');expect(calls.at(-1).tools).toHaveLength(1);
+    await Bun.sleep(20);start=env.events.length;
+    env.client.send(JSON.stringify({type:'response.create',model:'m0',input:'x',access_programs:{cyber:'daybreak_red'}}));
+    const error=(await env.terminal(start)).at(-1);expect(error.error).toMatchObject({code:'codex_router_unsupported_access_program',param:'access_programs.cyber',message:'Selected access program cannot be represented by the target protocol'});expect(calls).toHaveLength(3);
+  }finally{await env.close();upstream.stop(true);}
+});
 test('real WS binding protocol selects HTTP conversion on WS-enabled targets; prewarm and history switch',async()=>{
   const calls:any[]=[]; let upgradeAttempts = 0;
   const upstream=Bun.serve({hostname:'127.0.0.1',port:0,async fetch(request){if (request.headers.get('upgrade') === 'websocket') upgradeAttempts++; const body=await request.json();calls.push({url:request.url,body});return sse(request.url.endsWith('/messages')?anthropic('second'):chat('first'));}});
@@ -57,4 +77,21 @@ for (const bindModels of [false, true]) test(`unbound native model retains WS tr
     expect(terminal.type).toBe('response.completed');expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({type:'response.create',model:'unbound-model'});
   } finally {await env.close();upstream.stop(true);}
+});
+
+for (const bound of [false,true]) test(`native WS reference continuation retains declaration carriers (${bound ? 'bound' : 'unbound'})`,async()=>{
+  const calls:any[]=[];
+  const carrier={type:'additional_tools',role:'developer',tools:[{type:'function',name:'native_tool',parameters:{type:'object'}}]};
+  const upstream=Bun.serve({hostname:'127.0.0.1',port:0,fetch(request,server){if(server.upgrade(request))return;return new Response('WS required',{status:400});},websocket:{message(socket,message){const body=JSON.parse(String(message));calls.push(body);socket.send(JSON.stringify({type:'response.completed',response:{id:`native-${calls.length}`,object:'response',status:'completed',model:body.model,output:[{type:'message',role:'assistant',content:[{type:'output_text',text:'native'}]}]}}));}}});
+  const env=await setup([{protocol:'responses',target:`http://127.0.0.1:${upstream.port}`,ws:true}],bound);
+  const model=bound?'m0':'unbound-model';
+  try{
+    env.client.send(JSON.stringify({type:'response.create',model,input:[carrier,{role:'user',content:'first'}]}));
+    const first=(await env.terminal()).at(-1);expect(first.type).toBe('response.completed');
+    await Bun.sleep(20);const start=env.events.length;
+    env.client.send(JSON.stringify({type:'response.create',model,previous_response_id:first.response.id,input:[{role:'user',content:'next'}]}));
+    expect((await env.terminal(start)).at(-1).type).toBe('response.completed');expect(calls).toHaveLength(2);
+    expect(calls[0].input[0]).toEqual(carrier);expect(calls[1].input[0]).toEqual(carrier);
+    expect(calls[1].input.map((item:any)=>item.type??item.role)).toEqual(['additional_tools','user','message','user']);
+  }finally{await env.close();upstream.stop(true);}
 });

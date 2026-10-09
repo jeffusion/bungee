@@ -2,6 +2,8 @@ import {afterEach,expect,test} from 'bun:test';
 import {ScopedPluginRegistry,setScopedPluginRegistry,getScopedPluginRegistry} from '../src/scoped-plugin-registry';
 import {handleRequest} from '../src/worker/request/handler';
 import {emptyCatalogServiceHost} from './support/empty-catalog-service-host';
+import capturedBase from '../../../plugins/codex-router/tests/fixtures/captured-app-base.json';
+import capturedPreferences from '../../../plugins/codex-router/tests/fixtures/captured-app-preferences.json';
 const originalFetch=globalThis.fetch,previous=getScopedPluginRegistry();afterEach(()=>{globalThis.fetch=originalFetch;setScopedPluginRegistry(previous);});
 const logging={accessLogWriter:{write(){},updateBodyId(){},updateResponseBodyId(){},updateProtocolOutcome(){}},fileLogWriter:{async write(){}}};
 const path=new URL('./fixtures/codex-dispatch-plugin.ts',import.meta.url).pathname;
@@ -62,4 +64,30 @@ test('registry refuses a Codex binding without target protocol',async()=>{
     const result=await registry.initializeFromConfig({routes:[{id:'entry',path:'/codex',plugins:[{name:'codex-router',path,options:{models:[{provider:'p',model:'m',target:{type:'route',id:'target'}}]}}],endpoints:[{target:'http://unused'}]}]});
     expect(result.failed).toBe(1);expect(registry.getRoutePluginOwners('/codex',true)).toHaveLength(0);
   } finally {await registry.destroy();}
+});
+
+for(const [name,captured,count] of [['base',capturedBase,11],['preferences',capturedPreferences,13]] as const)test(`captured ${name} public HTTP pipeline preserves every tool and model routing`,async()=>{
+  const config:any={routes:[{id:'e',path:'/codex',plugins:[{name:'codex-router',path,options:{models:[{source:'captured-model',provider:'p',model:'destination',target:{type:'route',id:'t',protocol:'chat_completions'}}]}}],endpoints:[{target:'http://unused'}]},
+    {id:'t',path:'/target',path_rewrite:{'^/target':''},endpoints:[{target:'http://upstream.test'}]}]};
+  const registry=new ScopedPluginRegistry(import.meta.dir);expect((await registry.initializeFromConfig(config)).failed).toBe(0);setScopedPluginRegistry(registry);
+  const calls:any[]=[];globalThis.fetch=Object.assign(async(url:any,init:any)=>{calls.push({url:String(url),body:JSON.parse(await new Response(init.body).text())});return Response.json({choices:[{message:{role:'assistant',content:'{"title":"fixture","description":"fixture"}'},finish_reason:'stop'}]});},{preconnect(){}}) as any;
+  try{
+    const response=await handleRequest(new Request('http://local/codex/responses',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(captured)}),config,{logging});
+    expect(response.status).toBe(200);expect((await response.json() as any).model).toBe('captured-model');
+    expect(calls).toHaveLength(1);expect(calls[0].body.tools).toHaveLength(count);expect(calls[0].body.model).toBe('destination');
+    expect(calls[0].url).toEndWith('/chat/completions');
+    expect(calls[0].body.messages.map((m:any)=>m.role)).toEqual(captured.input.filter(i=>i.type!=='additional_tools').map(i=>i.role));
+    expect(calls[0].body).not.toHaveProperty('access_programs');
+  }finally{await registry.destroy();}
+});
+
+test('codec rejection details survive a separately bundled plugin and reach HTTP without upstream calls',async()=>{
+  const config:any={routes:[{id:'e',path:'/codex',plugins:[{name:'codex-router',path,options:{models:[{source:'m',provider:'p',model:'destination',target:{type:'route',id:'t',protocol:'chat_completions'}}]}}],endpoints:[{target:'http://unused'}]},
+    {id:'t',path:'/target',endpoints:[{target:'http://upstream.test'}]}]};
+  const registry=new ScopedPluginRegistry(import.meta.dir);expect((await registry.initializeFromConfig(config)).failed).toBe(0);setScopedPluginRegistry(registry);
+  let calls=0;globalThis.fetch=Object.assign(async()=>{calls++;return Response.json({});},{preconnect(){}}) as any;
+  try{
+    const response=await handleRequest(new Request('http://local/codex/responses',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'m',input:'x',access_programs:{cyber:'daybreak_blue'}})}),config,{logging});
+    expect(response.status).toBe(422);expect(await response.json()).toEqual({error:'codex_router_unsupported_access_program',message:'Selected access program cannot be represented by the target protocol',param:'access_programs.cyber'});expect(calls).toBe(0);
+  }finally{await registry.destroy();}
 });

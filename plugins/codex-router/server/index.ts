@@ -53,22 +53,25 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       }
       if(input.conversation || input.response_id)throw new DataAdmissionError(422,'codex_router_unsupported_history_reference');
       input.model=binding.model;
-      const logicalInput=typeof input.input === 'string' ? [{role:'user',content:input.input}] : input.input;
+      let logicalInput=typeof input.input === 'string' ? [{role:'user',content:input.input}] : input.input;
       if(!Array.isArray(logicalInput))throw new DataAdmissionError(422,'codex_router_invalid_history');
       if(!opaqueRestored && logicalInput.some((item:any)=>item?.encrypted_content || item?.type==='compaction'))throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
-      if(input.tools?.length && (!capabilities.toolCall || binding.capabilityOverrides?.tools===false))throw new DataAdmissionError(422,'codex_router_tools_unsupported');
+      const hasTools=input.tools?.length || logicalInput.some((item:any)=>item?.type==='additional_tools' && item.tools?.length);
+      if(hasTools && (!capabilities.toolCall || binding.capabilityOverrides?.tools===false))throw new DataAdmissionError(422,'codex_router_tools_unsupported');
       let toolNames;
+      let diagnostics;
       if(protocol!=='responses'){
         try {
           const decoded=decodeResponsesRequest(input,protocol,{omitOptionalWebSearch:true,reasoningEffort:capabilities.reasoning && binding.capabilityOverrides?.reasoningEffort===true,
             anthropicThinkingBudget:undefined,maxOutputTokens:capabilities.outputLimit ?? undefined});
-          context.body=decoded.body;toolNames=decoded.toolNames;
-        }catch(error){if(error instanceof ResponsesCodecError)throw new DataAdmissionError(422,`codex_router_${error.code}`);throw error;}
+          context.body=decoded.body;toolNames=decoded.toolNames;logicalInput=decoded.canonicalInput;
+          diagnostics=decoded.diagnostics;
+        }catch(error){if(error instanceof ResponsesCodecError)throw new DataAdmissionError(422,`codex_router_${error.code}`,undefined,{message:error.message,param:error.param});throw error;}
         context.url.pathname=context.url.pathname.replace(/\/responses$/,protocol==='chat_completions'?'/chat/completions':'/messages');
       }else context.body=input;
       const adapter=protocolAdapter({protocol:protocol==='responses'?undefined:protocol,model:bindingSource(binding),toolNames,signal,
         save:async(response,responseContext)=>{if(scope && typeof response.id==='string')await this.history.put({scope,id:response.id,value:{target:binding.target,origin:{provider:binding.provider,model:binding.model,upstreamId:responseContext?.upstreamId},items:[...logicalInput,...response.output]}},{signal,operationId:crypto.randomUUID()});}});
-      return {target:binding.target,protocol,requiredUpstreamId,adapter};
+      return {target:binding.target,protocol,requiredUpstreamId,adapter,...(protocol!=='responses'?{canonicalInput:logicalInput,diagnostics}:{})};
     });
     hooks.onBeforeRequest.tap('codex-router.catalog-validator', context => {
       if (context.method === 'GET' && /\/models$/.test(context.originalUrl.pathname)) {

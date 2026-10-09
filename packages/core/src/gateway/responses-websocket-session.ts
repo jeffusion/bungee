@@ -8,7 +8,7 @@ import {createBodySource} from './body-factory';
 import {BodyBufferLease,bodySourceFor} from './body-service';
 import {controlledBodyHandle} from './controlled-views';
 import type {BodyHandle} from './body-contracts';
-import {DataAdmissionError} from '../data-admission/errors';
+import {DataAdmissionError, type DataAdmissionErrorDetails} from '../data-admission/errors';
 
 interface History {model:string;items:unknown[];bytes:number;expires:number}
 const TERMINALS = new Set(['response.completed','response.incomplete','response.failed']);
@@ -27,8 +27,9 @@ export class ResponsesWebSocketSession {
     while(this.history.size>=32 || this.historyBytes+bytes>8*1024*1024){const oldest=this.history.keys().next().value!;const item=this.history.get(oldest)!;this.history.delete(oldest);this.historyBytes-=item.bytes;this.historyLease.release(item.bytes);}
     this.historyLease.add(bytes);this.historyBytes+=bytes;this.history.set(id,{model,items:structuredClone(items),bytes,expires:Date.now()+600_000});
   }
-  private error(session:ManagedWebSocketSession,code:string,status=422):Promise<void> {
-    return session.send(JSON.stringify({type:'error',status,error:{type:'invalid_request_error',code,message:code}}));
+  private error(session:ManagedWebSocketSession,code:string,status=422,details?:DataAdmissionErrorDetails):Promise<void> {
+    const safe=new DataAdmissionError(status,code,undefined,details).details;
+    return session.send(JSON.stringify({type:'error',status,error:{type:'invalid_request_error',code,message:safe?.message ?? code,...(safe?.param ? {param:safe.param}:{})}}));
   }
   onMessage(session:ManagedWebSocketSession,message:WebSocketMessageView):void|Promise<void> {
     const value=message.json() as Record<string,any>|undefined;
@@ -82,14 +83,15 @@ export class ResponsesWebSocketSession {
       const id=randomUUID();
       const request=new Request(this.input.request.url,{method:'POST',headers,body:JSON.stringify(body),signal});
       deriveWorkerRequestIdentity(this.input.request,request,id);
-      const response=await runWithGatewayHooks(this.hooks,()=>runGatewayRequest(request,this.input.config,{servingRevision:this.input.servingRevision,transport:'websocket',websocketBridge:this.input.bridge,skipEntryRate:true}));
+      const response=await runWithGatewayHooks(this.hooks,()=>runGatewayRequest(request,this.input.config,{servingRevision:this.input.servingRevision,transport:'websocket',websocketBridge:this.input.bridge,skipEntryRate:true,logging:this.input.logging,onCanonicalInput(input){logicalInput=[...input];}}));
       source=createBodySource(response.body,this.input.bridge.limits.maxMessageBytes,response.headers.get('content-encoding')??'',signal,{requestId:id,attemptId:id,direction:'response',stage:'client-response',version:1,contentType:response.headers.get('content-type')??'',contentEncoding:response.headers.get('content-encoding')??''});
       const wire=response.body && bodySourceFor(response.body)===source ? response.body : source.take() as ReadableStream<Uint8Array>|null;
       const handle:BodyHandle=controlledBodyHandle(source,wire,source.handle(),signal);
       if(!response.ok){
         let code='codex_router_generation_rejected';
-        try{const payload:any=await handle.json({id:'websocket.error',mandatory:true,signal});if(typeof payload?.error==='string')code=payload.error;}catch{}
-        await this.error(session,code,response.status);return;
+        let details:DataAdmissionErrorDetails|undefined;
+        try{const payload:any=await handle.json({id:'websocket.error',mandatory:true,signal});if(typeof payload?.error==='string'){code=payload.error;details={message:payload.message,param:payload.param};}}catch{}
+        await this.error(session,code,response.status,details);return;
       }
       let terminal=false;
       const deliver=async(event:any)=>{
@@ -97,7 +99,7 @@ export class ResponsesWebSocketSession {
         if(terminal)throw new Error('Responses event after terminal');
         if(TERMINALS.has(event.type)){
           terminal=true;
-          if(completeHistory && event.type!=='response.failed' && typeof event.response?.id==='string' && Array.isArray(event.response.output))this.remember(event.response.id,body.model,[...logicalInput,...event.response.output]);
+          if(completeHistory && event.type==='response.completed' && typeof event.response?.id==='string' && Array.isArray(event.response.output))this.remember(event.response.id,body.model,[...logicalInput,...event.response.output]);
         }
         await session.send(JSON.stringify(event));
       };
@@ -114,7 +116,7 @@ export class ResponsesWebSocketSession {
       }
       if(!terminal)throw new Error('Responses stream ended without terminal');
     }catch(error){
-      if(!session.signal.aborted)await this.error(session,signal.aborted?'codex_router_generation_cancelled':error instanceof DataAdmissionError?error.code:'codex_router_generation_failed',error instanceof DataAdmissionError?error.status:signal.aborted?499:502);
+      if(!session.signal.aborted)await this.error(session,signal.aborted?'codex_router_generation_cancelled':error instanceof DataAdmissionError?error.code:'codex_router_generation_failed',error instanceof DataAdmissionError?error.status:signal.aborted?499:502,error instanceof DataAdmissionError?error.details:undefined);
     }finally {source?.dispose();}
   }
 }
