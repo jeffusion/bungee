@@ -1,0 +1,605 @@
+{
+  "model": "captured-model",
+  "input": [
+    {
+      "type": "additional_tools",
+      "id": "captured-tools-0",
+      "role": "developer",
+      "tools": [
+        {
+          "type": "namespace",
+          "name": "functions",
+          "description": "Sanitized captured tool description.",
+          "tools": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "description": "Sanitized captured tool description.",
+              "format": {
+                "type": "grammar",
+                "syntax": "lark",
+                "definition": "\nstart: pragma_source | plain_source\npragma_source: PRAGMA_LINE NEWLINE SOURCE\nplain_source: SOURCE\n\nPRAGMA_LINE: /[ \\t]*\\/\\/ @exec:[^\\r\\n]*/\nNEWLINE: /\\r?\\n/\nSOURCE: /[\\s\\S]+/\n"
+              }
+            },
+            {
+              "type": "function",
+              "name": "wait",
+              "description": "Sanitized captured tool description.",
+              "strict": false,
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "cell_id": {
+                    "type": "string",
+                    "description": "Sanitized captured tool description."
+                  },
+                  "max_tokens": {
+                    "type": "number",
+                    "description": "Sanitized captured tool description."
+                  },
+                  "terminate": {
+                    "type": "boolean",
+                    "description": "Sanitized captured tool description."
+                  },
+                  "yield_time_ms": {
+                    "type": "number",
+                    "description": "Sanitized captured tool description."
+                  }
+                },
+                "required": [
+                  "cell_id"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "function",
+              "name": "request_user_input",
+              "description": "Sanitized captured tool description.",
+              "strict": false,
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "questions": {
+                    "type": "array",
+                    "description": "Sanitized captured tool description.",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "header": {
+                          "type": "string",
+                          "description": "Sanitized captured tool description."
+                        },
+                        "id": {
+                          "type": "string",
+                          "description": "Sanitized captured tool description."
+                        },
+                        "options": {
+                          "type": "array",
+                          "description": "Sanitized captured tool description.",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "description": "Sanitized captured tool description.",
+                              "label": {
+                                "type": "string",
+                                "description": "Sanitized captured tool description."
+                              }
+                            },
+                            "required": [
+                              "label",
+                              "description"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "question": {
+                          "type": "string",
+                          "description": "Sanitized captured tool description."
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "header",
+                        "question",
+                        "options"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "questions"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "function",
+              "name": "request_user_input_async",
+              "description": "Sanitized captured tool description.",
+              "strict": false,
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "questions": {
+                    "type": "array",
+                    "description": "Sanitized captured tool description.",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "options": {
+                          "type": "array",
+                          "description": "Sanitized captured tool description.",
+                          "items": {
+                            "type": "string"
+                          },
+                          "minItems": 1
+                        },
+                        "title": {
+                          "type": "string",
+                          "description": "Sanitized captured tool description."
+                        }
+                      },
+                      "required": [
+                        "title"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "minItems": 1
+                  }
+                },
+                "required": [
+                  "questions"
+                ],
+                "additionalProperties": false
+              }
+            }
+          ]
+        },
+        {
+          "type": "namespace",
+          "name": "clock",
+          "description": "Sanitized captured tool description.",
+          "tools": [
+            {
+              "type": "function",
+              "name": "sleep",
+              "description": "Sanitized captured tool description.",
+              "strict": false,
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "duration_ms": {
+                    "type": "number",
+                    "description": "Sanitized captured tool description."
+                  }
+                },
+                "required": [
+                  "duration_ms"
+                ],
+                "additionalProperties": false
+              }
+            }
+          ]
+        },
+        {
+          "type": "namespace",
+          "name": "collaboration",
+          "description": "Sanitized captured tool description.",
+          "tools": [
+            {
+              "type": "function",
+              "name": "followup_task",
+              "description": "Sanitized captured tool description.",
+              "strict": false,
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "message": {
+                    "type": "string",
+                    "description": "Sanitized captured tool description.",
+                    "encrypted": true
+                  },
+                  "target": {
+                    "type": "string",
+                    "description": "Sanitized captured tool description."
+                  }
+                },
+                "required": [
+                  "target",
+                  "message"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "function",
+              "name": "interrupt_agent",
+              "description": "Sanitized captured tool description.",
+              "strict": false,
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "target": {
+                    "type": "string",
+                    "description": "Sanitized captured tool description."
+                  }
+                },
+                "required": [
+                  "target"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "function",
+              "name": "list_agents",
+              "description": "Sanitized captured tool description.",
+              "strict": false,
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "path_prefix": {
+                    "type": "string",
+                    "description": "Sanitized captured tool description."
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "function",
+              "name": "send_message",
+              "description": "Sanitized captured tool description.",
+              "strict": false,
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "message": {
+                    "type": "string",
+                    "description": "Sanitized captured tool description.",
+                    "encrypted": true
+                  },
+                  "target": {
+                    "type": "string",
+                    "description": "Sanitized captured tool description."
+                  }
+                },
+                "required": [
+                  "target",
+                  "message"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "function",
+              "name": "spawn_agent",
+              "description": "Sanitized captured tool description.",
+              "strict": false,
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "agent_type": {
+                    "type": "string",
+                    "description": "Sanitized captured tool description."
+                  },
+                  "fork_turns": {
+                    "type": "string",
+                    "description": "Sanitized captured tool description."
+                  },
+                  "message": {
+                    "type": "string",
+                    "description": "Sanitized captured tool description.",
+                    "encrypted": true
+                  },
+                  "model": {
+                    "type": "string",
+                    "description": "Sanitized captured tool description."
+                  },
+                  "reasoning_effort": {
+                    "type": "string",
+                    "description": "Sanitized captured tool description."
+                  },
+                  "task_name": {
+                    "type": "string",
+                    "description": "Sanitized captured tool description."
+                  }
+                },
+                "required": [
+                  "task_name",
+                  "message"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "function",
+              "name": "wait_agent",
+              "description": "Sanitized captured tool description.",
+              "strict": false,
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "timeout_ms": {
+                    "type": "number",
+                    "description": "Sanitized captured tool description."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          ]
+        },
+        {
+          "type": "namespace",
+          "name": "mcp__cua_repl",
+          "description": "Sanitized captured tool description.",
+          "tools": [
+            {
+              "type": "function",
+              "name": "js",
+              "description": "Sanitized captured tool description.",
+              "strict": false,
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "description": "Sanitized captured tool description."
+                  },
+                  "timeout_ms": {
+                    "type": "integer",
+                    "description": "Sanitized captured tool description."
+                  },
+                  "title": {
+                    "type": "string",
+                    "description": "Sanitized captured tool description."
+                  }
+                },
+                "required": [
+                  "code"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "function",
+              "name": "js_reset",
+              "description": "Sanitized captured tool description.",
+              "strict": false,
+              "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "id": "captured-item-1",
+      "role": "developer",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "captured message 1"
+        }
+      ],
+      "internal_chat_message_metadata_passthrough": {
+        "content_item_kinds": [
+          "model.base_instructions"
+        ]
+      }
+    },
+    {
+      "type": "message",
+      "id": "captured-item-2",
+      "role": "developer",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "captured message 2"
+        },
+        {
+          "type": "input_text",
+          "text": "captured message 2"
+        },
+        {
+          "type": "input_text",
+          "text": "captured message 2"
+        },
+        {
+          "type": "input_text",
+          "text": "captured message 2"
+        },
+        {
+          "type": "input_text",
+          "text": "captured message 2"
+        },
+        {
+          "type": "input_text",
+          "text": "captured message 2"
+        }
+      ],
+      "internal_chat_message_metadata_passthrough": {
+        "turn_id": "01a11fcd-2404-7561-90ca-0a601a9d40ef",
+        "create_time": 1791534905.4956312,
+        "content_item_kinds": [
+          "generic.developer_instructions",
+          "memories.instructions",
+          "host_skills.instructions",
+          "permissions.instructions",
+          "collaboration_mode.instructions",
+          "plugins.recommendations"
+        ]
+      }
+    },
+    {
+      "type": "message",
+      "id": "captured-item-3",
+      "role": "developer",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "captured message 3"
+        }
+      ],
+      "internal_chat_message_metadata_passthrough": {
+        "turn_id": "01a11fcd-2404-7561-90ca-0a601a9d40ef",
+        "create_time": 1791534905.495635,
+        "content_item_kinds": [
+          "multi_agent.role_instructions"
+        ]
+      }
+    },
+    {
+      "type": "message",
+      "id": "captured-item-4",
+      "role": "developer",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "captured message 4"
+        }
+      ],
+      "internal_chat_message_metadata_passthrough": {
+        "turn_id": "01a11fcd-2404-7561-90ca-0a601a9d40ef",
+        "create_time": 1791534905.495636,
+        "content_item_kinds": [
+          "multi_agent.mode_instructions"
+        ]
+      }
+    },
+    {
+      "type": "message",
+      "id": "captured-item-5",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "captured message 5"
+        },
+        {
+          "type": "input_text",
+          "text": "captured message 5"
+        }
+      ],
+      "internal_chat_message_metadata_passthrough": {
+        "turn_id": "01a11fcd-2404-7561-90ca-0a601a9d40ef",
+        "create_time": 1791534905.495637,
+        "content_item_kinds": [
+          "agents_md.instructions",
+          "environments.environment_context"
+        ]
+      }
+    },
+    {
+      "type": "message",
+      "id": "captured-item-6",
+      "role": "developer",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "captured message 6"
+        }
+      ],
+      "internal_chat_message_metadata_passthrough": {
+        "turn_id": "01a11fcd-2404-7561-90ca-0a601a9d40ef",
+        "create_time": 1791534905.6504033,
+        "content_item_kinds": [
+          "additional_content.codex_apps_client_time_context"
+        ]
+      }
+    },
+    {
+      "type": "message",
+      "id": "captured-item-7",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "captured message 7"
+        }
+      ],
+      "internal_chat_message_metadata_passthrough": {
+        "turn_id": "01a11fcd-2404-7561-90ca-0a601a9d40ef",
+        "create_time": 1791534905.6531315,
+        "content_item_kinds": [
+          "additional_content.codex_apps_open_page"
+        ]
+      }
+    },
+    {
+      "type": "message",
+      "id": "captured-item-8",
+      "role": "developer",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "captured message 8"
+        }
+      ],
+      "internal_chat_message_metadata_passthrough": {
+        "turn_id": "01a11fcd-2404-7561-90ca-0a601a9d40ef",
+        "create_time": 1791534905.655374,
+        "content_item_kinds": [
+          "additional_content.codex_apps_open_page_instructions"
+        ]
+      }
+    },
+    {
+      "type": "message",
+      "id": "captured-item-9",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "captured message 9"
+        }
+      ],
+      "internal_chat_message_metadata_passthrough": {
+        "turn_id": "01a11fcd-2404-7561-90ca-0a601a9d40ef",
+        "create_time": 1791534905.6615202,
+        "content_item_kinds": [
+          "user.text"
+        ]
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "parallel_tool_calls": false,
+  "reasoning": {
+    "effort": "high",
+    "summary": "detailed",
+    "context": "all_turns"
+  },
+  "store": false,
+  "stream": true,
+  "stream_options": {
+    "reasoning_summary_delivery": "sequential_cutoff"
+  },
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "prompt_cache_key": "captured-cache",
+  "text": {
+    "verbosity": "low"
+  },
+  "client_metadata": {
+    "mcp_attribution": "fixture",
+    "x-codex-installation-id": "fixture",
+    "session_id": "fixture",
+    "x-codex-window-id": "fixture",
+    "x-codex-turn-metadata": "fixture",
+    "thread_id": "fixture",
+    "root_turn_id": "fixture",
+    "turn_id": "fixture"
+  },
+  "access_programs": {
+    "cyber": "standard"
+  }
+}

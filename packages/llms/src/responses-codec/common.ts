@@ -24,10 +24,21 @@ export interface ResponsesCodecCapabilities {
   maxOutputTokens?: number;
   limits?: Partial<ResponsesCodecLimits>;
 }
-export class ResponsesCodecError extends Error {
-  constructor(readonly code: string, message: string) { super(message); this.name = 'ResponsesCodecError'; }
+export interface ResponsesConversionDiagnostic {
+  param: string;
+  action: 'mapped' | 'omitted';
+  reason: string;
 }
-export function fail(code: string, message: string): never { throw new ResponsesCodecError(code, message); }
+export class ResponsesCodecError extends Error {
+  constructor(readonly code: string, message: string, readonly param?: string) { super(message); this.name = 'ResponsesCodecError'; }
+}
+export function fail(code: string, message: string, param?: string): never { throw new ResponsesCodecError(code, message, param); }
+export function atParam<T>(param: string, run: () => T): T {
+  try { return run(); } catch (error) {
+    if (error instanceof ResponsesCodecError && error.param === undefined) throw new ResponsesCodecError(error.code, error.message, param);
+    throw error;
+  }
+}
 export function record(value: unknown, where: string): JsonRecord {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail('invalid_payload', `${where} must be an object`);
   return value as JsonRecord;

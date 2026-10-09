@@ -155,7 +155,9 @@ describe('Responses strict shared codec (mock protocol fixtures)', () => {
   }
 
   test('capability-approved reasoning effort and Anthropic thinking budgets are explicit', () => {
-    expectCode(() => decodeResponsesRequest(request({ reasoning: { effort: 'high' } }), 'chat_completions'), 'unsupported_reasoning');
+    const omitted=decodeResponsesRequest(request({ reasoning: { effort: 'high' } }), 'chat_completions');
+    expect(omitted.body).not.toHaveProperty('reasoning_effort');
+    expect(omitted.diagnostics).toContainEqual({param:'reasoning.effort',action:'omitted',reason:'target_reasoning_effort_unavailable'});
     expect(decodeResponsesRequest(request({ reasoning: { effort: 'high' } }), 'chat_completions', { reasoningEffort: true }).body.reasoning_effort).toBe('high');
     expect(decodeResponsesRequest(request({ reasoning: { effort: 'high' } }), 'anthropic_messages', { anthropicThinkingBudget: 2048 }).body.thinking).toEqual({ type: 'enabled', budget_tokens: 2048 });
     expectCode(() => decodeResponsesRequest(request({ reasoning: { effort: 'high' } }), 'anthropic_messages', { anthropicThinkingBudget: 4096 }), 'unsupported_reasoning');
@@ -229,9 +231,9 @@ describe('Responses strict shared codec (mock protocol fixtures)', () => {
     expect(decodeResponsesRequest(request({ text: { format: { type: 'json_schema', name: 'answer', schema: { type: 'object' }, strict: true } } }), 'chat_completions').body.response_format).toEqual({ type: 'json_schema', json_schema: { name: 'answer', schema: { type: 'object' }, strict: true } });
   });
 
-  test('capability hints with no faithful mapping and unknown content are explicit errors', () => {
-    expectCode(() => decodeResponsesRequest(request({ reasoning: { summary: 'auto' } }), 'chat_completions', { reasoningEffort: true }), 'unsupported_reasoning');
-    expectCode(() => decodeResponsesRequest(request({ text: { verbosity: 'low' } }), 'chat_completions'), 'unsupported_request');
+  test('known preferences are observable omissions while unsupported content and constraints fail', () => {
+    expect(decodeResponsesRequest(request({ reasoning: { summary: 'auto' } }), 'chat_completions', { reasoningEffort: true }).diagnostics).toContainEqual({param:'reasoning.summary',action:'omitted',reason:'target_summary_not_guaranteed'});
+    expect(decodeResponsesRequest(request({ text: { verbosity: 'low' } }), 'chat_completions').diagnostics).toContainEqual({param:'text.verbosity',action:'omitted',reason:'target_verbosity_not_available'});
     expectCode(() => decodeResponsesRequest(request({ include: ['web_search_call.action.sources'] }), 'chat_completions'), 'unsupported_request');
     expectCode(() => decodeResponsesRequest(request({ store: true }), 'chat_completions'), 'unsupported_request');
     expectCode(() => decodeResponsesRequest(request({ unknown_parameter: true }), 'chat_completions'), 'unsupported_request');
