@@ -41,10 +41,27 @@
 - 独立复核 P2：无条件清理 WS 工具声明破坏原生引用续聊。改为只使用转换路径的 canonicalInput，补绑定/未绑定原生续聊测试（9 pass），同轴复审确认修复。诊断宿主依赖补充复审无新增 P0–P2。
 - 全量源文件精确路径回归：4111 pass / 0 fail / 32078 assertions，386 文件。Bun 未加 ./ 的过滤器会额外收集 dist 下复制的测试，首次两次运行因此有两项模块路径错误；最终精确源文件运行退出 0。
 - 镜像 a8208ab6b6819e52a19a10ab19baa2a19b6d81c5 构建期间旧实例持续运行，随后 compose up --no-deps --force-recreate 直接替换，无 compose down、预先停服或额外备份。Compose 返回后 8.55 秒 /health 恢复 200，容器 healthy；这不是精确停机时长测量。配置版本切换前后均为 132，现有 gpt-6-luna→zai/glm-5.3-flash 绑定不变。
-- 真实 CLI probe 使用现有认证能列出 gpt-6-luna，但生成入口返回 unauthorized/401，未到模型上游。两轮状态均 failed，无文件修改、命令或 MCP 执行，不报告 GLM 工具链已验收。已请求用户让本机 CLI 使用既有授权访问方式，不索取或复制凭据。
+- 初次真实 CLI probe 两轮 failed、无工具执行。后续核对 401 日志发现其来自 `/chatgpt/` 当时选中的原上游，而非已经证实的 CLI 入口认证失败；此前“未到上游、需要重新配置 CLI 认证”的判断撤回。用户将目标 `/zai/oai` 临时公开后，直接调用返回 200；Router 的实际工具续聊问题及修复证据见下节。
 - 当前没有已绑定的真实 Anthropic 目标；真实 Anthropic、跨真实提供商续聊与 Desktop 人工验收仍有缺口。上述 fixture/model mock 证据不代替这些验收。
 
 真实提供商 probe：`BUNGEE_REAL_CODEX_PROBE=1 bun tests/support/codex-router-provider-probe.ts <现有公开模型> <现有入口URL>`。仅在明确授权后使用；由 Codex 自己使用现有认证，不读取或复制凭据，不写用户配置，不修改服务绑定。随机临时目录包含三行文本和本地 MCP，验证读取→修改第二行→重读→MCP→无工具续聊两个 nonce，保留临时目录用于核验。
+
+### 真实 GLM 工具续聊修复与验收
+
+真实请求已到达绑定的 `/zai/oai`，但 CLI 回传的 `reasoning` 含 `encrypted_content: null`、`content: null` 和明文 summary。旧判断使用 `!== undefined`，将 null 误判为不可还原加密历史，在 `input[3]` 返回 422。修复提交 `00c207de559b30d7528cd56bd62384ebee6a4129`：只将非 null 加密内容视为不可还原；Chat 的明文推理历史能力与 reasoning.effort 参数映射分离，按实际模型能力映射到 assistant.reasoning_content，不要求开启 effort override。
+
+非空 reasoning.content 尚未实现转换，仍明确拒绝并返回该项 `.content` 位置；真正的加密、compaction 及 Anthropic 无法重编码的推理历史仍拒绝。独立复核指出非空 content 会丢失的 P2，已补严格检查和负向测试；同轴复审确认修复，无新增 finding。
+
+- 最终 llms/插件专项 123 pass / 0 fail / 780 assertions；架构检查及 llms/core 构建通过，镜像完整构建通过。此前包含核心 HTTP/WS 的专项为 146 pass / 0 fail。
+- 构建插件＋master＋双 worker＋CLI mock 闭环：6 pass / 0 fail / 198 assertions。Chat 工具响应新增明文 reasoning_content，下一轮必须将其原样传回上游才允许完成；Chat、Anthropic 原有三种工具闭环均通过。
+- 按授权直接替换本地镜像到 `00c207d`，容器 healthy，`/health` 为 200；构建期间旧实例持续服务，未执行 compose down 或提前停服。单实例容器替换可能短暂断连，本轮未测量精确中断时长。配置版本仍为 132，未修改模型绑定。
+- 真实 CLI 0.160.1 从 `/chatgpt` 选择 gpt-6-luna，经现有 Router 绑定到 `/zai/oai` 的 glm-5.3-flash，目标既有模型映射出站名称为 `GLM-5.3-Flash`。实际传输为 HTTP/SSE。
+- 在 `/tmp/bungee-provider-probe-dFYdIQ` 实际执行两次本地命令、一项 custom apply_patch 文件修改、一项 namespace MCP echo。只替换三行文本中的第二行，其他行字节保持；MCP 审计记录实际调用。首轮和无工具续聊均 completed，fileExact、mcpExact、continuationExact 全部为 true。随机标记为 `79a43748-64d2-46d4-bccd-b29e4d858f47`。
+- 6 次逻辑生成均为 200/completed，分别且仅各有一条 completed token 记录。日志检查确认原始 call_id 顺序、工具输出、文件标记、MCP 标记及明文推理均进入目标 Chat 历史。首个访问请求 `ad7db71e-ca39-4b3c-9382-b550ef48439d`，续聊 `c92c40d5-0b45-4c52-9644-441944eb1d65`；各自逻辑 ID 为 `fa36e665-3311-4607-8584-071624bfdbbd`、`5348ff58-71ac-43e8-bf67-23fbd890001e`。
+
+probe 仅在本次子进程关闭 Apps/Plugins 功能，防止模型误选用户的远程文件工具；用户配置与认证不变。本地文件工具使用绝对临时路径。之前的一次失败尝试调用了远程 MCP 并得到路径不存在，不能当成本地 MCP 成功证据。
+
+本轮确认真实 GLM 的 HTTP/SSE CLI 文件、custom 和 MCP 工具续聊；真实 WS 客户端、Desktop 人工操作、真实 Anthropic 和跨真实提供商续聊仍未验收。自动化 WS/Anthropic mock 证据不能代替它们。
 
 ## 协议字段清理（2026-10-09）
 

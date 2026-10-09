@@ -15,6 +15,7 @@ export async function probeCodexProvider(input:{model:string;baseUrl:string}) {
   const executable=Bun.which('codex');if(!executable)throw new Error('codex executable unavailable');
   const child=spawn(executable,['app-server','--stdio',
     '-c',`openai_base_url=${JSON.stringify(input.baseUrl)}`,'-c','model_provider="openai"',
+    '-c','features.apps=false','-c','features.plugins=false',
     '-c',`mcp_servers={codex_fixture={command=${JSON.stringify(process.execPath)},args=${JSON.stringify([script,audit])},startup_timeout_sec=10,tool_timeout_sec=10}}`],
     {cwd:root,stdio:['pipe','pipe','pipe']});
   let buffer='',closed=false;const pending=new Map<number,{resolve(value:any):void;reject(error:Error):void}>();
@@ -52,7 +53,7 @@ export async function probeCodexProvider(input:{model:string;baseUrl:string}) {
     const catalog=await rpc(2,'model/list',{includeHidden:false});
     const thread=await rpc(3,'thread/start',{model:input.model,cwd:root,approvalPolicy:'never',sandbox:'workspace-write',ephemeral:true,experimentalRawEvents:false});
     if(!thread.result?.thread?.id)throw new Error('thread/start rejected');
-    const first=await turn(4,thread.result.thread.id,`Acceptance ${nonce}. Work only in this temporary directory. Read probe.txt using a tool. Replace only its second line ${before} with ${after}, keeping the other lines unchanged. Read the file again using a tool to verify it. Call the local codex_fixture MCP echo with fixture_echo=${mcp}. Do not inspect other directories. Finish after these operations.`);
+    const first=await turn(4,thread.result.thread.id,`Acceptance ${nonce}. Work only in ${root}. Use the local exec_command shell tool to read ${path}. Use apply_patch or the local shell to replace only its second line ${before} with ${after}, keeping the other lines unchanged. Read ${path} again using exec_command to verify it. Call the local codex_fixture MCP echo with fixture_echo=${mcp}. Do not inspect other directories. Finish after these operations.`);
     const second=await turn(5,thread.result.thread.id,'Continue from the preceding turn without calling any tools: give the exact current second line of probe.txt and the exact MCP echo result from that turn.');
     const actual=await readFile(path,'utf8');
     const mcpCalls=(await readFile(audit,'utf8').catch(()=> '')).split('\n').filter(Boolean).map(line=>JSON.parse(line)).filter(e=>e.event==='tools/call');
