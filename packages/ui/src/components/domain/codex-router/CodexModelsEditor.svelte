@@ -142,7 +142,6 @@
           <div class="space-y-2">
             <Label class="block">{t('sourceProtocol')}</Label>
             <BSelect searchable searchLabels={{ empty: t('noOptions') }} value={binding.sourceProtocol ?? 'responses'} options={protocolOptions.slice(0, 1)} ariaLabel={t('sourceProtocol')} onchange={() => update(index, { sourceProtocol: 'responses' })} />
-            <p class="text-sm text-zinc-400">{t('sourceProtocolHint')}</p>
           </div>
         </div>
         <div class="grid min-w-0 gap-4 border-t border-carbon-600 pt-4 sm:grid-cols-2" data-testid="codex-binding-destination">
