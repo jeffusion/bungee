@@ -100,3 +100,12 @@ test('additional tools cannot bypass target tool capability limits',async()=>{
   const context:any={method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},requestId:'capability',clientIP:'local',body:{model:'client',input:[{type:'additional_tools',tools:[{type:'function',name:'f',parameters:{type:'object'}}]}]}};
   await expect(hooks.onDispatchRequest.promise({context,targets:[{type:'route',id:'t'}],signal:new AbortController().signal})).rejects.toThrow('codex_router_tools_unsupported');
 });
+
+test('reasoning-capable Chat route restores nullable plain reasoning independently of effort override',async()=>{
+  const plugin=new CodexRouterPlugin({models:[{source:'client',provider:'p',model:'m',target:{type:'route',id:'t',protocol:'chat_completions'}}]});
+  await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:()=>({...caps,model:()=>({...caps.model(),reasoning:true})}),rpc:{consume:()=>({get:async()=>null,put:async()=>null})}}} as any);
+  const hooks=createPluginHooks();plugin.register(hooks);
+  const context:any={method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},requestId:'plain-reasoning',clientIP:'local',body:{model:'client',reasoning:{effort:'high'},input:[{role:'user',content:'hello'},{type:'reasoning',summary:[{type:'summary_text',text:'plain'}],content:null,encrypted_content:null},{role:'assistant',content:'answer'}]}};
+  await hooks.onDispatchRequest.promise({context,targets:[{type:'route',id:'t'}],signal:new AbortController().signal});
+  expect(context.body.messages[1]).toMatchObject({reasoning_content:'plain',content:'answer'});expect(context.body).not.toHaveProperty('reasoning_effort');
+});

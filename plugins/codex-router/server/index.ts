@@ -63,6 +63,7 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       if(protocol!=='responses'){
         try {
           const decoded=decodeResponsesRequest(input,protocol,{omitOptionalWebSearch:true,reasoningEffort:capabilities.reasoning && binding.capabilityOverrides?.reasoningEffort===true,
+            reasoningHistory:capabilities.reasoning && binding.capabilityOverrides?.reasoning!==false,
             anthropicThinkingBudget:undefined,maxOutputTokens:capabilities.outputLimit ?? undefined});
           context.body=decoded.body;toolNames=decoded.toolNames;logicalInput=decoded.canonicalInput;
           diagnostics=decoded.diagnostics;
