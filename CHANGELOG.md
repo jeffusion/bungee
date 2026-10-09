@@ -1,3 +1,10 @@
+# [5.18.0](https://github.com/jeffusion/bungee/compare/v5.17.0...v5.18.0) (2026-10-09)
+
+
+### Features
+
+* **codex-router:** add catalog bindings on websocket baseline ([02a56bb](https://github.com/jeffusion/bungee/commit/02a56bb1e67447202382725b98c3249f0700fed6))
+
 # [5.17.0](https://github.com/jeffusion/bungee/compare/v5.16.0...v5.17.0) (2026-10-09)
 
 
