@@ -1,8 +1,11 @@
 <script lang="ts">
-  import { _ } from '$i18n';
+  import { _, isLoading } from '$i18n';
+  import { getPluginText } from '$utils/plugin-i18n';
   import { createFormatter, isVirtualField } from '$utils/field-transform';
   import {
     collectSchemaFieldNames,
+    displayConfigValue,
+    displayModelBindings,
     hasDisplayValue,
     shouldRenderFallbackField,
     shouldShowField,
@@ -17,15 +20,15 @@
    * 3. 使用翻译系统翻译标签和选项
    * 4. 适用于所有插件
    */
-  export let schema: any[] = [];
-  export let config: Record<string, any> = {};
+  let { schema = [], config = {}, pluginName = '' }: { schema?: any[]; config?: Record<string, any>; pluginName?: string } = $props();
+  const translate = (label: string) => getPluginText(label, pluginName, $_);
 
   interface DisplayItem {
     label: string;
     value: string;
   }
 
-  $: displayItems = formatConfigForDisplay(schema, config);
+  let displayItems = $derived($isLoading ? [] : formatConfigForDisplay(schema, config));
 
   /**
    * 格式化配置为可显示的项列表
@@ -51,7 +54,7 @@
           if (virtualValue) {
             const displayValue = formatFieldValue(field, virtualValue);
             items.push({
-              label: $_(field.label),
+              label: translate(field.label),
               value: displayValue
             });
 
@@ -66,7 +69,7 @@
       else if (hasDisplayValue(config[field.name]) && !processedFields.has(field.name) && shouldShowField(field, showIfContext)) {
         const displayValue = formatFieldValue(field, config[field.name]);
         items.push({
-          label: $_(field.label),
+          label: translate(field.label),
           value: displayValue
         });
         processedFields.add(field.name);
@@ -78,7 +81,7 @@
       if (shouldRenderFallbackField(key, value, processedFields, schemaFieldNames)) {
         items.push({
           label: key,
-          value: String(value)
+          value: displayConfigValue(value)
         });
       }
     }
@@ -108,17 +111,21 @@
    * 根据字段类型格式化显示值
    */
   function formatFieldValue(field: any, value: any): string {
+    if (pluginName === 'codex-router' && field.name === 'models') {
+      return displayModelBindings(value, type => translate(`editor.${type}`));
+    }
+
     // select: 显示翻译后的选项标签
     if (field.type === 'select' && field.options) {
       const option = field.options.find((opt: any) => opt.value === value);
-      return option ? $_(option.label) : String(value);
+      return option ? translate(option.label) : displayConfigValue(value);
     }
 
     // multiselect: 显示翻译后的选项标签列表
     if (field.type === 'multiselect' && field.options && Array.isArray(value)) {
       const labels = value.map(v => {
         const option = field.options.find((opt: any) => opt.value === v);
-        return option ? $_(option.label) : String(v);
+        return option ? translate(option.label) : displayConfigValue(v);
       });
       return labels.join(', ');
     }
@@ -148,16 +155,16 @@
     }
 
     // 其他类型：直接转字符串
-    return String(value);
+    return displayConfigValue(value);
   }
 </script>
 
 {#if displayItems.length > 0}
   <div class="space-y-1.5">
     {#each displayItems as item}
-      <div class="grid grid-cols-[minmax(80px,auto)_1fr] gap-2 border-l border-carbon-600 pl-2 text-xs">
+      <div class="grid grid-cols-[minmax(80px,auto)_1fr] min-w-0 gap-2 border-l border-carbon-600 pl-2 text-xs">
         <span class="font-mono uppercase tracking-command text-zinc-500">{item.label}:</span>
-        <span class="font-mono text-zinc-300 break-words">{item.value}</span>
+        <span class="min-w-0 font-mono text-zinc-300 break-all whitespace-pre-line">{item.value}</span>
       </div>
     {/each}
   </div>

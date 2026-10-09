@@ -8,9 +8,7 @@
   import { isVirtualField } from '$utils/field-transform';
   import { getPluginText } from '$utils/plugin-i18n';
   import { Button } from '$components/ui/button';
-  import { BSelect } from '$components/industrial';
-  import { PanelCard } from '$components/industrial';
-  import * as Dialog from '$components/ui/dialog';
+  import { BSelect, IndustrialDialog } from '$components/industrial';
 
   export let plugins: Array<EditorPluginBinding | string> = [];
   export let protectedBindingIds: readonly string[] = [];
@@ -173,6 +171,8 @@
     pluginConfig = {};
     configErrors = {};
     editingPluginIndex = null;
+    const opener = dialogOpener;
+    void tick().then(() => { if (!showAddDialog) opener?.focus({ preventScroll: true }); });
   }
 
   $: selectedPluginSchema = selectedPluginName
@@ -251,6 +251,7 @@
                 {#if pluginOptions && Object.keys(pluginOptions).length > 0 && pluginMeta}
                   <PluginConfigDisplay
                     schema={pluginMeta.configSchema || []}
+                    {pluginName}
                     config={pluginOptions}
                   />
                 {/if}
@@ -284,10 +285,7 @@
   {/if}
 </div>
 
-  <Dialog.Root bind:open={showAddDialog} closeFocus={() => dialogOpener} onOpenChange={(open) => { if (!open) handleCancelDialog(); }}>
-    <Dialog.Content class="!max-w-2xl !gap-0 border-carbon-600 bg-carbon-900 !p-0 shadow-industrial" style="width: calc(100vw - 2rem)" closeClass="hidden">
-      <PanelCard title={editingPluginIndex !== null ? $_('plugin.editPlugin') : $_('plugin.addPlugin')} tag="PLUGIN">
-        <svelte:fragment slot="title-extra"><Dialog.Title class="sr-only">{editingPluginIndex !== null ? $_('plugin.editPlugin') : $_('plugin.addPlugin')}</Dialog.Title></svelte:fragment>
+{#snippet editorBody()}
         <div class="space-y-4">
           <div class="space-y-1.5">
             <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400">// {$_('plugin.selectPlugin')}</span>
@@ -333,12 +331,10 @@
             </div>
           {/if}
 
-          <div class="flex justify-end gap-2 border-t border-carbon-600 pt-4">
-            <Dialog.Close asChild let:builder>
-              <Button variant="ghost" builders={[builder]}>
-                {$_('common.cancel')}
-              </Button>
-            </Dialog.Close>
+        </div>
+{/snippet}
+{#snippet editorFooter()}
+            <Button variant="ghost" onclick={handleCancelDialog}>{$_('common.cancel')}</Button>
             <Button
               variant="default"
               disabled={!selectedPluginName || Object.keys(configErrors).length > 0}
@@ -347,8 +343,9 @@
             >
               {editingPluginIndex !== null ? $_('plugin.update') : $_('common.add')}
             </Button>
-          </div>
-        </div>
-      </PanelCard>
-    </Dialog.Content>
-  </Dialog.Root>
+{/snippet}
+<IndustrialDialog bind:open={showAddDialog} width="42rem" scrollBody={selectedPluginName === 'codex-router'}
+  title={editingPluginIndex !== null ? $_('plugin.editPlugin') : $_('plugin.addPlugin')}
+  description={$_('plugin.pluginConfiguration')} closeLabel={$_('common.close')}
+  returnFocus={dialogOpener} body={editorBody} footer={editorFooter}
+  onOpenChange={open => { if (!open) handleCancelDialog(); }} />

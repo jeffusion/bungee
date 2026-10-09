@@ -1,5 +1,20 @@
 # Codex Router 实施记录
 
+## 绑定配置与实际交互修复（2026-10-09）
+
+本地服务已按授权更新至 `0006157`。以下为其后的修复：
+
+- 模型绑定编辑器迁移为 Svelte 5 响应式状态；手动/目录模式可双向切换，本次编辑中分别保留两种草稿。保存后的手动模式由缺少 sourceProvider 识别。
+- 源/目标提供商均复用 searchable BSelect 在字段内过滤。空的转发目标使用提示文案；目标标签区分路由/服务，加载中及失效引用均不暴露内部数组编码。
+- 插件摘要随语言包和语言切换更新，模型绑定显示 `源模型 → 供应商/目标模型`、协议名称和本地化目标类型；通用结构化配置不再经过 String(object)。
+- 新绑定在插件中保存 `sourceProtocol: responses` 及 `target.protocol: responses|chat_completions|anthropic_messages`。插件负责协议转换，route/service 负责转发链路；路由和服务编辑器移除模型协议字段。旧数据中的 llm_protocol 仅作为缺省绑定协议的兼容来源，显式绑定协议优先，包括 HTTP/SSE、模型能力目录与 WS 传输选择。当前源入口仍仅支持 Responses，不宣称其它源协议已实现。
+- 移除重复目录设置页及其 native widget 注册；`/catalog` control API 和路由内绑定表单继续使用 models.dev。目录管理留在 models.dev 插件。
+- 绑定弹窗复用 IndustrialDialog，滚动仅作用于表单正文，头部和操作区固定在视口内；绑定的各 Select 使用公共固定定位 renderer。
+
+验证：41 项配置/目录/HTTP 协议/摘要专项、4 项实际本机 WS、17 项 dispatch/作用域/表单回归、23 项 manifest/schema 契约和 32 项架构检查通过；完整 UI 回归 452 pass / 0 fail，最终取消焦点修复后补跑 3 项表单处理测试及完整绑定浏览器脚本通过。UI/core 构建通过。Chromium 验证中英文摘要、双模式草稿、提供商字段过滤、协议保存重开、1440/768/390/320px、390×560 矮视口、多绑定、弹层点击、Escape、正文滚动、保存/取消返回焦点。WS 补验目标启用 WS 且旧协议为 Responses 时，绑定 Chat/Anthropic 仍使用 HTTP 转换，上游未收到 Upgrade。
+
+独立审查未发现可确认 P1/P2；提出的矮视口/多绑定/焦点与 WS 协议覆盖缺口已逐项补验。补验发现取消后的焦点缺失，已在取消处理器中局部恢复并通过实际浏览器验证；该修复为局部机械更改，自行验证，无需复审。模拟接口验证不代表真实提供商验收，不修改生产绑定配置。
+
 ## 统一可搜索下拉交互（2026-10-09）
 
 原先 ClientModelPicker 使用可编辑 input 加独立分页，PriceModelPicker 使用 Popover/Command 加另一套分页。现两者都通过公共 BSelect 的 remoteSearch 模式使用同一内部 renderer；普通本地单选、multiple/tags 保持原路径，searchable 本地过滤与 creatable 单选也复用该 renderer。
@@ -45,7 +60,7 @@
 
 基线完整构建和架构检查通过。WebSocket 专项在受限沙箱因 loopback listen EPERM 失败；允许本机监听后 48 pass / 0 fail。该记录只证明本地传输，不证明真实 Codex/OAuth 提供商兼容。
 
-插件挂载入口 route，配置 `models` 数组：每项 `provider`、`model`、可选 `alias`、`target: {type: route|service, id: UUID}`、可选 `capabilityOverrides`。目标在自身配置中声明 `llm_protocol: responses|chat_completions|anthropic_messages`。不管理上游 URL/凭据，不添加模型前缀。
+插件挂载入口 route，配置 `models` 数组：每项 `provider`、`model`、可选 `alias`、`target: {type: route|service, id: UUID}`、可选 `capabilityOverrides`。当前目标接收协议由绑定的 `target.protocol` 声明；旧配置可以回退到目标的 `llm_protocol`。不管理上游 URL/凭据，不添加模型前缀。
 
 目录模板针对 CLI 0.160.1。保留上游原生字段与顺序；没有能力目录或上下文长度时不发布外部模型。默认不声明服务端搜索、并行工具或压缩历史支持。能力修正只限制目录所支持的能力。目录按请求合并，无跨身份缓存，返回 private/no-store 与新 ETag。泛用 data[] 仍返回 data[]。原生目录与绑定 ID 冲突在读取目录时拒绝；动态原生目录不可在离线配置编译时获取，不能声称已经在提交前验证远端原生冲突。
 
@@ -57,7 +72,7 @@
 
 增加唯一 Gateway dispatch provider 和公开 onDispatchRequest Hook。目标只能来自入口插件 schema 中 gateway_target 声明的编译引用，客户端参数无法创建引用；每次请求最多转交一次，目标目录的 dispatch Hook 不再重入。route 目标运行最终 route/service/upstream 链路，service 目标使用入口 route 和指定 service；共享 service 插件及凭据按入口作用域初始化。
 
-调度先于单一 admission session。可信 entryRouteId 随签名 RPC、preview 和 grant 固定，key-access 同时检查入口/最终受保护 scope；入口和目标不同的 route 限流分别应用。绑定目标发布时必须声明 llm_protocol；目录阶段尚不能在离线发布时获知动态原生模型冲突。
+调度先于单一 admission session。可信 entryRouteId 随签名 RPC、preview 和 grant 固定，key-access 同时检查入口/最终受保护 scope；入口和目标不同的 route 限流分别应用。绑定目标发布时必须声明接收协议，新配置在 target.protocol 声明，旧配置兼容 llm_protocol；目录阶段尚不能在离线发布时获知动态原生模型冲突。
 
 验证：新增调度、既有流水线及引用检查 23 项通过；admission/key-access/scoped phase 51 项通过（监听端口测试在沙箱外重跑）；核心构建和 32 项架构测试通过。此阶段接通原生 Responses，转换目标仍返回 protocol_not_ready，下一阶段解除。
 

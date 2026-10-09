@@ -276,7 +276,7 @@
           />
 
         {:else if pluginName === 'codex-router' && field.name === 'models'}
-          <CodexModelsEditor value={Array.isArray(formattedValues[field.name]) ? formattedValues[field.name] : []} on:change={e=>handleChange(field.name,e.detail)}/>
+          <CodexModelsEditor value={Array.isArray(formattedValues[field.name]) ? formattedValues[field.name] : []} onchange={models=>handleChange(field.name,models)}/>
         {:else if field.type === 'json'}
           <Textarea
             id={field.name}

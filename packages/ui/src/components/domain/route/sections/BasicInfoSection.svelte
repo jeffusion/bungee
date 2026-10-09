@@ -41,7 +41,7 @@
     pathRewriteEntries
       .filter((e) => e.pattern.trim())
       .forEach((e) => { rewrite[e.pattern] = e.replacement; });
-    
+
     const nextRewrite = Object.keys(rewrite).length > 0 ? rewrite : undefined;
     if (JSON.stringify(route.path_rewrite) !== JSON.stringify(nextRewrite)) {
       route.path_rewrite = nextRewrite;
@@ -81,11 +81,7 @@
 
 <div class="space-y-4">
   {#if showOnly === undefined || showOnly === 'path'}
-    <label class="block text-xs">模型接收协议（可选）
-      <select class="nx-input w-full" value={route.llm_protocol ?? ''} on:change={e=>{route.llm_protocol=(e.currentTarget.value || undefined) as typeof route.llm_protocol;}}>
-        <option value="">未声明</option><option value="responses">Responses</option><option value="chat_completions">Chat Completions</option><option value="anthropic_messages">Anthropic Messages</option>
-      </select>
-    </label>
+
     <div class="space-y-1.5">
       <label class="block space-y-1.5">
         <span class="nx-field-label">// {$_('routes.path')} *</span>

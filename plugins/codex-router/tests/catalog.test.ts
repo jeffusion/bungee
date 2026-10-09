@@ -66,3 +66,11 @@ test('unavailable explicit replacements cannot advertise native capabilities or 
     expect(original.models).toHaveLength(2);
   }
 });
+
+test('source protocol defaults to Responses and binding target accepts only supported receiving protocols', () => {
+  for (const protocol of ['responses', 'chat_completions', 'anthropic_messages']) {
+    expect(parseBindings([{ ...bindings[0], sourceProtocol: 'responses', target: { ...bindings[0].target, protocol } }])[0].target.protocol).toBe(protocol);
+  }
+  expect(() => parseBindings([{ ...bindings[0], sourceProtocol: 'chat_completions' }])).toThrow('source_protocol_unsupported');
+  expect(() => parseBindings([{ ...bindings[0], target: { ...bindings[0].target, protocol: 'unknown' } }])).toThrow('target_protocol_invalid');
+});

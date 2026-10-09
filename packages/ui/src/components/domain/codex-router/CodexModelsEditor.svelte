@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { _, isLoading } from '$i18n';
   import { getPluginText } from '$utils/plugin-i18n';
   import { getConfigSnapshot } from '$api/config';
@@ -10,36 +10,37 @@
   import { Label } from '$components/ui/label';
   import { Button } from '$components/ui/button';
   import PriceModelPicker from '@plugins/token-stats/ui/PriceModelPicker.svelte';
-  import { createModelSearch, type ModelSearchState } from '@plugins/token-stats/ui/model-search';
-  import type { ModelsDevModelOption, ModelsDevProviderSummary, ModelsDevCatalogStatus } from '@plugins/models-dev/contract';
+  import type { ModelsDevProviderSummary, ModelsDevCatalogStatus } from '@plugins/models-dev/contract';
   import type { ModelBinding } from '@plugins/codex-router/server/config';
 
-  export let value: ModelBinding[] = [];
-  export let catalogOnly = false;
-  const dispatch = createEventDispatcher<{ change: ModelBinding[] }>();
+  let { value = $bindable([]), onchange }: { value?: ModelBinding[]; onchange?: (value: ModelBinding[]) => void } = $props();
   const componentId = `codex-bindings-${Math.random().toString(36).slice(2, 10)}`;
-  let rowIds: number[] = [], nextRowId = 0;
-  let manualSources: Record<number, boolean> = {};
-  let providers: ModelsDevProviderSummary[] = [];
-  let catalogVersion: number | null = null;
-  let modelCount = 0, loading = true, catalogError = false, targetsError = false;
-  let targets: { type: 'route' | 'service'; id: string; label: string; protocol?: string }[] = [];
-  let search = '';
-  let results: ModelSearchState<ModelsDevModelOption> = { models: [], total: 0, page: 1, pageSize: 50, loading: false, error: false };
+  let rowIds = $state<number[]>(untrack(() => value.map((_, index) => index))), nextRowId = untrack(() => value.length);
+  let manualSources = $state<Record<number, boolean>>({});
+  const catalogDrafts = new Map<number, { source: string; provider?: string }>();
+  const manualDrafts = new Map<number, string>();
+  let providers = $state<ModelsDevProviderSummary[]>([]);
+  let catalogVersion = $state<number | null>(null);
+  let modelCount = $state(0), loading = $state(true), catalogError = $state(false), targetsError = $state(false), targetsLoading = $state(true);
+  let targets = $state<{ type: 'route' | 'service'; id: string; label: string; protocol?: ModelBinding['target']['protocol'] }[]>([]);
   let alive = false;
   const controller = new AbortController();
-  const modelSearch = createModelSearch<ModelsDevModelOption, string>(
-    (path, signal) => requestPluginControl('codex-router', path, 'GET', undefined, signal),
-    state => { results = state; },
-    (query, page) => `/catalog?${new URLSearchParams({ search: query, page: String(page) })}`,
-  );
   const t = (key: string) => $isLoading ? '' : getPluginText(`editor.${key}`, 'codex-router', (id, options) => $_(id, options));
-  $: providerOptions = providers.map(provider => ({ value: provider.provider, label: `${provider.name} · ${provider.provider}` }));
-  $: targetOptions = targets.map(target => ({ value: JSON.stringify([target.type, target.id]), label: `${target.label} · ${target.type} · ${target.protocol ?? t('protocolMissing')}` }));
-  $: pages = Math.max(1, Math.ceil(results.total / results.pageSize));
-  $: if (rowIds.length !== value.length) rowIds = value.map((_, index) => rowIds[index] ?? nextRowId++);
+  let providerOptions = $derived(providers.map(provider => ({ value: provider.provider, label: `${provider.name} · ${provider.provider}` })));
+  let targetOptions = $derived.by(() => {
+    const options = targets.map(target => ({ value: JSON.stringify([target.type, target.id]), label: `${t(target.type)} · ${target.label}`, disabled: false }));
+    for (const binding of value) {
+      if (!binding.target.id) continue;
+      const key = JSON.stringify([binding.target.type, binding.target.id]);
+      if (!options.some(option => option.value === key)) options.push({ value: key, label: `${t(binding.target.type)} · ${binding.target.id}${targetsLoading ? '' : ` · ${t('targetUnavailable')}`}`, disabled: true });
+    }
+    return options;
+  });
+  const protocolOptions = [{ value: 'responses', label: 'Responses' }, { value: 'chat_completions', label: 'Chat Completions' }, { value: 'anthropic_messages', label: 'Anthropic Messages' }];
+  $effect(() => { if (rowIds.length !== value.length) rowIds = value.map((_, index) => rowIds[index] ?? nextRowId++); });
+  function targetProtocol(binding: ModelBinding) { return binding.target.protocol ?? targets.find(target => target.type === binding.target.type && target.id === binding.target.id)?.protocol; }
 
-  function publish(next: ModelBinding[]) { value = next; dispatch('change', value); }
+  function publish(next: ModelBinding[]) { value = next; onchange?.(value); }
   function update(index: number, patch: Partial<ModelBinding>) {
     publish(value.map((binding, i) => {
       if (i !== index) return binding;
@@ -54,10 +55,10 @@
   }
   function add() {
     rowIds = [...rowIds, nextRowId++];
-    publish([...value, { source: '', provider: '', model: '', target: { type: 'route', id: '' } }]);
+    publish([...value, { source: '', sourceProtocol: 'responses', provider: '', model: '', target: { type: 'route', id: '' } }]);
   }
   function remove(index: number) {
-    delete manualSources[rowIds[index]];
+    delete manualSources[rowIds[index]]; catalogDrafts.delete(rowIds[index]); manualDrafts.delete(rowIds[index]);
     rowIds = rowIds.filter((_, i) => i !== index);
     publish(value.filter((_, i) => i !== index));
   }
@@ -66,7 +67,15 @@
   }
   function toggleSource(index: number, rowId: number, manual: boolean) {
     manualSources = { ...manualSources, [rowId]: manual };
-    if (manual) update(index, { sourceProvider: undefined });
+    const binding = value[index];
+    if (manual) {
+      catalogDrafts.set(rowId, { source: binding.source ?? binding.alias ?? binding.model, provider: binding.sourceProvider });
+      update(index, { source: manualDrafts.get(rowId) ?? binding.source ?? binding.alias ?? binding.model, sourceProvider: undefined });
+    } else {
+      manualDrafts.set(rowId, binding.source ?? binding.alias ?? binding.model);
+      const draft = catalogDrafts.get(rowId);
+      update(index, { source: draft?.source ?? '', sourceProvider: draft?.provider });
+    }
   }
   async function loadCatalog() {
     loading = true; catalogError = false;
@@ -78,39 +87,21 @@
     finally { if (alive) loading = false; }
   }
   async function loadTargets() {
-    targetsError = false;
+    targetsLoading = true; targetsError = false;
     try {
       const config = (await getConfigSnapshot()).config.logical_configuration;
       if (!alive) return;
       targets = [...config.routes.map(route => ({ type: 'route' as const, id: route.id, label: route.path, protocol: route.llm_protocol })), ...config.services.map(service => ({ type: 'service' as const, id: service.id, label: service.name, protocol: service.llm_protocol }))];
     } catch { if (alive) targetsError = true; }
+    finally { if (alive) targetsLoading = false; }
   }
   onMount(() => {
     alive = true;
-    if (catalogOnly) modelSearch.search('', 1, false);
-    else { void loadCatalog(); void loadTargets(); }
-    return () => { alive = false; controller.abort(); modelSearch.destroy(); };
+    void loadCatalog(); void loadTargets();
+    return () => { alive = false; controller.abort(); };
   });
 </script>
 
-{#if catalogOnly}
-  <div class="space-y-4" data-testid="codex-model-catalog">
-    <div class="space-y-2"><Label for={`${componentId}-search`}>{t('search')}</Label>
-      <Input id={`${componentId}-search`} aria-label={t('search')} value={search} on:input={(event) => { search = event.currentTarget.value; modelSearch.search(search); }} />
-    </div>
-    {#if results.loading}<LoadingIndicator label={t('loading')} />
-    {:else if results.error}<p role="alert" class="text-sm text-red-400">{t('error')}</p><Button variant="outline" onclick={() => modelSearch.search(search, results.page, false)}>{t('retry')}</Button>
-    {:else if !results.models.length}<p role="status" class="text-sm text-zinc-400">{t('empty')}</p>
-    {:else}<div class="divide-y divide-carbon-600">
-      {#each results.models as model (`${model.provider}:${model.model}`)}<div class="grid min-w-0 gap-1 py-3 text-sm sm:grid-cols-2"><span class="break-words text-zinc-200">{model.name}</span><span class="break-all font-mono text-xs text-zinc-400">{model.provider} / {model.model}</span></div>{/each}
-    </div>{/if}
-    <div class="flex flex-wrap items-center gap-3 border-t border-carbon-600 pt-4">
-      <Button variant="outline" disabled={results.loading || results.page <= 1} onclick={() => modelSearch.search(search, results.page - 1, false)}>{t('previous')}</Button>
-      <span class="text-xs text-zinc-400">{results.page} / {pages}</span>
-      <Button variant="outline" disabled={results.loading || results.page >= pages} onclick={() => modelSearch.search(search, results.page + 1, false)}>{t('next')}</Button>
-    </div>
-  </div>
-{:else}
   <div class="space-y-5" data-testid="codex-model-bindings">
     <p class="text-sm text-zinc-400">{t('description')}</p>
     {#if loading}<LoadingIndicator label={t('loading')} />{/if}
@@ -133,12 +124,12 @@
           {#if manualSource(binding, rowIds[index])}
             <div class="space-y-2">
               <Label class="block" for={`${id}-source`}>{t('source')}</Label>
-              <Input id={`${id}-source`} aria-label={t('source')} value={binding.source ?? binding.alias ?? binding.model} maxlength={512} placeholder={t('sourcePlaceholder')} required on:input={event => update(index, { source: event.currentTarget.value })} />
+              <Input id={`${id}-source`} aria-label={t('source')} value={binding.source ?? binding.alias ?? binding.model} maxlength={512} placeholder={t('sourcePlaceholder')} required oninput={event => update(index, { source: event.currentTarget.value })} />
             </div>
           {:else}
             <div class="grid min-w-0 gap-4 sm:grid-cols-2">
               <div class="min-w-0 space-y-2"><Label class="block">{t('sourceProvider')}</Label>
-                <BSelect value={binding.sourceProvider ?? ''} options={providerOptions} ariaLabel={t('sourceProvider')} placeholder={t('sourceProvider')} disabled={loading || catalogError} onchange={provider => update(index, { sourceProvider: String(provider), source: '' })} />
+                <BSelect searchable searchLabels={{ empty: t('noOptions') }} value={binding.sourceProvider ?? ''} options={providerOptions} ariaLabel={t('sourceProvider')} placeholder={t('sourceProvider')} disabled={loading || catalogError} onchange={provider => update(index, { sourceProvider: String(provider), source: '' })} />
               </div>
               <div class="min-w-0 space-y-2"><Label class="block">{t('source')}</Label>
                 <PriceModelPicker value={binding.source ?? binding.alias ?? binding.model} provider={binding.sourceProvider ?? ''} {catalogVersion} catalogPlugin="codex-router" catalogPath="/catalog" disabled={!binding.sourceProvider || !modelCount} label={t('source')} placeholder={t('source')} searchLabel={t('search')} emptyLabel={t('empty')} loadingLabel={t('loading')} errorLabel={t('error')} retryLabel={t('retry')} loadedLabel={t('loaded')} completeLabel={t('complete')} loadMoreLabel={t('loadMore')} onchange={source => update(index, { source })} />
@@ -146,10 +137,15 @@
             </div>
           {/if}
           <p class="text-xs leading-relaxed text-zinc-400">{t('sourceHint')}</p>
+          <div class="space-y-2">
+            <Label class="block">{t('sourceProtocol')}</Label>
+            <BSelect searchable searchLabels={{ empty: t('noOptions') }} value={binding.sourceProtocol ?? 'responses'} options={protocolOptions.slice(0, 1)} ariaLabel={t('sourceProtocol')} onchange={() => update(index, { sourceProtocol: 'responses' })} />
+            <p class="text-sm text-zinc-400">{t('sourceProtocolHint')}</p>
+          </div>
         </div>
         <div class="grid min-w-0 gap-4 border-t border-carbon-600 pt-4 sm:grid-cols-2" data-testid="codex-binding-destination">
           <div class="min-w-0 space-y-2"><Label class="block" id={`${id}-provider-label`}>{t('provider')}</Label>
-            <BSelect value={binding.provider} options={providerOptions} ariaLabel={t('provider')} placeholder={t('provider')} disabled={loading || catalogError} onchange={provider => update(index, { provider: String(provider), model: '' })} />
+            <BSelect searchable searchLabels={{ empty: t('noOptions') }} value={binding.provider} options={providerOptions} ariaLabel={t('provider')} placeholder={t('provider')} disabled={loading || catalogError} onchange={provider => update(index, { provider: String(provider), model: '' })} />
           </div>
           <div class="min-w-0 space-y-2"><Label class="block" id={`${id}-model-label`}>{t('model')}</Label>
             <PriceModelPicker value={binding.model} provider={binding.provider} {catalogVersion} catalogPlugin="codex-router" catalogPath="/catalog" disabled={!binding.provider || !modelCount} label={t('model')} placeholder={t('model')} searchLabel={t('search')} emptyLabel={t('empty')} loadingLabel={t('loading')} errorLabel={t('error')} retryLabel={t('retry')} loadedLabel={t('loaded')} completeLabel={t('complete')} loadMoreLabel={t('loadMore')} onchange={model => update(index, { model })} />
@@ -157,7 +153,11 @@
         </div>
         <div class="min-w-0 space-y-2" data-testid="codex-binding-target">
           <Label class="block" id={`${id}-target-label`}>{t('target')}</Label>
-            <BSelect value={JSON.stringify([binding.target.type, binding.target.id])} options={targetOptions} ariaLabel={t('target')} placeholder={t('targetPlaceholder')} disabled={targetsError} onchange={encoded => { const [type, id] = JSON.parse(String(encoded)); update(index, { target: { type, id } }); }} />
+            <BSelect searchable searchLabels={{ empty: t('noOptions') }} value={binding.target.id ? JSON.stringify([binding.target.type, binding.target.id]) : ''} options={targetOptions} ariaLabel={t('target')} placeholder={t('targetPlaceholder')} disabled={targetsLoading || targetsError} onchange={encoded => { const [type, id] = JSON.parse(String(encoded)); const selected = targets.find(target => target.type === type && target.id === id); update(index, { target: { type, id, ...(binding.target.protocol ?? selected?.protocol ? { protocol: binding.target.protocol ?? selected?.protocol } : {}) } }); }} />
+        </div>
+        <div class="space-y-2">
+          <Label class="block">{t('targetProtocol')}</Label>
+          <BSelect searchable searchLabels={{ empty: t('noOptions') }} value={targetProtocol(binding) ?? ''} options={protocolOptions} ariaLabel={t('targetProtocol')} placeholder={t('targetProtocolPlaceholder')} onchange={protocol => update(index, { target: { ...binding.target, protocol: String(protocol) as ModelBinding['target']['protocol'] } })} />
         </div>
         <details class="border-t border-carbon-600 pt-3">
           <summary class="cursor-pointer text-xs text-zinc-400 focus-visible:outline focus-visible:outline-nexus-500">{t('advanced')}</summary>
@@ -180,4 +180,3 @@
     {/each}
     <Button variant="outline" disabled={value.length >= 100} onclick={add}>{t('add')}</Button>
   </div>
-{/if}

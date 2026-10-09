@@ -229,6 +229,15 @@ behavior remain unchanged. Table/list pagination remains explicit.
   Outside dismissal, disabling and unmounting cancel requests. Late responses
   cannot replace the current query. Values outside loaded pages remain visible.
 
+Model routing bindings group source and destination separately. Provider fields
+reuse searchable BSelect. An unset forwarding target shows a translated
+placeholder, never its encoded internal key. Receiving protocols belong to the
+binding editor; route/service editors contain transport settings. The binding
+editor uses IndustrialDialog with a scrolling body and stationary actions. Its
+searchable BSelect popups use fixed positioning outside the body clipping
+container; ordinary inline Bits UI selects keep scrollBody=false. Plugin
+summaries use translated labels and readable model pairs, not object coercion.
+
 The shared renderer knows no provider or API. Domain adapters supply options,
 page status, translated labels and search/cancel callbacks, reusing the existing
 abort/generation search service. No global styles or alternate data protocol
