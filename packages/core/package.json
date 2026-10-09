@@ -1,6 +1,6 @@
 {
   "name": "@jeffusion/bungee-core",
-  "version": "5.19.0",
+  "version": "5.20.0",
   "description": "Bungee reverse proxy core engine",
   "main": "./dist/main.js",
   "types": "./dist/main.d.ts",

@@ -1,3 +1,10 @@
+# [5.20.0](https://github.com/jeffusion/bungee/compare/v5.19.0...v5.20.0) (2026-10-09)
+
+
+### Features
+
+* **codex-router:** share protocol codecs and bounded history ([cd078bc](https://github.com/jeffusion/bungee/commit/cd078bcca02a43dfa7d21adbd9983a69e0ab7b9f))
+
 # [5.19.0](https://github.com/jeffusion/bungee/compare/v5.18.0...v5.19.0) (2026-10-09)
 
 
