@@ -332,6 +332,7 @@ export type PluginConfigFieldType =
   | 'multiselect' // 多选下拉
   | 'textarea'    // 多行文本
   | 'json'        // JSON 编辑器
+  | 'gateway_target'
   | 'model_mapping'
   | 'object'      // 对象（嵌套表单）
   | 'array';      // 数组（列表编辑器）

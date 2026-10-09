@@ -8,8 +8,8 @@
 import type { Plugin } from '@jeffusion/bungee-core/plugin';
 import { definePlugin } from '@jeffusion/bungee-core/plugin';
 import type { PluginHooks, PluginInitContext, PluginLogger } from '@jeffusion/bungee-core/plugin';
-import { MODELS_DEV_CATALOG_CONTRACT_VERSION, MODELS_DEV_CATALOG_SERVICE_ID, MODELS_DEV_CATALOG_SNAPSHOT_CONTRACT } from '../contract';
-import { CatalogView, catalogServiceOf, reconcileCatalogView } from './local';
+import { MODELS_DEV_CAPABILITIES_SERVICE_ID, MODELS_DEV_CAPABILITIES_CONTRACT_VERSION, MODELS_DEV_CATALOG_CONTRACT_VERSION, MODELS_DEV_CATALOG_SERVICE_ID, MODELS_DEV_CATALOG_SNAPSHOT_CONTRACT } from '../contract';
+import { CatalogView, capabilitiesServiceOf, catalogServiceOf, reconcileCatalogView } from './local';
 
 const RECONCILE_INTERVAL_MS = 5_000;
 
@@ -33,6 +33,7 @@ export const ModelsDevPlugin = definePlugin(
       await snapshot.sync();
       if (this.view.status().version === null) apply(snapshot.current());
       const local = catalogServiceOf(this.view);
+      services.publish(MODELS_DEV_CAPABILITIES_SERVICE_ID, MODELS_DEV_CAPABILITIES_CONTRACT_VERSION, capabilitiesServiceOf(this.view));
       services.publish(MODELS_DEV_CATALOG_SERVICE_ID, MODELS_DEV_CATALOG_CONTRACT_VERSION, {
         ...local,
         status: () => {

@@ -166,7 +166,10 @@ export interface LoadBalancingConfig {
   hash_policy?: HashPolicyConfig;
 }
 
+export type LLMProtocol = 'responses' | 'chat_completions' | 'anthropic_messages';
+
 export interface Service {
+  llm_protocol?: LLMProtocol;
   /** Stable identity supplied by the runtime compiler. */
   id?: string;
   name: string;
@@ -246,6 +249,7 @@ export interface RetryConfig {
 }
 
 export interface RouteConfig extends DirectionalModificationRules {
+  llm_protocol?: LLMProtocol;
   /** Stable logical route identity, present only in compiled runtime config. */
   id?: string;
   path: string;

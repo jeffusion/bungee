@@ -1,0 +1,33 @@
+{
+  "shell_type": "unified_exec",
+  "visibility": "list",
+  "supported_in_api": true,
+  "default_reasoning_summary": "none",
+  "support_verbosity": true,
+  "default_verbosity": "low",
+  "apply_patch_tool_type": "freeform",
+  "truncation_policy": {
+    "mode": "tokens",
+    "limit": 10000
+  },
+  "effective_context_window_percent": 95,
+  "input_modalities": [
+    "text",
+    "image"
+  ],
+  "slug": "",
+  "display_name": "",
+  "description": "",
+  "priority": 100,
+  "default_reasoning_level": "none",
+  "supported_reasoning_levels": [],
+  "base_instructions": "",
+  "supports_search_tool": false,
+  "supports_parallel_tool_calls": false,
+  "supports_image_detail_original": false,
+  "supports_reasoning_effort_updates": false,
+  "use_responses_lite": false,
+  "multi_agent_version": "v1",
+  "additional_speed_tiers": [],
+  "service_tiers": []
+}

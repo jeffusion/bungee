@@ -47,6 +47,18 @@
         "version": 1,
         "process": "worker",
         "kind": "local"
+      },
+      {
+        "id": "models-dev.capabilities.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "local"
+      },
+      {
+        "id": "models-dev.capabilities.v1",
+        "version": 1,
+        "process": "worker",
+        "kind": "local"
       }
     ],
     "consumes": [

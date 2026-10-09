@@ -1,0 +1,148 @@
+{
+  "name": "codex-router",
+  "version": "1.0.0",
+  "author": "Bungee Team",
+  "builtin": true,
+  "schemaVersion": 3,
+  "artifactKind": "runtime-plugin",
+  "main": "server/index.ts",
+  "control": {
+    "entry": "server/control.ts",
+    "rpc": []
+  },
+  "capabilities": [
+    "hooks",
+    "api",
+    "dynamicRuntimeLoad",
+    "controlPlane"
+  ],
+  "uiExtensionMode": "none",
+  "engines": {
+    "bungee": "^4.2.0 || ^5.0.0"
+  },
+  "metadata": {
+    "name": "metadata.name",
+    "description": "plugin.description",
+    "icon": "alt_route"
+  },
+  "dependencies": {
+    "models-dev": "^1.0.0"
+  },
+  "services": {
+    "consumes": [
+      {
+        "plugin": "models-dev",
+        "id": "models-dev.catalog.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "local"
+      },
+      {
+        "plugin": "models-dev",
+        "id": "models-dev.catalog.v1",
+        "version": 1,
+        "process": "worker",
+        "kind": "local"
+      },
+      {
+        "plugin": "models-dev",
+        "id": "models-dev.capabilities.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "local"
+      },
+      {
+        "plugin": "models-dev",
+        "id": "models-dev.capabilities.v1",
+        "version": 1,
+        "process": "worker",
+        "kind": "local"
+      }
+    ]
+  },
+  "configSchema": [
+    {
+      "name": "models",
+      "type": "array",
+      "label": "models.label",
+      "default": [],
+      "validation": {
+        "max": 100
+      },
+      "items": {
+        "name": "binding",
+        "type": "object",
+        "label": "Model",
+        "properties": [
+          {
+            "name": "provider",
+            "type": "string",
+            "label": "provider",
+            "required": true,
+            "validation": {
+              "trimmed": true,
+              "max": 512
+            }
+          },
+          {
+            "name": "model",
+            "type": "string",
+            "label": "model",
+            "required": true,
+            "validation": {
+              "trimmed": true,
+              "max": 512
+            }
+          },
+          {
+            "name": "alias",
+            "type": "string",
+            "label": "alias",
+            "required": false,
+            "validation": {
+              "trimmed": true,
+              "max": 512
+            }
+          },
+          {
+            "name": "target",
+            "type": "gateway_target",
+            "label": "Target",
+            "required": true
+          },
+          {
+            "name": "capabilityOverrides",
+            "type": "json",
+            "label": "Capabilities"
+          }
+        ]
+      }
+    }
+  ],
+  "contributes": {
+    "settings": "/catalog",
+    "api": [
+      {
+        "path": "/catalog",
+        "methods": [
+          "GET"
+        ],
+        "handler": "getCatalog",
+        "execution": "control",
+        "capability": "config.read"
+      }
+    ]
+  },
+  "translations": {
+    "zh-CN": {
+      "metadata.name": "Codex 模型路由",
+      "plugin.description": "从共享目录选择模型并绑定已有路由或服务",
+      "models.label": "模型绑定"
+    },
+    "en": {
+      "metadata.name": "Codex Router",
+      "plugin.description": "Bind catalog models to existing routes or services",
+      "models.label": "Model bindings"
+    }
+  }
+}
