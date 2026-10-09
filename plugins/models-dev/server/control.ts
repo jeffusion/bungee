@@ -15,13 +15,13 @@ import type {
 import type { PluginStorage } from '@jeffusion/bungee-core/plugin';
 import {
   MODELS_DEV_CATALOG_SERVICE_ID,
-  MODELS_DEV_CATALOG_CONTRACT_VERSION,
+  MODELS_DEV_CAPABILITIES_SERVICE_ID, MODELS_DEV_CAPABILITIES_CONTRACT_VERSION, MODELS_DEV_CATALOG_CONTRACT_VERSION,
   MODELS_DEV_CATALOG_SNAPSHOT_CONTRACT,
   MODELS_DEV_SOURCE_URL,
 } from '../contract';
 import { buildCatalogIndex } from './catalog';
 import { downloadModelsDevCatalog } from './download';
-import { CatalogView, catalogServiceOf, readCatalogSnapshot, type SnapshotSource } from './local';
+import { CatalogView, capabilitiesServiceOf, catalogServiceOf, readCatalogSnapshot, type SnapshotSource } from './local';
 import {
   DEFAULT_MODELS_DEV_SETTINGS, parseModelsDevSettings, readCatalogRecord, readModelsDevSettings, readPersistedStatus,
   writeModelsDevSettings, writePersistedStatus,
@@ -300,6 +300,7 @@ class ModelsDevControl implements PluginControl {
       version: (version: number) => this.store.version(version),
     });
     if (host.services !== undefined) {
+      host.services.publish(MODELS_DEV_CAPABILITIES_SERVICE_ID, MODELS_DEV_CAPABILITIES_CONTRACT_VERSION, capabilitiesServiceOf(this.manager.view));
       host.services.publish(MODELS_DEV_CATALOG_SERVICE_ID, MODELS_DEV_CATALOG_CONTRACT_VERSION, catalogServiceOf(this.manager.view));
     }
     this.api = this.buildApi();

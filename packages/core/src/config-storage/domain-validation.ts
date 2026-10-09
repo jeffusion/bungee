@@ -60,6 +60,7 @@ export function validateServiceDomain(
   context: ValidationContext,
 ): void {
   if (endpointCount === 0) context.add('empty_service', `${path}.endpoints`, 'Service requires at least one upstream');
+  validateLLMProtocol(object, path, context);
   validateServicePolicies(object, path, context);
 }
 
@@ -74,6 +75,7 @@ export function validateRouteDomain(
     context.add('invalid_path', `${path}.path`, 'Route path must start with /');
   }
   validateDirectionalModificationRules(object, path, context);
+  validateLLMProtocol(object, path, context);
   validateRoutePolicies(object, path, context);
   const direct = isObject(object.direct_response) && object.direct_response.enabled === true;
   const redirect = isObject(object.redirect) && object.redirect.enabled === true;
@@ -82,5 +84,11 @@ export function validateRouteDomain(
       && 'enabled' in rule && rule.enabled === true);
   if (!hasService && endpointCount === 0 && !direct && !redirect && !rules) {
     context.add('missing_route_target', path, 'Direct route requires upstreams or an enabled response policy');
+  }
+}
+
+function validateLLMProtocol(object: JsonObject, path: string, context: ValidationContext): void {
+  if (object.llm_protocol !== undefined && !['responses', 'chat_completions', 'anthropic_messages'].includes(object.llm_protocol as string)) {
+    context.add('invalid_value', `${path}.llm_protocol`, 'Declare responses, chat_completions or anthropic_messages');
   }
 }

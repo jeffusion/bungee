@@ -1,3 +1,4 @@
+import { validateGatewayTargets } from './gateway-target-validation';
 import type {
   LogicalConfigurationV2, PluginBindingV2, RouteV2, ServiceV2, UpstreamManagedByV2, UpstreamV2,
 } from '@jeffusion/bungee-types';
@@ -25,8 +26,8 @@ import {
 } from './validation';
 
 const GLOBAL_KEYS = ['log_level', 'body_parser_limit', 'auth', 'logging', 'publication'] as const;
-const SERVICE_KEYS = ['health_check', 'failover', 'load_balancing'] as const;
-const ROUTE_KEYS = ['request', 'response', 'path_rewrite', 'auth', 'timeouts', 'rate_limit', 'cors',
+const SERVICE_KEYS = ['llm_protocol', 'health_check', 'failover', 'load_balancing'] as const;
+const ROUTE_KEYS = ['llm_protocol', 'request', 'response', 'path_rewrite', 'auth', 'timeouts', 'rate_limit', 'cors',
   'response_rules', 'direct_response', 'redirect', 'retry', 'websocket'] as const;
 const UPSTREAM_KEYS = ['request', 'response', 'description', 'condition'] as const;
 const ENTITY_KEYS = ['id', 'position', 'plugins'] as const;
@@ -287,6 +288,7 @@ export function parseNormalizeCompile(
     routes: parseRoutes(root.routes, serviceIds, catalog, context),
     plugins,
   };
+  validateGatewayTargets(value, catalog, context);
   if (options?.globalPlugins) {
     const validateScopedBindings = (bindings: readonly PluginBindingV2[], path: string): void => {
       bindings.forEach((binding, index) => {

@@ -166,6 +166,9 @@ function validateType(
       }
       break;
 
+    case 'gateway_target':
+      if (!value || !['route','service'].includes(value.type) || typeof value.id !== 'string' || !value.id) return {field:path,message:'Expected route/service reference',value};
+      break;
     case 'json':
       // JSON 可以是任意类型，但如果是字符串需要是有效 JSON
       if (typeof value === 'string') {

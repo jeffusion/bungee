@@ -9,6 +9,8 @@ import { createHash } from 'node:crypto';
 import type { PluginChannelSnapshotRead } from '@jeffusion/bungee-core/plugin';
 import type {
   ModelsDevCatalogService,
+  ModelsDevCapabilitiesService,
+  ModelsDevCapabilities,
   ModelsDevCatalogStatus,
   ModelsDevModelMatch,
   ModelsDevModelPage,
@@ -72,6 +74,19 @@ export class CatalogView implements ModelsDevCatalogService {
     return resolveModelInCatalog(this.#index, input);
   }
 
+  capabilities(input: { provider: string; model: string }): ModelsDevCapabilities | null {
+    const entry = this.#index?.byProvider.get(input.provider)?.models.get(input.model);
+    if (!entry || !entry.raw || typeof entry.raw !== 'object') return null;
+    const raw = entry.raw as Record<string, any>;
+    const limit = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
+    return Object.freeze({provider: input.provider, model: entry.id, name: entry.name,
+      contextWindow: limit(raw.limit?.context), outputLimit: limit(raw.limit?.output),
+      toolCall: raw.tool_call === true, reasoning: raw.reasoning === true,
+      inputModalities: Object.freeze(Array.isArray(raw.modalities?.input)
+        ? raw.modalities.input.filter((value: unknown): value is string => typeof value === 'string') : []),
+    });
+  }
+
   resolveProvider(input: { url: string }): ModelsDevProviderMatch | null {
     return resolveProviderFromUrl(this.#index, input.url);
   }
@@ -131,4 +146,8 @@ export function reconcileCatalogView(snapshot: PluginChannelSnapshotRead | null,
     view.fail(error instanceof Error ? error.message.slice(0, 64) : 'catalog_read_failed');
     return 'failed';
   }
+}
+
+export function capabilitiesServiceOf(view: CatalogView): ModelsDevCapabilitiesService {
+  return { status: () => view.status(), model: input => view.capabilities(input) };
 }

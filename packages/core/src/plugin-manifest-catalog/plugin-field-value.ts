@@ -48,6 +48,8 @@ export function fieldValueSatisfies(field: ReadonlyPluginConfigField, value: Plu
       && new Set(value).size === value.length
       && value.every((item) => field.options?.some((option) => option.value === item) ?? false); break;
     case 'model_mapping': valid = Array.isArray(value) && modelMappings(value) && (!field.required || value.length > 0); break;
+    case 'gateway_target': valid = objectValue(value) && Object.keys(value).length === 2
+      && ['route','service'].includes(value.type as string) && typeof value.id === 'string' && value.id.length > 0; break;
     case 'json': valid = typeof value !== 'string' || validJsonString(value); break;
     case 'array': valid = Array.isArray(value) && (!field.required || value.length > 0) && field.items !== undefined
       && value.every((item) => field.items !== undefined && fieldValueSatisfies(field.items, item)); break;

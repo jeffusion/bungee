@@ -2,6 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import { _ } from '$i18n';
   import { createParser, createFormatter, isVirtualField } from '$utils/field-transform';
+  import CodexModelsEditor from '$components/domain/codex-router/CodexModelsEditor.svelte';
   import ModelMappingEditor from '$components/domain/model-mapping/ModelMappingEditor.svelte';
   import { Input } from '$components/ui/input';
   import { Textarea } from '$components/ui/textarea';
@@ -274,6 +275,8 @@
             onblur={() => handleBlur(field)}
           />
 
+        {:else if pluginName === 'codex-router' && field.name === 'models'}
+          <CodexModelsEditor value={Array.isArray(formattedValues[field.name]) ? formattedValues[field.name] : []} on:change={e=>handleChange(field.name,e.detail)}/>
         {:else if field.type === 'json'}
           <Textarea
             id={field.name}

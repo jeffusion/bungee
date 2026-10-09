@@ -21,7 +21,7 @@ import {
   string,
 } from './parse-utils';
 
-const FIELD_TYPES = ['string', 'number', 'boolean', 'select', 'multiselect', 'textarea', 'json', 'model_mapping', 'object', 'array'] as const;
+const FIELD_TYPES = ['string', 'number', 'boolean', 'select', 'multiselect', 'textarea', 'json', 'model_mapping', 'gateway_target', 'object', 'array'] as const;
 const FIELD_FIELDS = new Set(['name', 'type', 'label', 'required', 'default', 'options', 'description', 'placeholder', 'catalogPlugin', 'sourceCatalogProviderField', 'targetCatalogProviderField', 'validation', 'showIf', 'properties', 'items', 'fieldTransform']);
 const OPTION_FIELDS = new Set(['label', 'value', 'description']);
 const VALIDATION_FIELDS = new Set(['trimmed', 'min', 'max', 'message']);

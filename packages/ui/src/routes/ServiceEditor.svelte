@@ -429,6 +429,11 @@ let service = $state<Service>({
 
         {:else if activeSection === 'transport'}
           <div class="space-y-4">
+            <label class="block text-xs">模型接收协议（可选）
+              <select class="nx-input w-full" value={service.llm_protocol ?? ''} onchange={e=>{service.llm_protocol=(e.currentTarget.value || undefined) as typeof service.llm_protocol;}}>
+                <option value="">未声明</option><option value="responses">Responses</option><option value="chat_completions">Chat Completions</option><option value="anthropic_messages">Anthropic Messages</option>
+              </select>
+            </label>
             <PanelCard title={$_('serviceEditor.builder.loadBalancing')} tag="LB-01">
               <LoadBalancingSection bind:load_balancing={service.load_balancing} />
             </PanelCard>

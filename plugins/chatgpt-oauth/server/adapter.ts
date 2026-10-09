@@ -54,6 +54,7 @@ type AdaptedRequest = Readonly<{
   siwc?: boolean;
   attemptId?: string;
   adaptedResponses: WeakSet<Response>;
+  preserveModels?: boolean;
 }>;
 
 function record(value: unknown): JsonObject {
@@ -385,7 +386,7 @@ export class ChatgptOauthAdapter {
   constructor() {}
 
   beforeRequest(context: MutableRequestContext): MutableRequestContext {
-    const target = context.url.pathname === MODELS_PATH
+    const target = (context.url.pathname === MODELS_PATH || (context.originalUrl.searchParams.has('client_version') && context.url.pathname === '/models'))
       ? 'models'
       : context.url.pathname === CHAT_COMPLETIONS_PATH
       ? 'chat'
@@ -421,6 +422,7 @@ export class ChatgptOauthAdapter {
       setHeader(context.headers, 'Originator', CODEX_MODELS_ORIGINATOR);
       this.requests.set(context.requestId, Object.freeze({
         target, stream: false, includeUsage: false, allowMissingContentType: false,
+        preserveModels: context.originalUrl.searchParams.has('client_version'),
         adaptedResponses: new WeakSet<Response>(),
       }));
       return context;
@@ -514,8 +516,9 @@ export class ChatgptOauthAdapter {
       }
       try {
         const payload = await context.bodyHandle.json(bodyConsumer(context.signal));
-        const models = state.siwc ? parseSiwcModelsBody(payload) : parseCodexModelsPayload(payload);
-        const body = {
+        const models = state.preserveModels ? [] : state.siwc ? parseSiwcModelsBody(payload) : parseCodexModelsPayload(payload);
+        if (state.preserveModels && (!payload || typeof payload !== 'object' || !Array.isArray((payload as JsonObject).models))) throw new CodexModelsError('invalid_structure');
+        const body = state.preserveModels ? payload : {
           object: 'list',
           data: models.map(({ id }) => ({ id, object: 'model', owned_by: 'openai' })),
         };

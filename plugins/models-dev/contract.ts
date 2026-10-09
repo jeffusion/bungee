@@ -129,3 +129,21 @@ export interface ModelsDevCatalogService {
   /** Resolve one provider from a real upstream URL via `provider.api`; ambiguous/none => null. */
   resolveProvider(input: { readonly url: string }): ModelsDevProviderMatch | null;
 }
+
+/** Capability reads are additive; existing catalog.v1 consumers stay unchanged. */
+export const MODELS_DEV_CAPABILITIES_SERVICE_ID = 'models-dev.capabilities.v1';
+export const MODELS_DEV_CAPABILITIES_CONTRACT_VERSION = 1;
+export interface ModelsDevCapabilities {
+  readonly provider: string;
+  readonly model: string;
+  readonly name: string;
+  readonly contextWindow: number | null;
+  readonly outputLimit: number | null;
+  readonly toolCall: boolean;
+  readonly reasoning: boolean;
+  readonly inputModalities: readonly string[];
+}
+export interface ModelsDevCapabilitiesService {
+  status(): ModelsDevCatalogStatus;
+  model(input: { readonly provider: string; readonly model: string }): ModelsDevCapabilities | null;
+}
