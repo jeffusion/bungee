@@ -21,3 +21,13 @@
 调度先于单一 admission session。可信 entryRouteId 随签名 RPC、preview 和 grant 固定，key-access 同时检查入口/最终受保护 scope；入口和目标不同的 route 限流分别应用。绑定目标发布时必须声明 llm_protocol；目录阶段尚不能在离线发布时获知动态原生模型冲突。
 
 验证：新增调度、既有流水线及引用检查 23 项通过；admission/key-access/scoped phase 51 项通过（监听端口测试在沙箱外重跑）；核心构建和 32 项架构测试通过。此阶段接通原生 Responses，转换目标仍返回 protocol_not_ready，下一阶段解除。
+
+## 协议与历史阶段
+
+`@bungee/llms/plugin-api` 提供共享 Responses 请求、JSON 响应和 SSE 状态机。Codex 调度按目标接收协议生成 Chat Completions 或 Anthropic Messages；目标已有转换链路继续处理后续转换。旧 openai-messages-to-chat 插件使用相同响应 codec，保留原请求兼容入口。多候选 SSE 不再做有损合并，而是明确拒绝。
+
+namespace 工具使用无碰撞的线协议名称并恢复原名称；custom 工具包装为字符串 input 参数并还原。工具 JSON 不完整、流截断、未知终态及服务端工具要求均不能产生成功完成。Chat reasoning_effort 和 Anthropic thinking budget 需要显式 capabilityOverrides，后者必须小于输出预算。未支持的图像、推理历史或参数返回明确错误。
+
+历史正文仅保存在控制进程的有界临时缓存，经 canonical 插件 RPC 分块访问，不写入数据库或命令 journal。缓存按可信身份、入口、配置版本和绑定配置隔离；默认 512 条、32 MiB 总量、8 MiB 单条、10 分钟 TTL。待组装 RPC 分块另限 128 项、8 MiB 总量和 30 秒 TTL。无可信身份的 HTTP 请求需要完整历史。引用失效及不可还原的跨目标历史要求新建对话。
+
+验证：阶段组合测试 110 pass；旧桥接及共享 codec 兼容测试 62 pass；核心构建、llms 类型检查和 32 项架构检查通过。覆盖真实核心 HTTP 流水线到 mock Chat/Anthropic 上游的 JSON/SSE，以及 canonical RPC 和独立消费者的历史读写。独立消费者测试仍在同一进程中，不代表多 worker 验收。WebSocket 会话模式、真实 App/CLI 与提供商验收仍待完成。

@@ -32,12 +32,12 @@ export interface DispatchRequestInput {
   readonly signal: AbortSignal;
   readonly servingRevision?: number;
 }
-export interface DispatchRequestDecision { readonly target: GatewayDispatchTarget }
+export interface DispatchRequestDecision { readonly target: GatewayDispatchTarget; readonly adapter?: import('../plugin.types').Plugin }
 export interface GatewayDispatchInput extends Omit<DispatchRequestInput,'targets'> { readonly config: AppConfig; readonly entry: RouteConfig }
 export interface GatewayDispatchDecision {
   readonly route: RouteConfig; readonly effective: EffectiveRouteConfig;
   readonly context: import('../hooks').MutableRequestContext;
-  readonly entryRouteId?: string; readonly target?: GatewayDispatchTarget;
+  readonly entryRouteId?: string; readonly target?: GatewayDispatchTarget; readonly adapter?: import('../plugin.types').Plugin;
 }
 export interface GatewayRouteInput { readonly request: Request; readonly config: AppConfig }
 export interface GatewayRouteDecision { readonly route?: RouteConfig; readonly effective?: EffectiveRouteConfig; readonly response?: Response; readonly responseKind?: 'rule' | 'local' }

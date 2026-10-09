@@ -9,6 +9,7 @@ const BUILTIN_PLUGIN_ENGINES = {
   'anthropic-request-sanitizer': '^4.2.0 || ^5.0.0',
   'anthropic-tool-name-transformer': '^4.2.0 || ^5.0.0',
   'chatgpt-oauth': '^4.3.0 || ^5.0.0',
+  'codex-router': '^4.2.0 || ^5.0.0',
   'deepseek-reasoning-fix': '^4.2.0 || ^5.0.0',
   'model-mapping': '^4.2.0 || ^5.0.0',
   'openai-messages-to-chat': '^4.2.0 || ^5.0.0',
@@ -18,8 +19,8 @@ const BUILTIN_PLUGIN_ENGINES = {
 const BUILTIN_PLUGIN_NAMES = Object.keys(BUILTIN_PLUGIN_ENGINES) as (keyof typeof BUILTIN_PLUGIN_ENGINES)[];
 
 describe('builtin plugin manifests', () => {
-  test('covers all nine built-in plugin engine declarations', () => {
-    expect(BUILTIN_PLUGIN_NAMES).toHaveLength(9);
+  test('covers all ten built-in plugin engine declarations', () => {
+    expect(BUILTIN_PLUGIN_NAMES).toHaveLength(10);
   });
 
   test.each(BUILTIN_PLUGIN_NAMES)('loads %s as a vnext manifest', async (pluginName) => {

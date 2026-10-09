@@ -3,7 +3,7 @@ export interface ModelBinding {
   model: string;
   alias?: string;
   target: { type: 'route' | 'service'; id: string };
-  capabilityOverrides?: { contextWindow?: number; tools?: boolean; reasoning?: boolean; images?: boolean };
+  capabilityOverrides?: { contextWindow?: number; tools?: boolean; reasoning?: boolean; images?: boolean; reasoningEffort?: boolean; anthropicThinkingBudget?: number };
 }
 export function parseBindings(value: unknown): readonly ModelBinding[] {
   if (value === undefined) return [];
@@ -25,8 +25,8 @@ export function parseBindings(value: unknown): readonly ModelBinding[] {
     if (overrides !== undefined) {
       if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) throw new Error('codex_router_invalid_capabilities');
       for (const [key, val] of Object.entries(overrides)) {
-        if (key === 'contextWindow' ? typeof val !== 'number' || !Number.isSafeInteger(val) || val < 1
-          : !['tools','reasoning','images'].includes(key) || typeof val !== 'boolean') throw new Error('codex_router_invalid_capabilities');
+        if (['contextWindow','anthropicThinkingBudget'].includes(key) ? typeof val !== 'number' || !Number.isSafeInteger(val) || val < 1
+          : !['tools','reasoning','images','reasoningEffort'].includes(key) || typeof val !== 'boolean') throw new Error('codex_router_invalid_capabilities');
       }
     }
     return Object.freeze(structuredClone(entry)) as ModelBinding;
