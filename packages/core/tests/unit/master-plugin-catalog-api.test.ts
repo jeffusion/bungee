@@ -1,6 +1,31 @@
 import { expect, test } from 'bun:test';
 import { createMasterPluginCatalogApi } from '../../src/master-runtime/master-plugin-catalog-api';
 import type { PluginManifestRecord } from '../../src/plugin-manifest-catalog/types';
+import codexRouterManifest from '../../../../plugins/codex-router/manifest.json';
+
+test('Codex Router schema translation keys match the published language dictionaries', async () => {
+  const codex = { name: codexRouterManifest.name, manifest: codexRouterManifest, configSchema: codexRouterManifest.configSchema } as unknown as PluginManifestRecord;
+  const catalog = createMasterPluginCatalogApi({ catalog: { records: () => [codex] } });
+  const state = { aggregate: { plugin_activations: [{ plugin_name: codex.name }] } } as never;
+  const schemas = await (await catalog.handle(new Request('http://test/api/plugins/schemas'), state)).json();
+  const translations = await (await catalog.handle(new Request('http://test/api/plugin-translations'), state)).json();
+  expect(schemas['codex-router'].configSchema[0].label).toBe('plugins.codex-router.models.label');
+  for (const language of ['zh-CN', 'en']) {
+    const key = schemas['codex-router'].configSchema[0].label.replace('plugins.codex-router.', '');
+    expect(translations[language].plugins['codex-router'][key]).toBe(language === 'zh-CN' ? '模型绑定' : 'Model bindings');
+    const checkLabels = (value: unknown): void => {
+      if (!value || typeof value !== 'object') return;
+      for (const [name, child] of Object.entries(value)) {
+        if (name === 'label' && typeof child === 'string' && child.startsWith('plugins.')) {
+          expect(child).toStartWith('plugins.codex-router.');
+          const relative = child.slice('plugins.codex-router.'.length);
+          expect(translations[language].plugins['codex-router'][relative]).toBeString();
+        } else checkLabels(child);
+      }
+    };
+    checkLabels(schemas['codex-router'].configSchema);
+  }
+});
 
 const record = {
   name: 'sandbox-plugin',
