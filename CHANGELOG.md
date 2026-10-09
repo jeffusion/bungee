@@ -1,3 +1,26 @@
+# [5.21.0](https://github.com/jeffusion/bungee/compare/v5.20.0...v5.21.0) (2026-10-09)
+
+
+### Bug Fixes
+
+* **ci:** isolate plugin artifacts and use complete registry fixtures ([b36bcbf](https://github.com/jeffusion/bungee/commit/b36bcbfb1d23956e484030fdb35b1c98739edc7b))
+* **codex-router:** clarify model bindings and align native UI ([8f847e6](https://github.com/jeffusion/bungee/commit/8f847e60494a307af977dd160202343fd6272ca2))
+* **codex-router:** correct binding controls and protocol ownership ([c6cb853](https://github.com/jeffusion/bungee/commit/c6cb85371fc85b3409674584a1401888d87c4b47))
+* **codex-router:** display target model names in Codex catalog ([54b410c](https://github.com/jeffusion/bungee/commit/54b410c42e5ca146289d01e2784c23157f607601))
+* **codex-router:** group and align model binding fields ([11390ce](https://github.com/jeffusion/bungee/commit/11390cecc4114a75f51ae06c1509417a78ab6232))
+* **codex-router:** preserve canonical history and request diagnostics ([497d4a9](https://github.com/jeffusion/bungee/commit/497d4a920c5cdee8349e390f60812745fb1bd957))
+* **codex-router:** remove redundant protocol hint ([23a3196](https://github.com/jeffusion/bungee/commit/23a3196df28c76f2472f5103d8e9e739f160503d))
+* **codex-router:** remove route protocol compatibility ([eab2325](https://github.com/jeffusion/bungee/commit/eab232518e70e094e3415a41eaf850bb6e915f95))
+* **codex-router:** restore nullable plain reasoning in tool history ([6e3306b](https://github.com/jeffusion/bungee/commit/6e3306b34de247711a68bd48244beb6c82b1aed4))
+* **codex-router:** use relative schema translation keys ([87fd236](https://github.com/jeffusion/bungee/commit/87fd236e65a69c68bdb6bb1498db6988ca67c3cc))
+* **llms:** decode Codex tool carriers and generation preferences ([a3f2e4e](https://github.com/jeffusion/bungee/commit/a3f2e4efa5ec13d600c5c0b5e2bc2f448c504154))
+
+
+### Features
+
+* **codex-router:** integrate websocket sessions and worker history ([50a86ce](https://github.com/jeffusion/bungee/commit/50a86ce3bc72e7dba68691bf225be5e4c26e1072))
+* **codex-router:** select source models from shared catalog ([bf34b93](https://github.com/jeffusion/bungee/commit/bf34b93efd9ee0cbe37f1dc2cb522364e44d9682))
+
 # [5.20.0](https://github.com/jeffusion/bungee/compare/v5.19.0...v5.20.0) (2026-10-09)
 
 
