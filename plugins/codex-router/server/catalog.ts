@@ -35,7 +35,7 @@ export function mergeCatalog(native: unknown, bindings: readonly ModelBinding[],
     const context = Math.min(info.contextWindow, overrides?.contextWindow ?? info.contextWindow);
     const reasoning = info.reasoning && overrides?.reasoning !== false;
     // Only the implemented protocol subset is advertised; catalog fields are not promises of hosted tools.
-    const model = {...template, slug:id, display_name:id === binding.model ? info.name : `${id} → ${info.name}`, description:`${info.name} (${binding.provider})`,
+    const model = {...template, slug:id, display_name:info.name, description:`${info.name} (${binding.provider})`,
       context_window:context, max_context_window:context, auto_compact_token_limit:Math.floor(context * 0.85),
       input_modalities: ['text', ...(info.inputModalities.includes('image') && overrides?.images !== false ? ['image'] : [])],
       supported_reasoning_levels: reasoning ? ['low','medium','high'].map(effort => ({effort,description:effort})) : [],

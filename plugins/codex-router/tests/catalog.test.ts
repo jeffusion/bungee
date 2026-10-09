@@ -22,7 +22,7 @@ test('generic directory stays data[], refresh failure retains capability view an
 test('aliases are optional, duplicate and native-conflicting identifiers fail closed',()=>{
   expect(()=>parseBindings([bindings[0],bindings[0]])).toThrow('conflict');
   expect(()=>mergeCatalog({models:[{slug:'org/model'}]},bindings,service)).toThrow('conflict');
-  const alias=parseBindings([{...bindings[0],alias:'my-model'}]);expect((mergeCatalog({models:[]},alias,service) as any).models[0].slug).toBe('my-model');
+  const alias=parseBindings([{...bindings[0],alias:'my-model'}]);expect((mergeCatalog({models:[]},alias,service) as any).models[0]).toMatchObject({slug:'my-model',display_name:'Model'});
 });
 test('catalog validators reject malformed inputs and ETag includes catalog/client versions',()=>{
   expect(()=>parseBindings([{...bindings[0],capabilityOverrides:{images:'yes'}}])).toThrow();
@@ -34,7 +34,7 @@ test('explicit source replaces one native model using target capabilities while 
   const result=mergeCatalog(native,binding,service) as any;
   expect(result.models).toHaveLength(2);
   expect(result.models[0]).toMatchObject({slug:'gpt-native',context_window:16000,supports_search_tool:false});
-  expect(result.models[0].display_name).toContain('Model');
+  expect(result.models[0].display_name).toBe('Model');
   expect(result.models[1]).toEqual(native.models[1]);expect(result.other).toBe('keep');
   expect(native.models[0].context_window).toBe(999999);
   expect((mergeCatalog({data:[{id:'gpt-native'}]},binding,service) as any).data).toEqual([{id:'gpt-native',object:'model',owned_by:'lab'}]);
