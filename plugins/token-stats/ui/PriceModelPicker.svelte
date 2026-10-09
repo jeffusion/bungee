@@ -59,7 +59,7 @@
     </Popover.Trigger>
     <Popover.Content style={`width: ${width}px`} class="max-w-[calc(100vw-2rem)] border-carbon-600 p-0" align="start">
       <!-- cmdk-sv's imperative sorting moves Svelte-owned nodes; keep filtering declarative. -->
-      <Command.Root shouldFilter={false}>
+      <Command.Root shouldFilter={false} label={searchLabel}>
         <Command.Input bind:value={search} placeholder={searchLabel} aria-label={searchLabel} />
         <Command.List>
           {#if results.loading}<p role="status" class="px-3 py-2 text-xs text-zinc-400">{loadingLabel}</p>

@@ -2,11 +2,12 @@ export interface ModelBinding {
   provider: string;
   model: string;
   source?: string;
+  sourceProvider?: string;
   alias?: string;
   target: { type: 'route' | 'service'; id: string };
   capabilityOverrides?: { contextWindow?: number; tools?: boolean; reasoning?: boolean; images?: boolean; reasoningEffort?: boolean; anthropicThinkingBudget?: number };
 }
-/** The model selected by Codex; model itself is the upstream destination. */
+/** The model in the client request; model itself is the upstream destination. */
 export function bindingSource(binding: ModelBinding): string { return binding.source ?? binding.alias ?? binding.model; }
 export function parseBindings(value: unknown): readonly ModelBinding[] {
   if (value === undefined) return [];
@@ -14,9 +15,10 @@ export function parseBindings(value: unknown): readonly ModelBinding[] {
   const ids = new Set<string>();
   return Object.freeze(value.map(entry => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)
-      || Object.keys(entry).some(key => !['provider','model','source','alias','target','capabilityOverrides'].includes(key))
-      || (entry.source !== undefined && entry.alias !== undefined)) throw new Error('codex_router_invalid_bindings');
-    for (const text of [entry.provider, entry.model, ...(entry.source === undefined ? [] : [entry.source]), ...(entry.alias === undefined ? [] : [entry.alias])]) {
+      || Object.keys(entry).some(key => !['provider','model','source','sourceProvider','alias','target','capabilityOverrides'].includes(key))
+      || (entry.source !== undefined && entry.alias !== undefined)
+      || (entry.sourceProvider !== undefined && entry.source === undefined)) throw new Error('codex_router_invalid_bindings');
+    for (const text of [entry.provider, entry.model, ...(entry.source === undefined ? [] : [entry.source]), ...(entry.sourceProvider === undefined ? [] : [entry.sourceProvider]), ...(entry.alias === undefined ? [] : [entry.alias])]) {
       if (typeof text !== 'string' || !text || text !== text.trim() || text.length > 512 || /[\x00-\x1f\x7f]/.test(text)) throw new Error('codex_router_invalid_bindings');
     }
     const target = entry.target;
