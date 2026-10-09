@@ -294,10 +294,14 @@ describe('PluginManifestCatalog filesystem snapshot', () => {
 
     const optional: PluginScanRoot = { path: missing, required: false };
     const required: PluginScanRoot = { path: BUILTINS, required: true };
+    const baseline = await buildPluginManifestCatalog({
+      pathResolver: { getScanRoots: () => [required] },
+    });
     const catalog = await buildPluginManifestCatalog({
       pathResolver: { getScanRoots: () => [optional, required] },
     });
-    expect(catalog.names()).toHaveLength(16);
+    expect(catalog.names()).toEqual(baseline.names());
+    expect(catalog.hash).toBe(baseline.hash);
   });
 
   test('resolves catalogPlugin references only after the complete catalog is built', async () => {
