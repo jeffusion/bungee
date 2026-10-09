@@ -134,12 +134,13 @@ test('typed SSE plugin N:M output and final flush retain explicit metadata',asyn
 });
 test('registered SSE callback with an empty declared demand keeps opaque bytes',async()=>{
   const {createPluginHooks}=await import('../../packages/core/src/hooks');
-  const {getScopedPluginRegistry,setScopedPluginRegistry}=await import('../../packages/core/src/scoped-plugin-registry');
+  const {ScopedPluginRegistry,getScopedPluginRegistry,setScopedPluginRegistry}=await import('../../packages/core/src/scoped-plugin-registry');
   const previous=getScopedPluginRegistry();let invocations=0;const hooks=createPluginHooks();
   const handler={pluginName:'disabled-observer',config:{},bodyRequirements(){return {request:'none' as const};},register(){}};
   const phase={handlers:[handler],hooks,hasStreamCallbacks:true,hasResponseCallbacks:false,hasInterceptCallbacks:false,metadata:{createdAt:0,pluginCount:1,pluginNames:['disabled-observer'],scope:'route'}};
   const inbound={async onResponse(res:Response){return res;},async onStreamChunk(chunk:unknown){invocations++;return [chunk];},async onFlushStream(chunks:unknown[]){return chunks;},async onError(){}};
-  const registry={getPrecompiledHooks(){return {routePhase:phase,upstreamPhase:{...phase,handlers:[]},servicePhase:null,globalPrecompiled:null,routePrecompiled:phase,inbound};},getGlobalAdmissionHandlers(){return [];},getAttemptObservationOwners(){return [];}};
-  setScopedPluginRegistry(registry as any);
-  try{const payload=new Uint8Array([255,128,0,13,10,13,10]);const result=await run(payload,'',{},{},'text/event-stream');expect(result.response.status).toBe(200);expect(hash(result.bytes)).toBe(hash(payload));expect(invocations).toBe(0);}finally{setScopedPluginRegistry(previous);}
+  const registry=new ScopedPluginRegistry();
+  registry.getPrecompiledHooks=()=>({routePhase:phase,upstreamPhase:{...phase,handlers:[]},servicePhase:null,globalPrecompiled:null,routePrecompiled:phase,inbound}) as any;
+  setScopedPluginRegistry(registry);
+  try{const payload=new Uint8Array([255,128,0,13,10,13,10]);const result=await run(payload,'',{},{},'text/event-stream');expect(result.response.status).toBe(200);expect(hash(result.bytes)).toBe(hash(payload));expect(invocations).toBe(0);}finally{setScopedPluginRegistry(previous);await registry.destroy();}
 });

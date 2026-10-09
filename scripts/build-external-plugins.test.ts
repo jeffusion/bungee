@@ -152,6 +152,21 @@ describe('rewriteManifestForBuiltArtifact', () => {
     }
   });
 
+  test('copies runtime UI files without packaging source tests', async () => {
+    const fixture = workspace();
+    const plugin = writePlugin(fixture.source, 'ui-plugin', { ui: true });
+    writeFileSync(join(plugin, 'ui/helper.ts'), 'export const value = 1;');
+    writeFileSync(join(plugin, 'ui/helper.test.ts'), "import '../missing-test-dependency';");
+    mkdirSync(join(plugin, 'ui/nested'));
+    writeFileSync(join(plugin, 'ui/nested/helper.spec.js'), "import '../missing-test-dependency';");
+    await buildExternalPlugins({ sourceDirectory: fixture.source, outputDirectory: fixture.output });
+    const ui = join(fixture.output, 'ui-plugin/ui');
+    expect(readFileSync(join(ui, 'widget.svelte'), 'utf8')).toBe('<div />');
+    expect(readFileSync(join(ui, 'helper.ts'), 'utf8')).toBe('export const value = 1;');
+    expect(existsSync(join(ui, 'helper.test.ts'))).toBe(false);
+    expect(existsSync(join(ui, 'nested/helper.spec.js'))).toBe(false);
+  });
+
   test('builds and rewrites an optional control bundle', async () => {
     const fixture = workspace();
     writePlugin(fixture.source, 'control-plugin', {

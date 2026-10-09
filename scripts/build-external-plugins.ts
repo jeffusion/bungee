@@ -39,7 +39,10 @@ export function rewriteManifestForBuiltArtifact(manifest: StrictPluginManifest):
 
 function copyPluginUi(record: PluginManifestRecord, outputPath: string): void {
   const uiSource = path.join(record.pluginPath, 'ui');
-  if (fs.existsSync(uiSource)) fs.cpSync(uiSource, path.join(outputPath, 'ui'), { recursive: true });
+  if (fs.existsSync(uiSource)) fs.cpSync(uiSource, path.join(outputPath, 'ui'), {
+    recursive: true,
+    filter: source => !/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(source),
+  });
   for (const component of record.manifest.ui?.components ?? []) {
     const destination = path.join(outputPath, component.entry);
     if (fs.existsSync(destination)) continue;
