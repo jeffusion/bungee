@@ -232,7 +232,7 @@ describe('Responses strict shared codec (mock protocol fixtures)', () => {
   test('capability hints with no faithful mapping and unknown content are explicit errors', () => {
     expectCode(() => decodeResponsesRequest(request({ reasoning: { summary: 'auto' } }), 'chat_completions', { reasoningEffort: true }), 'unsupported_reasoning');
     expectCode(() => decodeResponsesRequest(request({ text: { verbosity: 'low' } }), 'chat_completions'), 'unsupported_request');
-    expectCode(() => decodeResponsesRequest(request({ include: ['reasoning.encrypted_content'] }), 'chat_completions'), 'unsupported_request');
+    expectCode(() => decodeResponsesRequest(request({ include: ['web_search_call.action.sources'] }), 'chat_completions'), 'unsupported_request');
     expectCode(() => decodeResponsesRequest(request({ store: true }), 'chat_completions'), 'unsupported_request');
     expectCode(() => decodeResponsesRequest(request({ unknown_parameter: true }), 'chat_completions'), 'unsupported_request');
     expectCode(() => decodeResponsesRequest(request({ tools: [{ type: 'function', name: 'strict', strict: true }] }), 'anthropic_messages'), 'unsupported_tool');
@@ -276,4 +276,27 @@ describe('Responses strict shared codec (mock protocol fixtures)', () => {
     expect(events.map(e => e.type)).toEqual(['response.output_text.done', 'response.content_part.done', 'response.output_item.done', 'response.failed']);
     expect(events[2].item).toMatchObject({ status: 'incomplete' });
   });
+});
+
+test('refusal output can be replayed as assistant history for either target protocol',()=>{
+  const result=encodeResponsesResult({choices:[{message:{role:'assistant',content:null,refusal:'I cannot help with that.'},finish_reason:'stop'}]},'chat_completions','m');
+  for(const protocol of ['chat_completions','anthropic_messages'] as const){
+    const next=decodeResponsesRequest({model:'m',input:[{role:'user',content:'old question'},...result.output,{role:'user',content:'new question'}]},protocol,{maxOutputTokens:4096});
+    expect(JSON.stringify(next.body.messages[1])).toContain('I cannot help with that.');
+    expect(next.body.messages.at(-1).role).toBe('user');
+  }
+});
+
+test('real CLI optional encrypted-output and metadata preferences remain compatible without opaque history', () => {
+  for (const protocol of protocols) {
+    const raw = request({prompt_cache_key:'fixture-cache',client_metadata:{client:'codex'},include:['reasoning.encrypted_content'],
+      tools:[{type:'web_search'},...declarations],tool_choice:'auto',reasoning:{effort:'none'},store:false});
+    const decoded = decodeResponsesRequest(raw,protocol,{omitOptionalWebSearch:true});
+    expect(decoded.body.tools).toHaveLength(3);
+    expect(decoded.body).not.toHaveProperty('client_metadata');
+    expect(decoded.body).not.toHaveProperty('include');
+    expectCode(() => decodeResponsesRequest({...raw,tool_choice:'required'},protocol,{omitOptionalWebSearch:true}),'unsupported_tool');
+    expectCode(() => decodeResponsesRequest({...raw,tool_choice:{type:'web_search'}},protocol,{omitOptionalWebSearch:true}),'unsupported_tool');
+    expectCode(() => decodeResponsesRequest({...raw,input:[{type:'reasoning',encrypted_content:'sealed'}]},protocol,{omitOptionalWebSearch:true}),'unsupported_content');
+  }
 });

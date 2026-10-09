@@ -22,6 +22,8 @@ function fixtures(responseJson = false, observers: Array<{name:string;scope?:str
     return {pluginName:name,scopeKey:scope??'route:/gateway-test',hooks:isolated.onAttemptObservation,observe:{request:true,response:true,sse:true}};});
   const inbound={async onResponse(res:Response,ctx:any){return hooks.onResponse.promise(res,ctx);},async onRawResponse(result:any,ctx:any){return hooks.onRawResponse.promise(result,ctx);},async onError(){},async onStreamChunk(chunk:unknown){return [chunk];},async onFlushStream(chunks:unknown[]){return chunks;}};
   setScopedPluginRegistry({getGatewayHooks(){return providers;},getPrecompiledHooks(){return {routePhase:phase,upstreamPhase:{...phase,handlers:[]},servicePhase:null,globalPrecompiled:null,routePrecompiled:phase,inbound};},
+    runWithRequestLeases(_leases:unknown,run:()=>unknown){return run();},
+    async dispatchRequest(){return undefined;},
     getGlobalAdmissionHandlers(){return [];},getAttemptObservationOwners(){return owners;}} as any);
   const config={routes:[{path:'/gateway-test',endpoints:[{target:'http://pipeline.test'}]}]} as AppConfig;
   globalThis.fetch=Object.assign(async (_input:any,init?:RequestInit)=>{if(init?.body)await new Response(init.body).arrayBuffer();return Response.json({usage:{output_tokens:7},value:1});},{preconnect(){}}) as typeof fetch;

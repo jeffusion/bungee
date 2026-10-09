@@ -28,6 +28,7 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
     return {request:context.method === 'POST' && /\/responses$/.test(context.url.pathname) ? 'json-write' as const : 'none' as const, response: context.method === 'GET' && /\/models$/.test(context.url.pathname) ? ['json' as const] : []};
   }
   register(hooks: PluginHooks) {
+    hooks.onWebSocketSessionMode.tap('codex-router.session', url => /\/responses$/.test(url.pathname) ? 'responses' : undefined);
     hooks.onDispatchRequest.tapPromise('codex-router.binding', async ({context,targets,principal,servingRevision,signal}) => {
       if (context.method !== 'POST' || !/\/responses$/.test(context.originalUrl.pathname)) return;
       const binding = this.bindings.find(binding => (binding.alias ?? binding.model) === context.body?.model);
@@ -38,31 +39,38 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       if(!capabilities)throw new DataAdmissionError(503,'codex_router_model_unavailable');
       const scope=principal?.domain !== 'anonymous' && principal?.keyId ? createHash('sha256').update(JSON.stringify([principal,context.routeId,servingRevision ?? null,this.bindings])).digest('hex') : null;
       const input=structuredClone(context.body);
+      let requiredUpstreamId:string|undefined;
+      let opaqueRestored=false;
       if(input.previous_response_id){
         if(!scope)throw new DataAdmissionError(422,'codex_router_history_identity_required');
         const prior=await this.history.get({scope,id:input.previous_response_id},{signal});
         if(!prior)throw new DataAdmissionError(422,'codex_router_history_missing_start_new_conversation');
         const delta=typeof input.input === 'string' ? [{role:'user',content:input.input}] : input.input;
         if(!Array.isArray(delta))throw new DataAdmissionError(422,'codex_router_invalid_history');
-        if(JSON.stringify(prior.target)!==JSON.stringify(binding.target) && prior.items.some((item:any)=>item.encrypted_content || item.type==='compaction'))throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
+        if(prior.items.some((item:any)=>item.encrypted_content || item.type==='compaction')){
+          if(target.protocol!=='responses' || JSON.stringify(prior.target)!==JSON.stringify(binding.target) || prior.origin?.provider!==binding.provider || prior.origin?.model!==binding.model || !prior.origin?.upstreamId)throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
+          requiredUpstreamId=prior.origin.upstreamId;opaqueRestored=true;
+        }
         input.input=[...prior.items,...delta];delete input.previous_response_id;
       }
       if(input.conversation || input.response_id)throw new DataAdmissionError(422,'codex_router_unsupported_history_reference');
       input.model=binding.model;
       const logicalInput=typeof input.input === 'string' ? [{role:'user',content:input.input}] : input.input;
       if(!Array.isArray(logicalInput))throw new DataAdmissionError(422,'codex_router_invalid_history');
+      if(!opaqueRestored && logicalInput.some((item:any)=>item?.encrypted_content || item?.type==='compaction'))throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
+      if(input.tools?.length && (!capabilities.toolCall || binding.capabilityOverrides?.tools===false))throw new DataAdmissionError(422,'codex_router_tools_unsupported');
       let toolNames;
       if(target.protocol!=='responses'){
         try {
-          const decoded=decodeResponsesRequest(input,target.protocol,{reasoningEffort:capabilities.reasoning && binding.capabilityOverrides?.reasoningEffort===true,
-            anthropicThinkingBudget:binding.capabilityOverrides?.anthropicThinkingBudget,maxOutputTokens:capabilities.outputLimit ?? undefined});
+          const decoded=decodeResponsesRequest(input,target.protocol,{omitOptionalWebSearch:true,reasoningEffort:capabilities.reasoning && binding.capabilityOverrides?.reasoningEffort===true,
+            anthropicThinkingBudget:undefined,maxOutputTokens:capabilities.outputLimit ?? undefined});
           context.body=decoded.body;toolNames=decoded.toolNames;
         }catch(error){if(error instanceof ResponsesCodecError)throw new DataAdmissionError(422,`codex_router_${error.code}`);throw error;}
         context.url.pathname=context.url.pathname.replace(/\/responses$/,target.protocol==='chat_completions'?'/chat/completions':'/messages');
       }else context.body=input;
       const adapter=protocolAdapter({protocol:target.protocol==='responses'?undefined:target.protocol,model:binding.alias ?? binding.model,toolNames,signal,
-        save:async(response)=>{if(scope && typeof response.id==='string')await this.history.put({scope,id:response.id,value:{target:binding.target,items:[...logicalInput,...response.output]}},{signal,operationId:crypto.randomUUID()});}});
-      return {target:binding.target,adapter};
+        save:async(response,responseContext)=>{if(scope && typeof response.id==='string')await this.history.put({scope,id:response.id,value:{target:binding.target,origin:{provider:binding.provider,model:binding.model,upstreamId:responseContext?.upstreamId},items:[...logicalInput,...response.output]}},{signal,operationId:crypto.randomUUID()});}});
+      return {target:binding.target,requiredUpstreamId,adapter};
     });
     hooks.onBeforeRequest.tap('codex-router.catalog-validator', context => {
       if (context.method === 'GET' && /\/models$/.test(context.originalUrl.pathname)) {
@@ -77,7 +85,7 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
         const protocol=this.targets?.find(target=>target.type===binding.target.type && target.id===binding.target.id)?.protocol;
         return {...binding,capabilityOverrides:{...binding.capabilityOverrides,
           ...(protocol==='anthropic_messages'?{images:false}:{}),
-          ...(protocol && protocol!=='responses' ? {reasoning:protocol==='chat_completions' ? binding.capabilityOverrides?.reasoningEffort===true : !!binding.capabilityOverrides?.anthropicThinkingBudget}:{}),
+          ...(protocol && protocol!=='responses' ? {reasoning:protocol==='chat_completions' ? binding.capabilityOverrides?.reasoningEffort===true : false}:{}),
         }};
       });
       const body = mergeCatalog(native, bindings, this.catalog);

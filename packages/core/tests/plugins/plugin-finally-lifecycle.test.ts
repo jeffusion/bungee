@@ -72,6 +72,8 @@ function installPrecompiledHooks(precompiledHooks: PrecompiledHooks): void {
   };
 
   setScopedPluginRegistry({
+    runWithRequestLeases<T>(_leases: ReadonlyMap<string, () => void>, run: () => T): T { return run(); },
+    async dispatchRequest() { return undefined; },
     getPrecompiledHooks: () => phaseAwareHooks,
   } as unknown as ScopedPluginRegistry);
 }

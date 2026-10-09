@@ -3,5 +3,6 @@ export { isWebSocketUpgradeRequest, validateWebSocketRequest } from './headers';
 export {
   createWebSocketBridge, WebSocketBridge, WEBSOCKET_BRIDGE_DEFAULTS,
   type WebSocketBridgeOptions, type WebSocketBridgeData, type WebSocketUpgradeOptions,
-  type WebSocketBridgeStats,
+  type WebSocketBridgeStats, type WebSocketResponsesRequestOptions,
+  type ManagedWebSocketSession, type ManagedWebSocketSessionOptions,
 } from './transport';

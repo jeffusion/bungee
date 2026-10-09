@@ -462,6 +462,8 @@ describe('proxy credential regressions', () => {
       },
     }));
     setScopedPluginRegistry({
+      runWithRequestLeases<T>(_leases: ReadonlyMap<string, () => void>, run: () => T): T { return run(); },
+      async dispatchRequest() { return undefined; },
       getPrecompiledHooks: () => phaseHooks({
         onError: async (context) => {
           onErrorCalls++;

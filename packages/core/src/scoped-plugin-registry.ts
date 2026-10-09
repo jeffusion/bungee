@@ -1456,6 +1456,41 @@ export class ScopedPluginRegistry {
 
   getGlobalAdmissionHandlers(): readonly PluginHandler[] { return this.globalInstances.map(instance => instance.handler); }
 
+  /** Entry plugins retained across dispatch/session work even when the final route differs. */
+  getRoutePluginOwners(routeId:string,dispatchOnly=false):Array<{pluginName:string;scopeKey:string}> {
+    return (this.routeInstances.get(routeId) ?? []).filter(instance=>{
+      if(!dispatchOnly)return true;
+      const hooks=createPluginHooks();instance.handler.register(hooks);
+      return hooks.onDispatchRequest.hasCallbacks();
+    }).map(instance=>({pluginName:instance.handler.pluginName,scopeKey:getScopeKey(instance.scope)}));
+  }
+
+  /** Dispatch and deferred response callbacks share the retained entry owner's RPC authority. */
+  async dispatchRequest(routeId:string,input:import('./gateway/contracts').DispatchRequestInput,callee:unknown):Promise<import('./gateway/contracts').DispatchRequestDecision|undefined> {
+    for(const instance of this.routeInstances.get(routeId) ?? []){
+      const hooks=createPluginHooks();instance.handler.register(hooks);
+      if(!hooks.onDispatchRequest.hasCallbacks())continue;
+      const context=this.rpcContexts.get(`${instance.handler.pluginName}\0${getScopeKey(instance.scope)}`);
+      const lease=this.requestLeases.getStore()?.get(`${instance.handler.pluginName}\0${getScopeKey(instance.scope)}`);
+      const invoke=<T>(run:()=>T):T=>context && this.serviceHost.rpc ? this.serviceHost.runInInvocation(context,{purpose:'request',callee,signal:input.signal,lease},run):run();
+      const result=await invoke(()=>hooks.onDispatchRequest.promise(input));
+      if(!result)continue;
+      if(!result.adapter)return result;
+      const adapter=result.adapter;
+      return {...result,adapter:{bodyRequirements:adapter.bodyRequirements.bind(adapter),register(target){
+        const wrapped={...target};
+        for(const name of ['onResponse','onStreamChunk','onFlushStream','onRawResponse','onError'] as const){
+          const hook=target[name];
+          (wrapped as any)[name]=new Proxy(hook,{get(object,key){
+            if(key==='tap' || key==='tapPromise')return (label:string,callback:(...args:any[])=>any)=>(object[key] as any).call(object,label,(...args:any[])=>invoke(()=>callback(...args)));
+            const value=Reflect.get(object,key);return typeof value==='function'?value.bind(object):value;
+          }});
+        }
+        adapter.register(wrapped);
+      }}};
+    }
+  }
+
   getDeclaredDispatchTargets(routeId: string): import('./gateway/contracts').GatewayDispatchTarget[] {
     return (this.routeInstances.get(routeId) ?? []).flatMap(instance => declaredDispatchTargets(instance.config.options ?? {}, this.pluginClasses.get(instance.handler.pluginName)?.configSchema ?? []));
   }

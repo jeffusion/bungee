@@ -19,6 +19,7 @@ async function withResponsePlugin(rewrite: boolean) {
     }, async onError(){}, async onStreamChunk(chunk:unknown){return [chunk];}, async onFlushStream(chunks:unknown[]){return chunks;},
   };
   setScopedPluginRegistry({getPrecompiledHooks(){return {routePhase:phase,upstreamPhase:{...phase,handlers:[]},servicePhase:null,globalPrecompiled:null,routePrecompiled:phase,inbound};},
+    runWithRequestLeases(_leases:unknown,run:()=>unknown){return run();},async dispatchRequest(){return undefined;},
     getGlobalAdmissionHandlers(){return [];},getAttemptObservationOwners(){return [];}} as any);
   const upstream = Bun.serve({hostname:'127.0.0.1',port:0,fetch(){return new Response(wire,{headers:{'content-type':'application/json','content-encoding':'gzip','content-length':String(wire.byteLength)}});}});
   const gateway = Bun.serve({hostname:'127.0.0.1',port:0,fetch(req){return handleRequest(req,{routes:[{path:'/test',endpoints:[{target:upstream.url.origin}]}]},

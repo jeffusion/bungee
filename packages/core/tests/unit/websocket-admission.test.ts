@@ -17,3 +17,10 @@ test('unbudgeted WebSocket uses signed admission and releases the original grant
   await admission.prepare(input,new AbortController().signal);await admission.release();
   expect(calls).toEqual(['inspect','preview','admit','release']);
 });
+test('WS generation cannot enable unsupported hard budgets by supplying JSON',async()=>{
+  const calls:string[]=[];
+  setWorkerAdmissionSession({admission:async operation=>{calls.push(operation);return {policyVersion:1,requirements:{'token-budget':{request:'json-read'}}};}});
+  const admission=new WorkerRequestAdmission([],base,async()=>{throw Error('unexpected budget call');});
+  await expect(admission.prepare({...input,model:'external',body:{model:'external',input:'hello'}},new AbortController().signal)).rejects.toMatchObject({status:422,code:'websocket_budget_unsupported'});
+  expect(calls).toEqual(['inspect']);
+});
