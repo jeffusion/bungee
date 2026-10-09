@@ -17,7 +17,8 @@ function exact(value: Record<string, unknown>, keys: string[]): void {
 }
 export function parseAdmissionTarget(value: unknown): AdmissionTarget {
   const target = object(value);
-  exact(target, ['requestId','attemptId','principal','routeId','serviceId','upstreamId','url','model','now']);
+  exact(target, ['requestId','attemptId','principal','routeId','serviceId','upstreamId','url','model','now',...(Object.hasOwn(target,'entryRouteId') ? ['entryRouteId'] : [])]);
+  if (Object.hasOwn(target,'entryRouteId') && (typeof target.entryRouteId !== 'string' || !target.entryRouteId || target.entryRouteId.length > 256)) throw new Error('invalid RPC entry route');
   for (const name of ['requestId','attemptId','routeId','upstreamId','url']) if (typeof target[name] !== 'string' || !(target[name] as string).length || (target[name] as string).length > (name === 'url' ? 65536 : 256)) throw new Error('invalid RPC target');
   if (!Number.isSafeInteger(target.now) || (target.serviceId !== null && typeof target.serviceId !== 'string') || (target.model !== null && typeof target.model !== 'string')) throw new Error('invalid RPC target');
   const principal = object(target.principal);

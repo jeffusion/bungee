@@ -1,3 +1,4 @@
+import { declaredDispatchTargets } from './gateway/dispatch-targets';
 import { registerGatewayBuiltins, validateGatewayProviders } from './gateway/runtime';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { PluginBodyRequirements, PluginBodyRequirementContext } from './plugin.types';
@@ -1446,6 +1447,10 @@ export class ScopedPluginRegistry {
 
   getGlobalAdmissionHandlers(): readonly PluginHandler[] { return this.globalInstances.map(instance => instance.handler); }
 
+  getDeclaredDispatchTargets(routeId: string): import('./gateway/contracts').GatewayDispatchTarget[] {
+    return (this.routeInstances.get(routeId) ?? []).flatMap(instance => declaredDispatchTargets(instance.config.options ?? {}, this.pluginClasses.get(instance.handler.pluginName)?.configSchema ?? []));
+  }
+
   // ============ 生命周期管理 ============
 
   /**
@@ -1559,8 +1564,9 @@ export class ScopedPluginRegistry {
         }
       }
 
-      if (route.service) {
-        const service = config.services?.find(candidate => candidate.name === route.service);
+      const dispatchServices = this.getDeclaredDispatchTargets(routeId).filter(target => target.type === 'service').map(target => config.services?.find(service => service.id === target.id)).filter((service): service is Service => !!service);
+      const relatedServices = [...new Map([...(config.services?.filter(service => service.name === route.service) ?? []),...dispatchServices].map(service => [service.name,service])).values()];
+      for (const service of relatedServices) {
         if (service?.plugins?.length) {
           const serviceName = service.name;
 
@@ -1580,7 +1586,7 @@ export class ScopedPluginRegistry {
       }
 
       // 3. 加载上游级插件
-      const endpoints = resolveEffectiveRouteEndpoints(route, config.services);
+      const endpoints = [...new Map([...resolveEffectiveRouteEndpoints(route, config.services),...dispatchServices.flatMap(service => service.endpoints)].map(endpoint => [endpoint.id ?? endpoint.target,endpoint])).values()];
 
       for (const [upstreamIndex, upstream] of endpoints.entries()) {
         const upstreamId = upstream.id || String(upstreamIndex); // Use config id or fallback to index

@@ -25,7 +25,7 @@ export interface AdmissionGrant {
   readonly snapshots: Readonly<Record<string, DurableJson>>;
 }
 interface PluginRuntime { publication: AdmissionPluginPublication; plugin: IngressPlugin; state: DurableJson; keyed?: KeyedAdmissionState }
-interface StoredGrant { routeId: string; sourcePrincipal: DataPrincipal; worker: string; grant: AdmissionGrant; plugins: readonly PluginRuntime[]; expires: number | null }
+interface StoredGrant { entryRouteId?: string; routeId: string; sourcePrincipal: DataPrincipal; worker: string; grant: AdmissionGrant; plugins: readonly PluginRuntime[]; expires: number | null }
 function workerKey(worker: RateLimitWorkerIdentity): string {
   return JSON.stringify([worker.master_generation, worker.process_instance_id, worker.boot_nonce, worker.worker_slot]);
 }
@@ -130,14 +130,14 @@ export class DataAdmissionHost {
     if (this.blocked) throw new DataAdmissionError(503,'admission_state_unavailable');
     if (this.publicationAdmissionSequence !== undefined && this.options.admissionSequence?.() !== this.publicationAdmissionSequence) throw new DataAdmissionError(503,'admission_worker_set_changed');
     if (this.options.authorizeWorker(worker) !== 'active') throw new DataAdmissionError(503,'admission_worker_not_active');
-    for (const requirement of this.routeRequirements) if (requirement.routeIds.includes(target.routeId)
+    for (const requirement of this.routeRequirements) if ((requirement.routeIds.includes(target.routeId) || !!target.entryRouteId && requirement.routeIds.includes(target.entryRouteId))
       && !this.plugins.some(runtime=>runtime.publication.name === requirement.plugin && runtime.plugin.resolveIdentity)) throw new DataAdmissionError(503,'route_protection_unavailable');
     let principal = ANONYMOUS_PRINCIPAL;
     for (const runtime of this.plugins) if (runtime.plugin.resolveIdentity) {
       try { principal = runtime.plugin.resolveIdentity({...target,now:this.now()},structuredClone(runtime.publication.policy)); }
       catch (error) { throw normalizeAdmissionError(error) ?? new DataAdmissionError(503,'route_protection_unavailable'); }
     }
-    if (principal.domain === 'anonymous' && this.routeRequirements.some(requirement=>requirement.routeIds.includes(target.routeId))) throw new DataAdmissionError(503,'route_protection_unavailable');
+    if (principal.domain === 'anonymous' && this.routeRequirements.some(requirement=>(requirement.routeIds.includes(target.routeId) || !!target.entryRouteId && requirement.routeIds.includes(target.entryRouteId)))) throw new DataAdmissionError(503,'route_protection_unavailable');
     const requirements: Record<string,{request:'none'|'json-read'}> = {};
     for (const runtime of this.plugins) {
       if (typeof runtime.plugin.bodyRequirements !== 'function') throw new DataAdmissionError(503,'admission_body_requirements_missing');
@@ -159,7 +159,7 @@ export class DataAdmissionHost {
     if (this.publicationAdmissionSequence !== undefined && this.options.admissionSequence?.() !== this.publicationAdmissionSequence) throw new DataAdmissionError(503, 'admission_worker_set_changed');
     if (this.options.authorizeWorker(worker) !== 'active') throw new DataAdmissionError(503, 'admission_worker_not_active');
     for (const requirement of this.routeRequirements) {
-      if (requirement.routeIds.includes(target.routeId) && !this.plugins.some(p => p.publication.name === requirement.plugin && p.plugin.resolveIdentity)) {
+      if ((requirement.routeIds.includes(target.routeId) || !!target.entryRouteId && requirement.routeIds.includes(target.entryRouteId)) && !this.plugins.some(p => p.publication.name === requirement.plugin && p.plugin.resolveIdentity)) {
         throw new DataAdmissionError(503, 'route_protection_unavailable');
       }
     }
@@ -172,11 +172,11 @@ export class DataAdmissionHost {
         throw new DataAdmissionError(503, 'route_protection_unavailable');
       }
     }
-    if (principal.domain === 'anonymous' && this.routeRequirements.some(r => r.routeIds.includes(target.routeId))) throw new DataAdmissionError(503, 'route_protection_unavailable');
+    if (principal.domain === 'anonymous' && this.routeRequirements.some(r => (r.routeIds.includes(target.routeId) || !!target.entryRouteId && r.routeIds.includes(target.entryRouteId)))) throw new DataAdmissionError(503, 'route_protection_unavailable');
     const ticket = this.previews.get(target.requestId);
     if (!preview && expectedVersion !== undefined && (!ticket || ticket.version !== this.version || ticket.expires <= this.now()
       || ticket.worker !== workerKey(worker) || ticket.target.attemptId !== target.attemptId
-      || ticket.target.url !== target.url || ticket.target.model !== target.model || ticket.target.routeId !== target.routeId
+      || ticket.target.url !== target.url || ticket.target.model !== target.model || ticket.target.routeId !== target.routeId || ticket.target.entryRouteId !== target.entryRouteId
       || JSON.stringify(ticket.target.principal) !== JSON.stringify(principal)
       || ticket.target.serviceId !== target.serviceId || ticket.target.upstreamId !== target.upstreamId)) {
       throw new DataAdmissionError(409, 'admission_preview_changed');
@@ -219,7 +219,7 @@ export class DataAdmissionHost {
       else plan.runtime.state = plan.state;
     }
     this.previews.delete(target.requestId);
-    this.grants.set(target.requestId, { routeId: target.routeId, sourcePrincipal: structuredClone(target.principal), worker: workerKey(worker), grant, plugins: this.plugins.map(runtime => ({publication: runtime.publication, plugin: runtime.plugin, state: null})), expires: null });
+    this.grants.set(target.requestId, { entryRouteId:target.entryRouteId, routeId: target.routeId, sourcePrincipal: structuredClone(target.principal), worker: workerKey(worker), grant, plugins: this.plugins.map(runtime => ({publication: runtime.publication, plugin: runtime.plugin, state: null})), expires: null });
     return grant;
   }
   beforeAttempt(target: AdmissionTarget, worker: RateLimitWorkerIdentity): AdmissionGrant {
@@ -239,7 +239,7 @@ export class DataAdmissionHost {
     if (stored) stored.expires = this.now() + 15000;
   }
   private assertGrant(stored: StoredGrant, target: AdmissionTarget, worker: RateLimitWorkerIdentity): void {
-    if (stored.worker !== workerKey(worker) || stored.routeId !== target.routeId || JSON.stringify(stored.sourcePrincipal) !== JSON.stringify(target.principal)
+    if (stored.worker !== workerKey(worker) || stored.routeId !== target.routeId || stored.entryRouteId !== target.entryRouteId || JSON.stringify(stored.sourcePrincipal) !== JSON.stringify(target.principal)
       || !['active', 'retired'].includes(this.options.authorizeWorker(worker))) throw new DataAdmissionError(403, 'admission_identity_mismatch');
   }
 }

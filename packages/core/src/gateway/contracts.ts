@@ -1,5 +1,5 @@
 /** Typed extension stages shared by built-in and project plugins. */
-import type { AppConfig, RouteConfig, CorsConfig } from '@jeffusion/bungee-types';
+import type { AppConfig, RouteConfig, CorsConfig, LLMProtocol } from '@jeffusion/bungee-types';
 import type { ExpressionContext } from '../expression-engine';
 import type { EffectiveRouteConfig, RuntimeUpstream, RequestSnapshot } from '../worker/types';
 import type { HandleRequestRuntimeContext } from './request-plugin';
@@ -24,6 +24,21 @@ export type GatewayBodyRuleArguments = [body:Record<string,any>,rules:Modificati
 export type GatewayHeaderRuleArguments = [headers:Headers,rules:ModificationRules['headers'],context:ExpressionContext];
 export type GatewayCorsArguments = [response:Response,cors:CorsConfig|undefined,request:Request];
 export type GatewayQueryRuleArguments = [params:URLSearchParams,rules:ModificationRules['query'],context:ExpressionContext,requestLog:any];
+export interface GatewayDispatchTarget { readonly type: 'route' | 'service'; readonly id: string }
+export interface DispatchRequestInput {
+  readonly context: import('../hooks').MutableRequestContext;
+  readonly targets: readonly (GatewayDispatchTarget & {readonly protocol?: LLMProtocol})[];
+  readonly principal?: import('../plugin-extensions').DataPrincipal;
+  readonly signal: AbortSignal;
+  readonly servingRevision?: number;
+}
+export interface DispatchRequestDecision { readonly target: GatewayDispatchTarget }
+export interface GatewayDispatchInput extends Omit<DispatchRequestInput,'targets'> { readonly config: AppConfig; readonly entry: RouteConfig }
+export interface GatewayDispatchDecision {
+  readonly route: RouteConfig; readonly effective: EffectiveRouteConfig;
+  readonly context: import('../hooks').MutableRequestContext;
+  readonly entryRouteId?: string; readonly target?: GatewayDispatchTarget;
+}
 export interface GatewayRouteInput { readonly request: Request; readonly config: AppConfig }
 export interface GatewayRouteDecision { readonly route?: RouteConfig; readonly effective?: EffectiveRouteConfig; readonly response?: Response; readonly responseKind?: 'rule' | 'local' }
 export interface GatewayAdmissionInput {
@@ -69,7 +84,7 @@ export interface GatewayLogResult { readonly logger?: RequestLogger }
 
 /** Provider stages are fixed, required, and registered exactly once at startup. */
 export const GATEWAY_PROVIDER_STAGES = [
-  'onGatewayWebSocket','onGatewayBody','onGatewayRequest', 'onGatewayRoute', 'onGatewayAdmission', 'onGatewayAdmissionSession',
+  'onGatewayWebSocket','onGatewayBody','onGatewayRequest', 'onGatewayRoute', 'onGatewayDispatch', 'onGatewayAdmission', 'onGatewayAdmissionSession',
   'onGatewayAdmissionPrepare', 'onGatewaySelect', 'onGatewayFailover', 'onGatewayRetry',
   'onGatewayForward', 'onGatewayHeaderRules', 'onGatewayCors', 'onGatewayBodyRules', 'onGatewayQueryRules', 'onGatewayResponseRules', 'onGatewayLog',
 ] as const;

@@ -25,6 +25,8 @@ export interface ManagementProvider {
   sessionCookie?(request: Request): string | undefined;
 }
 export interface AdmissionTarget {
+  /** Host-pinned entry scope for one internal handoff. */
+  readonly entryRouteId?: string;
   readonly requestId: string;
   readonly attemptId: string;
   readonly principal: DataPrincipal;
