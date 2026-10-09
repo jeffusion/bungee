@@ -41,6 +41,15 @@ function errorSummary(
 }
 
 describe('parseNormalizeCompile', () => {
+  test('rejects model protocol fields on routes and services', () => {
+    const service = { id: IDS.service, name: 'primary', endpoints: [{ id: IDS.upstream, target: 'https://example.com' }] };
+    const route = { id: IDS.route, path: '/v1', service_id: IDS.service };
+    expect(errorSummary({ services: [{ ...service, llm_protocol: 'responses' }], routes: [route] }))
+      .toContainEqual({ code: 'unknown_field', path: 'services[0].llm_protocol' });
+    expect(errorSummary({ services: [service], routes: [{ ...route, llm_protocol: 'responses' }] }))
+      .toContainEqual({ code: 'unknown_field', path: 'routes[0].llm_protocol' });
+  });
+
   test('accepts exact global scalar domains and rejects aliases or malformed limits', () => {
     // Given / When / Then
     for (const logLevel of ['trace', 'debug', 'info', 'warn', 'error', 'fatal']) {

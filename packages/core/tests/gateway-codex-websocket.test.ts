@@ -5,8 +5,8 @@ import {createWebSocketBridge,isWebSocketUpgradeRequest} from '../src/websocket'
 const path=new URL('./fixtures/codex-dispatch-plugin.ts',import.meta.url).pathname;
 const previous=getScopedPluginRegistry();afterEach(()=>setScopedPluginRegistry(previous));
 async function waitUntil(predicate:()=>boolean){for(let i=0;i<200;i++){if(predicate())return;await Bun.sleep(10);}throw new Error('Timeout');}
-async function setup(endpoints:any[]){
-  const config:any={logging:{enabled:false},routes:[{id:'e',path:'/codex',websocket:{enabled:true},path_rewrite:{'^/codex':''},plugins:[{name:'codex-router',path,options:{models:endpoints.map((endpoint,index)=>({source:`m${index}`,provider:'p',model:endpoint.model ?? `m${index}`,target:{type:'route',id:`t${index}`,protocol:endpoint.protocol}}))}}],endpoints:[{target:endpoints[0].target}]},...endpoints.map((endpoint,index)=>({id:`t${index}`,path:`/target${index}`,llm_protocol:endpoint.legacyProtocol,path_rewrite:{[`^/target${index}`]:''},websocket:{enabled:endpoint.ws===true},endpoints:[{id:`u${index}`,target:endpoint.target}]}))]};
+async function setup(endpoints:any[], bindModels=true){
+  const config:any={logging:{enabled:false},routes:[{id:'e',path:'/codex',websocket:{enabled:true},path_rewrite:{'^/codex':''},plugins:[{name:'codex-router',path,options:{models:!bindModels?[]:endpoints.map((endpoint,index)=>({source:`m${index}`,provider:'p',model:endpoint.model ?? `m${index}`,target:{type:'route',id:`t${index}`,protocol:endpoint.protocol}}))}}],endpoints:[{target:endpoints[0].target}]},...endpoints.map((endpoint,index)=>({id:`t${index}`,path:`/target${index}`,path_rewrite:{[`^/target${index}`]:''},websocket:{enabled:endpoint.ws===true},endpoints:[{id:`u${index}`,target:endpoint.target}]}))]};
   const registry=new ScopedPluginRegistry(import.meta.dir);expect((await registry.initializeFromConfig(config)).failed).toBe(0);setScopedPluginRegistry(registry);
   const bridge=createWebSocketBridge({closeTimeoutMs:200});const completions=new Set<Promise<void>>();
   const server=Bun.serve({hostname:'127.0.0.1',port:0,websocket:bridge.websocket,async fetch(request,server){if(!isWebSocketUpgradeRequest(request))return new Response('no');const result=await runGatewayWebSocket({request,nativeRequest:request,server,config,bridge,servingRevision:1,retain(promise){completions.add(promise);void promise.finally(()=>completions.delete(promise));}});return result.response;}});
@@ -18,10 +18,10 @@ async function setup(endpoints:any[]){
 const chat=(text:string)=>[{choices:[{index:0,delta:{content:text},finish_reason:null}]},{choices:[{index:0,delta:{},finish_reason:'stop'}]},{choices:[],usage:{prompt_tokens:2,completion_tokens:1}}];
 const anthropic=(text:string)=>[{type:'message_start',message:{usage:{input_tokens:2,output_tokens:0}}},{type:'content_block_start',index:0,content_block:{type:'text',text:''}},{type:'content_block_delta',index:0,delta:{type:'text_delta',text}},{type:'content_block_stop',index:0},{type:'message_delta',delta:{stop_reason:'end_turn'},usage:{output_tokens:1}},{type:'message_stop'}];
 function sse(events:any[]){return new Response(events.map(e=>`data: ${JSON.stringify(e)}\n\n`).join(''),{headers:{'content-type':'text/event-stream'}});}
-test('real WS binding protocol overrides legacy Responses on WS-enabled targets; prewarm and history switch',async()=>{
+test('real WS binding protocol selects HTTP conversion on WS-enabled targets; prewarm and history switch',async()=>{
   const calls:any[]=[]; let upgradeAttempts = 0;
   const upstream=Bun.serve({hostname:'127.0.0.1',port:0,async fetch(request){if (request.headers.get('upgrade') === 'websocket') upgradeAttempts++; const body=await request.json();calls.push({url:request.url,body});return sse(request.url.endsWith('/messages')?anthropic('second'):chat('first'));}});
-  const base=`http://127.0.0.1:${upstream.port}`;const env=await setup([{protocol:'chat_completions',target:base,ws:true,legacyProtocol:'responses'},{protocol:'anthropic_messages',target:base,ws:true,legacyProtocol:'responses'}]);
+  const base=`http://127.0.0.1:${upstream.port}`;const env=await setup([{protocol:'chat_completions',target:base,ws:true},{protocol:'anthropic_messages',target:base,ws:true}]);
   try{
     env.client.send(JSON.stringify({type:'response.create',generate:false,model:'m0',input:[{role:'developer',content:'rules'}]}));const warm=await env.terminal();expect(calls).toHaveLength(0);const warmId=warm.at(-1).response.id;
     let start=env.events.length;env.client.send(JSON.stringify({type:'response.create',model:'m0',previous_response_id:warmId,input:'hello'}));const first=await env.terminal(start);expect(first.at(-1).type).toBe('response.completed');expect(calls).toHaveLength(1);expect(calls[0].body.messages).toHaveLength(2);
@@ -45,4 +45,16 @@ test('disconnect aborts active generation and drains retained connection resourc
   globalThis.fetch=Object.assign((_url:any,options:any)=>{calls++;return new Promise<Response>((_resolve,reject)=>options.signal.addEventListener('abort',()=>{aborted++;reject(new Error('cancelled'));},{once:true}));},{preconnect(){}}) as any;
   const env=await setup([{protocol:'chat_completions',target:'http://unused.test'}]);
   try{env.client.send(JSON.stringify({type:'response.create',model:'m0',input:'hello'}));await waitUntil(()=>calls===1);env.client.close();await waitUntil(()=>aborted===1);expect(env.events.some(e=>e.type==='response.completed')).toBe(false);}finally{await env.close();globalThis.fetch=original;}
+});
+
+for (const bindModels of [false, true]) test(`unbound native model retains WS transport with ${bindModels ? 'other bindings' : 'empty bindings'}`, async () => {
+  const calls:any[]=[];
+  const upstream=Bun.serve({hostname:'127.0.0.1',port:0,fetch(request,server){if(server.upgrade(request))return;return new Response('WS required',{status:400});},websocket:{message(socket,message){const body=JSON.parse(String(message));calls.push(body);socket.send(JSON.stringify({type:'response.completed',response:{id:'native-unbound',object:'response',status:'completed',model:body.model,output:[]}}));}}});
+  const env=await setup([{protocol:'responses',target:`http://127.0.0.1:${upstream.port}`,ws:true}],bindModels);
+  try {
+    env.client.send(JSON.stringify({type:'response.create',model:'unbound-model',input:'hello'}));
+    const terminal=(await env.terminal()).at(-1);
+    expect(terminal.type).toBe('response.completed');expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({type:'response.create',model:'unbound-model'});
+  } finally {await env.close();upstream.stop(true);}
 });

@@ -205,7 +205,7 @@ export interface PluginScopeInfo {
 export interface PluginInitContext {
   /** Host-controlled, dependency-restricted public service facade. */
   readonly services?: PluginServices;
-  readonly dispatchTargets?: readonly (import('../gateway/contracts').GatewayDispatchTarget & {readonly protocol?: import('@jeffusion/bungee-types').LLMProtocol})[];
+  readonly dispatchTargets?: readonly import('../gateway/contracts').GatewayDispatchTarget[];
   /** 插件配置 */
   config: Record<string, any>;
   /** 插件存储 */

@@ -1159,7 +1159,7 @@ async function executeHttpRequestInternal(
             {
               servingRevision: runtimeContext?.servingRevision,
               websocketBridge: runtimeContext?.websocketBridge,
-              nativeWebSocket: runtimeContext?.transport === 'websocket' && route.websocket?.enabled === true && (dispatch.protocol ?? route.llm_protocol ?? config.services?.find(service=>service.name===route.service)?.llm_protocol ?? 'responses') === 'responses',
+              nativeWebSocket: runtimeContext?.transport === 'websocket' && route.websocket?.enabled === true && (dispatch.protocol ?? 'responses') === 'responses',
               attemptId,requestOverride,
               beforeSend: dataAdmission ? async (target) => {
                 preparedAdmission = requireGatewayResult(await gatewayHooks().onGatewayAdmissionPrepare.promise({session:dataAdmission!,target:{...target,transport:runtimeContext?.transport,attemptId,upstreamId:selectedUpstream.upstream_id},signal:req.signal,readBody:()=>requestOverride ? Promise.resolve(requestOverride.body):readSnapshotJson(requestSnapshot,'admission-body')}), 'onGatewayAdmissionPrepare');

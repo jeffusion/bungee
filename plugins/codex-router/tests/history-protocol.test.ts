@@ -5,10 +5,10 @@ import {createPluginHooks} from '../../../packages/core/src/hooks';
 const cache=new HistoryCache();const transport=new HistoryTransport(cache);
 const caps={status:()=>({version:1}),model:()=>({provider:'p',model:'m',name:'m',contextWindow:32000,outputLimit:4096,toolCall:true,reasoning:false,inputModalities:['text']})};
 async function router(protocol:string,alias='m',principal:any={domain:'data',keyId:'k',credentialVersion:1}){
-  const binding={provider:'p',model:'m',alias,target:{type:'route',id:protocol}};
+  const binding={provider:'p',model:'m',alias,target:{type:'route',id:protocol,protocol}};
   const handler=new CodexRouterPlugin({models:[binding]});await handler.init( {scope:{type:'route',routeId:'/codex'},services:{consume:()=>caps,rpc:{consume:()=>({get:async(input:any)=>transport.get(input),put:async(input:any)=>transport.put(input)})}}} as any);
   const hooks=createPluginHooks();handler.register(hooks);
-  const dispatch=(body:any)=>hooks.onDispatchRequest.promise({context:{method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},body,requestId:crypto.randomUUID(),clientIP:'local'},targets:[{type:'route',id:protocol,protocol:protocol as any}],signal:new AbortController().signal,principal,servingRevision:1});
+  const dispatch=(body:any)=>hooks.onDispatchRequest.promise({context:{method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},body,requestId:crypto.randomUUID(),clientIP:'local'},targets:[{type:'route',id:protocol}],signal:new AbortController().signal,principal,servingRevision:1});
   return {dispatch};
 }
 test('Chat and Anthropic JSON results return Responses and retain ordinary history across consumers',async()=>{
@@ -44,9 +44,9 @@ test('history contract runs through the canonical RPC host',async()=>{
 });
 
 test('cross-model namespace tool continuation re-encodes the cached logical history',async()=>{
-  cache.clear();const models=[{provider:'p',model:'chat',target:{type:'route',id:'chat'}},{provider:'p',model:'anthropic',target:{type:'route',id:'anthropic'}}];
+  cache.clear();const models=[{provider:'p',model:'chat',target:{type:'route',id:'chat',protocol:'chat_completions'}},{provider:'p',model:'anthropic',target:{type:'route',id:'anthropic',protocol:'anthropic_messages'}}];
   const create=async()=>{const plugin=new CodexRouterPlugin({models});await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:()=>caps,rpc:{consume:()=>({get:async(input:any)=>transport.get(input),put:async(input:any)=>transport.put(input)})}}} as any);const hooks=createPluginHooks();plugin.register(hooks);return hooks;};
-  const targets:any=[{type:'route',id:'chat',protocol:'chat_completions'},{type:'route',id:'anthropic',protocol:'anthropic_messages'}];const principal={domain:'data',keyId:'cross',credentialVersion:1};
+  const targets:any=[{type:'route',id:'chat'},{type:'route',id:'anthropic'}];const principal={domain:'data',keyId:'cross',credentialVersion:1};
   const context=(body:any)=>({method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},body,requestId:crypto.randomUUID(),clientIP:'local'});
   const tools=[{type:'namespace',name:'mcp',tools:[{type:'function',name:'lookup',parameters:{type:'object',properties:{}}}]}];const one=context({model:'chat',input:'lookup',tools});
   const decision=await (await create()).onDispatchRequest.promise({context:one,targets,signal:new AbortController().signal,principal,servingRevision:7});const resultHooks=createPluginHooks();decision!.adapter!.register(resultHooks);
@@ -57,10 +57,10 @@ test('cross-model namespace tool continuation re-encodes the cached logical hist
 });
 
 test('opaque native references pin provider/model and actual upstream',async()=>{
-  cache.clear();const models=[{provider:'a',model:'one',target:{type:'route',id:'native'}},{provider:'b',model:'two',target:{type:'route',id:'native'}}];
+  cache.clear();const models=[{provider:'a',model:'one',target:{type:'route',id:'native',protocol:'responses'}},{provider:'b',model:'two',target:{type:'route',id:'native',protocol:'responses'}}];
   const plugin=new CodexRouterPlugin({models});await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:()=>caps,rpc:{consume:()=>({get:async(input:any)=>transport.get(input),put:async(input:any)=>transport.put(input)})}}} as any);
   const hooks=createPluginHooks();plugin.register(hooks);
-  const run=(body:any)=>hooks.onDispatchRequest.promise({context:{method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},body,requestId:crypto.randomUUID(),clientIP:'local'},targets:[{type:'route',id:'native',protocol:'responses'}],signal:new AbortController().signal,principal:{domain:'data',keyId:'opaque',credentialVersion:1},servingRevision:9});
+  const run=(body:any)=>hooks.onDispatchRequest.promise({context:{method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},body,requestId:crypto.randomUUID(),clientIP:'local'},targets:[{type:'route',id:'native'}],signal:new AbortController().signal,principal:{domain:'data',keyId:'opaque',credentialVersion:1},servingRevision:9});
   const decision=await run({model:'one',input:'hello'});const resultHooks=createPluginHooks();decision!.adapter!.register(resultHooks);
   const response=await resultHooks.onResponse.promise(Response.json({}),{upstreamId:'actual-endpoint',bodyHandle:{json:async()=>({id:'opaque-id',status:'completed',output:[{type:'reasoning',encrypted_content:'private'}]})}} as any);expect((await response.json() as any).id).toBe('opaque-id');
   expect((await run({model:'one',previous_response_id:'opaque-id',input:'next'}))!.requiredUpstreamId).toBe('actual-endpoint');
@@ -68,7 +68,7 @@ test('opaque native references pin provider/model and actual upstream',async()=>
   await expect(run({model:'one',input:[{type:'reasoning',encrypted_content:'private'}]})).rejects.toThrow('unrestorable_history');
 });
 test('Anthropic thinking overrides cannot enable a capability without restorable history',async()=>{
-  const plugin=new CodexRouterPlugin({models:[{provider:'p',model:'m',target:{type:'route',id:'a'},capabilityOverrides:{anthropicThinkingBudget:1024}}]});await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:()=>({...caps,model:()=>({...caps.model(),reasoning:true})}),rpc:{consume:()=>({get:async()=>null,put:async()=>null})}}} as any);
+  const plugin=new CodexRouterPlugin({models:[{provider:'p',model:'m',target:{type:'route',id:'a',protocol:'anthropic_messages'},capabilityOverrides:{anthropicThinkingBudget:1024}}]});await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:()=>({...caps,model:()=>({...caps.model(),reasoning:true})}),rpc:{consume:()=>({get:async()=>null,put:async()=>null})}}} as any);
   const hooks=createPluginHooks();plugin.register(hooks);
-  await expect(hooks.onDispatchRequest.promise({context:{method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},body:{model:'m',input:'hello',reasoning:{effort:'high'}},requestId:crypto.randomUUID(),clientIP:'local'},targets:[{type:'route',id:'a',protocol:'anthropic_messages'}],signal:new AbortController().signal})).rejects.toThrow('unsupported_reasoning');
+  await expect(hooks.onDispatchRequest.promise({context:{method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},body:{model:'m',input:'hello',reasoning:{effort:'high'}},requestId:crypto.randomUUID(),clientIP:'local'},targets:[{type:'route',id:'a'}],signal:new AbortController().signal})).rejects.toThrow('unsupported_reasoning');
 });

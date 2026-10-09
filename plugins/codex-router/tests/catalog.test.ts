@@ -6,7 +6,7 @@ import {mergeCatalog,catalogEtag} from '../server/catalog';
 const view=new CatalogView();
 view.apply(buildCatalogIndex({version:1,fetchedAt:1,catalog:{lab:{models:{'org/model':{name:'Model',limit:{context:32000,output:4000},tool_call:true,reasoning:true,modalities:{input:['text','image']}}}}}}));
 const service=capabilitiesServiceOf(view);
-const bindings=parseBindings([{provider:'lab',model:'org/model',target:{type:'service',id:'target'},capabilityOverrides:{contextWindow:16000,images:false,reasoning:false}}]);
+const bindings=parseBindings([{provider:'lab',model:'org/model',target:{type:'service',id:'target',protocol:'responses'},capabilityOverrides:{contextWindow:16000,images:false,reasoning:false}}]);
 test('rich native metadata is preserved; original slash ID and intersected capabilities are advertised',()=>{
   const native={models:[{slug:'native',visibility:'hidden',supported_in_api:false,extra:{x:1}}],other:'keep'};
   const result=mergeCatalog(native,bindings,service) as any;
@@ -71,6 +71,7 @@ test('source protocol defaults to Responses and binding target accepts only supp
   for (const protocol of ['responses', 'chat_completions', 'anthropic_messages']) {
     expect(parseBindings([{ ...bindings[0], sourceProtocol: 'responses', target: { ...bindings[0].target, protocol } }])[0].target.protocol).toBe(protocol);
   }
+  expect(() => parseBindings([{ ...bindings[0], target: { type: 'service', id: 'target' } }])).toThrow('target_protocol_required');
   expect(() => parseBindings([{ ...bindings[0], sourceProtocol: 'chat_completions' }])).toThrow('source_protocol_unsupported');
   expect(() => parseBindings([{ ...bindings[0], target: { ...bindings[0].target, protocol: 'unknown' } }])).toThrow('target_protocol_invalid');
 });

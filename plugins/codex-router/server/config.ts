@@ -7,7 +7,7 @@ export interface ModelBinding {
   sourceProvider?: string;
   sourceProtocol?: 'responses';
   alias?: string;
-  target: { type: 'route' | 'service'; id: string; protocol?: LLMProtocol };
+  target: { type: 'route' | 'service'; id: string; protocol: LLMProtocol };
   capabilityOverrides?: { contextWindow?: number; tools?: boolean; reasoning?: boolean; images?: boolean; reasoningEffort?: boolean; anthropicThinkingBudget?: number };
 }
 /** The model in the client request; model itself is the upstream destination. */
@@ -28,7 +28,8 @@ export function parseBindings(value: unknown): readonly ModelBinding[] {
     const target = entry.target;
     if (!target || !['route','service'].includes(target.type) || typeof target.id !== 'string' || !target.id
       || Object.keys(target).some(key => !['type','id','protocol'].includes(key))) throw new Error('codex_router_invalid_target');
-    if (target.protocol !== undefined && !['responses','chat_completions','anthropic_messages'].includes(target.protocol)) throw new Error('codex_router_target_protocol_invalid');
+    if (target.protocol === undefined) throw new Error('codex_router_target_protocol_required');
+    if (!['responses','chat_completions','anthropic_messages'].includes(target.protocol)) throw new Error('codex_router_target_protocol_invalid');
     const publicId = bindingSource(entry);
     if (ids.has(publicId)) throw new Error('codex_router_model_conflict');
     ids.add(publicId);

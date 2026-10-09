@@ -1,19 +1,15 @@
-import type { Plugin, PluginHooks, GatewayDispatchInput, GatewayDispatchDecision, GatewayDispatchTarget } from './plugin';
+import type { Plugin, PluginHooks, GatewayDispatchInput, GatewayDispatchDecision } from './plugin';
 import { DataAdmissionError } from '../data-admission/errors';
 import { getScopedPluginRegistry } from '../scoped-plugin-registry';
 import { resolveEffectiveRoute } from './routing-plugin';
-import type { LLMProtocol, RouteConfig } from '@jeffusion/bungee-types';
+import type { RouteConfig } from '@jeffusion/bungee-types';
 
 export class DispatchPlugin implements Plugin {
   bodyRequirements() { return {request:'none' as const}; }
   register(hooks: PluginHooks): void {
     hooks.onGatewayDispatch.tapPromise('builtin.dispatch', async ({config,entry,context,signal,principal,servingRevision}: GatewayDispatchInput): Promise<GatewayDispatchDecision> => {
       const registry = getScopedPluginRegistry();
-      const references = registry?.getDeclaredDispatchTargets?.(entry.path) ?? [];
-      const targets = references.map(target => {
-        const entity = (target.type === 'route' ? config.routes : config.services ?? []).find(entity => entity.id === target.id);
-        return {...target,protocol:entity?.llm_protocol as LLMProtocol | undefined};
-      });
+      const targets = registry?.getDeclaredDispatchTargets?.(entry.path) ?? [];
       const dispatch = await registry?.dispatchRequest(entry.path,{context,signal,principal,servingRevision,targets},{kind:'gateway-request',revision:servingRevision,target:{requestId:context.requestId,attemptId:context.requestId,principal,routeId:entry.id ?? entry.path,serviceId:null,upstreamId:'dispatch',url:context.originalUrl.href,model:typeof context.body?.model==='string'?context.body.model:null,now:Date.now()}});
       if (!dispatch) return {route:entry,effective:resolveEffectiveRoute(config,entry),context};
       if (!targets.some(target => target.type === dispatch.target.type && target.id === dispatch.target.id)) throw new DataAdmissionError(403,'dispatch_target_not_declared');
@@ -30,7 +26,7 @@ export class DispatchPlugin implements Plugin {
         if (!service) throw new DataAdmissionError(422,'dispatch_target_unavailable');
         route = {...entry,service:service.name,service_id:service.id,endpoints:undefined} as RouteConfig;
       }
-      return {route,effective:resolveEffectiveRoute(config,route),context,entryRouteId:entry.id ?? entry.path,target:dispatch.target,requiredUpstreamId:dispatch.requiredUpstreamId,protocol:dispatch.protocol ?? targets.find(target=>target.type===dispatch.target.type && target.id===dispatch.target.id)?.protocol,adapter:dispatch.adapter};
+      return {route,effective:resolveEffectiveRoute(config,route),context,entryRouteId:entry.id ?? entry.path,target:dispatch.target,requiredUpstreamId:dispatch.requiredUpstreamId,protocol:dispatch.protocol,adapter:dispatch.adapter};
     });
   }
 }
