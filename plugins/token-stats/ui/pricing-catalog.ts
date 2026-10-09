@@ -9,9 +9,10 @@ export function createPricingModelSearch(
   load: (path: string, signal: AbortSignal) => Promise<PricingModelPage>,
   publish: (state: PricingModelSearchState) => void,
   delayMs = 250,
+  catalogPath = '/pricing/models',
 ) {
   return createModelSearch(load, publish, (query: { provider: string; search: string }, page) => {
     const params = new URLSearchParams({ provider: query.provider, search: query.search, page: String(page), pageSize: '50' });
-    return `/pricing/models?${params}`;
+    return `${catalogPath}?${params}`;
   }, delayMs);
 }

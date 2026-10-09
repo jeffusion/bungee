@@ -6,7 +6,7 @@ import { definePlugin, DataAdmissionError, type Plugin, type PluginInitContext, 
 import { MODELS_DEV_CAPABILITIES_SERVICE_ID, MODELS_DEV_CAPABILITIES_CONTRACT_VERSION, type ModelsDevCapabilitiesService } from '../../models-dev/contract';
 import manifest from '../manifest.json';
 import type { PluginConfigField } from '@jeffusion/bungee-core/plugin';
-import { parseBindings } from './config';
+import { parseBindings, bindingSource } from './config';
 import { mergeCatalog, catalogEtag } from './catalog';
 
 export const CodexRouterPlugin = definePlugin(class implements Plugin {
@@ -31,12 +31,12 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
     hooks.onWebSocketSessionMode.tap('codex-router.session', url => /\/responses$/.test(url.pathname) ? 'responses' : undefined);
     hooks.onDispatchRequest.tapPromise('codex-router.binding', async ({context,targets,principal,servingRevision,signal}) => {
       if (context.method !== 'POST' || !/\/responses$/.test(context.originalUrl.pathname)) return;
-      const binding = this.bindings.find(binding => (binding.alias ?? binding.model) === context.body?.model);
+      const binding = this.bindings.find(binding => bindingSource(binding) === context.body?.model);
       if (!binding) return;
       const target = targets.find(target => target.type === binding.target.type && target.id === binding.target.id);
       if (!target?.protocol) throw new DataAdmissionError(422,'codex_router_target_protocol_required');
       const capabilities=this.catalog.model(binding);
-      if(!capabilities)throw new DataAdmissionError(503,'codex_router_model_unavailable');
+      if(!capabilities || capabilities.contextWindow === null || !capabilities.inputModalities.includes('text'))throw new DataAdmissionError(503,'codex_router_model_unavailable');
       const scope=principal?.domain !== 'anonymous' && principal?.keyId ? createHash('sha256').update(JSON.stringify([principal,context.routeId,servingRevision ?? null,this.bindings])).digest('hex') : null;
       const input=structuredClone(context.body);
       let requiredUpstreamId:string|undefined;
@@ -68,7 +68,7 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
         }catch(error){if(error instanceof ResponsesCodecError)throw new DataAdmissionError(422,`codex_router_${error.code}`);throw error;}
         context.url.pathname=context.url.pathname.replace(/\/responses$/,target.protocol==='chat_completions'?'/chat/completions':'/messages');
       }else context.body=input;
-      const adapter=protocolAdapter({protocol:target.protocol==='responses'?undefined:target.protocol,model:binding.alias ?? binding.model,toolNames,signal,
+      const adapter=protocolAdapter({protocol:target.protocol==='responses'?undefined:target.protocol,model:bindingSource(binding),toolNames,signal,
         save:async(response,responseContext)=>{if(scope && typeof response.id==='string')await this.history.put({scope,id:response.id,value:{target:binding.target,origin:{provider:binding.provider,model:binding.model,upstreamId:responseContext?.upstreamId},items:[...logicalInput,...response.output]}},{signal,operationId:crypto.randomUUID()});}});
       return {target:binding.target,requiredUpstreamId,adapter};
     });
