@@ -8,6 +8,8 @@
 
 ### 字段与工具处理
 
+模型目录的 `display_name` 直接使用 models.dev 的目标模型名称，例如 `GLM 5.3 Flash`；`slug` 保持绑定的原始模型标识，用于请求匹配。新增和替换条目均不在展示名称中拼接路由关系。目录专项 9 pass / 0 fail，覆盖替换、别名、原生条目保留及能力描述。
+
 | 输入 | 转换规则 |
 |---|---|
 | 顶层 tools / additional_tools.tools | 转换前合并注册，载体不生成聊天消息；namespace 内 function/custom 共用编码与回程映射 |
