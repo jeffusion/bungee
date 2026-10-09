@@ -19,6 +19,7 @@
   const dispatch = createEventDispatcher<{ change: ModelBinding[] }>();
   const componentId = `codex-bindings-${Math.random().toString(36).slice(2, 10)}`;
   let rowIds: number[] = [], nextRowId = 0;
+  let manualSources: Record<number, boolean> = {};
   let providers: ModelsDevProviderSummary[] = [];
   let catalogVersion: number | null = null;
   let modelCount = 0, loading = true, catalogError = false, targetsError = false;
@@ -56,8 +57,16 @@
     publish([...value, { source: '', provider: '', model: '', target: { type: 'route', id: '' } }]);
   }
   function remove(index: number) {
+    delete manualSources[rowIds[index]];
     rowIds = rowIds.filter((_, i) => i !== index);
     publish(value.filter((_, i) => i !== index));
+  }
+  function manualSource(binding: ModelBinding, rowId: number) {
+    return manualSources[rowId] ?? Boolean((binding.source ?? binding.alias ?? binding.model) && !binding.sourceProvider);
+  }
+  function toggleSource(index: number, rowId: number, manual: boolean) {
+    manualSources = { ...manualSources, [rowId]: manual };
+    if (manual) update(index, { sourceProvider: undefined });
   }
   async function loadCatalog() {
     loading = true; catalogError = false;
@@ -116,10 +125,27 @@
           <span class="text-xs font-medium text-zinc-300">{t('binding')} {index + 1}</span>
           <Button variant="ghost" class="h-7 shrink-0 px-2 text-xs" onclick={() => remove(index)}>{t('remove')}</Button>
         </div>
-        <div class="min-w-0 space-y-2" data-testid="codex-binding-source">
-          <Label class="block" for={`${id}-source`}>{t('source')}</Label>
-            <Input id={`${id}-source`} aria-label={t('source')} value={binding.source ?? binding.alias ?? binding.model} maxlength={512} placeholder={t('sourcePlaceholder')} required on:input={event => update(index, { source: event.currentTarget.value })} />
-            <p class="text-xs leading-relaxed text-zinc-400">{t('sourceHint')}</p>
+        <div class="min-w-0 space-y-3" data-testid="codex-binding-source">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <span class="text-xs font-medium text-zinc-300">{t('match')}</span>
+            <Button variant="ghost" class="h-7 px-2 text-xs" onclick={() => toggleSource(index, rowIds[index], !manualSource(binding, rowIds[index]))}>{manualSource(binding, rowIds[index]) ? t('fromCatalog') : t('manual')}</Button>
+          </div>
+          {#if manualSource(binding, rowIds[index])}
+            <div class="space-y-2">
+              <Label class="block" for={`${id}-source`}>{t('source')}</Label>
+              <Input id={`${id}-source`} aria-label={t('source')} value={binding.source ?? binding.alias ?? binding.model} maxlength={512} placeholder={t('sourcePlaceholder')} required on:input={event => update(index, { source: event.currentTarget.value })} />
+            </div>
+          {:else}
+            <div class="grid min-w-0 gap-4 sm:grid-cols-2">
+              <div class="min-w-0 space-y-2"><Label class="block">{t('sourceProvider')}</Label>
+                <BSelect value={binding.sourceProvider ?? ''} options={providerOptions} ariaLabel={t('sourceProvider')} placeholder={t('sourceProvider')} disabled={loading || catalogError} onchange={provider => update(index, { sourceProvider: String(provider), source: '' })} />
+              </div>
+              <div class="min-w-0 space-y-2"><Label class="block">{t('source')}</Label>
+                <PriceModelPicker value={binding.source ?? binding.alias ?? binding.model} provider={binding.sourceProvider ?? ''} {catalogVersion} catalogPlugin="codex-router" catalogPath="/catalog" disabled={!binding.sourceProvider || !modelCount} label={t('source')} placeholder={t('source')} searchLabel={t('search')} emptyLabel={t('empty')} loadingLabel={t('loading')} errorLabel={t('error')} retryLabel={t('retry')} previousLabel={t('previous')} nextLabel={t('next')} onchange={source => update(index, { source })} />
+              </div>
+            </div>
+          {/if}
+          <p class="text-xs leading-relaxed text-zinc-400">{t('sourceHint')}</p>
         </div>
         <div class="grid min-w-0 gap-4 border-t border-carbon-600 pt-4 sm:grid-cols-2" data-testid="codex-binding-destination">
           <div class="min-w-0 space-y-2"><Label class="block" id={`${id}-provider-label`}>{t('provider')}</Label>

@@ -47,6 +47,15 @@ test('source is explicit and legacy alias/model bindings retain their match with
   expect(()=>parseBindings([{...bindings[0],source:'a',alias:'b'}])).toThrow('invalid_bindings');
   expect(()=>parseBindings([{...bindings[0],source:' '}])).toThrow('invalid_bindings');
 });
+test('source provider is optional catalog metadata and does not change model matching or target capabilities',()=>{
+  const selected=parseBindings([{...bindings[0],source:'original',sourceProvider:'original-provider'}]);
+  expect(selected[0].sourceProvider).toBe('original-provider');
+  expect(bindingSource(selected[0])).toBe('original');
+  expect((mergeCatalog({models:[]},selected,service) as any).models[0]).toMatchObject({slug:'original',context_window:16000});
+  expect(()=>parseBindings([{...selected[0]},{...selected[0],sourceProvider:'another-provider'}])).toThrow('conflict');
+  for(const sourceProvider of ['', ' ', 42, 'bad\nprovider', 'x'.repeat(513)])expect(()=>parseBindings([{...selected[0],sourceProvider}])).toThrow('invalid_bindings');
+  expect(()=>parseBindings([{...bindings[0],sourceProvider:'original-provider'}])).toThrow('invalid_bindings');
+});
 test('unavailable explicit replacements cannot advertise native capabilities or restore native routing',()=>{
   const binding=parseBindings([{...bindings[0],source:'gpt-native'}]);
   for(const info of [null,{...service.model(bindings[0])!,contextWindow:null},{...service.model(bindings[0])!,inputModalities:['audio']}]){

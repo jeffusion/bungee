@@ -40,14 +40,15 @@ await page.route('**/api/**', async route => {
   if (url.pathname === '/api/plugins/codex-router/control/catalog') {
     catalogQueries.push(url.searchParams);
     const search = url.searchParams.get('search') ?? '';
+    const provider = url.searchParams.get('provider') ?? 'fixture';
     const page = Number(url.searchParams.get('page') ?? 1);
     if (holdNextPage && page === 2) {
       holdNextPage = false;
       await new Promise<void>(resolve => { releasePage = resolve; });
     }
-    return json({ models: [{ provider: 'fixture', providerName: 'Fixture', model: search || `org/model-${page}`, name: 'Fixture Model' }],
+    return json({ models: [{ provider, providerName: provider, model: search || (provider === 'original' ? `gpt-original-${page}` : provider === 'original-alt' ? 'gpt-alternate' : `org/model-${page}`), name: 'Fixture Model' }],
       total: search ? 1 : 51, page: search ? 1 : page, pageSize: 50,
-      providers: [{ provider: 'fixture', name: 'Fixture', modelCount: 51 }], status: { version: 1, modelCount: 51 } });
+      providers: [{ provider: 'fixture', name: 'Fixture', modelCount: 51 }, { provider: 'original', name: 'Original', modelCount: 51 }, { provider: 'original-alt', name: 'Alternate', modelCount: 1 }], status: { version: 1, modelCount: 103 } });
   }
   return route.fulfill({ status: 404, json: { error: 'unexpected_fixture_request' } });
 });
@@ -84,13 +85,33 @@ try {
   const dialog = page.getByRole('dialog');
   await dialog.getByRole('button', { name: '添加模型绑定', exact: true }).click();
   const row = dialog.getByTestId('codex-model-binding');
-  await row.getByRole('textbox', { name: '原始模型', exact: true }).fill('gpt-original');
+  await expect(row.getByRole('button', { name: '原始模型', exact: true })).toBeDisabled();
+  await row.getByRole('combobox', { name: '原始提供商', exact: true }).click();
+  await page.getByRole('option', { name: 'Original · original', exact: true }).click();
+  await row.getByRole('button', { name: '原始模型', exact: true }).click();
+  await page.getByRole('button', { name: '下一页', exact: true }).click();
+  await page.getByRole('option', { name: 'gpt-original-2', exact: true }).click();
   await row.getByRole('combobox', { name: '目标提供商', exact: true }).click();
   await page.getByRole('option', { name: 'Fixture · fixture', exact: true }).click();
   await row.getByRole('button', { name: '目标模型', exact: true }).click();
   await page.getByRole('option', { name: 'org/model-1', exact: true }).click();
   await row.getByRole('combobox', { name: '转发路由 / 服务', exact: true }).click();
   await page.getByRole('option', { name: 'fixture-service · service · responses', exact: true }).click();
+  // Source provider changes only reset the source selection, preserving the destination.
+  await row.getByRole('combobox', { name: '原始提供商', exact: true }).click();
+  await page.getByRole('option', { name: 'Alternate · original-alt', exact: true }).click();
+  await expect(row.getByRole('button', { name: '原始模型', exact: true })).not.toContainText('gpt-original-2');
+  await expect(row.getByRole('button', { name: '目标模型', exact: true })).toContainText('org/model-1');
+  await row.getByRole('button', { name: '原始模型', exact: true }).click();
+  await page.getByRole('option', { name: 'gpt-alternate', exact: true }).click();
+  await row.getByRole('combobox', { name: '原始提供商', exact: true }).click();
+  await page.getByRole('option', { name: 'Original · original', exact: true }).click();
+  await row.getByRole('button', { name: '原始模型', exact: true }).click();
+  await page.getByLabel('搜索模型', { exact: true }).fill('gpt-original');
+  await page.getByRole('option', { name: 'gpt-original', exact: true }).click();
+  expect(catalogQueries.some(query => query.get('provider') === 'original' && query.get('page') === '2')).toBe(true);
+  expect(catalogQueries.some(query => query.get('provider') === 'original' && query.get('search') === 'gpt-original')).toBe(true);
+  expect(catalogQueries.some(query => query.get('provider') === 'fixture')).toBe(true);
   await row.getByText('能力限制（可选）', { exact: true }).click();
   await row.getByRole('spinbutton', { name: '上下文长度上限', exact: true }).fill('16000');
   await row.getByRole('button', { name: '增加上下文上限', exact: true }).click();
@@ -99,22 +120,28 @@ try {
   for (const width of [1440, 768, 390, 320]) {
     await page.setViewportSize({ width, height: 1000 });
     expect(await row.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
-    await expect(row.getByRole('textbox', { name: '原始模型', exact: true })).toBeVisible();
-    const source = (await row.getByRole('textbox', { name: '原始模型', exact: true }).boundingBox())!;
+    await expect(row.getByRole('button', { name: '原始模型', exact: true })).toBeVisible();
+    const source = (await row.getByTestId('codex-binding-source').boundingBox())!;
+    const sourceProvider = (await row.getByRole('combobox', { name: '原始提供商', exact: true }).boundingBox())!;
+    const sourceModel = (await row.getByRole('button', { name: '原始模型', exact: true }).boundingBox())!;
     const provider = (await row.getByRole('combobox', { name: '目标提供商', exact: true }).boundingBox())!;
     const model = (await row.getByRole('button', { name: '目标模型', exact: true }).boundingBox())!;
     const target = (await row.getByRole('combobox', { name: '转发路由 / 服务', exact: true }).boundingBox())!;
     expect(provider.y).toBeGreaterThan(source.y + source.height);
     expect(target.y).toBeGreaterThan(model.y + model.height);
+    expect(Math.abs(source.x - sourceProvider.x)).toBeLessThanOrEqual(1);
     expect(Math.abs(source.x - provider.x)).toBeLessThanOrEqual(1);
     expect(Math.abs(source.x - target.x)).toBeLessThanOrEqual(1);
     expect(Math.abs(source.width - target.width)).toBeLessThanOrEqual(1);
     if (width >= 768) {
       expect(Math.abs(provider.y - model.y)).toBeLessThanOrEqual(1);
       expect(Math.abs(provider.height - model.height)).toBeLessThanOrEqual(1);
+      expect(Math.abs(sourceProvider.y - sourceModel.y)).toBeLessThanOrEqual(1);
+      expect(Math.abs(sourceProvider.height - sourceModel.height)).toBeLessThanOrEqual(1);
     } else {
       expect(model.y).toBeGreaterThan(provider.y + provider.height);
       expect(Math.abs(source.x - model.x)).toBeLessThanOrEqual(1);
+      expect(sourceModel.y).toBeGreaterThan(sourceProvider.y + sourceProvider.height);
       await page.screenshot({ path: `/tmp/codex-router-layout-${width}.png`, fullPage: true });
     }
   }
@@ -125,14 +152,25 @@ try {
   await dialog.getByTestId('plugin-config-save-button').click();
   await expect(dialog).toHaveCount(0);
   await page.getByTestId('section-plugins').getByRole('button', { name: '编辑', exact: true }).click();
-  await expect(dialog.getByRole('textbox', { name: '原始模型', exact: true })).toHaveValue('gpt-original');
+  await expect(dialog.getByRole('button', { name: '原始模型', exact: true })).toContainText('gpt-original');
+  await expect(dialog.getByRole('combobox', { name: '原始提供商', exact: true })).toContainText('Original · original');
   await expect(dialog.getByRole('button', { name: '目标模型', exact: true })).toContainText('org/model-1');
   await expect(dialog.getByRole('combobox', { name: '转发路由 / 服务', exact: true })).toContainText('fixture-service');
   await dialog.getByText('能力限制（可选）', { exact: true }).click();
   await expect(dialog.getByRole('spinbutton', { name: '上下文长度上限', exact: true })).toHaveValue('16001');
   await expect(dialog.getByRole('checkbox', { name: '禁用图片输入', exact: true })).toBeChecked();
+  await dialog.getByRole('button', { name: '手动输入', exact: true }).click();
+  await expect(dialog.getByRole('textbox', { name: '原始模型', exact: true })).toHaveValue('gpt-original');
+  await dialog.getByRole('textbox', { name: '原始模型', exact: true }).fill('custom-original');
+  await dialog.getByTestId('plugin-config-save-button').click();
+  await page.getByTestId('section-plugins').getByRole('button', { name: '编辑', exact: true }).click();
+  await expect(dialog.getByRole('textbox', { name: '原始模型', exact: true })).toHaveValue('custom-original');
+  await expect(dialog.getByRole('button', { name: '目标模型', exact: true })).toContainText('org/model-1');
   expect(errors).toEqual([]);
-  console.log('Codex Router UI passed: native settings; search/pagination race; binding values retained; source, destination and forwarding vertically grouped; destination controls aligned; no overflow at 1440/768/390/320px. All APIs are fixtures.');
+  console.log('Codex Router UI passed: independent source/destination provider filtering; source search and pagination; catalog and manual values retained; grouped and aligned fields; no overflow at 1440/768/390/320px. All APIs are fixtures.');
+} catch (error) {
+  await page.screenshot({ path: '/tmp/codex-router-source-picker-failure.png', fullPage: true });
+  throw error;
 } finally {
   await browser.close();
   server.stop(true);
