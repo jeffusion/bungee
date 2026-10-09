@@ -172,6 +172,9 @@
   },
   "translations": {
     "zh-CN": {
+      "editor.loaded": "已加载",
+      "editor.complete": "已全部加载",
+      "editor.loadMore": "加载更多",
       "metadata.name": "Codex 模型路由",
       "plugin.description": "从共享目录选择模型并绑定已有路由或服务",
       "models.label": "模型绑定",
@@ -220,6 +223,9 @@
       "editor.contextInvalid": "请输入正整数。"
     },
     "en": {
+      "editor.loaded": "Loaded",
+      "editor.complete": "All loaded",
+      "editor.loadMore": "Load more",
       "metadata.name": "Codex Router",
       "plugin.description": "Bind catalog models to existing routes or services",
       "models.label": "Model bindings",

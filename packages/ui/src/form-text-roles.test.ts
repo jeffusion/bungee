@@ -78,7 +78,8 @@ test('migrated field titles use the field role, not metadata captions', async ()
 
 test('BSelect custom input and multiple branches keep readable normal-weight placeholders and tags', async () => {
   const source = await read('./components/industrial/BSelect.svelte');
-  const inputs = [...source.matchAll(/<input\b[\s\S]*?class="([^"]+)"/g)];
+  const editable = await read('./components/industrial/BSearchSelect.svelte');
+  const inputs = [...(source + editable).matchAll(/<input\b[\s\S]*?class="([^"]+)"/g)];
   expect(inputs).toHaveLength(2); // creatable single and tags input
   for (const input of inputs) {
     expect(input[1]).toContain('font-normal text-zinc-200');

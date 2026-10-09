@@ -199,6 +199,41 @@ top-of-file comment. Read the source — it's the spec.
 | `IndustrialToggle` | Flat hard-edged ON/OFF switch with embedded OFF/ON text | Anywhere you'd reach for legacy round switch. Replaces it everywhere on dark surfaces. |
 | `BCarouselList` | Measured rows grouped into horizontal carousel pages | Dashboard overview and quota lists that must fit a fixed card height |
 | `BCarousel` | Content-first rotation with subtle indicators and contextual navigation | Notices, feature tours, or grouped summaries inside a PanelCard |
+| `BSelect` searchable single mode | Field-integrated local filtering or remote incremental loading | Model catalogs, recorded client models and editable aliases |
+
+**Searchable BSelect contract:** use `searchable` for local single-select
+filtering or `remoteSearch` for server-backed results. `creatable` shares the
+same single-select renderer. Multiple/tags and ordinary local single-select
+behavior remain unchanged. Table/list pagination remains explicit.
+
+- Search is typed in the field itself. The popup contains candidates and a
+  subtle loading/count/retry footer, never a second search input or page buttons.
+  Opening clears the search and starts page 1, preserving the confirmed value
+  as the placeholder; closing restores the confirmed value.
+- Nonempty remote searches debounce by 250ms and cancel previous work
+  immediately. Clearing search loads immediately. Search/provider/catalog
+  changes discard accumulated results and reset scroll to the top.
+- Scrolling near the bottom requests the next page once and appends results
+  without moving focus, resetting scroll or removing previously loaded items.
+  Deduplicate by value. Stop when the server's final page is reached.
+- Arrow Up/Down navigate enabled candidates; Arrow Down at the loaded boundary
+  requests the next page and moves only after it arrives. Enter confirms an
+  active candidate, never an arbitrary catalog ID. Creatable values require
+  explicit confirmation. IME composition and native editing keys stay native.
+- Loading the next page leaves existing options usable. A failed page keeps
+  earlier results and exposes retry for that page. A short footer reports
+  loaded/total, loading, completion or failure using translated labels; its
+  boundary is low contrast, with orange focus emphasis on the field outer edge.
+- Escape closes only this dropdown and restores field focus/value. Tab can
+  reach retry/custom confirmation; leaving the field and popup dismisses it.
+  Outside dismissal, disabling and unmounting cancel requests. Late responses
+  cannot replace the current query. Values outside loaded pages remain visible.
+
+The shared renderer knows no provider or API. Domain adapters supply options,
+page status, translated labels and search/cancel callbacks, reusing the existing
+abort/generation search service. No global styles or alternate data protocol
+are added. The interactive reference is at `/#/design`. Keyboard/combobox
+semantics follow the [WAI-ARIA combobox pattern](https://www.w3.org/WAI/ARIA/apg/patterns/combobox/).
 
 **BCarousel contract:** import from the industrial barrel. Pass `items` and a
 `children(item, index)` snippet; no parent context is required. `index` is

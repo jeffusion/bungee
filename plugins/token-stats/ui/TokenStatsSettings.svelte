@@ -146,7 +146,8 @@
               <Label for={`price-alias-${mappingIds[index]}`}>{t('mappingSource')}</Label>
               <ClientModelPicker id={`price-alias-${mappingIds[index]}`} value={mapping.source} label={t('mappingSource')}
                 placeholder={t('mappingSourcePlaceholder')} loadingLabel={t('clientModelsLoading')} errorLabel={t('clientModelsError')}
-                emptyLabel={t('clientModelsEmpty')} previousLabel={t('previousPage')} nextLabel={t('nextPage')}
+                emptyLabel={t('clientModelsEmpty')} loadedLabel={t('modelsLoaded')} completeLabel={t('modelsComplete')} loadMoreLabel={t('modelsLoadMore')}
+                searchLabel={t('mappingSearch')} retryLabel={t('modelSearchRetry')} customLabel={t('mappingUseCustom')}
                 disabled={mappingsBusy} onchange={(value) => changeMapping(index, 'source', value)} />
             </div>
             <div class="min-w-0 space-y-2">
@@ -159,7 +160,7 @@
               <PriceModelPicker value={mapping.model} provider={mapping.provider} {catalogVersion}
                 disabled={mappingsBusy || !mapping.provider || !status.modelCount} label={t('mappingTarget')} placeholder={t('mappingTarget')}
                 searchLabel={t('mappingSearch')} emptyLabel={t('mappingNoModels')} loadingLabel={t('clientModelsLoading')}
-                errorLabel={t('modelsError')} retryLabel={t('mappingRetry')} previousLabel={t('previousPage')} nextLabel={t('nextPage')}
+                errorLabel={t('modelsError')} retryLabel={t('modelSearchRetry')} loadedLabel={t('modelsLoaded')} completeLabel={t('modelsComplete')} loadMoreLabel={t('modelsLoadMore')}
                 onchange={(value) => changeMapping(index, 'model', value)} />
             </div>
             <Button variant="ghost" disabled={mappingsBusy} onclick={() => removeMapping(index)}>{t('mappingRemove')}</Button>

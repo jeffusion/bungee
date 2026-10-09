@@ -141,7 +141,7 @@
                 <BSelect value={binding.sourceProvider ?? ''} options={providerOptions} ariaLabel={t('sourceProvider')} placeholder={t('sourceProvider')} disabled={loading || catalogError} onchange={provider => update(index, { sourceProvider: String(provider), source: '' })} />
               </div>
               <div class="min-w-0 space-y-2"><Label class="block">{t('source')}</Label>
-                <PriceModelPicker value={binding.source ?? binding.alias ?? binding.model} provider={binding.sourceProvider ?? ''} {catalogVersion} catalogPlugin="codex-router" catalogPath="/catalog" disabled={!binding.sourceProvider || !modelCount} label={t('source')} placeholder={t('source')} searchLabel={t('search')} emptyLabel={t('empty')} loadingLabel={t('loading')} errorLabel={t('error')} retryLabel={t('retry')} previousLabel={t('previous')} nextLabel={t('next')} onchange={source => update(index, { source })} />
+                <PriceModelPicker value={binding.source ?? binding.alias ?? binding.model} provider={binding.sourceProvider ?? ''} {catalogVersion} catalogPlugin="codex-router" catalogPath="/catalog" disabled={!binding.sourceProvider || !modelCount} label={t('source')} placeholder={t('source')} searchLabel={t('search')} emptyLabel={t('empty')} loadingLabel={t('loading')} errorLabel={t('error')} retryLabel={t('retry')} loadedLabel={t('loaded')} completeLabel={t('complete')} loadMoreLabel={t('loadMore')} onchange={source => update(index, { source })} />
               </div>
             </div>
           {/if}
@@ -152,7 +152,7 @@
             <BSelect value={binding.provider} options={providerOptions} ariaLabel={t('provider')} placeholder={t('provider')} disabled={loading || catalogError} onchange={provider => update(index, { provider: String(provider), model: '' })} />
           </div>
           <div class="min-w-0 space-y-2"><Label class="block" id={`${id}-model-label`}>{t('model')}</Label>
-            <PriceModelPicker value={binding.model} provider={binding.provider} {catalogVersion} catalogPlugin="codex-router" catalogPath="/catalog" disabled={!binding.provider || !modelCount} label={t('model')} placeholder={t('model')} searchLabel={t('search')} emptyLabel={t('empty')} loadingLabel={t('loading')} errorLabel={t('error')} retryLabel={t('retry')} previousLabel={t('previous')} nextLabel={t('next')} onchange={model => update(index, { model })} />
+            <PriceModelPicker value={binding.model} provider={binding.provider} {catalogVersion} catalogPlugin="codex-router" catalogPath="/catalog" disabled={!binding.provider || !modelCount} label={t('model')} placeholder={t('model')} searchLabel={t('search')} emptyLabel={t('empty')} loadingLabel={t('loading')} errorLabel={t('error')} retryLabel={t('retry')} loadedLabel={t('loaded')} completeLabel={t('complete')} loadMoreLabel={t('loadMore')} onchange={model => update(index, { model })} />
           </div>
         </div>
         <div class="min-w-0 space-y-2" data-testid="codex-binding-target">

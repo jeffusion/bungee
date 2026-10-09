@@ -2,6 +2,7 @@
   // Industrial Design System Showcase — references all reusable components.
   import IndustrialDialogExample from '$components/industrial/IndustrialDialogExample.svelte';
   import BCarouselExample from '$components/industrial/BCarouselExample.svelte';
+  import BSelectSearchExample from '$components/industrial/BSelectSearchExample.svelte';
   import IndustrialToggle from '$components/industrial/IndustrialToggle.svelte';
 import {
 	PanelCard,
@@ -735,6 +736,10 @@ const bSelectOptions = [
   <!-- ===== 5. Industrial Components ==================================== -->
   <section class="space-y-3" id="design-section-industrial-b" data-testid="design-section-industrial-b">
     <SectionDivider label="INDUSTRIAL COMPONENTS" />
+
+    <PanelCard title="搜索下拉 / BSelect" tag="SEARCH / SCROLL">
+      <BSelectSearchExample />
+    </PanelCard>
 
     <PanelCard title="轮播 / BCarousel" tag="AUTO / MANUAL">
       <BCarouselExample />

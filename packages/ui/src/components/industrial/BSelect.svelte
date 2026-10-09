@@ -2,7 +2,8 @@
 	import X from "lucide-svelte/icons/x";
 	import ChevronDown from "lucide-svelte/icons/chevron-down";
 	import Loader2 from "lucide-svelte/icons/loader-2";
-	import { onMount } from "svelte";
+	import BSearchSelect from "./BSearchSelect.svelte";
+	import type { SelectRemoteSearch, SelectSearchLabels } from "./select-search";
 	import * as Select from "$components/ui/select";
 	import { cn } from "$utils";
 
@@ -19,6 +20,13 @@
 		mode = "single",
 		multiple = false,
 		creatable = false,
+		searchable = false,
+		remoteSearch,
+		searchLabels = {},
+		id,
+		maxLength = 512,
+		rootTestId,
+		searchTestId,
 		placeholder = "Select...",
 		ariaLabel,
 		class: className = "",
@@ -40,6 +48,13 @@
 		mode?: SelectMode;
 		multiple?: boolean;
 		creatable?: boolean;
+		searchable?: boolean;
+		remoteSearch?: SelectRemoteSearch;
+		searchLabels?: Partial<SelectSearchLabels>;
+		id?: string;
+		maxLength?: number;
+		rootTestId?: string;
+		searchTestId?: string;
 		placeholder?: string;
 		ariaLabel?: string;
 		class?: string;
@@ -58,13 +73,6 @@
 	let open = $state(false);
 	let hovering = $state(false);
 	let searchText = $state("");
-	let highlightedIndex = $state(-1);
-	const listboxId = $props.id();
-
-	// Creatable dropdown refs
-	let containerEl: HTMLDivElement | undefined = $state();
-	let inputEl: HTMLInputElement | undefined = $state();
-
 	// Width-stabilization ghost span (single mode only).
 	// We render a hidden mirror of the trigger's internal layout using the
 	// LONGEST label among `options`, measure its rendered width with
@@ -139,7 +147,6 @@
 	);
 
 	let sizeClass = $derived(size === "large" ? "min-h-[38px]" : size === "small" ? "min-h-[30px]" : "min-h-[34px]");
-	let inputSizeClass = $derived(size === "large" ? "h-[38px]" : size === "small" ? "h-[30px]" : "h-[34px]");
 	let statusClass = $derived(
 		status === "error"
 			? "border-red-500 focus-visible:ring-red-500"
@@ -188,57 +195,6 @@
 		}
 	}
 
-	// --- Creatable single mode handlers ---
-	function handleCreatableInputFocus() {
-		open = true;
-		searchText = "";
-		highlightedIndex = -1;
-	}
-
-	function handleCreatableInputChange(event: Event) {
-		const target = event.target as HTMLInputElement;
-		searchText = target.value;
-		highlightedIndex = -1;
-		open = true;
-	}
-
-	function handleCreatableInputKeydown(event: KeyboardEvent) {
-		if (!open) return;
-		const items = filteredOptions;
-		const totalItems = items.length + (searchText.trim() && !hasExactMatch ? 1 : 0);
-
-		if (event.key === "ArrowDown") {
-			event.preventDefault();
-			highlightedIndex = Math.min(highlightedIndex + 1, totalItems - 1);
-		} else if (event.key === "ArrowUp") {
-			event.preventDefault();
-			highlightedIndex = Math.max(highlightedIndex - 1, 0);
-		} else if (event.key === "Enter") {
-			event.preventDefault();
-			if (highlightedIndex >= 0 && highlightedIndex < items.length) {
-				selectCreatableItem(items[highlightedIndex].value);
-			} else if (highlightedIndex === items.length && searchText.trim() && !hasExactMatch) {
-				// "Create xxx" option selected
-				selectCreatableItem(searchText.trim());
-			} else if (searchText.trim()) {
-				// No item highlighted, just create from input
-				selectCreatableItem(searchText.trim());
-			}
-		} else if (event.key === "Escape") {
-			event.preventDefault();
-			open = false;
-			inputEl?.blur();
-		}
-	}
-
-	function selectCreatableItem(itemValue: string) {
-		value = itemValue;
-		searchText = "";
-		open = false;
-		emit(value);
-		inputEl?.blur();
-	}
-
 	function handleSearchInputChange(event: Event) {
 		const target = event.target as HTMLInputElement;
 		searchText = target.value;
@@ -277,18 +233,6 @@
 		removeValue(removedValue);
 	}
 
-	// Close creatable dropdown on outside click
-	$effect(() => {
-		if (!open) return;
-		function handleClick(e: MouseEvent) {
-			if (containerEl && !containerEl.contains(e.target as Node)) {
-				open = false;
-				searchText = "";
-			}
-		}
-		document.addEventListener("click", handleClick, true);
-		return () => document.removeEventListener("click", handleClick, true);
-	});
 </script>
 
 <div
@@ -297,99 +241,12 @@
 	onmouseenter={() => (hovering = true)}
 	onmouseleave={() => (hovering = false)}
 >
-	{#if isCreatableSingle}
-		<!-- Creatable single-select: Native input + custom dropdown (no Bits UI Select) -->
-		<div bind:this={containerEl} class="relative">
-			<div class={cn(
-				"flex items-center justify-between gap-1 border-2 border-carbon-500 bg-carbon-900 px-2 py-0",
-				inputSizeClass,
-				statusClass,
-				"focus-within:border-nexus-500 focus-within:ring-1 focus-within:ring-nexus-500/30",
-			)}>
-				{#if loading}
-					<Loader2 class="h-3.5 w-3.5 shrink-0 animate-spin text-zinc-500" />
-				{/if}
-				<input
-					bind:this={inputEl}
-					type="text"
-					value={searchText || value}
-					placeholder={placeholder}
-					{disabled}
-					class="min-w-0 flex-1 border-0 bg-transparent p-0 font-mono text-[11px] font-normal text-zinc-200 placeholder:text-zinc-400 placeholder:font-normal outline-none focus:ring-0 focus:outline-none"
-					onfocus={handleCreatableInputFocus}
-					oninput={handleCreatableInputChange}
-					onkeydown={handleCreatableInputKeydown}
-					aria-label={ariaLabel}
-					role="combobox"
-					aria-expanded={open}
-					aria-controls={open ? listboxId : undefined}
-					aria-autocomplete="list"
-					aria-activedescendant={open && highlightedIndex >= 0 ? `${listboxId}-${highlightedIndex}` : undefined}
-					aria-haspopup="listbox"
-					autocomplete="off"
-				/>
-				{#if showClear}
-					<button
-						type="button"
-						class="shrink-0 text-zinc-500 transition-colors hover:text-red-300"
-						aria-label="Clear selection"
-						title="Clear"
-						onclick={clearSelection}
-					>
-						<X class="h-3.5 w-3.5" />
-					</button>
-				{:else}
-					<ChevronDown class="h-4 w-4 shrink-0 opacity-50" />
-				{/if}
-			</div>
-
-			{#if open}
-				<div
-					id={listboxId}
-					class="absolute left-0 top-full z-[200] mt-1 min-w-full overflow-hidden border border-carbon-600 bg-carbon-800 shadow-md outline-none"
-					role="listbox"
-				>
-					<div class="p-1 max-h-[200px] overflow-y-auto">
-						{#each filteredOptions as option, i}
-							<button
-								type="button"
-								role="option"
-								id={`${listboxId}-${i}`}
-								aria-selected={value === option.value}
-								disabled={option.disabled}
-								class={cn(
-									"relative flex w-full cursor-default select-none items-center py-1.5 px-2 text-sm text-zinc-300 outline-none",
-									option.disabled && "pointer-events-none opacity-50",
-									value === option.value && "bg-nexus-500/15 text-nexus-400 font-semibold",
-									highlightedIndex === i && "bg-carbon-700 text-zinc-100",
-								)}
-								onclick={() => selectCreatableItem(option.value)}
-								onmouseenter={() => (highlightedIndex = i)}
-							>
-								{option.label}
-							</button>
-						{/each}
-						{#if searchText.trim() && !hasExactMatch}
-							{@const createIdx = filteredOptions.length}
-							<button
-								type="button"
-								role="option"
-								id={`${listboxId}-${createIdx}`}
-								aria-selected={false}
-								class={cn(
-									"relative flex w-full cursor-default select-none items-center py-1.5 px-2 text-sm text-zinc-300 outline-none",
-									highlightedIndex === createIdx && "bg-carbon-700 text-zinc-100",
-								)}
-								onclick={() => selectCreatableItem(searchText.trim())}
-								onmouseenter={() => (highlightedIndex = createIdx)}
-							>
-								<span class="text-nexus-400">Create</span>&nbsp;"{searchText.trim()}"
-							</button>
-						{/if}
-					</div>
-				</div>
-			{/if}
-		</div>
+	{#if !isMultiple && (isCreatableSingle || searchable || remoteSearch)}
+		<BSearchSelect {id} {value} options={dedupedOptions} {remoteSearch} {disabled} {loading} {creatable} {allowClear}
+			label={ariaLabel} {placeholder} {size} {status} {maxLength} {rootTestId} {searchTestId}
+			labels={{ search: 'Search options', loading: 'Loading', error: 'Unable to load options', empty: 'No matching options',
+				retry: 'Retry', custom: 'Create', loaded: 'Loaded', complete: 'All loaded', loadMore: 'Load more', clear: 'Clear selection', ...searchLabels }}
+			onchange={(next) => { value = next; emit(next); }} />
 	{:else if isTagsMode}
 		<!-- Tags/Combobox mode: Input + filtered dropdown (multiple values) -->
 		<Select.Root multiple bind:open selected={selectedValues} onSelectedChange={handleMultipleChange}>

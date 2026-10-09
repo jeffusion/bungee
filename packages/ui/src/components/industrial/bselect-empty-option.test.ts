@@ -6,7 +6,7 @@ const derived = (name: string) => {
   if (!expression) throw new Error(`Missing derived expression: ${name}`);
   return expression;
 };
-const functions = ['optionLabel', 'emit', 'clearSelection', 'selectCreatableItem', 'handleSingleChange', 'removeValue']
+const functions = ['optionLabel', 'emit', 'clearSelection', 'handleSingleChange', 'removeValue']
   .map((name) => {
     const fn = source.match(new RegExp(`\\tfunction ${name}\\([\\s\\S]*?\\n\\t}`))?.[0];
     if (!fn) throw new Error(`Missing component function: ${name}`);
@@ -28,7 +28,7 @@ const body = new Bun.Transpiler({ loader: 'ts' }).transformSync(`
     get selectedValues() { return ${derived('selectedValues')}; },
     get showClear() { return Boolean(${derived('showClear')}); },
     get value() { return value; }, get values() { return values; }, calls,
-    clearSelection, selectCreatableItem, handleSingleChange, removeValue,
+    clearSelection, handleSingleChange, removeValue,
   };
 `);
 const control = new Function('initial', body);
@@ -55,10 +55,10 @@ test('clear resets to All with an empty option, otherwise to a true placeholder'
   expect(control({ options: [final] }).selected).toBeUndefined();
 });
 
-test('unmatched nonempty values and creatable selection retain fallback labels and callbacks', () => {
+test('unmatched nonempty values and single selection retain fallback labels and callbacks', () => {
   const field = control({ options: [], value: 'loading-model-id' });
   expect(field.selected).toEqual({ value: 'loading-model-id', label: 'loading-model-id' });
-  field.selectCreatableItem('custom-model');
+  field.handleSingleChange({ value: 'custom-model' });
   expect(field.selected).toEqual({ value: 'custom-model', label: 'custom-model' });
   expect(field.calls).toEqual(['custom-model']);
   field.handleSingleChange(final);
