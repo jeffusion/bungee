@@ -8,9 +8,10 @@ import {captureProcessIdentity, probeProcessIdentity, type CapturedProcessIdenti
 export const CLI_TOOL_ROUNDTRIP = 'codex-fixture-real-tool-roundtrip';
 export const CLI_EXEC_MARKER = 'codex-fixture-exec-marker';
 export const CLI_MCP_MARKER = 'codex-fixture-mcp-marker';
+export const CLI_PATCH_MARKER = 'codex-fixture-patch-marker';
 
 // A real stdio MCP child started by Codex, not an emulated app-server tool result.
-const echoMcpScript = String.raw`import {appendFileSync} from 'node:fs';
+export const echoMcpScript = String.raw`import {appendFileSync} from 'node:fs';
 import {createInterface} from 'node:readline';
 const auditPath = process.argv[2];
 const audit = (event) => appendFileSync(auditPath, JSON.stringify({pid: process.pid, ...event}) + '\n');
@@ -90,7 +91,7 @@ export async function probeCodexCli(input: {root: string; baseUrl: string; token
 export async function probeCodexChatgptModels(input: {root: string; baseUrl: string; mockUrl: string; token: string; model: string; toolRoundTrip?: boolean}) {
   const executable = Bun.which('codex');
   if (!executable) throw new Error('BUNGEE_CODEX_CLI_PROBE requires a local codex executable');
-  const home = join(input.root, input.toolRoundTrip ? 'cli-chatgpt-tool-home' : input.model === 'org/chat' ? 'cli-chatgpt-chat-home'
+  const home = join(input.root, input.toolRoundTrip ? `cli-chatgpt-tool-${input.model.replaceAll('/','-')}` : input.model === 'org/chat' ? 'cli-chatgpt-chat-home'
     : input.model === 'org/anthropic' ? 'cli-chatgpt-anthropic-home' : 'cli-chatgpt-home'); await mkdir(home, {recursive: true});
   const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
   const claims = {email: 'fixture@example.invalid', exp: Math.floor(Date.now() / 1000) + 86400,
@@ -139,7 +140,7 @@ export async function probeCodexChatgptModels(input: {root: string; baseUrl: str
     const account = await rpc(2, 'account/read', {refreshToken: false});
     const catalog = await rpc(3, 'model/list', {includeHidden: false});
     const listedModels = (catalog.result?.data ?? []).map((model: any) => model.model);
-    const thread = await rpc(4, 'thread/start', {model: input.model, cwd: home, approvalPolicy: 'never', sandbox: 'read-only', experimentalRawEvents: false});
+    const thread = await rpc(4, 'thread/start', {model: input.model, cwd: home, approvalPolicy: 'never', sandbox: input.toolRoundTrip ? 'workspace-write' : 'read-only', experimentalRawEvents: false});
     if (thread.error || !thread.result?.thread?.id) throw new Error(`app-server thread failed: ${JSON.stringify(thread.error)}`);
     if (input.toolRoundTrip) {
       const deadline = Date.now() + 5000;
@@ -148,7 +149,7 @@ export async function probeCodexChatgptModels(input: {root: string; baseUrl: str
       if (started) mcpIdentity = await captureProcessIdentity(started.pid, mcpInstanceId);
     }
     const prompt = input.toolRoundTrip
-      ? `${CLI_TOOL_ROUNDTRIP}: follow the fixture model's three tool calls, then finish. Only run its printf marker command, accept its empty apply_patch as a no-op, and call the local MCP echo. Do not inspect or modify files.`
+      ? `${CLI_TOOL_ROUNDTRIP}: follow the fixture model's three tool calls, then finish. Only run its printf marker command, apply its patch to fixture-patched.txt in this temporary working directory, and call the local MCP echo. Do not inspect or modify other files.`
       : 'Reply with fixture answer. Do not call tools or inspect files.';
     const turn = await rpc(5, 'turn/start', {threadId: thread.result.thread.id, input: [{type: 'text', text: prompt}]});
     if (turn.error) throw new Error(`app-server turn failed: ${JSON.stringify(turn.error)}`);
@@ -188,6 +189,6 @@ export async function probeCodexChatgptModels(input: {root: string; baseUrl: str
       }
     }
   }
-  return {...report, ...(input.toolRoundTrip ? {mcpAudit: await readMcpAudit()} : {}), exitCode,
+  return {...report, ...(input.toolRoundTrip ? {mcpAudit: await readMcpAudit(),patchedContent:await readFile(join(home,'fixture-patched.txt'),'utf8').catch(()=>null)} : {}), exitCode,
     stderr: stderr.split(input.token).join('[local-fixture-token]').split(idToken).join('[stub-id-token]')};
 }

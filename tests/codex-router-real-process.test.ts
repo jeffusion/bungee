@@ -16,8 +16,10 @@ import {
   type GatewayFixture, type GatewayMasterStartupState, type OwnedMaster, type PortLease,
 } from './support/token-stats-gateway';
 import {probeProcessIdentity} from '../packages/core/src/master-runtime/process-identity';
-import {probeCodexCli, probeCodexChatgptModels, bundledCodexCatalogModel, CLI_TOOL_ROUNDTRIP, CLI_EXEC_MARKER, CLI_MCP_MARKER} from './support/codex-router-cli-probe';
+import {probeCodexCli, probeCodexChatgptModels, bundledCodexCatalogModel, CLI_TOOL_ROUNDTRIP, CLI_EXEC_MARKER, CLI_MCP_MARKER, CLI_PATCH_MARKER} from './support/codex-router-cli-probe';
 import modelTemplate from '../plugins/codex-router/server/model-template-0.160.1.json';
+import capturedBase from '../plugins/codex-router/tests/fixtures/captured-app-base.json';
+import capturedPreferences from '../plugins/codex-router/tests/fixtures/captured-app-preferences.json';
 
 const uuid = (n: number) => `c0de0000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const ENTRY = uuid(1), NATIVE = uuid(2), CHAT = uuid(3), ANTHROPIC = uuid(4), NATIVE_WS = uuid(5);
@@ -55,8 +57,8 @@ function response(id: string, model: string) {return {id, object: 'response', st
   output: [message('fixture answer')], usage: {input_tokens: 4, output_tokens: 2, total_tokens: 6}};}
 function sse(events: any[]) {return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(''),
   {headers: {'content-type': 'text/event-stream'}});}
-function chatEvents() {return [
-  {choices: [{index: 0, delta: {content: 'chat answer'}, finish_reason: null}]},
+function chatEvents(text='chat answer') {return [
+  {choices: [{index: 0, delta: {content: text}, finish_reason: null}]},
   {choices: [{index: 0, delta: {}, finish_reason: 'stop'}]},
   {choices: [], usage: {prompt_tokens: 4, completion_tokens: 2, total_tokens: 6}},
 ];}
@@ -77,7 +79,8 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
   const pending = new Set<string>(), aborted = new Set<string>();
   const modelQueries: Array<{path: string; clientVersion: string | null}> = [];
   const accountQueries: string[] = [];
-  const cliToolRoundTrip: {firstRequestId?: string; followupRequestId?: string; wires?: Record<string, string>; outputs?: any[]} = {};
+  type ToolRoundTrip={firstRequestId?:string;followupRequestId?:string;wires?:Record<string,string>;outputs?:any[]};
+  const cliToolRoundTrips=new Map<string,ToolRoundTrip>();
   let management = '', proxy = '', revision = 0, aggregate: any;
   let token = '', otherToken = '', firstId = '', firstPid = 0;
   let workers: Worker[] = [];
@@ -117,9 +120,12 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
             cancel() {pending.delete(call.requestId); aborted.add(call.requestId);},
           }), {headers: {'content-type': 'text/event-stream'}});
         }
-        if (path.endsWith('/chat/completions') && JSON.stringify(body.messages).includes(CLI_TOOL_ROUNDTRIP)) {
+        if ((path.endsWith('/chat/completions') || path.endsWith('/messages')) && JSON.stringify(body.messages).includes(CLI_TOOL_ROUNDTRIP)) {
+          const anthropic=path.endsWith('/messages');
+          const cliToolRoundTrip=cliToolRoundTrips.get(body.model) ?? {};
+          cliToolRoundTrips.set(body.model,cliToolRoundTrip);
           if (!cliToolRoundTrip.firstRequestId) {
-            const declared = body.tools.map((tool: any) => tool.function);
+            const declared = body.tools.map((tool: any) => anthropic ? {...tool,parameters:tool.input_schema}:tool.function);
             const exec = declared.find((tool: any) => tool.parameters?.properties?.cmd);
             const patch = declared.find((tool: any) => tool.parameters?.properties?.input && tool.description?.includes('Original input format:'));
             const echo = declared.find((tool: any) => tool.parameters?.properties?.fixture_echo);
@@ -127,10 +133,16 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
             cliToolRoundTrip.wires = {exec: exec?.name, patch: patch?.name, ...(echo ? {mcp: echo.name} : {})};
             const requested = [
               {id: 'call_fixture_exec', tool: exec, arguments: {cmd: `printf '${CLI_EXEC_MARKER}\\n'`, login: false, yield_time_ms: 1000, max_output_tokens: 1000}},
-              {id: 'call_fixture_patch', tool: patch, arguments: {input: '*** Begin Patch\n*** End Patch\n'}},
+              {id: 'call_fixture_patch', tool: patch, arguments: {input: `*** Begin Patch\n*** Add File: fixture-patched.txt\n+${CLI_PATCH_MARKER}\n*** End Patch\n`}},
               ...(echo ? [{id: 'call_fixture_mcp', tool: echo, arguments: {fixture_echo: CLI_MCP_MARKER}}] : []),
             ];
             if (requested.some(item => !item.tool)) return Response.json({error: 'fixture_tool_declaration_missing'}, {status: 400});
+            if(anthropic)return sse([
+              {type:'message_start',message:{id:'tool-turn',usage:{input_tokens:4,output_tokens:0}}},
+              ...requested.flatMap((item,index)=>[{type:'content_block_start',index,content_block:{type:'tool_use',id:item.id,name:item.tool.name,input:{}}},
+                {type:'content_block_delta',index,delta:{type:'input_json_delta',partial_json:JSON.stringify(item.arguments)}},{type:'content_block_stop',index}]),
+              {type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:2}},{type:'message_stop'},
+            ]);
             return sse([
               {choices: [{index: 0, delta: {role: 'assistant', tool_calls: requested.map((item, index) => ({index, id: item.id, type: 'function',
                 function: {name: item.tool.name, arguments: JSON.stringify(item.arguments)}}))}, finish_reason: null}]},
@@ -139,11 +151,17 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
             ]);
           }
           cliToolRoundTrip.followupRequestId = call.requestId;
-          cliToolRoundTrip.outputs = body.messages.filter((message: any) => message.role === 'tool').map((message: any) =>
-            ({callId: message.tool_call_id, content: message.content}));
-          return sse(chatEvents());
+          cliToolRoundTrip.outputs = anthropic ? body.messages.flatMap((message:any)=>Array.isArray(message.content)?message.content:[])
+            .filter((block:any)=>block.type==='tool_result').map((block:any)=>({callId:block.tool_use_id,content:block.content}))
+            : body.messages.filter((message: any) => message.role === 'tool').map((message: any) => ({callId: message.tool_call_id, content: message.content}));
+          const output=(id:string)=>JSON.stringify(cliToolRoundTrip.outputs!.find(item=>item.callId===id)?.content);
+          if(cliToolRoundTrip.outputs.length!==3 || !output('call_fixture_exec')?.includes(CLI_EXEC_MARKER)
+            || !output('call_fixture_patch')?.includes('Success') || !output('call_fixture_mcp')?.includes(CLI_MCP_MARKER)) {
+            return Response.json({error:'fixture_tool_results_incomplete'}, {status:400});
+          }
+          return sse(anthropic?anthropicEvents():chatEvents());
         }
-        if (path.endsWith('/chat/completions')) return body.stream ? sse(chatEvents()) : Response.json({
+        if (path.endsWith('/chat/completions')) return body.stream ? sse(chatEvents(body.response_format?.type==='json_schema'?'{"title":"fixture","description":"fixture"}':'chat answer')) : Response.json({
           id: `chat-${calls.length}`, object: 'chat.completion', model: body.model,
           choices: [{index: 0, message: {role: 'assistant', content: 'chat answer'}, finish_reason: 'stop'}],
           usage: {prompt_tokens: 4, completion_tokens: 2, total_tokens: 6},
@@ -319,6 +337,45 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     }};
     sockets.add(socket); return socket;
   }
+  test('captured full HTTP/WS requests cross the built gateway; canonical tool history crosses workers and target protocol',async()=>{
+    const start=calls.length;
+    const socket=await openSocket();
+    try{
+      for(const [captured,count] of [[capturedBase,11],[capturedPreferences,13]] as const){
+        const raw=await fetch(`${proxy}/codex/responses`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:JSON.stringify({...captured,model:'org/chat'}),signal:AbortSignal.timeout(20000)});
+        expect(raw.status).toBe(200);const text=await raw.text();expect(text).toContain('response.completed');
+        expect(calls.at(-1)!.body.tools).toHaveLength(count);expect(calls.at(-1)!.path).toBe('/v1/chat/completions');
+        const result=await socket.create({...captured,model:'org/chat'});expect(result.at(-1).type).toBe('response.completed');expect(calls.at(-1)!.body.tools).toHaveLength(count);
+      }
+      const conversionId=calls.at(-1)!.requestId;
+      await waitUntil(()=>{
+        const db=new Database(fixture!.accessDbPath,{readonly:true});
+        try{
+          const row:any=db.query("SELECT j.value FROM access_logs, json_each(access_logs.processing_steps) AS j WHERE json_extract(j.value,'$.step')='codex_router_conversion' AND json_extract(j.value,'$.detail.requestId')=?").get(conversionId);
+          const step=row?.value && JSON.parse(row.value);
+          return step?.detail?.diagnostics?.some((item:any)=>item.param==='stream_options.reasoning_summary_delivery');
+        }finally{db.close();}
+      },'conversion diagnostic did not reach the existing request log',12000);
+      const carrier={type:'additional_tools',role:'developer',tools};
+      const first=await post({model:'org/chat',input:[carrier,...smallHistory]});expect(first.status).toBe(200);
+      const origin=calls.at(-1)!.pid;
+      const changed={...carrier,tools:tools.map(tool=>({...tool,description:'current request declaration'}))};
+      let crossed=false;
+      for(let i=0;i<24 && !crossed;i++){
+        const follow=await post({model:'org/anthropic',previous_response_id:first.body.id,input:[changed,{role:'user',content:'continue'}]});
+        expect(follow.status).toBe(200);expect(calls.at(-1)!.path).toBe('/v1/messages');
+        expect(calls.at(-1)!.body.tools).toHaveLength(4);
+        const blocks=calls.at(-1)!.body.messages.flatMap((m:any)=>m.content);
+        expect(blocks.filter((b:any)=>b.type==='tool_result').map((b:any)=>b.content)).toEqual(['ordinary result','file result','memory result','custom result']);
+        crossed=calls.at(-1)!.pid!==origin;
+      }
+      expect(crossed).toBe(true);
+      const before=calls.length;
+      const denied=await post({model:'org/chat',input:'x',access_programs:{cyber:'daybreak_blue'}});
+      expect(denied.status).toBe(422);expect(denied.body.param).toBe('access_programs.cyber');expect(calls).toHaveLength(before);
+      await assertMetered(calls.slice(start));
+    }finally{await socket.close();}
+  },60000);
   test('public WS generations switch Chat/service → Anthropic/route with exact tool history and native WS transport, each metered once', async () => {
     const socket = await openSocket(); const start = calls.length;
     try {
@@ -405,23 +462,26 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         expect(anthropicActual).toHaveLength(1); expect(anthropicActual[0]!.path).toBe('/v1/messages');
         expect(anthropicActual[0]!.requestShape.model).toBe('org/anthropic');
         expect(anthropicDiscovery.notifications.some((event: any) => event.itemType === 'agentMessage' && event.text === 'anthropic answer')).toBe(true);
+        for(const toolModel of ['org/chat','org/anthropic']){
         const beforeTools = calls.length;
         const toolDiscovery = await probeCodexChatgptModels({root: fixture!.root, baseUrl: `${proxy}/codex`, mockUrl: `http://127.0.0.1:${upstream!.port}`, token,
-          model: 'org/chat', toolRoundTrip: true});
+          model: toolModel, toolRoundTrip: true});
+        const cliToolRoundTrip=cliToolRoundTrips.get(toolModel)!;
         const toolCalls = calls.slice(beforeTools);
         const toolInputShapes = (await readFile(join(fixture!.root, 'cli-input-shapes.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line))
           .filter(shape => shape.stage === 'dispatch' && toolCalls.some(call => call.requestId === shape.requestId));
         console.info(`codex_router_cli_tools ${JSON.stringify({...toolDiscovery, upstream: toolCalls.map(call => ({requestId: call.requestId, pid: call.pid,
           path: call.path, model: call.body.model})), roundTrip: cliToolRoundTrip, inputShapes: toolInputShapes})}`);
         expect(toolDiscovery.notifications.some((event: any) => event.method === 'turn/completed' && event.status === 'completed')).toBe(true);
-        expect(toolDiscovery.notifications.some((event: any) => event.itemType === 'agentMessage' && event.text === 'chat answer')).toBe(true);
+        expect(toolDiscovery.notifications.some((event: any) => event.itemType === 'agentMessage' && event.text === (toolModel==='org/chat'?'chat answer':'anthropic answer'))).toBe(true);
+        expect(toolDiscovery.patchedContent).toBe(`${CLI_PATCH_MARKER}\n`);
         expect(toolCalls).toHaveLength(2);
         expect(cliToolRoundTrip.firstRequestId).toBe(toolCalls[0]!.requestId);
         expect(cliToolRoundTrip.followupRequestId).toBe(toolCalls[1]!.requestId);
         expect(cliToolRoundTrip.wires?.mcp).toBeString();
         expect(cliToolRoundTrip.outputs?.map(item => item.callId).sort()).toEqual(['call_fixture_exec', 'call_fixture_mcp', 'call_fixture_patch']);
         expect(cliToolRoundTrip.outputs?.find(item => item.callId === 'call_fixture_exec')?.content).toContain(CLI_EXEC_MARKER);
-        expect(cliToolRoundTrip.outputs?.find(item => item.callId === 'call_fixture_patch')?.content).toContain('empty patch');
+        expect(JSON.stringify(cliToolRoundTrip.outputs?.find(item => item.callId === 'call_fixture_patch')?.content)).toContain('Success');
         expect(JSON.stringify(cliToolRoundTrip.outputs?.find(item => item.callId === 'call_fixture_mcp')?.content)).toContain(CLI_MCP_MARKER);
         expect(toolDiscovery.notifications.some((event: any) => event.method === 'item/completed' && event.itemType === 'commandExecution'
           && event.exitCode === 0 && event.output?.includes(CLI_EXEC_MARKER))).toBe(true);
@@ -431,12 +491,15 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
           event: 'tools/call', name: 'echo', text: CLI_MCP_MARKER}]);
         expect(['dead', 'mismatch']).toContain(toolDiscovery.mcpShutdown);
         const followup = toolCalls[1]!.body.messages;
-        expect(followup.find((message: any) => message.role === 'assistant' && message.tool_calls)?.tool_calls.map((tool: any) => tool.id).sort())
+        const restoredCalls=toolModel==='org/chat'?followup.find((message:any)=>message.role==='assistant' && message.tool_calls)?.tool_calls
+          :followup.flatMap((message:any)=>message.content).filter((block:any)=>block.type==='tool_use');
+        expect(restoredCalls.map((tool:any)=>tool.id).sort())
           .toEqual(['call_fixture_exec', 'call_fixture_mcp', 'call_fixture_patch']);
         const restoredInput = toolInputShapes.find(shape => shape.requestId === cliToolRoundTrip.followupRequestId)?.inputShape;
         expect(restoredInput).toContainEqual(expect.objectContaining({type: 'custom_tool_call', callId: 'call_fixture_patch', name: 'apply_patch'}));
         expect(restoredInput).toContainEqual(expect.objectContaining({type: 'custom_tool_call_output', callId: 'call_fixture_patch', outputType: 'string'}));
         expect(restoredInput).toContainEqual(expect.objectContaining({type: 'function_call', callId: 'call_fixture_mcp', name: 'echo', namespace: 'mcp__codex_fixture'}));
+        }
         const cliCalls = calls.slice(beforeCli);
         // CLI may stop consuming HTTP after the terminal event. Keep the transport
         // outcome visible while asserting complete token counts and no duplicates.
@@ -450,7 +513,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         }
       }
     } finally {await socket.close();}
-  }, 60000);
+  }, 120000);
 
   test('busy/cancel and disconnect abort real pending upstreams; later generation remains usable without duplicate statistics', async () => {
     const socket = await openSocket(); const start = calls.length;
