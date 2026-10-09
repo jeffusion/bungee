@@ -13,7 +13,7 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
   serialized(body, budget.maxRequestBytes, 'request');
   const supported = new Set(['model', 'input', 'instructions', 'tools', 'tool_choice', 'reasoning', 'text',
     'stream', 'temperature', 'top_p', 'parallel_tool_calls', 'metadata', 'max_output_tokens',
-    'previous_response_id', 'conversation', 'response_id', 'background', 'n', 'truncation', 'include', 'store']);
+    'previous_response_id', 'conversation', 'response_id', 'background', 'n', 'truncation', 'include', 'store', 'prompt_cache_key', 'client_metadata']);
   for (const key of Object.keys(body)) if (!supported.has(key)) fail('unsupported_request', `Unsupported Responses request field ${key}`);
   if (body.store === true) fail('unsupported_request', 'Stored Responses require caller-owned persistence');
   for (const key of ['previous_response_id', 'conversation', 'response_id']) {
@@ -22,7 +22,11 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
   if (body.background === true) fail('unsupported_request', 'Background Responses cannot be represented by this codec');
   if (body.n !== undefined && body.n !== 1) fail('unsupported_request', 'Only one response candidate is supported');
   if (body.truncation !== undefined && body.truncation !== 'disabled') fail('unsupported_request', 'Automatic input truncation cannot be represented');
-  if (body.include !== undefined && list(body.include, 'include').length) fail('unsupported_request', 'Requested extra Responses output fields cannot be represented');
+  // This asks for encrypted output if available; it does not supply opaque input history.
+  // Converted providers return no encrypted output. Actual encrypted input remains rejected below.
+  if (body.include !== undefined && list(body.include, 'include').some(field => field !== 'reasoning.encrypted_content')) fail('unsupported_request', 'Requested extra Responses output fields cannot be represented');
+  if (body.prompt_cache_key !== undefined) string(body.prompt_cache_key, 'prompt_cache_key');
+  if (body.client_metadata !== undefined) record(body.client_metadata, 'client_metadata');
   const model = string(body.model, 'model', true);
   const toolNames = new Map<string, ResponsesToolName>();
   const byOriginal = new Map<string, string>();
@@ -39,6 +43,8 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
   };
   const expandTool = (rawTool: unknown, namespace?: string): void => {
     const tool = record(rawTool, 'tool');
+    if (namespace === undefined && capabilities.omitOptionalWebSearch && ['web_search','web_search_preview'].includes(String(tool.type))
+      && (body.tool_choice === undefined || body.tool_choice === 'auto' || body.tool_choice === 'none')) return;
     if (tool.type === 'namespace') {
       if (namespace !== undefined) fail('unsupported_tool', 'Nested tool namespaces are not supported');
       const name = string(tool.name, 'namespace name', true);
@@ -82,6 +88,7 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     for (const rawPart of parts) {
       const part = record(rawPart, 'content part');
       if (part.type === 'input_text' || part.type === 'output_text' || part.type === 'text') string(part.text, 'content text');
+      else if (part.type === 'refusal' && role === 'assistant') string(part.refusal,'refusal');
       else if (part.type === 'input_image' && role === 'user') {
         if (protocol !== 'chat_completions') fail('unsupported_content', 'Anthropic image conversion requires provider-specific URL/data support');
         string(part.image_url, 'image_url', true);
@@ -90,7 +97,7 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
       if (part.annotations !== undefined && list(part.annotations, 'annotations').length) fail('unsupported_content', 'Output annotations cannot be represented in input history');
     }
     // Reuse the existing text/image normalizer only after validating every part.
-    const normalized = contentNormalizer.normalizeResponsesMessageContent(parts) as JsonRecord[];
+    const normalized = contentNormalizer.normalizeResponsesMessageContent(parts.map(raw=>{const part=raw as JsonRecord;return part.type==='refusal'?{type:'output_text',text:part.refusal}:part;})) as JsonRecord[];
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i] as JsonRecord;
       if (part.type === 'input_image' && part.detail !== undefined) (normalized[i].image_url as JsonRecord).detail = part.detail;

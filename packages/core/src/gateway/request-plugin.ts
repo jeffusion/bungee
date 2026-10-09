@@ -1,3 +1,4 @@
+import {normalizeAdmissionError} from '../data-admission/errors';
 import { hasWorkerAdmissionSession, type WorkerRequestAdmission, type PreparedAdmissionAttempt } from '../data-admission/worker';
 import { DataAdmissionError } from '../data-admission/host';
 /**
@@ -50,6 +51,10 @@ import { observeTransportResponse } from './body-observation-stream';
 
 export interface HandleRequestRuntimeContext {
   servingRevision?: number;
+  /** Host-only session context, never accepted from client fields. */
+  transport?: 'websocket';
+  websocketBridge?: import('../websocket').WebSocketBridge;
+  skipEntryRate?: boolean;
   logging?: RequestLoggerDependencies;
 }
 
@@ -889,8 +894,10 @@ async function executeHttpRequestInternal(
       await readSnapshotJson(requestSnapshot,'internal-dispatch',true);
       dispatchContext.body = structuredClone(requestSnapshot.body);
     }
-    const dispatch = requireGatewayResult(await gatewayHooks().onGatewayDispatch.promise({config,entry:entryRoute,context:dispatchContext,
-      signal:processingSignal,principal:trustedIdentity?.principal,servingRevision:runtimeContext?.servingRevision}), 'onGatewayDispatch');
+    for(const owner of requestRegistry?.getRoutePluginOwners?.(entryRoute.path,true) ?? [])retainOwner(owner.pluginName,owner.scopeKey);
+    const dispatchWork=()=>gatewayHooks().onGatewayDispatch.promise({config,entry:entryRoute,context:dispatchContext,
+      signal:processingSignal,principal:trustedIdentity?.principal,servingRevision:runtimeContext?.servingRevision});
+    const dispatch = requireGatewayResult(await (requestRegistry ? requestRegistry.runWithRequestLeases(ownerLeases,dispatchWork) : dispatchWork()), 'onGatewayDispatch');
     route = dispatch.route;
     if (dispatch.target) {
       requestSnapshot.body = dispatch.context.body;
@@ -951,11 +958,11 @@ async function executeHttpRequestInternal(
       env: process.env as Record<string, string>,
     };
 
-    if (dispatch.target && entryRoute.id !== route.id) {
+    if (dispatch.target && entryRoute.id !== route.id && !runtimeContext?.skipEntryRate) {
       const entryAdmission = requireGatewayResult(await gatewayHooks().onGatewayAdmission.promise({route:entryRoute,trustedPeer:getTrustedWorkerPeer(req),context:expressionContext,servingRevision:runtimeContext?.servingRevision,signal:processingSignal}), 'onGatewayAdmission');
       if (!entryAdmission.allowed) throw new DataAdmissionError(entryAdmission.retryAfterMs === undefined ? 503 : 429,'entry_route_rate_limited');
     }
-    const rateLimit = requireGatewayResult(await gatewayHooks().onGatewayAdmission.promise({
+    const rateLimit = runtimeContext?.skipEntryRate && route.id === entryRoute.id ? {allowed:true as const} : requireGatewayResult(await gatewayHooks().onGatewayAdmission.promise({
       route,trustedPeer:getTrustedWorkerPeer(req),context:expressionContext,
       servingRevision:runtimeContext?.servingRevision,signal:req.signal,
     }), 'onGatewayAdmission');
@@ -1108,6 +1115,7 @@ async function executeHttpRequestInternal(
       selectedUpstream: RuntimeUpstream,
       attemptLogger: RequestLogger
     ): Promise<ProxyRequestResult> => {
+      if(dispatch.requiredUpstreamId && selectedUpstream.upstream_id!==dispatch.requiredUpstreamId)throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
       const phaseAwareHooks = scopedRegistry?.getPrecompiledHooks(currentRouteId, selectedUpstream.upstream_id, routeServiceName, dispatch.adapter) ?? null;
       const attemptLoggers=new Map<ProxyRequestResult,RequestLogger>();
       const runAttempt = async (requestOverride?:import('./contracts').GatewayRequestOverride): Promise<ProxyRequestResult> => {
@@ -1150,9 +1158,11 @@ async function executeHttpRequestInternal(
             currentLogger, phaseAwareHooks, phase1and2Context, req.signal,
             {
               servingRevision: runtimeContext?.servingRevision,
+              websocketBridge: runtimeContext?.websocketBridge,
+              nativeWebSocket: runtimeContext?.transport === 'websocket' && route.websocket?.enabled === true && (dispatch.protocol ?? route.llm_protocol ?? config.services?.find(service=>service.name===route.service)?.llm_protocol ?? 'responses') === 'responses',
               attemptId,requestOverride,
               beforeSend: dataAdmission ? async (target) => {
-                preparedAdmission = requireGatewayResult(await gatewayHooks().onGatewayAdmissionPrepare.promise({session:dataAdmission!,target:{...target,attemptId,upstreamId:selectedUpstream.upstream_id},signal:req.signal,readBody:()=>requestOverride ? Promise.resolve(requestOverride.body):readSnapshotJson(requestSnapshot,'admission-body')}), 'onGatewayAdmissionPrepare');
+                preparedAdmission = requireGatewayResult(await gatewayHooks().onGatewayAdmissionPrepare.promise({session:dataAdmission!,target:{...target,transport:runtimeContext?.transport,attemptId,upstreamId:selectedUpstream.upstream_id},signal:req.signal,readBody:()=>requestOverride ? Promise.resolve(requestOverride.body):readSnapshotJson(requestSnapshot,'admission-body')}), 'onGatewayAdmissionPrepare');
               } : undefined,
               onRequestDispatch: () => { sent = true; },
               observeRequest: owners.some(owner=>owner.observe?.request) ? async (rawEvent) => {
@@ -1890,6 +1900,7 @@ async function executeHttpRequestInternal(
       status: responseStatus,
     }));
   } catch (error) {
+    error=normalizeAdmissionError(error) ?? error;
     success = false;
     if (error instanceof DataAdmissionError) {
       responseStatus = error.status;

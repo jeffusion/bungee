@@ -23,7 +23,7 @@ test('Chat and Anthropic JSON results return Responses and retain ordinary histo
 test('missing and anonymous references fail closed; encrypted conversion requests a new conversation',async()=>{
   const r=await router('chat_completions');await expect(r.dispatch({model:'m',previous_response_id:'missing',input:'delta'})).rejects.toThrow('history_missing');
   const anon=await router('chat_completions','m',{domain:'anonymous',keyId:'',credentialVersion:0});await expect(anon.dispatch({model:'m',previous_response_id:'private',input:'delta'})).rejects.toThrow('identity_required');
-  await expect(r.dispatch({model:'m',input:[{type:'reasoning',encrypted_content:'opaque'}]})).rejects.toThrow('unsupported_content');
+  await expect(r.dispatch({model:'m',input:[{type:'reasoning',encrypted_content:'opaque'}]})).rejects.toThrow('unrestorable_history');
 });
 test('bounded cache isolates scopes, evicts, expires, clones and clears',()=>{
   let now=0;const local=new HistoryCache({maxEntries:1,maxBytes:1024,maxEntryBytes:512,ttlMs:10},()=>now);const value={items:[{text:'secret'}]};local.put('a','r',value);value.items[0].text='changed';expect(local.get('a','r').items[0].text).toBe('secret');expect(local.get('b','r')).toBeNull();local.put('a','s',{});expect(local.get('a','r')).toBeNull();now=10;expect(local.get('a','s')).toBeNull();expect(()=>local.put('a','big',{text:'x'.repeat(600)})).toThrow('history_limit');local.clear();expect(local.status().bytes).toBe(0);
@@ -32,7 +32,7 @@ test('bounded cache isolates scopes, evicts, expires, clones and clears',()=>{
 test('large history uses canonical bounded chunks without any durable storage',async()=>{
   const {historyClient}=await import('../server/history-rpc');const transport=new HistoryTransport();const calls:number[]=[];
   const client=historyClient({get:async(input:any)=>transport.get(input),put:async(input:any)=>{calls.push(Buffer.byteLength(JSON.stringify(input)));return transport.put(input);}});
-  const value={items:[{text:'中文'.repeat(50000)}]};await client.put({scope:'key',id:'r',value},{operationId:crypto.randomUUID()});expect(calls.length).toBeGreaterThan(10);expect(Math.max(...calls)).toBeLessThan(65536);expect(await client.get({scope:'key',id:'r'})).toEqual(value);transport.clear();expect(await client.get({scope:'key',id:'r'})).toBeNull();
+  const value={items:[{text:'中文🙂'.repeat(50000)}]};await client.put({scope:'key',id:'r',value},{operationId:crypto.randomUUID()});expect(calls.length).toBeGreaterThan(10);expect(Math.max(...calls)).toBeLessThan(65536);expect(await client.get({scope:'key',id:'r'})).toEqual(value);transport.clear();expect(await client.get({scope:'key',id:'r'})).toBeNull();
 });
 
 test('history contract runs through the canonical RPC host',async()=>{
@@ -54,4 +54,21 @@ test('cross-model namespace tool continuation re-encodes the cached logical hist
   const two=context({model:'anthropic',tools,previous_response_id:response.id,input:[{type:'function_call_output',call_id:'call',output:'found'}]});await (await create()).onDispatchRequest.promise({context:two,targets,signal:new AbortController().signal,principal,servingRevision:7});
   expect(two.body.messages[1].content[0]).toMatchObject({type:'tool_use',id:'call',name:'bungee_tool_0'});expect(two.body.messages[2].content[0]).toMatchObject({type:'tool_result',tool_use_id:'call',content:'found'});
   await expect((await create()).onDispatchRequest.promise({context:context({model:'anthropic',previous_response_id:response.id,input:'next'}),targets,signal:new AbortController().signal,principal:{...principal,keyId:'other'},servingRevision:7})).rejects.toThrow('history_missing');
+});
+
+test('opaque native references pin provider/model and actual upstream',async()=>{
+  cache.clear();const models=[{provider:'a',model:'one',target:{type:'route',id:'native'}},{provider:'b',model:'two',target:{type:'route',id:'native'}}];
+  const plugin=new CodexRouterPlugin({models});await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:()=>caps,rpc:{consume:()=>({get:async(input:any)=>transport.get(input),put:async(input:any)=>transport.put(input)})}}} as any);
+  const hooks=createPluginHooks();plugin.register(hooks);
+  const run=(body:any)=>hooks.onDispatchRequest.promise({context:{method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},body,requestId:crypto.randomUUID(),clientIP:'local'},targets:[{type:'route',id:'native',protocol:'responses'}],signal:new AbortController().signal,principal:{domain:'data',keyId:'opaque',credentialVersion:1},servingRevision:9});
+  const decision=await run({model:'one',input:'hello'});const resultHooks=createPluginHooks();decision!.adapter!.register(resultHooks);
+  const response=await resultHooks.onResponse.promise(Response.json({}),{upstreamId:'actual-endpoint',bodyHandle:{json:async()=>({id:'opaque-id',status:'completed',output:[{type:'reasoning',encrypted_content:'private'}]})}} as any);expect((await response.json() as any).id).toBe('opaque-id');
+  expect((await run({model:'one',previous_response_id:'opaque-id',input:'next'}))!.requiredUpstreamId).toBe('actual-endpoint');
+  await expect(run({model:'two',previous_response_id:'opaque-id',input:'next'})).rejects.toThrow('unrestorable_history');
+  await expect(run({model:'one',input:[{type:'reasoning',encrypted_content:'private'}]})).rejects.toThrow('unrestorable_history');
+});
+test('Anthropic thinking overrides cannot enable a capability without restorable history',async()=>{
+  const plugin=new CodexRouterPlugin({models:[{provider:'p',model:'m',target:{type:'route',id:'a'},capabilityOverrides:{anthropicThinkingBudget:1024}}]});await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:()=>({...caps,model:()=>({...caps.model(),reasoning:true})}),rpc:{consume:()=>({get:async()=>null,put:async()=>null})}}} as any);
+  const hooks=createPluginHooks();plugin.register(hooks);
+  await expect(hooks.onDispatchRequest.promise({context:{method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},body:{model:'m',input:'hello',reasoning:{effort:'high'}},requestId:crypto.randomUUID(),clientIP:'local'},targets:[{type:'route',id:'a',protocol:'anthropic_messages'}],signal:new AbortController().signal})).rejects.toThrow('unsupported_reasoning');
 });

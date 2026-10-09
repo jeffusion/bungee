@@ -51,6 +51,7 @@ export function gatewayHooks(): PluginHooks {
   if (registry && typeof registry.getGatewayHooks === 'function') return registry.getGatewayHooks();
   return standaloneHooks ??= createGatewayHooks();
 }
+export function runWithGatewayHooks<T>(hooks: PluginHooks, run: () => T): T { return requestHooks.run(hooks,run); }
 export function initializeGateway(): void { gatewayHooks(); }
 export function requireGatewayResult<T>(value: T | undefined, stage: string): T {
   if (value === undefined) throw new Error(`gateway provider ${stage} returned no result`);

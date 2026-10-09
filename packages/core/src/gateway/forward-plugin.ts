@@ -68,6 +68,8 @@ export interface ProxyRequestResult {
 }
 
 export interface ProxyAttemptOptions {
+  readonly nativeWebSocket?: boolean;
+  readonly websocketBridge?: import('../websocket').WebSocketBridge;
   readonly requestOverride?:GatewayRequestOverride;
   readonly servingRevision?: number;
   readonly attemptId: string;
@@ -802,7 +804,7 @@ export async function executeForward(
         finalTargetUrl,
         managedCredential.source,
         managedCredential.policy,
-        requestSnapshot.method,
+        attemptOptions?.nativeWebSocket ? 'GET' : requestSnapshot.method,
         credentialExpectedPath,
       );
     } catch (error) {
@@ -1006,7 +1008,7 @@ export async function executeForward(
           managedCredential,
           finalTargetUrl,
           credentialExpectedPath,
-          requestSnapshot.method,
+          attemptOptions?.nativeWebSocket ? 'GET' : requestSnapshot.method,
           attemptSignal,
           attemptOptions,
         );
@@ -1111,7 +1113,11 @@ export async function executeForward(
       }
       throwIfAttemptCannotDispatch();
       attemptOptions?.onRequestDispatch?.();
-      proxyRes = await abortable(fetch(finalTargetUrl.href, fetchOptions), attemptSignal);
+      if (attemptOptions?.nativeWebSocket) {
+        if (!attemptOptions.websocketBridge || !isObjectBody(finalBody)) throw new DataAdmissionError(422,'websocket_generation_body_required');
+        for (const name of ['content-length','content-encoding','transfer-encoding','sec-websocket-key','sec-websocket-version','sec-websocket-protocol']) fetchHeaders.delete(name);
+        proxyRes = await abortable(attemptOptions.websocketBridge.requestResponses({url:finalTargetUrl,headers:fetchHeaders,body:finalBody,signal:attemptSignal}),attemptSignal);
+      } else proxyRes = await abortable(fetch(finalTargetUrl.href, fetchOptions), attemptSignal);
       upstreamResponse = proxyRes;
       if (!abortSource) {
         const elapsedTimeout = elapsedDeadlineReason();

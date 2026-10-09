@@ -1,3 +1,5 @@
+/** Escape UTF-16 code units so fixed RPC slices never contain lone surrogates. */
+export function serializeHistory(value:unknown):string {return JSON.stringify(value).replace(/[\uD800-\uDFFF]/g,unit=>'\\u'+unit.charCodeAt(0).toString(16).padStart(4,'0'));}
 /** Ephemeral control-process cache: no storage/database access, bounded across all workers. */
 export class HistoryCache {
   private entries = new Map<string,{text:string;bytes:number;expires:number}>();
@@ -7,7 +9,7 @@ export class HistoryCache {
   get(scope:string,id:string){this.sweep();const entry=this.entries.get(JSON.stringify([scope,id]));return entry ? JSON.parse(entry.text) : null;}
   readText(scope:string,id:string){this.sweep();return this.entries.get(JSON.stringify([scope,id]))?.text ?? null;}
   put(scope:string,id:string,value:unknown){
-    this.sweep();const text=JSON.stringify(value);const bytes=Buffer.byteLength(text);if(bytes>this.limits.maxEntryBytes)throw new Error('codex_router_history_limit');
+    this.sweep();const text=serializeHistory(value);const bytes=Buffer.byteLength(text);if(bytes>this.limits.maxEntryBytes)throw new Error('codex_router_history_limit');
     const key=JSON.stringify([scope,id]),old=this.entries.get(key);if(old){this.used-=old.bytes;this.entries.delete(key);}
     while(this.entries.size>=this.limits.maxEntries||this.used+bytes>this.limits.maxBytes){const oldest=this.entries.keys().next().value;if(oldest===undefined)throw new Error('codex_router_history_limit');const item=this.entries.get(oldest)!;this.used-=item.bytes;this.entries.delete(oldest);}
     this.entries.set(key,{text,bytes,expires:this.now()+this.limits.ttlMs});this.used+=bytes;

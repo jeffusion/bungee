@@ -1,3 +1,4 @@
+import {serializeHistory} from './history';
 import {defineRpcService} from '@jeffusion/bungee-core/plugin';
 const key={type:'string',minLength:1,maxLength:512} as const;
 /** Each canonical RPC frame is <=64 KiB; long histories use bounded ordered chunks. */
@@ -16,7 +17,7 @@ export function historyClient(rpc:any):HistoryClient {
       text+=part.data;if(Buffer.byteLength(text)>8*1024*1024)throw new Error('codex_router_history_limit');
       if(part.done)return JSON.parse(text);
     }throw new Error('codex_router_history_limit');},
-    async put({scope,id,value},options){const text=JSON.stringify(value),total=Math.ceil(text.length/8192);
+    async put({scope,id,value},options){const text=serializeHistory(value),total=Math.ceil(text.length/8192);
       if(total>1024||Buffer.byteLength(text)>8*1024*1024)throw new Error('codex_router_history_limit');
       for(let index=0;index<total;index++){options.signal?.throwIfAborted();await rpc.put({scope,id,index,total,data:text.slice(index*8192,(index+1)*8192)},{...options,operationId:`${options.operationId}-${index}`});}
     },

@@ -249,6 +249,7 @@ export interface PluginLogger {
 export function createPluginHooks(): PluginHooks {
   return {
     onGatewayWebSocket: new AsyncSeriesBailHook<[GatewayWebSocketInput], GatewayWebSocketResult>('onGatewayWebSocket'),
+    onWebSocketSessionMode: new AsyncSeriesBailHook<[URL], 'responses'>('onWebSocketSessionMode'),
     onWebSocketHandshake: new AsyncSeriesWaterfallHook<WebSocketHandshakeContext>('onWebSocketHandshake'),
     onWebSocketObservation: new WebSocketObservationHook('onWebSocketObservation'),
     onGatewayBody: new SyncBailHook<GatewayBodyArguments, BodySource>('onGatewayBody'),
@@ -363,6 +364,7 @@ export function createPluginHooks(): PluginHooks {
  */
 export interface PluginHooks {
   onGatewayWebSocket: AsyncSeriesBailHook<[GatewayWebSocketInput], GatewayWebSocketResult>;
+  onWebSocketSessionMode: AsyncSeriesBailHook<[URL], 'responses'>;
   onWebSocketHandshake: AsyncSeriesWaterfallHook<WebSocketHandshakeContext>;
   onWebSocketObservation: WebSocketObservationHook;
   onGatewayBody: SyncBailHook<GatewayBodyArguments, BodySource>;

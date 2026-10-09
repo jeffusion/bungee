@@ -65,6 +65,8 @@ function createPrecompiledHooks(options: {
 
 function installPhaseHooks(factory: (upstreamId?: string) => Omit<PhaseAwareHooks, 'globalPrecompiled' | 'routePrecompiled'> & { globalPrecompiled?: PrecompiledHooks | null; routePrecompiled?: PrecompiledHooks | null }): void {
   setScopedPluginRegistry({
+    runWithRequestLeases<T>(_leases: ReadonlyMap<string, () => void>, run: () => T): T { return run(); },
+    async dispatchRequest() { return undefined; },
     getPrecompiledHooks: (_routeId: string, upstreamId?: string) => {
       const partial = factory(upstreamId);
       return {

@@ -14,7 +14,7 @@ export class DispatchPlugin implements Plugin {
         const entity = (target.type === 'route' ? config.routes : config.services ?? []).find(entity => entity.id === target.id);
         return {...target,protocol:entity?.llm_protocol as LLMProtocol | undefined};
       });
-      const dispatch = await registry?.getRoutePrecompiledHooks?.(entry.path)?.hooks.onDispatchRequest.promise({context,signal,principal,servingRevision,targets});
+      const dispatch = await registry?.dispatchRequest(entry.path,{context,signal,principal,servingRevision,targets},{kind:'gateway-request',revision:servingRevision,target:{requestId:context.requestId,attemptId:context.requestId,principal,routeId:entry.id ?? entry.path,serviceId:null,upstreamId:'dispatch',url:context.originalUrl.href,model:typeof context.body?.model==='string'?context.body.model:null,now:Date.now()}});
       if (!dispatch) return {route:entry,effective:resolveEffectiveRoute(config,entry),context};
       if (!targets.some(target => target.type === dispatch.target.type && target.id === dispatch.target.id)) throw new DataAdmissionError(403,'dispatch_target_not_declared');
       signal.throwIfAborted();
@@ -30,7 +30,7 @@ export class DispatchPlugin implements Plugin {
         if (!service) throw new DataAdmissionError(422,'dispatch_target_unavailable');
         route = {...entry,service:service.name,service_id:service.id,endpoints:undefined} as RouteConfig;
       }
-      return {route,effective:resolveEffectiveRoute(config,route),context,entryRouteId:entry.id ?? entry.path,target:dispatch.target,adapter:dispatch.adapter};
+      return {route,effective:resolveEffectiveRoute(config,route),context,entryRouteId:entry.id ?? entry.path,target:dispatch.target,requiredUpstreamId:dispatch.requiredUpstreamId,protocol:targets.find(target=>target.type===dispatch.target.type && target.id===dispatch.target.id)?.protocol,adapter:dispatch.adapter};
     });
   }
 }

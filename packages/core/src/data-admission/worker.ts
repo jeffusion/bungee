@@ -37,8 +37,9 @@ export class WorkerRequestAdmission {
       const inspected = this.grant ? {policyVersion:this.grant.version, requirements:{}}
         : await session.admission('inspect',target,signal) as {policyVersion:number;requirements:Record<string,{request:'none'|'json-read'}>};
       if (!inspected || !Number.isSafeInteger(inspected.policyVersion) || !inspected.requirements) throw new DataAdmissionError(503,'admission_inspect_failed');
-      if (Object.values(inspected.requirements).some(requirement=>requirement.request === 'json-read') && body === undefined) {
-        if (transport === 'websocket') throw new DataAdmissionError(422,'websocket_budget_unsupported');
+      const needsBody = Object.values(inspected.requirements).some(requirement=>requirement.request === 'json-read');
+      if (needsBody && transport === 'websocket') throw new DataAdmissionError(422,'websocket_budget_unsupported');
+      if (needsBody && body === undefined) {
         if (!loadBody) throw new DataAdmissionError(503,'admission_body_unavailable'); body = await loadBody();
       }
       for (const plugin of this.plugins) if (plugin.resolveAdmissionModel) targetInput.model = plugin.resolveAdmissionModel({...input,body});

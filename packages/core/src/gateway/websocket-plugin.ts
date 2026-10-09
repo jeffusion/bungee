@@ -16,6 +16,7 @@ import { WebSocketObservers } from '../websocket/observation';
 import { validateWebSocketRequest } from '../websocket';
 import { websocketCredential } from './websocket-credential';
 import { logger } from '../logger';
+import {ResponsesWebSocketSession} from './responses-websocket-session';
 
 function headerRecord(headers:Headers):Record<string,string> {const result:Record<string,string>={};headers.forEach((value,name)=>{result[name]=value;});return result;}
 const reject = (status:number,error:string):GatewayWebSocketResult=>({response:Response.json({error},{status})});
@@ -72,6 +73,24 @@ export class WebSocketGatewayPlugin implements Plugin {
       const rate = requireGatewayResult(await gatewayHooks().onGatewayAdmission.promise({route,trustedPeer:getTrustedWorkerPeer(request),context:expressionContext(),servingRevision,signal}),'onGatewayAdmission');
       if (!rate.allowed) return {response:Response.json({error:rate.retryAfterMs===undefined?'rate_limit_unavailable':'rate_limited'},{status:rate.retryAfterMs===undefined?503:429,
         headers:rate.retryAfterMs===undefined?{}:{'retry-after':String(Math.max(1,Math.ceil(rate.retryAfterMs/1000)))}})};
+      const sessionMode=await registry?.getRoutePrecompiledHooks(route.path)?.hooks.onWebSocketSessionMode.promise(new URL(request.url));
+      if(sessionMode==='responses'){
+        for(const owner of registry?.getRoutePluginOwners(route.path) ?? [])retain(owner.pluginName,owner.scopeKey);
+        const handlers=registry?.getGlobalAdmissionHandlers() ?? [];
+        if(identity && hasWorkerAdmissionSession()){
+          for(const handler of handlers)retain(handler.pluginName);
+          admission=requireGatewayResult(await gatewayHooks().onGatewayAdmissionSession.promise({handlers,identity:{requestId:connectionId,principal:identity.principal,routeId:route.id ?? route.path,
+            serviceId:(route as {service_id?:string}).service_id ?? config.services?.find(service=>service.name===route.service)?.id ?? null},
+            invoke:(plugin,method,payload,target)=>registry!.invokeAdmissionRpc(plugin,method,payload,target,leases.get(`${plugin}\0global`)!)}),'onGatewayAdmissionSession');
+          const endpoint=effective.endpoints[0];
+          if(!endpoint)return reject(503,'upstream_unavailable');
+          await admission.prepare({attemptId:connectionId,upstreamId:endpoint.id ?? '0',url:endpoint.target,model:null,body:undefined,transport:'websocket'},signal);
+        }
+        const session=new ResponsesWebSocketSession(input,gatewayHooks());
+        const response=await bridge.upgradeSession(nativeRequest,server,{signal,onMessage:(transport,message)=>session.onMessage(transport,message),onClose:async()=>{session.dispose();await finish();}});
+        if(response){session.dispose();return {response};}
+        committed=true;return {};
+      }
       const upstreams = runtimeState.get(route.service ?? route.path)?.upstreams ?? effective.endpoints.map((endpoint,index)=>({...endpoint,upstream_id:endpoint.id ?? String(index),status:'HEALTHY',consecutive_failures:0,consecutive_successes:0,recovery_attempt_count:0} as RuntimeUpstream));
       const upstream = requireGatewayResult(await gatewayHooks().onGatewaySelect.promise({upstreams,route:effective,context:expressionContext()}),'onGatewaySelect').upstream;
       if (!upstream) return reject(503,'upstream_unavailable');

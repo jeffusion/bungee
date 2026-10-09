@@ -613,6 +613,24 @@ export async function startMasterComposition(
       catalog: () => catalog.hash,
       executorProof: () => journalRecovery?.currentProof ?? null,
       projectInvocation: async (worker, metadata, signal) => {
+        if(metadata.purpose==='request'){
+          const host=metadata.host as any;
+          const caller=metadata.caller.subject.split('@',1)[0];
+          if(host?.kind!=='gateway-request' || metadata.target.provider!==caller || metadata.caller.scope!=='binding')throw new Error('request_caller_invalid');
+          const target=parseAdmissionTarget(host.target);
+          const identity={role:'worker' as const,process_instance_id:worker.worker_instance_id,boot_nonce:worker.boot_nonce,master_generation:worker.master_generation,worker_slot:worker.worker_slot};
+          if(!['active','retired'].includes(authorizeStateWorker(identity)))throw new Error('worker_not_admitted');
+          const session=resources.workerFactory?.lookupPhysicalSession?.({...worker});
+          const status=session?.status;
+          if(!status || status.revision===null || status.revision!==host.revision || !status.content_hash || !status.plugin_catalog_hash)throw new Error('request_revision_invalid');
+          const snapshot=resources.repository?.getServingSnapshot({revision:status.revision,content_hash:status.content_hash,plugin_catalog_hash:status.plugin_catalog_hash});
+          const route=snapshot?.aggregate.logical_configuration.routes.find(route=>route.id===target.routeId);
+          if(!route || metadata.caller.subject!==`${caller}@route:${route.path}` || !route.plugins.some(binding=>binding.name===caller && binding.enabled) || !snapshot?.aggregate.plugin_activations.some(activation=>activation.plugin_name===caller))throw new Error('request_binding_invalid');
+          let verified=false;
+          for(const activation of snapshot.aggregate.plugin_activations)if(await resources.pluginControl!.verifyDataPrincipal(activation.plugin_name,target.principal)){verified=true;break;}
+          if(!verified || signal.aborted)throw new Error('request_principal_invalid');
+          return Object.freeze({kind:'gateway-request',revision:host.revision,target,worker:identity});
+        }
         if (metadata.purpose !== 'attempt') throw new Error('business_purpose_invalid');
         const host = metadata.host as any;
         const callerPlugin = metadata.caller.subject.split('@', 1)[0];

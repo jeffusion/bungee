@@ -20,6 +20,13 @@ const dataIdentities = new WeakMap<Request, TrustedDataIdentity>();
 export const INTERNAL_DATA_IDENTITY_HEADER = 'x-bungee-internal-data-identity';
 export const INTERNAL_DATA_IDENTITY_MAC_HEADER = 'x-bungee-internal-data-identity-mac';
 export function getTrustedDataIdentity(request: Request): TrustedDataIdentity | null { return dataIdentities.get(request) ?? null; }
+/** Core-only derivation: external headers cannot mint a logical generation identity. */
+export function deriveWorkerRequestIdentity(source: Request, derived: Request, requestId: string): void {
+  const identity = dataIdentities.get(source);
+  if (identity) dataIdentities.set(derived, Object.freeze({principal:identity.principal,requestId}));
+  const peer = trustedPeers.get(source);
+  if (peer) trustedPeers.set(derived,peer);
+}
 export function signDataIdentity(identity: string, method: string, url: string, secret: string): string {
   return createHmac('sha256', Buffer.from(parseWorkerTransportSecret(secret), 'base64url'))
     .update(JSON.stringify(['bungee-worker-transport/v1/principal',identity,method.toUpperCase(),url])).digest('hex');
