@@ -1,3 +1,15 @@
+# [5.19.0](https://github.com/jeffusion/bungee/compare/v5.18.0...v5.19.0) (2026-10-09)
+
+
+### Bug Fixes
+
+* **gateway:** preserve endpoint plugin scope during dispatch prewarming ([a3dd763](https://github.com/jeffusion/bungee/commit/a3dd763a0246fd27befe8eb99ea9ee918d94ef93))
+
+
+### Features
+
+* **gateway:** dispatch model bindings before admission ([786afd3](https://github.com/jeffusion/bungee/commit/786afd3805a772f2b35ad58e466cfbcf3eca2caa))
+
 # [5.18.0](https://github.com/jeffusion/bungee/compare/v5.17.0...v5.18.0) (2026-10-09)
 
 
