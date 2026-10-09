@@ -176,7 +176,7 @@ function createPhaseContext(
   requestId: string,
   routeId: string,
   routeServiceName: string | undefined,
-): MutableRequestContext {
+): MutableRequestContext & import('../hooks').MutableRequestContext {
   const originalUrl = new URL(requestSnapshot.url);
   return {
     method: requestSnapshot.method,
@@ -844,7 +844,7 @@ async function executeHttpRequestInternal(
 
     const routeMatchStart = performance.now();
     const routeDecision = requireGatewayResult(await gatewayHooks().onGatewayRoute.promise({request:req,config}), 'onGatewayRoute');
-    const route = routeDecision.route;
+    let route = routeDecision.route;
 
     if (!route) {
       logger.error({ request: requestLog }, `No route found for path: ${url.pathname}`);
@@ -865,29 +865,10 @@ async function executeHttpRequestInternal(
     });
     reqLogger.setOriginalRequestHeaders(redactRequestHeaders(originalHeaders));
 
-    // 获取路由 ID（用于预编译 hooks 查找）
-    // 统一使用 route.path 作为唯一标识
-    routeId = route.path;
-    routeServiceName = route.service;
-    const currentRouteId = route.path;
-    const effectiveRoute = requireGatewayResult(routeDecision.effective, 'onGatewayRoute');
-    const endpoints = effectiveRoute.endpoints;
-    const runtimeStateKey = route.service ?? route.path;
-
     if (hasWorkerAdmissionSession() && !trustedIdentity) {
       success = false; responseStatus = 401;
       return finalizeLocalResponse(Response.json({ error: 'unauthorized' }, { status: 401, headers: { 'www-authenticate': 'Bearer' } }));
     }
-    if (trustedIdentity) {
-      for (const handler of admissionHandlers) retainOwner(handler.pluginName);
-      dataAdmission = requireGatewayResult(await gatewayHooks().onGatewayAdmissionSession.promise({handlers:admissionHandlers, identity:{
-        requestId, principal: trustedIdentity.principal, routeId: route.id ?? currentRouteId,
-        serviceId: (route as { service_id?: string }).service_id
-          ?? (config.services?.find(service => service.name === route.service) as { id?: string } | undefined)?.id ?? null,
-      }, invoke:(plugin, method, payload, target) => requestRegistry!.invokeAdmissionRpc(plugin, method, payload, target, ownerLeases.get(`${plugin}\0global`)!)}), 'onGatewayAdmissionSession');
-    }
-
-
     if (routeDecision.response) {
       responseStatus = routeDecision.response.status;
       success = responseStatus < 400;
@@ -897,12 +878,42 @@ async function executeHttpRequestInternal(
     // 创建请求快照（在任何 plugin 执行之前）
     // This ensures each upstream retry gets a clean copy of the original request
     const snapshotStart = performance.now();
-    const processingDeadline = AbortSignal.timeout(effectiveRoute.timeouts?.request_ms ?? 30_000);
+    const processingDeadline = AbortSignal.timeout(route.timeouts?.request_ms ?? 30_000);
     const processingSignal = AbortSignal.any([req.signal,processingDeadline]);
     const requestSnapshot = await createRequestSnapshot(req, config.body_parser_limit, processingSignal, originalBody as ReadableStream<Uint8Array> | null,{requestId,attemptId:requestId,direction:'request',stage:'original-request',version:0,contentType:req.headers.get('content-type') ?? '',contentEncoding:req.headers.get('content-encoding') ?? ''});
     requestBodySource = requestSnapshot.bodySource;
+    const entryRoute = route;
+    const dispatchContext = createPhaseContext(requestSnapshot,requestId,entryRoute.path,entryRoute.service);
+    const dispatchHooks = requestRegistry?.getRoutePrecompiledHooks?.(entryRoute.path);
+    if (dispatchHooks?.hooks.onDispatchRequest.hasCallbacks()) {
+      await readSnapshotJson(requestSnapshot,'internal-dispatch',true);
+      dispatchContext.body = structuredClone(requestSnapshot.body);
+    }
+    const dispatch = requireGatewayResult(await gatewayHooks().onGatewayDispatch.promise({config,entry:entryRoute,context:dispatchContext,
+      signal:processingSignal,principal:trustedIdentity?.principal,servingRevision:runtimeContext?.servingRevision}), 'onGatewayDispatch');
+    route = dispatch.route;
+    if (dispatch.target) {
+      requestSnapshot.body = dispatch.context.body;
+      reqLogger.addStep('internal_dispatch',{entry:entryRoute.id ?? entryRoute.path,target:dispatch.target,model:dispatch.context.body?.model});
+    }
+    routeId = route.path;
+    routeServiceName = route.service;
+    const currentRouteId = route.path;
+    const effectiveRoute = dispatch.effective;
+    const endpoints = effectiveRoute.endpoints;
+    const runtimeStateKey = route.service ?? route.path;
+    if (trustedIdentity) {
+      for (const handler of admissionHandlers) retainOwner(handler.pluginName);
+      dataAdmission = requireGatewayResult(await gatewayHooks().onGatewayAdmissionSession.promise({handlers:admissionHandlers, identity:{
+        requestId, principal: trustedIdentity.principal, ...(dispatch.entryRouteId ? {entryRouteId:dispatch.entryRouteId} : {}), routeId: route.id ?? currentRouteId,
+        serviceId: (route as { service_id?: string }).service_id
+          ?? (config.services?.find(service => service.name === route.service) as { id?: string } | undefined)?.id ?? null,
+      }, invoke:(plugin, method, payload, target) => requestRegistry!.invokeAdmissionRpc(plugin, method, payload, target, ownerLeases.get(`${plugin}\0global`)!)}), 'onGatewayAdmissionSession');
+    }
+
     const demandHooks = requestRegistry?.getPrecompiledHooks(currentRouteId, undefined, routeServiceName);
     const demandContext = createPhaseContext(requestSnapshot,requestId,currentRouteId,routeServiceName);
+    if (dispatch.target) demandContext.url = new URL(dispatch.context.url);
     applyRoutePathRewriteToContext(demandContext,route,requestLog);
     const routeDemand = collectPluginBodyRequirements([demandHooks?.routePhase,demandHooks?.servicePhase], {
       requestId,method:req.method,url:demandContext.url,routeId:currentRouteId,serviceId:routeServiceName,stage:'route',
@@ -916,7 +927,7 @@ async function executeHttpRequestInternal(
     const routeNeedsBody = analyzeExpressionDependencies(routeRequestDemand,'request').requestBody
       || analyzeExpressionDependencies(route.response,'response').requestBody;
     if (routeDemand.replay || route.retry?.enabled || effectiveRoute.failover?.enabled) await requestBodySource?.buffer('configured-replay');
-    if (selectionNeedsBody || routeNeedsBody || routeDemand.request !== 'none') await readSnapshotJson(requestSnapshot,
+    if (!requestSnapshot.is_json_body && (selectionNeedsBody || routeNeedsBody || routeDemand.request !== 'none')) await readSnapshotJson(requestSnapshot,
       selectionNeedsBody ? 'selection-expression' : routeDemand.request !== 'none' ? 'plugin-body-demand' : 'route-expression',
       routeDemand.request === 'json-write' && !['GET','HEAD'].includes(req.method));
     reqLogger.addStep('request_body_plan',{mode:requestBodySource?.mode,reasons:requestBodySource?.reasons ?? [],replay:requestBodySource?.replayable ?? false,source:'wire'});
@@ -940,6 +951,10 @@ async function executeHttpRequestInternal(
       env: process.env as Record<string, string>,
     };
 
+    if (dispatch.target && entryRoute.id !== route.id) {
+      const entryAdmission = requireGatewayResult(await gatewayHooks().onGatewayAdmission.promise({route:entryRoute,trustedPeer:getTrustedWorkerPeer(req),context:expressionContext,servingRevision:runtimeContext?.servingRevision,signal:processingSignal}), 'onGatewayAdmission');
+      if (!entryAdmission.allowed) throw new DataAdmissionError(entryAdmission.retryAfterMs === undefined ? 503 : 429,'entry_route_rate_limited');
+    }
     const rateLimit = requireGatewayResult(await gatewayHooks().onGatewayAdmission.promise({
       route,trustedPeer:getTrustedWorkerPeer(req),context:expressionContext,
       servingRevision:runtimeContext?.servingRevision,signal:req.signal,
@@ -966,7 +981,8 @@ async function executeHttpRequestInternal(
     const scopedRegistry = requestRegistry;
     const requestPhaseHooks = scopedRegistry?.getPrecompiledHooks(currentRouteId, undefined, routeServiceName) ?? null;
     const phaseContext = createPhaseContext(requestSnapshot, requestId, currentRouteId, routeServiceName);
-    phaseContext.bodyWrite = routeDemand.request === 'json-write';
+    phaseContext.bodyWrite = !!dispatch.target || routeDemand.request === 'json-write';
+    if (dispatch.target) phaseContext.url = new URL(dispatch.context.url);
     phaseContext.bodyRequirements = routeDemand;
     applyRoutePathRewriteToContext(phaseContext, route, requestLog);
     const routePhaseResponse = await executePreFailoverPhase(requestPhaseHooks?.routePhase, phaseContext, {

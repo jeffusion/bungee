@@ -6,13 +6,15 @@ import type { ValidationContext } from './validation';
 /** Only schema-declared references participate. Client JSON and headers never supply targets. */
 export function validateGatewayTargets(config: LogicalConfigurationV2, schemas: PluginSchemaCatalog | undefined, context: ValidationContext): void {
   if (!schemas) return;
-  const routes = new Set(config.routes.map(route => route.id));
-  const services = new Set(config.services.map(service => service.id));
+  const routes = new Map(config.routes.map(route => [route.id,route]));
+  const services = new Map(config.services.map(service => [service.id,service]));
   const edges = new Map<string, Set<string>>();
   const visit = (value: unknown, field: ReadonlyPluginConfigField, owner: string, path: string): void => {
     if (field.type === 'gateway_target' && value && typeof value === 'object') {
       const target = value as {type:string;id:string};
-      if (!(target.type === 'route' ? routes : services).has(target.id)) context.add('invalid_value',path,'Dispatch target does not exist');
+      const entity = (target.type === 'route' ? routes : services).get(target.id);
+      if (!entity) context.add('invalid_value',path,'Dispatch target does not exist');
+      else if (!entity.llm_protocol) context.add('invalid_value',path,'Dispatch target requires an explicit receiving protocol');
       const refs = edges.get(owner) ?? new Set<string>(); refs.add(`${target.type}:${target.id}`); edges.set(owner,refs);
     } else if (field.type === 'array' && field.items && Array.isArray(value)) value.forEach((item,index) => visit(item,field.items!,owner,`${path}[${index}]`));
     else if (field.type === 'object' && field.properties && value && typeof value === 'object') {

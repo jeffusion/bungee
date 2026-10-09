@@ -56,16 +56,19 @@ function matchesModel(pattern: string, model: string): boolean {
   }
   return cursor <= end;
 }
-function check(target: AdmissionTarget, policy: AccessPolicy | null): AdmissionDenial | null {
+function protectedScopes(target: AdmissionTarget, publication: AccessPublication): string[] {
+  return [...new Set([target.entryRouteId,target.routeId].filter((id): id is string => !!id && publication.protectedRouteIds.includes(id)))];
+}
+function check(target: AdmissionTarget, policy: AccessPolicy | null, scopes: string[] = [target.routeId]): AdmissionDenial | null {
   if (target.principal.domain === 'anonymous') return null;
-  if (policy && ((policy.routes !== null && !policy.routes.includes(target.routeId))
+  if (policy && ((policy.routes !== null && !scopes.every(id => policy.routes!.includes(id)))
     || (policy.models !== null && (!target.model || !policy.models.some(pattern => matchesModel(pattern, target.model!)))))) return {error: 'key-access.scope_denied', status: 403};
   return null;
 }
 export function createIngress(): IngressPlugin { return {
   bodyRequirements(target, value) {
     const publication = validatePublication(value);
-    if (!publication.protectedRouteIds.includes(target.routeId) || target.principal.domain !== 'data') return { request: 'none' };
+    if (protectedScopes(target,publication).length === 0 || target.principal.domain !== 'data') return { request: 'none' };
     const policy = validatePolicy(publication.byKey[target.principal.keyId] ?? null);
     const urlModel = /\/models\/([^/:]+):(?:streamGenerateContent|generateContent)$/.test(new URL(target.url).pathname);
     return { request: policy?.models !== null && policy?.models !== undefined && policy.models.length > 0 && !urlModel ? 'json-read' : 'none' };
@@ -82,26 +85,27 @@ export function createIngress(): IngressPlugin { return {
   },
   resolveIdentity(target, value) {
     const p = validatePublication(value);
-    if (!p.protectedRouteIds.includes(target.routeId)) return ANONYMOUS_PRINCIPAL;
+    if (protectedScopes(target,p).length === 0) return ANONYMOUS_PRINCIPAL;
     if (!validPrincipal(target.principal, p, target.now)) throw new DataAdmissionError(401, 'unauthorized');
     return target.principal;
   },
   plan(target, value) {
     try {
       const p = validatePublication(value);
-      if (!p.protectedRouteIds.includes(target.routeId)) return {snapshot: null};
+      if (protectedScopes(target,p).length === 0) return {snapshot: null};
       if (target.principal.domain === 'anonymous') return {denial: {error: 'unauthorized', status: 401}};
       const policy = validatePolicy(p.byKey[target.principal.keyId] ?? null);
-      const denial = check(target, policy);
-      return denial ? {denial} : {snapshot: {routeId: target.routeId, policy: policy as any}};
+      const scopes = protectedScopes(target,p);
+      const denial = check(target, policy,scopes);
+      return denial ? {denial} : {snapshot: {routeId: target.routeId, entryRouteId:target.entryRouteId ?? null, scopes, policy: policy as any}};
     } catch { return {denial: {error: 'key-access.policy_unavailable', status: 503}}; }
   },
   beforeAttempt(target, snapshot) {
     if (snapshot === null) return target.principal.domain === 'anonymous' ? null : {error: 'key-access.invalid_grant', status: 503};
     try {
-      const s = snapshot as {routeId: string; policy: AccessPolicy | null};
-      if (!s || s.routeId !== target.routeId) return {error: 'key-access.scope_denied', status: 403};
-      return check(target, validatePolicy(s.policy));
+      const s = snapshot as {routeId: string; entryRouteId?: string | null; scopes?: string[]; policy: AccessPolicy | null};
+      if (!s || s.routeId !== target.routeId || (s.entryRouteId ?? null) !== (target.entryRouteId ?? null)) return {error: 'key-access.scope_denied', status: 403};
+      return check(target, validatePolicy(s.policy),s.scopes ?? [target.routeId]);
     } catch { return {error: 'key-access.policy_unavailable', status: 503}; }
   },
 }; }

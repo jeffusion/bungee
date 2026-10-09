@@ -13,3 +13,11 @@
 阶段验证和后续完成状态将随实现更新。真实 Desktop 界面与真实提供商联调尚未完成。
 
 目录阶段：6 项新契约测试通过；models-dev/model-mapping 回归 31 pass；OAuth/配置编译回归 74 pass；完整构建与架构检查通过。目录功能有绑定 UI、版本化模板、通用 target 引用与循环校验。后续调度尚在下一阶段。
+
+## 内部调度阶段
+
+增加唯一 Gateway dispatch provider 和公开 onDispatchRequest Hook。目标只能来自入口插件 schema 中 gateway_target 声明的编译引用，客户端参数无法创建引用；每次请求最多转交一次，目标目录的 dispatch Hook 不再重入。route 目标运行最终 route/service/upstream 链路，service 目标使用入口 route 和指定 service；共享 service 插件及凭据按入口作用域初始化。
+
+调度先于单一 admission session。可信 entryRouteId 随签名 RPC、preview 和 grant 固定，key-access 同时检查入口/最终受保护 scope；入口和目标不同的 route 限流分别应用。绑定目标发布时必须声明 llm_protocol；目录阶段尚不能在离线发布时获知动态原生模型冲突。
+
+验证：新增调度、既有流水线及引用检查 23 项通过；admission/key-access/scoped phase 51 项通过（监听端口测试在沙箱外重跑）；核心构建和 32 项架构测试通过。此阶段接通原生 Responses，转换目标仍返回 protocol_not_ready，下一阶段解除。

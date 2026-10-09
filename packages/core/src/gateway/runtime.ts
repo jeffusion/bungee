@@ -5,6 +5,7 @@ import { getScopedPluginRegistry } from '../scoped-plugin-registry';
 import { GATEWAY_PROVIDER_STAGES } from './contracts';
 import { HttpRequestPlugin, type executeHttpRequest } from './request-plugin';
 import { ForwardPlugin } from './forward-plugin';
+import { DispatchPlugin } from './dispatch-plugin';
 import { RoutingPlugin } from './routing-plugin';
 import { AdmissionPlugin } from './admission-plugin';
 import { SelectionPlugin } from './selection-plugin';
@@ -20,7 +21,7 @@ import type { GatewayWebSocketInput, GatewayWebSocketResult } from './websocket-
 const requestHooks = new AsyncLocalStorage<PluginHooks>();
 let standaloneHooks: PluginHooks | undefined;
 export function gatewayBuiltins(): Plugin[] {
-  return [new WebSocketGatewayPlugin(),new BodyServicePlugin(),new HttpRequestPlugin(),new RoutingPlugin(),new AdmissionPlugin(),new SelectionPlugin(),
+  return [new WebSocketGatewayPlugin(),new BodyServicePlugin(),new HttpRequestPlugin(),new RoutingPlugin(),new DispatchPlugin(),new AdmissionPlugin(),new SelectionPlugin(),
     new RetryPlugin(),new RequestRulesPlugin(),new ForwardPlugin(),new ResponseRulesPlugin(),new LoggingPlugin()];
 }
 /** The host only owns registration; providers use the existing Plugin contract and Hook executor. */

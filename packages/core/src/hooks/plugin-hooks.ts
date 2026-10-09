@@ -18,7 +18,7 @@ import type { PluginServices } from '../plugin-services';
 import type { PluginStorage, SSEEnvelope } from '../plugin.types';
 import type { InterceptResult, PluginPhase } from '@jeffusion/bungee-types';
 import type { RawResponseResult } from '../plugin-control/contracts';
-import type { GatewayBodyArguments, GatewayRequestArguments, GatewayForwardArguments, GatewayResponseRuleArguments, GatewayBodyRuleArguments, GatewayQueryRuleArguments, GatewayHeaderRuleArguments, GatewayCorsArguments, GatewayRouteInput, GatewayRouteDecision, GatewayAdmissionInput, GatewayAdmissionDecision, GatewayAdmissionSessionInput, GatewayAdmissionPrepareInput, GatewaySelectInput, GatewaySelectDecision, GatewayFailoverInput, GatewayRetryInput, GatewayLogInput, GatewayLogResult } from '../gateway/contracts';
+import type { GatewayBodyArguments, GatewayRequestArguments, GatewayForwardArguments, GatewayResponseRuleArguments, GatewayBodyRuleArguments, GatewayQueryRuleArguments, GatewayHeaderRuleArguments, GatewayCorsArguments, GatewayRouteInput, GatewayRouteDecision, GatewayDispatchInput, GatewayDispatchDecision, DispatchRequestInput, DispatchRequestDecision, GatewayAdmissionInput, GatewayAdmissionDecision, GatewayAdmissionSessionInput, GatewayAdmissionPrepareInput, GatewaySelectInput, GatewaySelectDecision, GatewayFailoverInput, GatewayRetryInput, GatewayLogInput, GatewayLogResult } from '../gateway/contracts';
 import type { WorkerRequestAdmission, PreparedAdmissionAttempt } from '../data-admission/worker';
 import type { FailoverCoordinator } from '../worker/upstream/failover-coordinator';
 import type { ProxyRequestResult } from '../gateway/forward-plugin';
@@ -253,6 +253,8 @@ export function createPluginHooks(): PluginHooks {
     onGatewayBody: new SyncBailHook<GatewayBodyArguments, BodySource>('onGatewayBody'),
     onGatewayRequest: new AsyncSeriesBailHook<GatewayRequestArguments, Response>('onGatewayRequest'),
     onGatewayRoute: new AsyncSeriesBailHook<[GatewayRouteInput], GatewayRouteDecision>('onGatewayRoute'),
+    onGatewayDispatch: new AsyncSeriesBailHook<[GatewayDispatchInput], GatewayDispatchDecision>('onGatewayDispatch'),
+    onDispatchRequest: new AsyncSeriesBailHook<[DispatchRequestInput], DispatchRequestDecision>('onDispatchRequest'),
     onGatewayAdmission: new AsyncSeriesBailHook<[GatewayAdmissionInput], GatewayAdmissionDecision>('onGatewayAdmission'),
     onGatewayAdmissionSession: new AsyncSeriesBailHook<[GatewayAdmissionSessionInput], WorkerRequestAdmission>('onGatewayAdmissionSession'),
     onGatewayAdmissionPrepare: new AsyncSeriesBailHook<[GatewayAdmissionPrepareInput], PreparedAdmissionAttempt[]>('onGatewayAdmissionPrepare'),
@@ -367,6 +369,8 @@ export interface PluginHooks {
   onGatewayCors: AsyncSeriesBailHook<GatewayCorsArguments, Response>;
   onGatewayRequest: AsyncSeriesBailHook<GatewayRequestArguments, Response>;
   onGatewayRoute: AsyncSeriesBailHook<[GatewayRouteInput], GatewayRouteDecision>;
+  onGatewayDispatch: AsyncSeriesBailHook<[GatewayDispatchInput], GatewayDispatchDecision>;
+  onDispatchRequest: AsyncSeriesBailHook<[DispatchRequestInput], DispatchRequestDecision>;
   onGatewayAdmission: AsyncSeriesBailHook<[GatewayAdmissionInput], GatewayAdmissionDecision>;
   onGatewayAdmissionSession: AsyncSeriesBailHook<[GatewayAdmissionSessionInput], WorkerRequestAdmission>;
   onGatewayAdmissionPrepare: AsyncSeriesBailHook<[GatewayAdmissionPrepareInput], PreparedAdmissionAttempt[]>;

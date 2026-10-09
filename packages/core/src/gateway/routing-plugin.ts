@@ -2,7 +2,7 @@ import type { AppConfig, RouteConfig, CorsConfig, ResponseRuleConfig } from '@je
 import type { EffectiveRouteConfig } from '../worker/types';
 import { resolveEffectiveRouteEndpoints, resolveRouteService } from '../utils/endpoint-resolver';
 import type { Plugin, PluginHooks, GatewayRouteInput, GatewayRouteDecision } from '@jeffusion/bungee-core/plugin';
-function resolveEffectiveRoute(config: AppConfig, route: RouteConfig): EffectiveRouteConfig {
+export function resolveEffectiveRoute(config: AppConfig, route: RouteConfig): EffectiveRouteConfig {
   const service = resolveRouteService(config, route);
   const endpoints = resolveEffectiveRouteEndpoints(route, config.services);
 
