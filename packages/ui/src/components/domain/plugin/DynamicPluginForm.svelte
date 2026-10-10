@@ -126,7 +126,7 @@
           (realField: string) => !value[realField]
         );
         if (missingFields.length > 0) {
-          return `${$_(field.label)} is required`;
+          return $_('plugin.fieldRequired', { values: { field: $_(field.label) } });
         }
       }
       return null;
@@ -134,7 +134,7 @@
 
     const isEmptyArray = Array.isArray(val) && val.length === 0;
     if (field.required && (val === undefined || val === null || val === '' || isEmptyArray)) {
-      return `${$_(field.label)} is required`;
+      return $_('plugin.fieldRequired', { values: { field: $_(field.label) } });
     }
 
     if (field.validation) {
@@ -249,6 +249,7 @@
         {:else if field.type === 'select'}
           <BSelect
             options={buildSelectOptions(field)}
+            ariaLabel={$_(field.label)}
             value={getFieldValue(field) ?? ''}
             placeholder={$_('common.select')}
             onchange={(v) => { handleChange(field.name, v); handleBlur(field); }}
@@ -257,6 +258,7 @@
         {:else if field.type === 'multiselect'}
           <BSelect
             options={buildSelectOptions(field)}
+            ariaLabel={$_(field.label)}
             multiple={true}
             values={formattedValues[field.name] || []}
             placeholder={$_('common.select')}
@@ -315,7 +317,7 @@
         {/if}
 
         {#if errors[field.name]}
-          <p class="font-mono text-[10px] uppercase tracking-command text-red-300" data-testid="plugin-config-validation-message">{errors[field.name]}</p>
+          <p role="alert" class="font-mono text-[10px] uppercase tracking-command text-red-300" data-testid="plugin-config-validation-message">{errors[field.name]}</p>
         {/if}
       </div>
     {/if}

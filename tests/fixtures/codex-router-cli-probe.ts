@@ -4,6 +4,7 @@ import {mkdir, readFile, writeFile} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 import {captureProcessIdentity, probeProcessIdentity, type CapturedProcessIdentity} from '../../packages/core/src/master-runtime/process-identity';
+import {assertCodexProbeTargets} from './codex-router-gateway-fixture';
 
 export const CLI_TOOL_ROUNDTRIP = 'codex-fixture-real-tool-roundtrip';
 export const CLI_EXEC_MARKER = 'codex-fixture-exec-marker';
@@ -46,6 +47,7 @@ function isolatedEnv(home: string): Record<string, string> {
 
 /** A valid native catalog row from exactly the installed CLI, without reading auth. */
 export async function bundledCodexCatalogModel(root: string): Promise<Record<string, any>> {
+  assertCodexProbeTargets(root);
   const executable = Bun.which('codex'); if (!executable) throw new Error('local codex executable is missing');
   const home = join(root, 'cli-bundled-home'); await mkdir(home, {recursive: true});
   const child = spawn(executable, ['debug', 'models', '--bundled'], {cwd: home, env: isolatedEnv(home), stdio: ['ignore', 'pipe', 'pipe']});
@@ -63,6 +65,7 @@ export async function bundledCodexCatalogModel(root: string): Promise<Record<str
 }
 
 export async function probeCodexCli(input: {root: string; baseUrl: string; token: string; model: string}) {
+  assertCodexProbeTargets(input.root,[input.baseUrl]);
   const executable = Bun.which('codex');
   if (!executable) throw new Error('BUNGEE_CODEX_CLI_PROBE requires a local codex executable');
   const home = join(input.root, 'cli-home'); await mkdir(home, {recursive: true});
@@ -88,7 +91,8 @@ export async function probeCodexCli(input: {root: string; baseUrl: string; token
 }
 
 /** CLI model/list with temporary ChatGPT-shaped auth and real local key-access. */
-export async function probeCodexChatgptModels(input: {root: string; baseUrl: string; mockUrl: string; token: string; model: string; toolRoundTrip?: boolean}) {
+export async function probeCodexChatgptModels(input: {root: string; baseUrl: string; mockUrl: string; token: string; model: string; toolRoundTrip?: boolean; effort?: string}) {
+  assertCodexProbeTargets(input.root,[input.baseUrl,input.mockUrl]);
   const executable = Bun.which('codex');
   if (!executable) throw new Error('BUNGEE_CODEX_CLI_PROBE requires a local codex executable');
   const home = join(input.root, input.toolRoundTrip ? `cli-chatgpt-tool-${input.model.replaceAll('/','-')}` : input.model === 'org/chat' ? 'cli-chatgpt-chat-home'
@@ -108,7 +112,7 @@ export async function probeCodexChatgptModels(input: {root: string; baseUrl: str
     const scriptPath = join(home, 'echo-mcp.mjs'); await writeFile(scriptPath, echoMcpScript);
     mcpConfig = `\n[mcp_servers.codex_fixture]\ncommand = ${JSON.stringify(process.execPath)}\nargs = ${JSON.stringify([scriptPath, mcpAuditPath, `--bungee-process-identity=${mcpInstanceId}`])}\nstartup_timeout_sec = 5\ntool_timeout_sec = 5\n`;
   }
-  await writeFile(join(home, 'config.toml'), `model_provider = "openai"\nopenai_base_url = ${JSON.stringify(input.baseUrl)}\nchatgpt_base_url = ${JSON.stringify(`${input.mockUrl}/backend-api`)}\ncli_auth_credentials_store = "file"\n[analytics]\nenabled = false\n${mcpConfig}`);
+  await writeFile(join(home, 'config.toml'), `model_provider = "openai"\nweb_search = "disabled"\nopenai_base_url = ${JSON.stringify(input.baseUrl)}\nchatgpt_base_url = ${JSON.stringify(`${input.mockUrl}/backend-api`)}\ncli_auth_credentials_store = "file"\n[analytics]\nenabled = false\n${mcpConfig}`);
   const child = spawn(executable, ['app-server', '--stdio'], {cwd: home, env: isolatedEnv(home), stdio: ['pipe', 'pipe', 'pipe']});
   let buffer = '', stderr = '', exitCode: number | null = null, exited = false;
   const messages: any[] = [], waiters = new Map<number, {resolve(value: any): void; reject(error: Error): void}>();
@@ -151,13 +155,15 @@ export async function probeCodexChatgptModels(input: {root: string; baseUrl: str
     const prompt = input.toolRoundTrip
       ? `${CLI_TOOL_ROUNDTRIP}: follow the fixture model's three tool calls, then finish. Only run its printf marker command, apply its patch to fixture-patched.txt in this temporary working directory, and call the local MCP echo. Do not inspect or modify other files.`
       : 'Reply with fixture answer. Do not call tools or inspect files.';
-    const turn = await rpc(5, 'turn/start', {threadId: thread.result.thread.id, input: [{type: 'text', text: prompt}]});
+    const turn = await rpc(5, 'turn/start', {threadId: thread.result.thread.id, input: [{type: 'text', text: prompt}], ...(input.effort ? {effort: input.effort} : {})});
     if (turn.error) throw new Error(`app-server turn failed: ${JSON.stringify(turn.error)}`);
     const deadline = Date.now() + 15000;
     while (!messages.some(message => message.method === 'turn/completed') && Date.now() < deadline && !exited) await Bun.sleep(25);
     if (!messages.some(message => message.method === 'turn/completed')) throw new Error('app-server model dispatch did not complete');
     report = {pid: child.pid, accountType: account.result?.account?.type, accountError: account.error ?? null,
-      listedModels, modelListError: catalog.error ?? null, selectedModel: input.model,
+      listedModels, reasoningModels: (catalog.result?.data ?? []).filter((model: any) => model.model === input.model)
+        .map((model: any) => ({model:model.model,levels:model.supportedReasoningEfforts?.map((entry: any)=>entry.reasoningEffort),defaultEffort:model.defaultReasoningEffort})),
+      modelListError: catalog.error ?? null, selectedModel: input.model, selectedEffort: input.effort ?? null,
       notifications: messages.filter(message => ['turn/completed', 'error', 'item/started', 'item/completed'].includes(message.method)).map(message => {
         const item = message.params?.item;
         return {method: message.method, status: message.params?.turn?.status ?? item?.status, itemType: item?.type, itemId: item?.id,

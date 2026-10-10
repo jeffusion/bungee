@@ -56,7 +56,6 @@ describe('PluginManifestCatalog filesystem snapshot', () => {
     });
 
     expect(first.names()).toEqual([
-      'ai-transformer',
       'anthropic-request-sanitizer',
       'anthropic-tool-name-transformer',
       'chatgpt-oauth',
@@ -64,10 +63,10 @@ describe('PluginManifestCatalog filesystem snapshot', () => {
       'deepseek-reasoning-fix',
       'key-access',
       'key-rate-limit',
+      'llm-protocol-adapter',
       'local-accounts',
       'model-mapping',
       'models-dev',
-      'openai-messages-to-chat',
       'signature-repair',
       'token-budget',
       'token-metering',
@@ -212,7 +211,7 @@ describe('PluginManifestCatalog filesystem snapshot', () => {
     const linkedMain = tempRoot();
     const linkedDirectory = writePlugin(linkedMain, 'linked-main');
     rmSync(join(linkedDirectory, 'server/index.ts'));
-    symlinkSync(join(BUILTINS, 'ai-transformer/server/index.ts'), join(linkedDirectory, 'server/index.ts'));
+    symlinkSync(join(BUILTINS, 'llm-protocol-adapter/server/index.ts'), join(linkedDirectory, 'server/index.ts'));
     await expectCatalogError([linkedMain], 'regular file');
   });
 

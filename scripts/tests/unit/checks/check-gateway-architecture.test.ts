@@ -13,6 +13,27 @@ describe('gateway architecture AST guard',()=>{
     "type Private = import('@jeffusion/bungee-core/src/private').Private;",
   ])('rejects private plugin dependency: %s',source=>{expect(rules(plugin,source)).toContain('plugin-public-entry');});
   test.each([
+    "import { conversionService } from '../../llm-protocol-adapter/server/service';",
+    "export * from '@plugins/llm-protocol-adapter/server/index';",
+    "await import('../../llm-protocol-adapter/server/control.ts');",
+    "require('../../models-dev/server/catalog');",
+    "type Private = import('../../llm-protocol-adapter/server/service').ConversionService;",
+    "import Service = require('@plugins/llm-protocol-adapter/server/service');",
+    "import { privateValue } from '@plugins/example/../llm-protocol-adapter/server/service';",
+  ])('rejects cross-plugin private imports: %s', source => {
+    expect(rules(plugin, source)).toContain('plugin-public-contract');
+  });
+  test('allows public cross-plugin contracts and same-plugin implementation imports', () => {
+    for (const source of [
+      "import { CONVERSION_SERVICE_ID } from '../../llm-protocol-adapter/contract';",
+      "import type { ModelsDevCapabilities } from '../../models-dev/contract.ts';",
+      "export type { ConversionService } from '@plugins/llm-protocol-adapter/contract';",
+      "import { local } from '../server/service';",
+    ]) expect(rules(plugin, source)).toEqual([]);
+    expect(rules('plugins/llm-protocol-adapter/server/index.ts', "import { local } from '../server/service';")).toEqual([]);
+    expect(rules(plugin, "const note = 'import from ../../llm-protocol-adapter/server/index'; // ../../models-dev/server/catalog")).toEqual([]);
+  });
+  test.each([
     'async function onResponse(response: Response) { return response.json(); }',
     'async function onResponse(response: Response) { return response.clone().text(); }',
     'async function onResponse(response: Response) { return response.body.getReader(); }',

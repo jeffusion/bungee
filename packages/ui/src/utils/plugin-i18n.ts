@@ -11,12 +11,12 @@
  *
  * @example
  * // 插件定义：metadata.name: 'metadata.name'
- * // 翻译文件：plugins.ai-transformer.metadata.name: "AI Transformer"
- * getPluginText('metadata.name', 'ai-transformer', $_) // => "AI Transformer"
+ * // 翻译文件：plugins.llm-protocol-adapter.metadata.name: "LLM Protocol Adapter"
+ * getPluginText('metadata.name', 'llm-protocol-adapter', $_) // => "LLM Protocol Adapter"
  *
  * @example
  * // 非翻译键，直接返回
- * getPluginText('My Plugin', 'ai-transformer', $_) // => "My Plugin"
+ * getPluginText('My Plugin', 'llm-protocol-adapter', $_) // => "My Plugin"
  */
 export function getPluginText(
   text: string | undefined,

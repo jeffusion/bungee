@@ -25,7 +25,8 @@
     "icon": "alt_route"
   },
   "dependencies": {
-    "models-dev": "^1.0.0"
+    "models-dev": "^1.0.0",
+    "llm-protocol-adapter": "^1.0.0"
   },
   "services": {
     "consumes": [
@@ -58,21 +59,28 @@
         "kind": "local"
       },
       {
-        "plugin": "codex-router",
-        "id": "codex-router.history.v1",
+        "plugin": "llm-protocol-adapter",
+        "id": "llm-protocol-adapter.conversion.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "local"
+      },
+      {
+        "plugin": "llm-protocol-adapter",
+        "id": "llm-protocol-adapter.conversion.v1",
+        "version": 1,
+        "process": "worker",
+        "kind": "local"
+      },
+      {
+        "plugin": "llm-protocol-adapter",
+        "id": "llm-protocol-adapter.history.v1",
         "version": 1,
         "process": "worker",
         "kind": "rpc"
       }
     ],
-    "provides": [
-      {
-        "id": "codex-router.history.v1",
-        "version": 1,
-        "process": "control",
-        "kind": "rpc"
-      }
-    ]
+    "provides": []
   },
   "configSchema": [
     {
@@ -214,7 +222,6 @@
       "editor.toolsOff": "禁用工具调用",
       "editor.imagesOff": "禁用图片输入",
       "editor.reasoningOff": "禁用推理能力",
-      "editor.reasoningEffort": "传递推理强度（目标需支持）",
       "editor.increase": "增加上下文上限",
       "editor.decrease": "减少上下文上限",
       "editor.contextInvalid": "请输入正整数。",
@@ -262,7 +269,6 @@
       "editor.toolsOff": "Disable tool calls",
       "editor.imagesOff": "Disable image input",
       "editor.reasoningOff": "Disable reasoning",
-      "editor.reasoningEffort": "Forward reasoning effort (requires target support)",
       "editor.increase": "Increase context limit",
       "editor.decrease": "Decrease context limit",
       "editor.contextInvalid": "Enter a positive whole number.",

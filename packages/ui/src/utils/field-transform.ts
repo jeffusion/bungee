@@ -68,9 +68,9 @@ export function createFormatter(transform: FieldTransform): FormatFunction | nul
  * 创建 split 类型的 Parser
  *
  * @example
- * Input: "anthropic-openai"
- * Config: { type: 'split', separator: '-', fields: ['from', 'to'] }
- * Output: { from: "anthropic", to: "openai" }
+ * Input: "east-one"
+ * Config: { type: 'split', separator: '-', fields: ['region', 'zone'] }
+ * Output: { region: "east", zone: "one" }
  */
 function createSplitParser(transform: FieldTransform): ParseFunction {
   const { separator = '-', fields = [] } = transform;
@@ -101,9 +101,9 @@ function createSplitParser(transform: FieldTransform): ParseFunction {
  * 创建 split 类型的 Formatter
  *
  * @example
- * Input: { from: "anthropic", to: "openai" }
- * Config: { type: 'split', separator: '-', fields: ['from', 'to'] }
- * Output: "anthropic-openai"
+ * Input: { region: "east", zone: "one" }
+ * Config: { type: 'split', separator: '-', fields: ['region', 'zone'] }
+ * Output: "east-one"
  */
 function createSplitFormatter(transform: FieldTransform): FormatFunction {
   const { separator = '-', fields = [] } = transform;

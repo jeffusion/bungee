@@ -1,6 +1,5 @@
 import {createHash} from 'node:crypto';
-import {decodeResponsesRequest,ResponsesCodecError} from '@jeffusion/bungee-llms/plugin-api';
-import {historyRpc,historyClient,type HistoryClient} from './history-rpc';
+import {ADAPTER_PLUGIN,CONVERSION_SERVICE_ID,CONVERSION_VERSION,historyRpc,historyClient,type HistoryClient,type ConversionService} from '../../llm-protocol-adapter/contract';
 import {protocolAdapter} from './protocol';
 import { definePlugin, DataAdmissionError, type Plugin, type PluginInitContext, type PluginHooks } from '@jeffusion/bungee-core/plugin';
 import { MODELS_DEV_CAPABILITIES_SERVICE_ID, MODELS_DEV_CAPABILITIES_CONTRACT_VERSION, type ModelsDevCapabilitiesService } from '../../models-dev/contract';
@@ -16,10 +15,12 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
   private readonly bindings;
   private history!:HistoryClient;
   private catalog!: ModelsDevCapabilitiesService;
+  private conversion!:ConversionService;
   constructor(options?: { models?: unknown }) { this.bindings = parseBindings(options?.models); }
   async init(context: PluginInitContext) {
     if (context.scope?.type !== 'route') throw new Error('codex_router_requires_route_scope');
-    this.history=historyClient(context.services!.rpc!.consume('codex-router',historyRpc));
+    this.history=historyClient(context.services!.rpc!.consume(ADAPTER_PLUGIN,historyRpc));
+    this.conversion=context.services!.consume(ADAPTER_PLUGIN,CONVERSION_SERVICE_ID,CONVERSION_VERSION);
     this.catalog = context.services!.consume('models-dev', MODELS_DEV_CAPABILITIES_SERVICE_ID, MODELS_DEV_CAPABILITIES_CONTRACT_VERSION);
   }
   bodyRequirements(context: { method: string; url: URL }) {
@@ -33,7 +34,7 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       if (!binding) return;
       if (!targets.some(target => target.type === binding.target.type && target.id === binding.target.id)) throw new DataAdmissionError(422,'codex_router_target_unavailable');
       const protocol = binding.target.protocol;
-      const capabilities=this.catalog.model(binding);
+      const capabilities=this.conversion.resolveCapabilities({provider:binding.provider,model:binding.model,targetProtocol:protocol,restrictions:binding.capabilityOverrides});
       if(!capabilities || capabilities.contextWindow === null || !capabilities.inputModalities.includes('text'))throw new DataAdmissionError(503,'codex_router_model_unavailable');
       const scope=principal?.domain !== 'anonymous' && principal?.keyId ? createHash('sha256').update(JSON.stringify([principal,context.routeId,servingRevision ?? null,this.bindings])).digest('hex') : null;
       const input=structuredClone(context.body);
@@ -58,19 +59,17 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       if(!opaqueRestored && logicalInput.some((item:any)=>item?.encrypted_content || item?.type==='compaction'))throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
       const hasTools=input.tools?.length || logicalInput.some((item:any)=>item?.type==='additional_tools' && item.tools?.length);
       if(hasTools && (!capabilities.toolCall || binding.capabilityOverrides?.tools===false))throw new DataAdmissionError(422,'codex_router_tools_unsupported');
-      let toolNames;
       let diagnostics;
-      if(protocol!=='responses'){
-        try {
-          const decoded=decodeResponsesRequest(input,protocol,{omitOptionalWebSearch:true,reasoningEffort:capabilities.reasoning && binding.capabilityOverrides?.reasoningEffort===true,
-            reasoningHistory:capabilities.reasoning && binding.capabilityOverrides?.reasoning!==false,
-            anthropicThinkingBudget:undefined,maxOutputTokens:capabilities.outputLimit ?? undefined});
-          context.body=decoded.body;toolNames=decoded.toolNames;logicalInput=decoded.canonicalInput;
-          diagnostics=decoded.diagnostics;
-        }catch(error){if(error instanceof ResponsesCodecError)throw new DataAdmissionError(422,`codex_router_${error.code}`,undefined,{message:error.message,param:error.param});throw error;}
-        context.url.pathname=context.url.pathname.replace(/\/responses$/,protocol==='chat_completions'?'/chat/completions':'/messages');
-      }else context.body=input;
-      const adapter=protocolAdapter({protocol:protocol==='responses'?undefined:protocol,model:bindingSource(binding),toolNames,signal,
+      let session;
+      try {session=this.conversion.createSession({sourceProtocol:'responses',targetProtocol:protocol,model:binding.model,responseModel:bindingSource(binding),provider:binding.provider,profile:capabilities,selectedEffort:input.reasoning?.effort});} catch(error) {const e=error as any;if(typeof e.code==='string')throw new DataAdmissionError(422,`llm_adapter_${e.code}`,undefined,{message:e.message,param:e.param});throw error;}
+      try {
+        const decoded=session.convertRequest(input);context.body=structuredClone(decoded.body);
+        if(protocol!=='responses')logicalInput=structuredClone(decoded.canonicalHistory);
+        // Host logs may flush after the consumer lease is revoked during drain.
+        diagnostics=structuredClone(decoded.diagnostics);
+      } catch(error) {session.dispose();const e=error as any;if(typeof e.code==='string')throw new DataAdmissionError(422,`llm_adapter_${e.code}`,undefined,{message:e.message,param:e.param});throw error;}
+      if(protocol!=='responses')context.url.pathname=context.url.pathname.replace(/\/responses$/,protocol==='chat_completions'?'/chat/completions':'/messages');
+      const adapter=protocolAdapter({session,protocol,model:bindingSource(binding),signal,
         save:async(response,responseContext)=>{if(scope && typeof response.id==='string')await this.history.put({scope,id:response.id,value:{target:binding.target,origin:{provider:binding.provider,model:binding.model,upstreamId:responseContext?.upstreamId},items:[...logicalInput,...response.output]}},{signal,operationId:crypto.randomUUID()});}});
       return {target:binding.target,protocol,requiredUpstreamId,adapter,...(protocol!=='responses'?{canonicalInput:logicalInput,diagnostics}:{})};
     });
@@ -83,14 +82,7 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
     hooks.onResponse.tapPromise('codex-router.catalog', async (response, context) => {
       if (context.method !== 'GET' || !/\/models$/.test(context.originalUrl.pathname) || !response.ok) return response;
       const native = await context.bodyHandle!.json({id:'codex-router.catalog',mandatory:true});
-      const bindings=this.bindings.map(binding=>{
-        const protocol=binding.target.protocol;
-        return {...binding,capabilityOverrides:{...binding.capabilityOverrides,
-          ...(protocol==='anthropic_messages'?{images:false}:{}),
-          ...(protocol!=='responses' ? {reasoning:protocol==='chat_completions' ? binding.capabilityOverrides?.reasoningEffort===true : false}:{}),
-        }};
-      });
-      const body = mergeCatalog(native, bindings, this.catalog);
+      const body = mergeCatalog(native,this.bindings,this.conversion);
       const headers = new Headers(response.headers);
       for (const key of ['content-length','content-encoding','etag','last-modified']) headers.delete(key);
       headers.set('content-type','application/json');
