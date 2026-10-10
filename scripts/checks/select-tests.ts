@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { readFile, stat, writeFile, rm } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { readFile, stat, writeFile, rm, realpath, lstat } from 'node:fs/promises';
+import { resolve, dirname } from 'node:path';
 import { buildRelations, phases, selectTests, validatePlan, type Phase, type Snapshot, type TestPlan } from './test-selection';
 
 export async function git(root: string, args: string[], input?: string): Promise<Buffer> {
@@ -10,6 +10,19 @@ export async function git(root: string, args: string[], input?: string): Promise
   return Buffer.from(stdout);
 }
 const entries = (buffer: Buffer): string[] => buffer.toString('utf8').split('\0').filter(Boolean);
+async function requireOutside(root: string, path: string): Promise<void> {
+  try {
+    if ((await lstat(path)).isSymbolicLink()) throw new Error('Output must be outside the repository and not a file symlink');
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  // Check ancestors too: a repository-owned directory link must not hide an output's location.
+  for (let parent = path; ; parent = dirname(parent)) {
+    let actual: string | undefined;
+    try { actual = await realpath(parent); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    if (actual === root || actual?.startsWith(root + '/')) throw new Error('Output must be outside the repository');
+    if (dirname(parent) === parent) break;
+  }
+}
 async function commit(root: string, ref: string): Promise<string> {
   return (await git(root, ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`])).toString().trim();
 }
@@ -121,7 +134,10 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()): P
   }
   if (options.help) { process.stdout.write(help); return 0; }
   const root = (await git(cwd, ['rev-parse', '--show-toplevel'])).toString().trim();
-  for (const name of ['output','record']) if (options[name] && (resolve(root, String(options[name])) === root || resolve(root, String(options[name])).startsWith(root + '/'))) throw new Error(`--${name} must be outside the repository`);
+  const physicalRoot = await realpath(root);
+  for (const name of ['output','record']) if (options[name]) {
+    await requireOutside(physicalRoot, resolve(root, String(options[name])));
+  }
   if (options.plan) {
     if (['base','head','committed','full','run','output'].some(key => options[key])) throw new Error('--plan cannot be combined with selection options');
     const phase = options.phase as Phase;
