@@ -105,6 +105,12 @@ try {
   const panel = page.locator('article').filter({ has: widget });
   const refresh = () => panel.locator('header').getByRole('button');
   const ready = () => refresh().and(page.locator('[aria-busy="false"]')).waitFor();
+  const setViewport = async (width: number) => {
+    await page.setViewportSize({ width, height: 900 });
+    // Crossing the dashboard breakpoint replaces the card and widget instance.
+    await page.locator(width < 768 ? '.dashboard-mobile-card' : '.grid-stack-item')
+      .filter({ has: widget }).waitFor({ state: 'visible' });
+  };
   await page.goto(base); await page.getByTestId('page-dashboard').waitFor();
   await page.waitForFunction(() => typeof (window as any).refreshTestPlugins === 'function');
   assert.equal(await widget.count(), 0); assert.equal(lists, 0); assert.equal(gets, 0);
@@ -156,8 +162,7 @@ try {
   await widget.hover();
   await widget.getByRole('button', { name: 'Start account rotation', exact: true }).click();
   const snapshot = async (language: string, width: number, state: string) => {
-    await page.setViewportSize({ width, height: 900 });
-    await page.waitForTimeout(100);
+    await setViewport(width);
     await ready();
     await page.evaluate(language => (window as any).setTestLocale(language), language);
     await panel.locator('header').getByRole('button', { name: language === 'en' ? 'Refresh quota usage' : '刷新额度用量' }).waitFor();
@@ -215,14 +220,13 @@ try {
   };
   for (const language of ['en', 'zh-CN']) for (const width of [390, 900, 1440]) await snapshot(language, width, 'populated');
   await page.evaluate(() => (window as any).setTestLocale('en'));
-  await page.setViewportSize({ width: 390, height: 900 });
+  await setViewport(390);
   await page.evaluate(() => (window as any).setLongSummary(true));
   await panel.getByTestId('native-widget-summary').filter({ hasText: 'deliberately long' }).waitFor();
   assert(await panel.getByTestId('native-widget-summary').evaluate(element => element.scrollWidth > element.clientWidth && getComputedStyle(element).overflow === 'hidden'));
   await panel.locator('header').screenshot({ path: '/tmp/bungee-quota-header-long-summary.png' });
   await page.evaluate(() => (window as any).setLongSummary(false));
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.waitForTimeout(100); await ready();
+  await setViewport(1440); await ready();
   const rows = () => widget.getByTestId('quota-account');
   assert.equal(await rows().first().locator('[role="meter"]').count(), 2);
   assert.equal(await rows().nth(1).locator('[role="meter"]').count(), 1);
@@ -242,8 +246,7 @@ try {
   assert(await refresh().isDisabled()); assert.equal((await refresh().boundingBox())!.width, buttonWidth);
   assert.equal(await refresh().locator('svg, .animate-spin').count(), 0);
   for (const language of ['en', 'zh-CN']) for (const width of [900, 1440]) {
-    await page.setViewportSize({ width, height: 900 });
-    await page.waitForTimeout(100);
+    await setViewport(width);
     await page.evaluate(language => (window as any).setTestLocale(language), language);
     await panel.locator('header').getByRole('button', { name: language === 'en' ? 'Refresh quota usage' : '刷新额度用量' }).waitFor();
     assert.equal((await refresh().boundingBox())!.height, 21); assert.equal((await refresh().boundingBox())!.width, 21);
@@ -263,7 +266,7 @@ try {
   assert.equal(await rows().nth(4).getByTestId('quota-state').innerText(), 'Unavailable');
   // Multiple trusted touch moves exercise native gesture arbitration inside
   // the compact carousel's scrollable slide.
-  await page.setViewportSize({ width: 390, height: 900 });
+  await setViewport(390);
   await widget.waitFor(); await ready(); await widget.scrollIntoViewIfNeeded();
   const touchViewport = widget.locator('[id$="-viewport"]');
   await touchViewport.focus(); await touchViewport.press('Home');
@@ -275,7 +278,7 @@ try {
   await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   assert.equal(await activeAccount().getAttribute('data-carousel-slide'), '1', 'mobile quota accepts a continuous left swipe over account content');
   await touch.detach();
-  await page.setViewportSize({ width: 1440, height: 900 }); await page.waitForTimeout(200); await ready();
+  await setViewport(1440); await ready();
   // Resize the actual GridStack card: grouping follows available space, not
   // a fixed account count or an assumed row height.
   const resizeQuota = async (height: number, width = 15) => {
