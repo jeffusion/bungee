@@ -6,7 +6,7 @@ import { CanonicalStreamRenderer, CanonicalStreamValidator } from './stream';
 import { fields } from './validation';
 import { LLM_PROTOCOLS, type LLMProtocol, type ProtocolSession, type ProtocolSessionContext } from './types';
 export * from './types';
-export const PROTOCOL_CONVERSION_RULES_VERSION = '1.0.0';
+export const PROTOCOL_CONVERSION_RULES_VERSION = '1.0.1';
 export function describeProtocolConversion() {
   return {
     rulesVersion: PROTOCOL_CONVERSION_RULES_VERSION, protocols: [...LLM_PROTOCOLS], matrix: LLM_PROTOCOLS.flatMap(sourceProtocol => LLM_PROTOCOLS.map(targetProtocol => ({

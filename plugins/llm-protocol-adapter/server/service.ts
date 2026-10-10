@@ -1,7 +1,7 @@
 import { createProtocolSession, describeProtocolConversion, ResponsesCodecError, type ProtocolSessionContext } from '@jeffusion/bungee-llms/plugin-api';
 import type { ModelsDevCapabilitiesService } from '../../models-dev/contract';
 import type { CapabilityContext, ConversionService, EffectiveCapabilities, AdapterSession } from '../contract';
-export const REASONING_RULES_VERSION = '2026-10-10.1';
+export const REASONING_RULES_VERSION = '2026-10-10.2';
 const concrete = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 /** Interface restrictions/defaults, not a second model capability catalog.
  * Sources: docs.z.ai/api-reference/llm/chat-completion and
