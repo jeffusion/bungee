@@ -74,4 +74,4 @@ API、管理登录和 UI 贡献均需 manifest 声明。管理登录由选中的
 - 检查初始化、依赖和发布失败日志。已提交版本与 serving 版本不同，说明运行发布尚未完成；不要继续写入试图掩盖问题。
 - 隔离环境的构建、浏览器与真实进程验证入口见[开发指南](development.md)。
 
-典型实现：[model-mapping](../../plugins/model-mapping/server/index.ts)、[ai-transformer](../../plugins/ai-transformer/server/index.ts)、[控制面账户插件](../../plugins/local-accounts/server/control.ts)。
+典型实现：[model-mapping](../../plugins/model-mapping/server/index.ts)、[LLM 协议适配器](../../plugins/llm-protocol-adapter/server/index.ts)、[控制面账户插件](../../plugins/local-accounts/server/control.ts)。

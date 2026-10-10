@@ -13,7 +13,7 @@
 | `name`, `version` | 唯一名称、SemVer 版本；与导出构造器元数据一致 |
 | `artifactKind` | runtime 插件为 `runtime-plugin` |
 | `main` | worker 插件入口 |
-| `runtimeScope` | `scoped`（缺省）或 `global`；global 插件不作为路由绑定使用 |
+| `runtimeScope` | `scoped`（缺省）、`global` 或 `global-and-scoped`；双作用域插件自动发布全局服务，显式绑定运行自身配置，详见 [LLM 协议适配器](llm-protocol-adapter.md) |
 | `capabilities` | 实际使用的能力，例如 hooks、api、dynamicRuntimeLoad、controlPlane；由严格 parser 校验 |
 | `engines.bungee` | 可运行的宿主版本范围 |
 | `control.entry`, `control.rpc` | 控制面入口、声明的 bound-attempt RPC |
