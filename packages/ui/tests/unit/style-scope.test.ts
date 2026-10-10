@@ -20,25 +20,26 @@ function files(directory: string): string[] {
   }
 }
 
-test('UI and all plugin UI global styles and stylesheet imports stay within the frozen baseline', () => {
-  for (const file of roots.flatMap(files)) {
-    const name = relative(workspace, file).replaceAll('\\', '/');
-    const source = readFileSync(file, 'utf8');
-    if (file.endsWith('.svelte')) {
-      expect(componentStyleAttributes(source), `${name}: global/external style attributes are forbidden`).toEqual([]);
-      expect(templateStylesheetElements(source), `${name}: template/head global style elements are forbidden`).toEqual([]);
-    }
-    if (file.endsWith('.svelte') || styles.test(file)) {
-      const actual = globalStyleFingerprints(source, file.endsWith('.svelte'));
-      const entry = baseline.styles[name as keyof typeof baseline.styles];
-      expect(isOrderedStyleSubset(actual, entry?.fingerprints ?? []),
-        `${name}: unregistered/changed/reordered global CSS; use a scoped component or follow INDUSTRIAL_DESIGN_SYSTEM.md §3.4.7`).toBe(true);
-    }
-    for (const specifier of stylesheetImports(source, file)) {
-      expect(baseline.imports, `${name}: unregistered global stylesheet import ${specifier}`)
-        .toContainEqual({ file: name, specifier });
-    }
+test.each(roots.flatMap(files))('scoped styles and stylesheet imports: %s', (file) => {
+  const name = relative(workspace, file).replaceAll('\\', '/');
+  const source = readFileSync(file, 'utf8');
+  if (file.endsWith('.svelte')) {
+    expect(componentStyleAttributes(source), `${name}: global/external style attributes are forbidden`).toEqual([]);
+    expect(templateStylesheetElements(source), `${name}: template/head global style elements are forbidden`).toEqual([]);
   }
+  if (file.endsWith('.svelte') || styles.test(file)) {
+    const actual = globalStyleFingerprints(source, file.endsWith('.svelte'));
+    const entry = baseline.styles[name as keyof typeof baseline.styles];
+    expect(isOrderedStyleSubset(actual, entry?.fingerprints ?? []),
+      `${name}: unregistered/changed/reordered global CSS; use a scoped component or follow INDUSTRIAL_DESIGN_SYSTEM.md §3.4.7`).toBe(true);
+  }
+  for (const specifier of stylesheetImports(source, file)) {
+    expect(baseline.imports, `${name}: unregistered global stylesheet import ${specifier}`)
+      .toContainEqual({ file: name, specifier });
+  }
+});
+
+test('every frozen global style allowance has a reason', () => {
   for (const entry of Object.values(baseline.styles)) expect(entry.reason.length).toBeGreaterThan(0);
 });
 
