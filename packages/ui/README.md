@@ -25,9 +25,9 @@ Access `/#/design` in the browser to view the live design system showcase, inclu
 7. **No Ad Hoc Global Styles**: Global styles are forbidden by default, including `:global`, standalone stylesheets, CSS imports/injection and component rules in `app.css`. Exceptions must follow [the mandatory isolation rules](./docs/INDUSTRIAL_DESIGN_SYSTEM.md#347-mandatory-component-ownership-and-style-isolation); the frozen legacy baseline does not authorize new globals.
 
 ## Testing & CI
-- **Static Migration Guards**: Run `bun test src/migration-guards.test.ts` to verify architectural boundaries.
-- **Style Isolation Guard**: Run `bun test src/style-scope.test.ts` to reject unregistered global CSS across the UI and all plugin UI directories. This runs in normal CI.
-- **Playwright Smoke Tests**: Run `bun run test:ui:smoke` in the root directory. The Linux pull-request CI job runs it directly with strict page assertions. See [local browser commands](../../docs/guides/development.md#ui-smoke).
+- **Import Boundaries**: Run `bun test tests/unit/ui-boundaries.test.ts` to check actual imports and reactive translation guards.
+- **Style Isolation Guard**: Run `bun test tests/unit/style-scope.test.ts` to reject unregistered global CSS across the UI and all plugin UI directories. This runs in normal CI.
+- **Browser Regression**: After building, run `bun run test:browser` from the repository root. The Linux and macOS CI jobs install Chromium and run the full `bun run test` entry. See [local browser commands](../../docs/guides/development.md#ui-smoke).
 
 ## Configuration
 - **Theme**: Defined in `tailwind.theme.js`.

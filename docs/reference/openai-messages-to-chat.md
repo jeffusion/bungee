@@ -90,7 +90,7 @@
 
 相关测试：
 
-- `packages/core/tests/plugins/openai-messages-to-chat.test.ts`
-- `packages/core/tests/plugins/openai-messages-to-chat.responses.test.ts`（responses 降级与回升路径验证）
+- `plugins/openai-messages-to-chat/tests/integration/openai-messages-to-chat.test.ts`
+- `plugins/openai-messages-to-chat/tests/integration/openai-messages-to-chat-responses.test.ts`（responses 降级与回升路径验证）
 
 该缓存最多 500 条，不跨 Worker 或重启恢复；需要跨 Worker 的受控续聊时使用 Codex Router。资源型端点限制仍有效，不能把缓存当作完整 Responses 持久化服务。

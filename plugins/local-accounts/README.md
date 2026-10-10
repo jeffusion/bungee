@@ -23,4 +23,4 @@
 
 管理员、会话和限流分别存储，认证只触碰当前会话。管理员 generation 撤销旧会话；failureEpoch 使旧限流状态失效。普通验证使用 CAS，不记录完整账户历史。状态不符合当前记录 schema 时拒绝初始化，不在运行中自动选择身份或转换账户。
 
-验证：`bun test plugins/local-accounts/tests/control.test.ts`。
+验证：`bun test plugins/local-accounts/tests/integration/control.test.ts`。

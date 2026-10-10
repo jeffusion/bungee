@@ -11,6 +11,13 @@
 - 不将凭据写入项目、日志或验证产物；不手工修改生成文件。
 - 本地测试、构建、浏览器检查、实际提供商验证和生产部署是不同证据；只报告实际完成的检查及其范围。
 
+### 测试维护
+
+- 测试入口放所属包、插件或工具的 `tests/{unit,integration,browser}/`；跨模块流程放根 `tests/`。按子系统组织，文件名用连字符，不重复写层级后缀。
+- 新增测试前查找既有覆盖；辅助代码、被加载夹具及运行产物分别管理。具体方法读取 scripts skill。
+- 禁止截取源码函数执行、复制生产算法计算预期值，以及为普通修复新增一次性测试框架、探针、报告或任务目录。
+- 不擅自缩减默认回归范围、增加跳过、重试或额外门禁；单元测试不得启动数据库、服务、子进程或浏览器。
+
 ## 最小项目入口
 
 Bungee 是 Bun/TypeScript 反向代理，包含独立 ingress、master/control、worker 和插件能力。
@@ -31,7 +38,7 @@ Bungee 是 Bun/TypeScript 反向代理，包含独立 ingress、master/control�
 | 工作 | 先读取 |
 | --- | --- |
 | 文档编写、审查、移动或删除 | [.agents/skills/documentation/SKILL.md](.agents/skills/documentation/SKILL.md)，再读 [docs/AGENTS.md](docs/AGENTS.md) 及相关文档 |
-| 工具脚本编写与整理 | [.agents/skills/scripts/SKILL.md](.agents/skills/scripts/SKILL.md)，再读调用入口及相关工具 |
+| 工具脚本或测试编写与整理 | [.agents/skills/scripts/SKILL.md](.agents/skills/scripts/SKILL.md)，再读调用入口及相关工具 |
 | 核心、持久化或生命周期 | [packages/core/AGENTS.md](packages/core/AGENTS.md)，再从文档索引定位架构与契约 |
 | CLI | [packages/cli/AGENTS.md](packages/cli/AGENTS.md) |
 | 协议转换 | [packages/llms/AGENTS.md](packages/llms/AGENTS.md) |

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { defaultLogFilters, countLogFilters } from '$components/domain/log/filter-state';
   import { onMount, onDestroy } from 'svelte';
   import { _ } from '$i18n';
   import { queryChains, exportLogs, type ChainEntry, type LogQueryParams, type TransportOutcome } from '$api/logs';
@@ -269,19 +270,9 @@ $: refreshIntervalOptions = $isLoading ? [] : [
 
   // 清除所有筛选
   function clearAllFilters() {
-    searchTerm = '';
-    method = '';
-    statusFilter = '';
-    transportFilter = undefined;
-    requestTypeFilter = '';
-    hasRetryFilter = undefined;
-    timeRangeType = 'recent';
-    recentHours = 1;
-    customStartTime = '';
-    customEndTime = '';
-    sortBy = 'timestamp';
-    sortOrder = 'desc';
-    page = 1;
+    ({ searchTerm, method, statusFilter, transportFilter, requestTypeFilter,
+      hasRetryFilter, timeRangeType, recentHours, customStartTime, customEndTime,
+      sortBy, sortOrder, page } = defaultLogFilters());
   }
 
   // 检查是否有激活的过滤条件
@@ -395,16 +386,9 @@ $: refreshIntervalOptions = $isLoading ? [] : [
   }
 
   // 计算激活的筛选条件数量
-  $: activeFiltersCount = [
-    searchTerm.trim(),
-    method,
-    statusFilter,
-    transportFilter !== undefined,
-    requestTypeFilter,
-    hasRetryFilter !== undefined,
-    timeRangeType !== 'all' && timeRangeType !== 'recent' || recentHours !== 1,
-    sortBy !== 'timestamp' || sortOrder !== 'desc'
-  ].filter(Boolean).length;
+  $: activeFiltersCount = countLogFilters({ searchTerm, method, statusFilter, transportFilter,
+    requestTypeFilter, hasRetryFilter, timeRangeType, recentHours, customStartTime, customEndTime,
+    sortBy, sortOrder, page });
 
   // 响应式查询 - 当任何查询参数改变时加载日志
   $: page, limit, searchTerm, method, statusFilter, transportFilter, requestTypeFilter, hasRetryFilter, sortBy, sortOrder, timeRangeType, recentHours, customStartTime, customEndTime, loadLogs();

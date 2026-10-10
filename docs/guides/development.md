@@ -43,8 +43,12 @@ Root scripts from `package.json`:
 | Script | Purpose |
 |---|---|
 | `bun dev` | run core in watch mode |
-| `bun test` | run workspace tests |
-| `bun run build` | check architecture + build types + llms + widgets + UI + bundled UI + core + CLI |
+| `bun run test` | build current artifacts, then run unit, integration and browser regressions |
+| `bun run test:fast` | run unit tests without databases, services, child processes or browsers |
+| `bun run test:integration` | run tests with isolated local resources |
+| `bun run test:browser` | run real browser tests with owned local services |
+| `bun run benchmark` | measure synthetic body resource usage |
+| `bun run build` | build types + llms + widgets + UI + bundled UI + core + CLI |
 | `bun run build:full` | build + binary packaging |
 | `bun run build:types` | build shared types package |
 | `bun run build:ui` | build UI package |
@@ -64,8 +68,8 @@ bun install
 bun packages/core/src/main.ts --initialize-config /tmp/bungee-dev/data/bungee.db
 BUNGEE_CONFIG_DB_PATH=/tmp/bungee-dev/data/bungee.db BUNGEE_ACCESS_DB_PATH=/tmp/bungee-dev/logs/access.db bun run dev
 
-# 3) Run tests
-bun test
+# 3) Run the complete regression
+bun run test
 ```
 
 Dashboard default endpoint:
@@ -97,18 +101,26 @@ This ensures UI and runtime artifacts are synchronized.
 
 ## 6) Testing Strategy
 
-- Unit + integration tests are under `packages/core/tests`
-- Package-local tests cover CLI, UI and reusable conversion code; root `tests/` contains cross-process integration, browser and benchmark entry points
-- CI flow builds UI assets and then executes `bun test`
+Tests belong to the module whose responsibility they primarily verify: `packages/<package>/tests/`, `plugins/<plugin>/tests/`, or `scripts/tests/`. Cross-module workflows belong to root `tests/`. Each owner uses only the directories it needs:
+
+- `unit/`: pure behavior with injected fakes; no real database, listener, subprocess or browser.
+- `integration/`: real local databases, services and process contracts.
+- `browser/`: real rendered components and user interactions; services are shared within a file and contexts are isolated between cases.
+- `helpers/`: explicit setup, waiting and cleanup; importing a helper must not allocate resources.
+- `fixtures/`: data and components loaded by the tested system.
+
+Use a descriptive kebab-case `<behavior>.test.ts`; the directory identifies its layer. Tests never import other test entries, and production code never imports tests. Keep snapshots beside their tests; keep databases, screenshots, logs and measurement results outside the checkout.
+
+`bun run test` builds before all three categories. Install Chromium with `bunx playwright install chromium`. Run an initial build before using category commands directly, and rebuild whenever the tested SDK or artifact changes. Bun discovers categories by path substring, with helper, fixture, manual and generated directories excluded in `bunfig.toml`; there is no separate test list.
+
+CI installs Chromium and runs the same complete entry on Linux and macOS. The build command only builds; architecture assertions run with unit tests. `bun run check:architecture` remains available for focused checks.
 
 ### CI and releases
 
 Development branches submit PRs directly to `main`. CI runs only on pull
 requests targeting `main`, including subsequent updates to those PRs.
 The Linux and macOS test jobs must pass before a PR can merge into `main`,
-and its branch must be up to date with `main`. Windows CI is temporarily
-disabled: its matrix entry, process-regression step and release-check entry
-are kept commented out for restoration.
+and its branch must be up to date with `main`. Windows CI is disabled; the active matrix covers Linux and macOS.
 
 A push to `main` starts Release directly, without rerunning the test matrix.
 Before publishing, Release verifies that the pushed commit is the final commit
@@ -131,9 +143,7 @@ to the selected commit before invoking semantic-release.
 Recommended local pre-PR checks:
 
 ```bash
-bun run build:ui
-bun run bundle:ui
-bun test
+bun run test
 ```
 
 ---
@@ -144,7 +154,7 @@ bun test
 - Keep PRs focused and incremental
 - Add/adjust tests for behavior changes
 - Update docs when configuration or operational behavior changes
-- UI and plugin UI changes must follow [component ownership and style isolation](../../packages/ui/docs/INDUSTRIAL_DESIGN_SYSTEM.md#347-mandatory-component-ownership-and-style-isolation): extract repeated DOM into shared components and keep component CSS scoped. Ad hoc global styles are forbidden; any genuine exception needs a documented reason, narrow scope, explicit review and browser verification. `bun test packages/ui/src/style-scope.test.ts` enforces the frozen global-style baseline in normal CI.
+- UI and plugin UI changes must follow [component ownership and style isolation](../../packages/ui/docs/INDUSTRIAL_DESIGN_SYSTEM.md#347-mandatory-component-ownership-and-style-isolation): extract repeated DOM into shared components and keep component CSS scoped. Ad hoc global styles are forbidden; any genuine exception needs a documented reason, narrow scope, explicit review and browser verification. `bun test packages/ui/tests/unit/style-scope.test.ts` enforces the frozen global-style baseline in normal CI.
 
 ### Investigating intermittent shutdown failures
 
@@ -203,28 +213,31 @@ The release tool resolves the repository root from its own location. `--dry-run`
 
 ### UI smoke
 
-Start the UI development server in another terminal, then run the fixture-backed check:
+After building and installing Chromium:
 
 ```bash
-cd packages/ui
-bun run dev --host 127.0.0.1 --port 5173
+bun test --isolate tests/browser/ui-smoke.test.ts
 ```
 
-```bash
-bun run test:ui:smoke --base-url http://127.0.0.1:5173 --strict-testids --evidence-dir /tmp/bungee-ui-smoke
-```
-
-The smoke tool mocks management APIs and checks rendered routes, login, page errors and screenshots. It proves UI behavior under fixtures; it does not prove production authentication or provider connectivity. The default output is ignored `test-results/ui-smoke`; `UI_SMOKE_EVIDENCE_DIR` can override it.
+The test starts its local UI service and mocks management APIs. It verifies rendered routes, login, page errors and screenshots; it does not establish production authentication or provider connectivity. The service and browser close on exit. Evidence uses temporary storage outside the checkout.
 
 ### Built runtime and storage
 
-After `bun run build`, validate isolated JS and native artifacts separately:
+The default browser category includes the built JS runtime and storage check:
 
 ```bash
-bun tests/browser/storage-acceptance-playwright.ts
-bun tests/browser/storage-acceptance-playwright.ts --binary /absolute/path/to/bungee-linux
+bun test --isolate tests/browser/storage-acceptance.test.ts
 ```
 
-The tool creates private temporary storage and a local upstream, verifies management login, an actual proxy response, restart and session recovery, then checks cleanup. Failure retains its fixture for diagnosis; never supply production data as test input. Passing the JS run does not establish native or other-platform acceptance.
+It creates private temporary storage and a local upstream, verifies management login, an actual proxy response, restart and session recovery, then checks owned process exit and port release. A failed run retains its private fixture for diagnosis. Passing JS tests does not establish native or other-platform acceptance.
 
-`bun tests/browser/plugin-business-browser-acceptance.ts --evidence-dir /tmp/bungee-plugin-browser` exercises plugin management with an isolated runtime and controlled upstream; it also downloads the public models.dev catalog, so it needs network access. It does not call paid model providers. Package-local browser checks remain under `packages/ui/tests/`, including NumberInput, scrolling, route editors and dashboard ownership. Use their documented environment inputs rather than personal ports or directories. All browser evidence must distinguish fixtures from real provider calls.
+Native and external-service acceptance remains manual:
+
+```bash
+bun tests/manual/storage-native-acceptance.ts /absolute/path/to/bungee-linux
+bun tests/manual/plugin-business-browser-acceptance.ts --evidence-dir /tmp/bungee-plugin-browser
+```
+
+The plugin business check downloads the public models.dev catalog and requires network access; it does not call paid model providers. Header and publication acceptance tools under `tests/manual/` require a disposable loopback backend and their declared environment inputs. They are excluded from automatic discovery. Read their ownership checks before using them, and never pass production data or credentials.
+
+Package-local browser checks include NumberInput, scrolling, route editors and dashboard widget ownership. Use `bun test --isolate <path-to-test>` for a focused file. All browser evidence must distinguish mocked APIs, local real gateways and external providers.

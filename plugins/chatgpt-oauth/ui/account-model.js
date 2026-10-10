@@ -177,3 +177,28 @@ export function errorCode(error) {
 }
 /** Returns a translation key; protocol codes remain unchanged. @param {unknown} error */
 export const errorText = error => `errors.${errorCode(error)}`;
+
+/** @param {{usage?: ReturnType<typeof accountUsage>}} row */
+export function creditCount(row) {
+    if (!row.usage) return undefined;
+    for (const state of ['fresh', 'stale']) {
+      for (const section of [row.usage.resetCredits, row.usage.usage]) {
+        if (section.state === state && section.value?.availableCount !== undefined) return section.value.availableCount;
+      }
+    }
+    return undefined;
+  }
+/** @param {{account: ReturnType<typeof accountSummary>, usage?: ReturnType<typeof accountUsage>, error?: string}} row */
+export function usageState(row, busy = false, notice = '') {
+    if (row.account.status !== 'active') return 'unavailable';
+    const hasSnapshot = !!(row.usage?.usage.value || row.usage?.resetCredits.value);
+    if (row.error || (notice && notice !== 'ui.widgetPartialAccounts')) return hasSnapshot ? 'stale' : 'unavailable';
+    if (!row.usage) return busy ? 'loading' : 'unavailable';
+    if (!hasSnapshot) return 'unavailable';
+    const { usage, resetCredits } = row.usage;
+    if (usage.state === 'stale' || resetCredits.state === 'stale') return 'stale';
+    if (usage.state === 'unavailable' && resetCredits.state === 'unavailable') return 'stale';
+    const windows = /** @type {Array<{usedPercent?:unknown}>} */ ([usage.value?.primary, usage.value?.secondary].filter(Boolean));
+    if (usage.state !== 'fresh' || resetCredits.state !== 'fresh' || !windows.length || windows.some(window => !(typeof window?.usedPercent === 'number' && Number.isFinite(window.usedPercent) && window.usedPercent >= 0 && window.usedPercent <= 100)) || creditCount(row) === undefined) return 'partial';
+    return 'fresh';
+  }

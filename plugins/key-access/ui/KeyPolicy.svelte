@@ -8,7 +8,7 @@
   import { keysApi, type ApiKey } from '$api/keys';
   import { PanelCard, IndustrialDialog, LoadingIndicator, StatusBadge, SegmentedControl, BSwitch } from '$components/industrial';
   import { keyStatus, modelPatterns, latestRequest } from '$components/domain/credentials/policy-state';
-  import { createdCredential, publicationMessage } from './key-flow';
+  import { createdCredential, publicationMessage, keyApplied, renderMessage, type Message } from './key-flow';
   let { pluginName = 'key-access' }: {pluginName?:string;apiBase?:string} = $props();
   let tab = $state('keys'), keys = $state<ApiKey[]>([]), routes = $state<{id:string;path:string}[]>([]), protectedIds = $state<string[]>([]);
   let loading = $state(true), busy = $state(false), error = $state<Message | null>(null), status = $state<Message | null>(null), ready = $state(false), inactive = $state(false);
@@ -18,14 +18,11 @@
   let routeConfigOpen = $state(false), selectedRoute = $state<{id:string;path:string}|null>(null);
   let routeKeyBindings = $state<Record<string,{id:string;name:string}[]>>({});
   let unrestrictedKeyIds = $state<string[]>([]);
-  const isKeyApplied = (routeId:string, keyId:string) => unrestrictedKeyIds.includes(keyId) || !!routeKeyBindings[routeId]?.some(key => key.id === keyId);
-  type Message = { key: string; values?: Record<string, string | number | string[] | Message>; append?: Message };
+  const isKeyApplied = (routeId:string, keyId:string) => keyApplied(routeId, keyId, unrestrictedKeyIds, routeKeyBindings);
   const message = (key: string, values?: Message['values']): Message => ({ key, values });
   const t = (key: string, values?: Record<string, string | number>) => $isLoading ? '' : getPluginText(key, pluginName, (id, options) => $_(id, { ...options, values }));
   function displayMessage(value: Message | null): string {
-    if (!value) return '';
-    const values = Object.fromEntries(Object.entries(value.values ?? {}).map(([key, item]) => [key, Array.isArray(item) ? new Intl.ListFormat($locale ?? undefined).format(item) : typeof item === 'object' ? displayMessage(item) : item]));
-    return [t(value.key, values), value.append ? displayMessage(value.append) : ''].filter(Boolean).join(' ');
+    return renderMessage(value, $locale, t);
   }
   class LocalizedError extends Error {
     readonly content: Message;

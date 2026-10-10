@@ -1,0 +1,1 @@
+import { readable } from 'svelte/store'; export const _ = readable(key => key);
