@@ -19,8 +19,7 @@ Choose the section that matches your task. Package and plugin READMEs describe t
 - [CLI commands](reference/cli.md)
 - [Plugin SDK and manifest](reference/plugin-api.md)
 - [Request statistics](reference/statistics.md)
-- [AI protocol conversion](reference/ai-protocol-conversion.md)
-- [Messages and Responses to Chat adapter](reference/openai-messages-to-chat.md)
+- [LLM protocol adapter](reference/llm-protocol-adapter.md)
 
 ## Architecture
 
