@@ -1,3 +1,4 @@
+import type { PluginRuntimeScope } from '@jeffusion/bungee-types';
 import { validateEngineRange } from './plugin-manifest-catalog/manifest-semver';
 import { assertSupportedServiceDeclarations, isCrossProcessSelfService } from './plugin-services/contracts';
 import { PluginManifestCatalogError } from './plugin-manifest-catalog/parse-utils';
@@ -8,7 +9,7 @@ export interface PluginDependencyManifest {
   readonly version: string;
   readonly dependencies?: Readonly<Record<string, string>>;
   readonly services?: PluginServiceDeclarations;
-  readonly runtimeScope?: 'global' | 'scoped';
+  readonly runtimeScope?: PluginRuntimeScope;
   readonly capabilities?: readonly string[];
   readonly control?: unknown;
   readonly ingress?: unknown;
@@ -26,7 +27,7 @@ export class PluginDependencyGraph {
     const records = new Map(Array.from(manifests, manifest => [manifest.name, manifest]));
     const dependencies = new Map<string, readonly string[]>();
     for (const [name, manifest] of records) {
-      if (manifest.services?.provides?.some(service => service.process !== 'control' && (service.scope ?? 'global') === 'global') && manifest.runtimeScope !== 'global') throw new PluginManifestCatalogError(`${name}.services`, 'global service providers must be global');
+      if (manifest.services?.provides?.some(service => service.process !== 'control' && (service.scope ?? 'global') === 'global') && manifest.runtimeScope !== 'global' && manifest.runtimeScope !== 'global-and-scoped') throw new PluginManifestCatalogError(`${name}.services`, 'global service providers must be global');
       if (Object.hasOwn(manifest, 'optionalDependencies')) throw new PluginManifestCatalogError(`${name}.optionalDependencies`, 'optional dependencies are not supported');
       try { assertSupportedServiceDeclarations(manifest.services ?? {}); }
       catch (error) { throw new PluginManifestCatalogError(`${name}.services`, (error as Error).message); }

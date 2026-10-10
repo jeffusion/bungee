@@ -790,6 +790,16 @@ export async function executeForward(
     for (const [key,value] of Object.entries(ctx.headers)) hookHeaders.set(key,value);
   }
 
+  // Strict plugin validation observes a frozen final representation before acquiring
+  // an upstream credential or opening a connection, including repair/failover attempts.
+  const validation = Object.freeze({method:requestSnapshot.method, originalUrl,
+    clientIP, requestId, routeId, upstreamId:upstream_id, url:targetUrlForRequest.href,
+    model:isObjectBody(finalBody) && typeof finalBody.model==='string' ? finalBody.model : null,
+    body:immutableSnapshot(finalBody), attemptId:attemptOptions?.attemptId??requestId, signal:requestSignal});
+  for(const phase of [phaseAwareHooks?.routePhase,phaseAwareHooks?.servicePhase,phaseAwareHooks?.upstreamPhase,phaseAwareHooks?.dispatchAdapter]) {
+    await phase?.hooks.onValidateOutbound.promise(validation);
+  }
+
   // Hooks receive mutable URL objects; fetch and credential checks use this private copy.
   if (managedCredential) stripCredentialHeaders(hookHeaders, managedCredential.policy);
   stripHopHeaders(hookHeaders);

@@ -1,4 +1,4 @@
-import type { PluginConfigValue, Sha256Digest } from '@jeffusion/bungee-types';
+import type { PluginConfigConstraint, PluginConfigValue, Sha256Digest } from '@jeffusion/bungee-types';
 import { fieldValueSatisfies } from '../plugin-manifest-catalog/plugin-field-value';
 import type { ReadonlyPluginConfigField } from '../plugin-manifest-catalog/types';
 import { type JsonObject, type ValidationContext } from './validation';
@@ -7,6 +7,7 @@ export interface ConfigurationCompileOptions {
   /** Legacy auth is accepted only when reconstructing historical configuration. */
   readonly rejectLegacyAuth?: boolean;
   readonly pluginDependencies?: import('../plugin-dependencies').PluginDependencyGraph;
+  readonly pluginConstraints?: ReadonlyMap<string, readonly PluginConfigConstraint[]>;
   readonly pluginSchemas: ReadonlyMap<string, readonly ReadonlyPluginConfigField[]>;
   readonly globalPlugins?: ReadonlySet<string>;
   readonly availablePlugins?: ReadonlySet<string>;

@@ -27,6 +27,7 @@ import type { PluginDependencyGraph } from './plugin-dependencies';
  * - 无 acquire/release，无 reset 调用
  */
 
+import { isAutomaticGlobalProvider } from './plugin-runtime-config';
 import { logger } from './logger';
 import { PluginServiceCleanupError, PluginServiceHost } from './plugin-services';
 import type {
@@ -768,6 +769,28 @@ export class ScopedPluginRegistry {
 
   // ============ 实例创建 ============
 
+  private validatedPluginOptions(pluginClass: PluginClass, pluginConfig: PluginConfig, scope: PluginScope): Record<string, any> {
+    // 获取配置（应用默认值）
+    let config = pluginConfig.options || {};
+    if (pluginClass.configSchema && pluginClass.configSchema.length > 0) {
+      // 应用默认值
+      config = applyDefaults(config, pluginClass.configSchema);
+
+      // 验证配置
+      const validation = validatePluginConfig(config, pluginClass.configSchema, pluginConfig.name, {
+        skipRequired: scope.type === 'global' && isAutomaticGlobalProvider(pluginConfig),
+      });
+      if (!validation.valid) {
+        const errorMessages = validation.errors.map(e => `  - ${e.field}: ${e.message}`).join('\n');
+        throw new Error(
+          `Invalid config for plugin "${pluginConfig.name}":\n${errorMessages}`
+        );
+      }
+    }
+
+    return config;
+  }
+
   /**
    * 创建插件处理器实例
    *
@@ -787,26 +810,16 @@ export class ScopedPluginRegistry {
     const pluginClass = await this.ensurePluginClassLoaded(pluginConfig);
     const effectivePluginName = pluginConfig.name || pluginClass.name;
 
-    // 获取配置（应用默认值）
-    let config = pluginConfig.options || {};
-    if (pluginClass.configSchema && pluginClass.configSchema.length > 0) {
-      // 应用默认值
-      config = applyDefaults(config, pluginClass.configSchema);
-
-      // 验证配置
-      const validation = validatePluginConfig(config, pluginClass.configSchema, effectivePluginName);
-      if (!validation.valid) {
-        const errorMessages = validation.errors.map(e => `  - ${e.field}: ${e.message}`).join('\n');
-        throw new Error(
-          `Invalid config for plugin "${effectivePluginName}":\n${errorMessages}`
-        );
-      }
-    }
+    const config = this.validatedPluginOptions(pluginClass, pluginConfig, scope);
 
     // 创建初始化上下文（包含 scope 信息）
     let createdHandler: PluginHandler;
     try {
       const initContext = await this.createInitContext(effectivePluginName, config, scope);
+      Object.defineProperty(initContext, 'initializationKind', {
+        value: scope.type === 'global' && isAutomaticGlobalProvider(pluginConfig) ? 'automatic-provider' : 'configured',
+        enumerable: true,
+      });
       // The real handler initialization runs inside a host-minted bootstrap
       // frame: a starting instance may only use explicitly bootstrap-allowed
       // methods, and any nested local/RPC consumption carries that purpose.
@@ -1779,8 +1792,10 @@ export class ScopedPluginRegistry {
             ? await this.loadPluginClass(pluginConfig.path)
             : await this.ensurePluginClassLoaded(pluginConfig);
           const scope: PluginScope = { type: 'route', routeId };
-          const initContext = await this.createInitContext(pluginClass.name, pluginConfig.options || {}, scope);
-          const handler = await pluginClass.createHandler(pluginConfig.options || {}, initContext);
+          const config = this.validatedPluginOptions(pluginClass, pluginConfig, scope);
+          const initContext = await this.createInitContext(pluginClass.name, config, scope);
+          Object.defineProperty(initContext, 'initializationKind', { value: 'configured', enumerable: true });
+          const handler = await pluginClass.createHandler(config, initContext);
           assertBodyContract(handler);
           this.serviceHost.markReady(pluginClass.name, getScopeKey(scope));
 
@@ -1858,8 +1873,10 @@ export class ScopedPluginRegistry {
             ? await this.loadPluginClass(pluginConfig.path)
             : await this.ensurePluginClassLoaded(pluginConfig);
           const scope: PluginScope = { type: 'upstream', routeId, upstreamId };
-          const initContext = await this.createInitContext(pluginClass.name, pluginConfig.options || {}, scope);
-          const handler = await pluginClass.createHandler(pluginConfig.options || {}, initContext);
+          const config = this.validatedPluginOptions(pluginClass, pluginConfig, scope);
+          const initContext = await this.createInitContext(pluginClass.name, config, scope);
+          Object.defineProperty(initContext, 'initializationKind', { value: 'configured', enumerable: true });
+          const handler = await pluginClass.createHandler(config, initContext);
           assertBodyContract(handler);
           this.serviceHost.markReady(pluginClass.name, getScopeKey(scope));
 
