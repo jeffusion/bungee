@@ -13,7 +13,7 @@ export default class CodexRouterProcessProbe {
           controls: Object.fromEntries(['include', 'store', 'stream', 'reasoning', 'text', 'tool_choice', 'parallel_tool_calls', 'background', 'truncation', 'service_tier'].filter(key => key in body).map(key => [key, body[key]])),
           inputShape: Array.isArray(body.input) ? body.input.map((item: any) => ({type: item.type, role: item.role, callId: item.call_id, name: item.name, namespace: item.namespace,
             outputType: typeof item.output, contentTypes: Array.isArray(item.content) ? item.content.map((part: any) => part.type) : typeof item.content})) : typeof body.input,
-          toolShape: body.tools?.map((tool: any) => ({type: tool.type, name: tool.name, format: tool.format?.type,
+          toolShape: body.tools?.map((tool: any) => ({type: tool.type, name: tool.name, format: tool.format?.type, externalWebAccess: tool.external_web_access,
             children: tool.tools?.map((child: any) => ({type: child.type, name: child.name, parameterKeys: Object.keys(child.parameters?.properties ?? {})}))}))};
         appendFileSync(join(dirname(process.env.BUNGEE_CONFIG_DB_PATH), '..', 'cli-input-shapes.jsonl'), `${JSON.stringify(shape)}\n`);
       }

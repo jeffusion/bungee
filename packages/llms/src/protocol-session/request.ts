@@ -397,7 +397,7 @@ export function convertProtocolRequest(raw: unknown, context: ProtocolSessionCon
   const b = canonicalRequest(raw, context.sourceProtocol, context.model);
   if(context.streaming!==undefined){bool(context.streaming,'context.streaming');if(b.stream!==undefined&&b.stream!==context.streaming)fail('invalid_payload','Request stream mode disagrees with transport context','stream');b.stream=context.streaming;}
   validateCanonical(b);
-  const cap = { ...context.capabilities, omitOptionalWebSearch: false, preserveToolIdentityDescription: true, preserveRefusalContent: true }, policy = context.reasoningPolicy;
+  const cap = { ...context.capabilities, omitOptionalWebSearch: true, preserveToolIdentityDescription: true, preserveRefusalContent: true }, policy = context.reasoningPolicy;
   const reasoning = b.reasoning === undefined ? undefined : record(b.reasoning, 'reasoning');
   const sourceThinking = b.sourceThinking;
   delete b.sourceThinking;

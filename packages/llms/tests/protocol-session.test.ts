@@ -49,7 +49,7 @@ function code(fn: () => unknown, value: string, param?: string) {
   }
 }
 describe('pure protocol sessions, local fixtures for the complete declared matrix', () => {
-  test('description exposes 4 passthrough, 10 conversions, 2 unsupported pairs', () => { const d = describeProtocolConversion(); expect(d.rulesVersion).toBe('1.0.0'); expect(d.matrix.filter(x => x.mode === 'convert')).toHaveLength(10); expect(d.matrix.filter(x => x.mode === 'passthrough')).toHaveLength(4); expect(d.matrix.filter(x => x.mode === 'unsupported')).toHaveLength(2); });
+  test('description exposes 4 passthrough, 10 conversions, 2 unsupported pairs', () => { const d = describeProtocolConversion(); expect(d.rulesVersion).toBe('1.0.1'); expect(d.matrix.filter(x => x.mode === 'convert')).toHaveLength(10); expect(d.matrix.filter(x => x.mode === 'passthrough')).toHaveLength(4); expect(d.matrix.filter(x => x.mode === 'unsupported')).toHaveLength(2); });
   for (const source of LLM_PROTOCOLS)
     for (const target of LLM_PROTOCOLS) {
       const pair = describeProtocolConversion().matrix.find(x => x.sourceProtocol === source && x.targetProtocol === target)!;
@@ -198,7 +198,55 @@ test('provider signatures, unknown constraints and guessed thinking mappings fai
   const schema = { ...request('chat_completions'), response_format: { type: 'json_schema', json_schema: { name: 'result', schema: { type: 'object' }, unknown_constraint: true } } }; code(() => createProtocolSession({ ...ctx('chat_completions', 'anthropic_messages'), capabilities: { anthropicStructuredOutput: true } }).convertRequest(schema), 'unsupported_request', 'text.format.unknown_constraint');
   const thinking = { ...request('anthropic_messages'), thinking: { type: 'enabled', budget_tokens: 1024 } }; code(() => createProtocolSession({ ...ctx('anthropic_messages', 'chat_completions'), reasoningPolicy: {} }).convertRequest(thinking), 'unsupported_reasoning', 'thinking');
   expect(createProtocolSession({ ...ctx('anthropic_messages', 'chat_completions'), capabilities: { reasoningEffort: true }, reasoningPolicy: { targetEffort: 'medium' } }).convertRequest(thinking).body.reasoning_effort).toBe('medium');
-  code(() => createProtocolSession({ ...ctx('responses', 'chat_completions'), capabilities: { omitOptionalWebSearch: true } }).convertRequest({ model, input: 'hello', tools: [{ type: 'web_search' }] }), 'unsupported_tool');
+  code(() => createProtocolSession(ctx('responses', 'chat_completions')).convertRequest({ model, input: 'hello', tools: [{ type: 'web_search' }], tool_choice: 'required' }), 'unsupported_tool', 'tools[0].type');
+});
+
+test('Codex cached search declaration is omitted with a safe diagnostic across converted targets', () => {
+  const functions = Array.from({ length: 28 }, (_, i) => ({ type: 'function', name: `fixture_${i}`, parameters: { type: 'object', properties: {} } }));
+  const raw = { model, input: 'hello', tools: [...functions, { type: 'web_search', external_web_access: false }], tool_choice: 'auto' };
+  for (const target of ['chat_completions', 'anthropic_messages'] as const) {
+    const converted = createProtocolSession(ctx('responses', target)).convertRequest(raw);
+    expect(converted.body.tools).toHaveLength(28);
+    expect(converted.diagnostics).toContainEqual({ param: 'tools[28]', action: 'omitted', reason: 'optional_hosted_web_search_unavailable' });
+    expect(JSON.stringify(converted.body)).not.toContain('web_search');
+    for (const tool_choice of ['required', { type: 'web_search' }])
+      code(() => createProtocolSession(ctx('responses', target)).convertRequest({ ...raw, tool_choice }), 'unsupported_tool', 'tools[28].type');
+    code(() => createProtocolSession(ctx('responses', target)).convertRequest({ ...raw, tools: [{ type: 'web_search', external_web_access: 'false' }] }), 'invalid_payload', 'tools[0].external_web_access');
+    code(() => createProtocolSession(ctx('responses', target)).convertRequest({ ...raw, tools: [{ type: 'web_search', unknown_search_constraint: true }] }), 'unsupported_tool', 'tools[0].unknown_search_constraint');
+  }
+  const same = createProtocolSession(ctx('responses', 'responses')).convertRequest(raw);
+  expect(same.body.tools).toEqual(raw.tools);
+  expect(same.diagnostics).toEqual([]);
+});
+
+test('optional hosted search is validated, bounded, and remains distinct from tool execution history', () => {
+  const convert = (tool: any, extra: any = {}) => createProtocolSession(ctx('responses', 'chat_completions')).convertRequest({ model, input: 'hello', tools: [tool], ...extra });
+  const tool = { type: 'web_search', external_web_access: false, indexed_web_access: true, search_context_size: 'low', search_content_types: ['text', 'image'],
+    filters: { allowed_domains: ['example.invalid'], blocked_domains: [] }, user_location: { type: 'approximate', country: 'US', timezone: 'UTC' } };
+  for (const tool_choice of [undefined, 'auto', 'none']) {
+    const result = convert(tool, { tool_choice });
+    expect(result.body).not.toHaveProperty('tools');
+    expect(result.diagnostics).toEqual([{ param: 'tools[0]', action: 'omitted', reason: 'optional_hosted_web_search_unavailable' }]);
+    expect(JSON.stringify(result.diagnostics)).not.toContain('example.invalid');
+    for (const target of ['chat_completions', 'anthropic_messages'] as const) {
+      const noTools = createProtocolSession(ctx('responses', target)).convertRequest({ model, input: 'hello', tools: [tool], tool_choice, parallel_tool_calls: true });
+      expect(noTools.body).not.toHaveProperty('tools');
+      expect(noTools.body).not.toHaveProperty('tool_choice');
+      expect(noTools.body).not.toHaveProperty('parallel_tool_calls');
+    }
+  }
+  for (const [option, param] of [
+    [{ search_context_size: ['low'] }, 'search_context_size'], [{ indexed_web_access: null }, 'indexed_web_access'],
+    [{ filters: { allowed_domains: 'example.invalid' } }, 'filters.allowed_domains'],
+    [{ user_location: { type: 'precise' } }, 'user_location.type'], [{ search_content_types: ['audio'] }, 'search_content_types'],
+  ] as const) code(() => convert({ ...tool, ...option }), 'invalid_payload', `tools[0].${param}`);
+  code(() => convert({ ...tool, filters: { unknown: true } }), 'unsupported_tool', 'tools[0].filters.unknown');
+  code(() => convert({ type: ['web_search'] }), 'unsupported_tool', 'tools[0]');
+  const carrier = createProtocolSession(ctx('responses', 'chat_completions')).convertRequest({ model, input: [{type: 'additional_tools', tools: [tool]}, {role: 'user', content: 'hello'}] });
+  expect(carrier.canonicalHistory).toEqual([{ role: 'user', content: 'hello' }]);
+  expect(carrier.diagnostics).toContainEqual({ param: 'input[0].tools[0]', action: 'omitted', reason: 'optional_hosted_web_search_unavailable' });
+  code(() => convert(tool, {input: [{type: 'web_search_call', id: 'hosted_history', status: 'completed'}]}), 'unsupported_content');
+  code(() => createProtocolSession({...ctx('responses', 'chat_completions'), capabilities: {limits: {maxItems: 1}}}).convertRequest({model, input: 'hello', tools: [tool, tool]}), 'resource_limit');
 });
 test('request/output limits and undeclared returned tools remain bounded and fail closed', () => {
   code(() => createProtocolSession({ ...ctx('chat_completions', 'anthropic_messages'), capabilities: { limits: { maxRequestBytes: 50 } } }).convertRequest(request('chat_completions')), 'resource_limit');
