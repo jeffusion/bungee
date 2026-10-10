@@ -56,6 +56,6 @@ Bun 1.4.2 的已知边界：服务端 maxPayloadLength 超限可能由 Bun 直�
 
 ## 验证方法与协议来源
 
-[真实进程测试](../../tests/websocket-gateway-real-process.test.ts)使用构建后的 master/ingress/worker 与隔离 SQLite，检查连接内生成计量、重复终态、断连及配置发布排空。TLS 夹具仅用于测试；不通过关闭证书校验建立连接。执行与证据边界见[开发指南](../guides/development.md)。本地 loopback 和 mock 契约不能证明远端提供商或所有客户端兼容。
+[真实进程测试](../../tests/integration/websocket-gateway-real-process.test.ts)使用构建后的 master/ingress/worker 与隔离 SQLite，检查连接内生成计量、重复终态、断连及配置发布排空。TLS 夹具仅用于测试；不通过关闭证书校验建立连接。执行与证据边界见[开发指南](../guides/development.md)。本地 loopback 和 mock 契约不能证明远端提供商或所有客户端兼容。
 
 官方协议参考：[Responses WebSocket mode](https://developers.openai.com/api/docs/guides/websocket-mode)、[Responses streaming events](https://developers.openai.com/api/reference/resources/responses/streaming-events)。公开 API 协议不能单独证明 ChatGPT/OAuth 远端兼容。

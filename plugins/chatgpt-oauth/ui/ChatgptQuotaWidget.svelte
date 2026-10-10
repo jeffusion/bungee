@@ -6,7 +6,7 @@
   import { getPluginText } from '$utils/plugin-i18n';
   import type { NativeWidgetHeaderChange } from '$components/native-widgets/widget-header';
   import { BCarouselList, LoadingIndicator, MetricBar, StatusBadge } from '$components/industrial';
-  import { accountSummary, accountUsage, errorText, canQueryUsage } from './account-model.js';
+  import { accountSummary, accountUsage, errorText, canQueryUsage, creditCount, usageState } from './account-model.js';
 
   let { pluginName = 'chatgpt-oauth', onHeaderChange }: { pluginName?: string; selectedRange?: string; onHeaderChange?: NativeWidgetHeaderChange } = $props();
   type Row = { account: ReturnType<typeof accountSummary>; usage?: ReturnType<typeof accountUsage>; error?: string };
@@ -30,28 +30,6 @@
     if (seconds % 86400 === 0) return t('ui.dayLimit', { count: seconds / 86400 });
     if (seconds % 3600 === 0) return t('ui.hourLimit', { count: seconds / 3600 });
     return t('ui.widgetMinuteLimit', { count: Math.round(seconds / 60) });
-  }
-  function creditCount(row: Row) {
-    if (!row.usage) return undefined;
-    for (const state of ['fresh', 'stale']) {
-      for (const section of [row.usage.resetCredits, row.usage.usage]) {
-        if (section.state === state && section.value?.availableCount !== undefined) return section.value.availableCount;
-      }
-    }
-    return undefined;
-  }
-  function usageState(row: Row) {
-    if (row.account.status !== 'active') return 'unavailable';
-    const hasSnapshot = !!(row.usage?.usage.value || row.usage?.resetCredits.value);
-    if (row.error || (notice && notice !== 'ui.widgetPartialAccounts')) return hasSnapshot ? 'stale' : 'unavailable';
-    if (!row.usage) return busy ? 'loading' : 'unavailable';
-    if (!hasSnapshot) return 'unavailable';
-    const { usage, resetCredits } = row.usage;
-    if (usage.state === 'stale' || resetCredits.state === 'stale') return 'stale';
-    if (usage.state === 'unavailable' && resetCredits.state === 'unavailable') return 'stale';
-    const windows = [usage.value?.primary, usage.value?.secondary].filter(Boolean);
-    if (usage.state !== 'fresh' || resetCredits.state !== 'fresh' || !windows.length || windows.some(window => !validPercent(window?.usedPercent)) || creditCount(row) === undefined) return 'partial';
-    return 'fresh';
   }
   async function refresh() {
     if (disposed) return;
@@ -112,7 +90,7 @@
 
 {#snippet accountContent(row: Row, measuring = false)}
   {@const account = row.account}
-  {@const state = usageState(row)}
+  {@const state = usageState(row, busy, notice)}
   <section class="quota-account grid shrink-0 min-w-0 grid-cols-1 items-start gap-3" data-testid={measuring ? undefined : 'quota-account'}>
     <div class="min-w-0 space-y-1.5">
     <div class="flex flex-wrap items-start justify-between gap-1">

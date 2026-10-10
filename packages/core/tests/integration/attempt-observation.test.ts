@@ -1,3 +1,6 @@
+import { afterAll as afterDataPlaneTests } from 'bun:test';
+import { createDataPlaneRuntime } from '../helpers/data-plane-runtime';
+const dataPlaneRuntime = await createDataPlaneRuntime();
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { gzipSync, zstdCompressSync } from 'node:zlib';
@@ -5,12 +8,12 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AppConfig } from '@jeffusion/bungee-types';
-import { ScopedPluginRegistry, setScopedPluginRegistry } from '../../src/scoped-plugin-registry';
-import { initializeRuntimeState } from '../../src/worker/state/runtime-state';
-import { handleRequest } from '../../src/worker/request/handler';
+const { ScopedPluginRegistry, setScopedPluginRegistry } = await import('../../src/scoped-plugin-registry');
+const { initializeRuntimeState } = await import('../../src/worker/state/runtime-state');
+const { handleRequest } = await import('../../src/worker/request/handler');
 import type { AttemptObservationEvent } from '../../src/hooks/plugin-hooks';
-import { createAttemptResponseObserver } from '../../src/worker/response/attempt-observation';
-import { ChatgptOauthAdapter } from '../../../../plugins/chatgpt-oauth/server/adapter';
+const { createAttemptResponseObserver } = await import('../../src/worker/response/attempt-observation');
+const { ChatgptOauthAdapter } = await import('../../../../plugins/chatgpt-oauth/server/adapter');
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 
 const originalFetch = globalThis.fetch;
@@ -823,3 +826,5 @@ describe('attempt observation lifecycle', () => {
     expect(state().events.filter(({ event }) => event.phase === 'response')).toHaveLength(0);
   });
 });
+
+afterDataPlaneTests(() => dataPlaneRuntime.close());

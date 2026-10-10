@@ -75,4 +75,4 @@ HTTP 上游经共享 SSE BodyHandle 转成 WS JSON；启用 WS 的 Responses 目
 
 字段处理参考 cc-switch `b4a079430ce85a604e10d97d4b7530774e00e112` 的工具提取与测试场景；new-api `7aa3531ef4c247ad4891c06cc8ed9d0ffb73fecc` 和 sub2api `3a6fd1c9db07203ca308aaba69e502bc1f35b307` 用于核对转换损耗与历史边界。未复制这些项目的协议源码或增加依赖；移植实质源码时须保留对应许可证。访问模式依据 [OpenAI Daybreak](https://developers.openai.com/api/docs/guides/daybreak)，不授予目标权限。
 
-[脱敏 fixtures](tests/fixtures/README.md)保留真实请求形状和不可表示约束。[真实进程测试](../../tests/codex-router-real-process.test.ts)经过实际宿主、worker 与 SQLite，但目录和模型上游使用 fixtures，不能证明远端提供商兼容。可选真实 CLI 检查使用 `BUNGEE_CODEX_CLI_PROBE=1`；它需要本地 Codex CLI，隔离配置和凭据，不访问用户实际会话。运行方法及证据边界见[开发指南](../../docs/guides/development.md)。
+[脱敏 fixtures](../../tests/fixtures/codex-requests/README.md)保留真实请求形状和不可表示约束。[真实进程测试](../../tests/integration/codex-router-real-process.test.ts)经过实际宿主、worker 与 SQLite，但目录和模型上游使用 fixtures，不能证明远端提供商兼容。可选真实 CLI 检查使用 `BUNGEE_CODEX_CLI_PROBE=1`；它需要本地 Codex CLI，隔离配置和凭据，不访问用户实际会话。运行方法及证据边界见[开发指南](../../docs/guides/development.md)。

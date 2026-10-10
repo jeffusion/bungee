@@ -8,7 +8,7 @@
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "bun run build",
-    "test": "bun run build && bun test tests/published-runtime.test.ts"
+    "test": "bun run build && bun test tests/"
   },
   "exports": {
     ".": {

@@ -1,12 +1,16 @@
+import { afterAll as afterDataPlaneTests } from 'bun:test';
+import { createDataPlaneRuntime } from '../helpers/data-plane-runtime';
+const dataPlaneRuntime = await createDataPlaneRuntime();
+const { dataPlaneBodyLogDir } = dataPlaneRuntime;
 import {startAnonymousAdmission} from '../helpers/anonymous-admission';
 import { expect, test } from 'bun:test';
 import { fileURLToPath } from 'node:url';
 import type { AppConfig } from '@jeffusion/bungee-types';
-import { ensureDataPlaneSchema, dataPlaneBodyLogDir } from '../helpers/data-plane-runtime';
-import { BodyStorageManager } from '../../src/logger/body-storage';
-import { ScopedPluginRegistry, setScopedPluginRegistry } from '../../src/scoped-plugin-registry';
-import { createIngressPublicListener } from '../../src/public-listener';
-import { restoreWorkerTransportRequest } from '../../src/config-worker/private-transport';
+
+const { BodyStorageManager } = await import('../../src/logger/body-storage');
+const { ScopedPluginRegistry, setScopedPluginRegistry } = await import('../../src/scoped-plugin-registry');
+const { createIngressPublicListener } = await import('../../src/public-listener');
+const { restoreWorkerTransportRequest } = await import('../../src/config-worker/private-transport');
 import { TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/config-worker-private-transport';
 import { localAdmissionSelector } from '../fixtures/public-listener';
 
@@ -14,7 +18,7 @@ import { localAdmissionSelector } from '../fixtures/public-listener';
 const SSE_FRAME_LIMIT_BYTES = 25 * 1024 * 1024;
 
 test('Codex large response and durable failure diagnostics survive with bounded independent body logging', async () => {
-  await ensureDataPlaneSchema();
+
   const [{ handleRequest }, runtime, { accessLogWriter }, { fileLogWriter }] = await Promise.all([
     import('../../src/worker/request/handler'),
     import('../../src/worker/state/runtime-state'),
@@ -120,3 +124,5 @@ test('Codex large response and durable failure diagnostics survive with bounded 
     accessLogWriter.getDatabase().query('DELETE FROM access_logs WHERE path=?').run(routeId);
   }
 }, 30_000);
+
+afterDataPlaneTests(() => dataPlaneRuntime.close());

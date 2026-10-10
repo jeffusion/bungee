@@ -24,7 +24,7 @@ import {
   manifest,
   tempRoot,
   writePlugin,
-} from './plugin-manifest-catalog-fixtures';
+} from '../helpers/plugin-manifest-catalog';
 
 afterEach(() => {
   cleanupCatalogRoots();

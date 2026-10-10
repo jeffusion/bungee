@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "bun --watch src/index.ts",
     "build": "bun build src/index.ts src/plugin-api.ts --outdir dist --target bun && tsc -p tsconfig.build.json",
-    "test": "echo 'No tests for llms package yet'",
+    "test": "bun test tests/",
     "prepublishOnly": "bun run build"
   },
   "dependencies": {

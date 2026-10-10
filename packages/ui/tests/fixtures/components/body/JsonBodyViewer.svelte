@@ -1,0 +1,1 @@
+<script>export let value;</script><pre data-body>{JSON.stringify(value)}</pre>

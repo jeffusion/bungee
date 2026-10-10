@@ -16,33 +16,92 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "lib": ["ESNext", "DOM", "DOM.Iterable"],
-    "types": ["vite/client", "bun-types"],
+    "lib": [
+      "ESNext",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "types": [
+      "vite/client",
+      "bun-types"
+    ],
     "baseUrl": ".",
     "paths": {
-      "@bungee/plugin-sdk": ["src/plugin-sdk/index.ts"],
-      "@plugins/*": ["../../plugins/*"],
-      "$components": ["src/components"],
-      "$components/*": ["src/components/*"],
-      "$api": ["src/api"],
-      "$api/*": ["src/api/*"],
-      "$stores": ["src/stores"],
-      "$stores/*": ["src/stores/*"],
-      "$i18n": ["src/i18n"],
-      "$i18n/*": ["src/i18n/*"],
-      "$pluginSdk": ["src/plugin-sdk"],
-      "$pluginSdk/*": ["src/plugin-sdk/*"],
-      "$utils": ["src/utils.ts"],
-      "$utils/*": ["src/utils/*"],
-      "$validation": ["src/validation"],
-      "$validation/*": ["src/validation/*"],
-      "$types": ["src/types"],
-      "$types/*": ["src/types/*"],
-      "$hooks": ["src/hooks"],
-      "$hooks/*": ["src/hooks/*"],
-      "$lib": ["src"],
-      "$lib/*": ["src/*"]
+      "@bungee/plugin-sdk": [
+        "src/plugin-sdk/index.ts"
+      ],
+      "@plugins/*": [
+        "../../plugins/*"
+      ],
+      "$components": [
+        "src/components"
+      ],
+      "$components/*": [
+        "src/components/*"
+      ],
+      "$api": [
+        "src/api"
+      ],
+      "$api/*": [
+        "src/api/*"
+      ],
+      "$stores": [
+        "src/stores"
+      ],
+      "$stores/*": [
+        "src/stores/*"
+      ],
+      "$i18n": [
+        "src/i18n"
+      ],
+      "$i18n/*": [
+        "src/i18n/*"
+      ],
+      "$pluginSdk": [
+        "src/plugin-sdk"
+      ],
+      "$pluginSdk/*": [
+        "src/plugin-sdk/*"
+      ],
+      "$utils": [
+        "src/utils.ts"
+      ],
+      "$utils/*": [
+        "src/utils/*"
+      ],
+      "$validation": [
+        "src/validation"
+      ],
+      "$validation/*": [
+        "src/validation/*"
+      ],
+      "$types": [
+        "src/types"
+      ],
+      "$types/*": [
+        "src/types/*"
+      ],
+      "$hooks": [
+        "src/hooks"
+      ],
+      "$hooks/*": [
+        "src/hooks/*"
+      ],
+      "$lib": [
+        "src"
+      ],
+      "$lib/*": [
+        "src/*"
+      ]
     }
   },
-  "include": ["src/**/*.ts", "src/**/*.js", "src/**/*.svelte", "../../plugins/*/ui/**/*.svelte"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.js",
+    "src/**/*.svelte",
+    "../../plugins/*/ui/**/*.svelte",
+    "tests/**/*.ts",
+    "tests/**/*.svelte",
+    "../../plugins/*/tests/unit/ui/**/*.ts"
+  ]
 }

@@ -1,15 +1,20 @@
+import { afterAll as afterDataPlaneTests } from 'bun:test';
+import { createDataPlaneRuntime } from '../helpers/data-plane-runtime';
+const dataPlaneRuntime = await createDataPlaneRuntime();
+const { dataPlaneTestRoot } = dataPlaneRuntime;
 import {startAnonymousAdmission} from '../helpers/anonymous-admission';
 import { afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import { join } from 'node:path';
 import { request as httpRequest } from 'node:http';
-import { ensureDataPlaneSchema, dataPlaneTestRoot } from '../helpers/data-plane-runtime';
-import { BodyStorageManager } from '../../src/logger/body-storage';
-import { HeaderStorageManager } from '../../src/logger/header-storage';
+
+const { BodyStorageManager } = await import('../../src/logger/body-storage');
+const { HeaderStorageManager } = await import('../../src/logger/header-storage');
 import type { RequestLoggerDependencies } from '../../src/logger/request-logger';
-import { loadProductionResources } from '../../src/config-worker/lifecycle';
-import { createIngressPublicListener, type PublicListener } from '../../src/public-listener';
-import { restoreWorkerTransportRequest } from '../../src/config-worker/private-transport';
+const { loadProductionResources } = await import('../../src/config-worker/lifecycle');
+import type { PublicListener } from '../../src/public-listener';
+const { createIngressPublicListener } = await import('../../src/public-listener');
+const { restoreWorkerTransportRequest } = await import('../../src/config-worker/private-transport');
 import { TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/config-worker-private-transport';
 import { localAdmissionSelector } from '../fixtures/public-listener';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
@@ -23,7 +28,7 @@ const bodyStorage = new BodyStorageManager({ enabled: true, maxSize: 16 }, join(
 const headerStorage = new HeaderStorageManager({}, join(dataPlaneTestRoot, 'limit-headers'));
 
 beforeAll(async () => {
-  await ensureDataPlaneSchema();
+
   ({ handleRequest } = await import('../../src/worker/request/handler'));
   ({ accessLogWriter } = await import('../../src/logger/access-log-writer'));
   ({ fileLogWriter } = await import('../../src/logger/file-log-writer'));
@@ -179,3 +184,5 @@ describe('request body limits and error records', () => {
     expect((await handleRequest(req(), { routes, body_parser_limit: '1kb' }, { logging: logging() })).status).toBe(413);
   });
 });
+
+afterDataPlaneTests(() => dataPlaneRuntime.close());

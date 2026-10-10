@@ -1,5 +1,0 @@
-{
-  "client": "codex-cli",
-  "version": "0.160.1",
-  "evidence": "bundled model schema and isolated local catalog probe; Desktop and real provider acceptance pending"
-}

@@ -9,12 +9,11 @@
   "scripts": {
     "start": "bun packages/core/src/main.ts",
     "dev": "bun --watch packages/core/src/main.ts",
-    "benchmark": "cd packages/core && bun run benchmark",
-    "test": "bun test",
-    "check:architecture": "bun scripts/checks/check-gateway-architecture.ts && bun test scripts/checks/check-gateway-architecture.test.ts",
-    "test:ui:smoke": "bun tests/browser/ui-smoke-playwright.ts",
+    "benchmark": "bun tests/benchmarks/measure-body-resources.ts",
+    "test": "bun run build && bun run test:fast && bun run test:integration && bun run test:browser",
+    "check:architecture": "bun scripts/checks/check-gateway-architecture.ts && bun test scripts/tests/unit/checks/check-gateway-architecture.test.ts",
     "prepare": "husky",
-    "build": "bun run check:architecture && bun run build:types && bun run build:llms && bun run generate:widgets && bun run build:ui && bun run bundle:ui && bun run build:core && bun run build:cli",
+    "build": "bun run build:types && bun run build:llms && bun run generate:widgets && bun run build:ui && bun run bundle:ui && bun run build:core && bun run build:cli",
     "build:full": "bun run build && bun run build:binaries",
     "build:clean": "rm -rf packages/*/dist bin/bungee-* packages/core/src/ui/assets.ts",
     "build:types": "cd packages/types && bun run build",
@@ -28,7 +27,10 @@
     "version:sync": "bun scripts/release/sync-versions.ts",
     "publish:dry": "bun scripts/release/publish.ts --dry-run",
     "publish": "bun scripts/release/publish.ts",
-    "release:binaries": "bun scripts/release/upload-binaries.ts"
+    "release:binaries": "bun scripts/release/upload-binaries.ts",
+    "test:fast": "bun test --isolate 'tests/unit/'",
+    "test:integration": "bun test --isolate 'tests/integration/'",
+    "test:browser": "bun test --isolate 'tests/browser/'"
   },
   "devDependencies": {
     "@commitlint/config-conventional": "^20.0.0",

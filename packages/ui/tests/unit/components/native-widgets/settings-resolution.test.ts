@@ -1,0 +1,30 @@
+import { expect, test } from 'bun:test';
+import { resolveNativeSettings } from '../../../../src/components/native-widgets/settings-resolution';
+import type { Plugin } from '$api/plugins';
+
+const plugin: Plugin = { name: 'chatgpt-oauth', enabled: true, metadata: { contributes: { settings: '/accounts', nativeSettingsComponent: 'ChatgptAccountsPage' } } };
+test('native settings must be a statically registered component owned by this plugin', () => {
+  const component = () => {};
+  expect(resolveNativeSettings(plugin, '/accounts', { ChatgptAccountsPage: component }, { ChatgptAccountsPage: plugin.name })).toEqual({ kind: 'native', component });
+  expect(resolveNativeSettings(plugin, '/accounts', {}, {}).kind).toBe('error');
+  expect(resolveNativeSettings(plugin, '/accounts', { ChatgptAccountsPage: component }, { ChatgptAccountsPage: 'other' }).kind).toBe('error');
+  expect(resolveNativeSettings({ ...plugin, metadata: { contributes: { settings: '/accounts', nativeSettingsComponent: 'toString' } } }, '/accounts', {}, {}).kind).toBe('error');
+  for (const path of ['/', '', '/unknown', '/accounts/', '/accounts?extra=1']) {
+    const result = resolveNativeSettings(plugin, path, { ChatgptAccountsPage: component }, { ChatgptAccountsPage: plugin.name });
+    expect(result.kind).toBe('error');
+    if (result.kind === 'error') expect(result.message).toContain('路径不匹配');
+  }
+});
+test('external sandbox settings retain PluginHost while invalid native declarations cannot fall back to iframe', async () => {
+  for (const path of ['/', '/unknown', '/settings']) expect(resolveNativeSettings({ name: 'external', enabled: true, metadata: { contributes: { settings: '/settings' } } }, path, {}, {})).toEqual({ kind: 'sandbox' });
+  const layout = await Bun.file(new URL('../../../../src/routes/PluginDetailLayout.svelte', import.meta.url)).text();
+  expect(layout.indexOf("settings?.kind === 'error'")).toBeLessThan(layout.indexOf('<PluginHost'));
+  // Structural order only — whitespace/newline agnostic: native branch precedes its {:else} and the fallback PanelCard.
+  const nativeAt = layout.indexOf("{#if settings?.kind === 'native'}");
+  const nativeElseAt = layout.indexOf('{:else}', nativeAt);
+  const fallbackPanelAt = layout.search(/<PanelCard\s+title=\{plugin\.name\.toUpperCase\(\)\}/);
+  expect(nativeAt).toBeGreaterThanOrEqual(0);
+  expect(nativeElseAt).toBeGreaterThan(nativeAt);
+  expect(fallbackPanelAt).toBeGreaterThan(nativeElseAt);
+  expect(layout).not.toMatch(/import\s*\(/);
+});

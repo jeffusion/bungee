@@ -8,7 +8,7 @@ import {hashConfigurationContent} from '../../src/config-storage/content-hash';
 import {
   FIXTURE_PUBLICATION_POLICY, FIXTURE_PUBLICATION_WAIT_MS, FIXTURE_STARTUP_WAIT_MS,
   waitForFixturePublication,
-} from '../../../../tests/support/publication-fixture';
+} from '../../../../tests/helpers/publication-fixture';
 
 test('real master/ingress/worker enforces model policy and honors Authorization header rules', async () => {
   const root = await mkdtemp(join(tmpdir(), 'bungee-key-access-request-'));

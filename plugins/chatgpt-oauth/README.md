@@ -43,9 +43,9 @@ OAuth/PKCE 流程参考 [Pi 的 MIT 实现](https://github.com/earendil-works/pi
 针对性测试：
 
 ```sh
-bun test plugins/chatgpt-oauth/tests/siwc-adapter.test.ts \
-  plugins/chatgpt-oauth/tests/siwc-account-model.test.js \
-  plugins/chatgpt-oauth/ui/account-model.test.js
+bun test plugins/chatgpt-oauth/tests/unit/siwc-adapter.test.ts \
+  plugins/chatgpt-oauth/tests/unit/ui/siwc-account-model.test.ts \
+  plugins/chatgpt-oauth/tests/unit/ui/account-automation.test.ts
 ```
 
 这些测试覆盖请求转换、受限工具、模型列表、SSE 聚合/转换、授权地址校验、登录类型和 manifest 契约；真实登录、账户权限及上游服务可用性需用自己的账户验证。

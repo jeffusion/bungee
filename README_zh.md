@@ -74,11 +74,13 @@ bungee import --file bungee-snapshot.json
 
 ```bash
 bun install --frozen-lockfile
-bun run build
-bun test
+bunx playwright install chromium
+bun run test
 ```
 
 项目固定使用 Bun 1.4.2。
+
+完整测试入口先构建，再依次执行单元、集成和浏览器测试。分类运行前需完成初次构建；目录和命令见[开发指南](./docs/guides/development.md#6-testing-strategy)。
 
 ## 文档
 

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { waitForAuthPublication } from '../support/auth-publication-readiness';
+import { waitForAuthPublication } from '../helpers/auth-publication-readiness';
 
 const runtime = (operation: string | null = 'converged', revision = 2) => ({
   revision, config: { privateFixtureValue: 'must-not-appear-in-diagnostics' },

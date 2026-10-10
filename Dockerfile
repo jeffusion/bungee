@@ -34,7 +34,7 @@ COPY plugins ./plugins
 COPY scripts/build/bundle-ui.ts ./scripts/build/
 COPY scripts/build/build-external-plugins.ts ./scripts/build/
 COPY scripts/checks/check-gateway-architecture.ts ./scripts/checks/
-COPY scripts/checks/check-gateway-architecture.test.ts ./scripts/checks/
+COPY scripts/tests/unit/checks/check-gateway-architecture.test.ts ./scripts/tests/unit/checks/
 
 # Run complete build pipeline
 # 1. Build Types (typescript) → packages/types/dist/

@@ -9,6 +9,7 @@
   import { duplicateEditorService } from '$api/config-adapters';
   import { RoutesAPI, type Route } from '$api/routes';
   import { findRuntimeUpstream, runtimeAvailabilityKey } from '$api/runtime';
+  import { formatLastUsed } from '$api/runtime-presentation';
   import { runtimeUpstreams } from '$stores/runtime';
   import RuntimeStatus from '$components/domain/service/RuntimeStatus.svelte';
   import RelationshipLink from '$components/domain/service/RelationshipLink.svelte';
@@ -153,23 +154,6 @@
     return () => { document.documentElement.style.overflow = ''; };
   });
 
-  function formatLastUsed(stateKey: string, upstreamId: string | undefined): string {
-    const record = findRuntimeUpstream($runtimeUpstreams, stateKey, upstreamId);
-    if (!record) return $_('runtime.unavailable');
-    const t = record.last_used_time;
-    if (t === null) return $_(record.last_used_complete ? 'services.noUsageRecord' : 'runtime.unavailable');
-    const prefix = record.last_used_complete ? '' : `${$_('runtime.observedOnly')} · `;
-    const diffSec = Math.floor((Date.now() - t) / 1000);
-    if (diffSec < 60) return prefix + $_('services.justNow');
-    const diffMin = Math.floor(diffSec / 60);
-    if (diffMin < 60) return prefix + $_('services.minutesAgo', { values: { count: diffMin } });
-    const diffHr = Math.floor(diffMin / 60);
-    if (diffHr < 24) return prefix + $_('services.hoursAgo', { values: { count: diffHr } });
-    const diffDay = Math.floor(diffHr / 24);
-    if (diffDay < 30) return prefix + $_('services.daysAgo', { values: { count: diffDay } });
-    const diffMon = Math.floor(diffDay / 30);
-    return prefix + $_('services.monthsAgo', { values: { count: diffMon } });
-  }
 
   let serviceViewModels = $derived(services.map((service) => {
     const consumers = getServiceConsumers(service.name, routes);
@@ -563,7 +547,7 @@
                   <td class="py-2.5 px-4 text-right font-mono text-[12px] text-zinc-300 tabular-nums">{upstream.priority ?? 1}</td>
                   <td class="py-2.5 px-4 text-right font-mono text-sm text-zinc-300 tabular-nums">{record?.active_request_count ?? $_('runtime.unavailable')}</td>
                   <td class="py-2.5 px-4 text-right font-mono text-sm text-zinc-400 tabular-nums">
-                    {formatLastUsed(selectedServiceForEndpoints.name, upstream._uid)}
+                    {formatLastUsed($runtimeUpstreams, selectedServiceForEndpoints.name, upstream._uid, $_)}
                   </td>
                 </tr>
               {/each}

@@ -16,7 +16,7 @@ import {
   type WorkerRuntimeSnapshot,
   type WorkerRuntimeSnapshotInput,
 } from '../../src/supervision';
-import { drainMessage, startCurrentMessage } from '../unit/config-publication-worker-runtime.fixtures';
+import { drainMessage, startCurrentMessage } from '../helpers/config-publication-worker-runtime';
 
 const IDENTITY = {
   master_generation: '51000000-0000-4000-8000-000000000001',

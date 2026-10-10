@@ -503,13 +503,13 @@ These rules apply to the management UI and **every plugin's UI**:
   exception and corresponding reviewed baseline update. Never refresh the
   baseline merely to make a failing check pass.
 
-`src/style-scope.test.ts` scans `src/` and all `plugins/*/ui/` directories and
-runs in the normal `bun test` CI step. New or changed global rules, new standalone
+`tests/unit/style-scope.test.ts` scans `src/` and all `plugins/*/ui/` directories and
+runs in the unit category of the complete CI regression. New or changed global rules, new standalone
 stylesheets, template/head style elements or stylesheet links, and unregistered
 stylesheet imports fail this check. Reordering frozen rules also fails. Run it locally:
 
 ```bash
-bun test packages/ui/src/style-scope.test.ts
+bun test packages/ui/tests/unit/style-scope.test.ts
 ```
 
 The route and service editor rails use
@@ -885,9 +885,11 @@ Before declaring any UI change "done":
 
 The project uses automated checks to enforce the industrial design system and prevent regressions.
 
-1. **Static Migration Guards**: Run `bun test packages/ui/src/migration-guards.test.ts` to verify that forbidden layers, legacy classes, and unguarded i18n calls are absent. This suite runs automatically on every pull request.
-2. **Playwright Smoke Tests**: Run `bun run test:ui:smoke` to execute browser-based smoke tests. The Linux pull-request CI job starts Vite and runs this check with `--strict-testids` directly. Local commands and output settings are documented in the [development guide](../../../docs/guides/development.md#ui-smoke).
-3. **Style Isolation Guard**: Run `bun test packages/ui/src/style-scope.test.ts`. CI runs it through `bun test`; global styles cannot be added or changed without the documented, reviewed exception described in §3.4.7.
+1. **Import and translation boundaries**: `bun test --isolate packages/ui/tests/unit/ui-boundaries.test.ts` checks actual imports and reactive translation syntax. Comment text and historical migration quotas do not define architectural boundaries.
+2. **Playwright regressions**: `bun run test:browser` includes smoke, route editor, scrolling and dashboard native widget checks. Tests start their own local services; both Linux and macOS CI install Chromium and execute the complete `bun run test` entry. Build current artifacts before running a category directly. See the [development testing guide](../../../docs/guides/development.md#6-testing-strategy).
+3. **Style isolation**: `bun test --isolate packages/ui/tests/unit/style-scope.test.ts` enforces the frozen global-style baseline. Global styles require the documented narrow reviewed exception in §3.4.7; reorganizing tests must not broaden it.
+
+Keep component tests under `tests/browser/`, pure logic under `tests/unit/`, and loaded hosts under `tests/fixtures/`. Test behavior through normal module imports or real rendering; never extract component source and execute it. Evidence belongs outside versioned source.
 
 ---
 
@@ -927,4 +929,4 @@ The maintained visual reference is `/#/design`, implemented by `src/routes/Desig
 
 Use `ui/number-input` for bounded integer fields. It accepts ASCII digits only, rejects invalid paste as a whole, and publishes undefined when cleared. Required validation prevents empty submission. Editing may temporarily exceed min/max; blur or Enter clamps and removes leading zeros. Buttons and arrow keys step by one, respect bounds/disabled/readonly, and never submit a form. Preserve text selection, external-value synchronization and spinbutton accessibility. The server still validates integers and ranges.
 
-The component check is `NUMBER_INPUT_EVIDENCE_DIR=/tmp/bungee-number-input bun packages/ui/tests/number-input-playwright.ts`; domain ranges belong to the [models-dev contract](../../../plugins/models-dev/README.md).
+The component check is `bun test --isolate packages/ui/tests/browser/number-input.test.ts`; domain ranges belong to the [models-dev contract](../../../plugins/models-dev/README.md).
