@@ -1501,15 +1501,14 @@ test('stops reconciliation without ingress and never revives repository work aft
   let starts = 0;
   let spawns = 0;
   const timers = new Map<number, () => void>();
-  const originalSetTimeout = globalThis.setTimeout;
-  const originalClearTimeout = globalThis.clearTimeout;
   let nextTimer = 1;
-  globalThis.setTimeout = ((callback: TimerHandler) => {
-    const id = nextTimer++;
-    timers.set(id, callback as () => void);
-    return id;
-  }) as typeof setTimeout;
-  globalThis.clearTimeout = ((id: number | ReturnType<typeof setTimeout>) => { timers.delete(Number(id)); }) as typeof clearTimeout;
+  const configurationRecoveryScheduler = {
+    schedule(_delayMs: number, callback: () => void) {
+      const id = nextTimer++;
+      timers.set(id, callback);
+      return { cancel: () => { timers.delete(id); } };
+    },
+  };
   const harness = recoveryDependencies({
     realRuntime: true,
     getActivePublication: () => { activeReads += 1; return null; },
@@ -1524,7 +1523,7 @@ test('stops reconciliation without ingress and never revives repository work aft
   harness.workerFactory.spawn = () => { spawns += 1; return harness.serving.process; };
   let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
   try {
-    handle = await startMasterComposition(harness.dependencies);
+    handle = await startMasterComposition({ ...harness.dependencies, configurationRecoveryScheduler });
     expect(timers.size).toBe(0);
     const before = { activeReads, appends, starts, spawns };
     await handle.shutdown().catch((error) => { throw error; });
@@ -1532,8 +1531,6 @@ test('stops reconciliation without ingress and never revives repository work aft
     expect({ activeReads, appends, starts, spawns }).toEqual(before);
   } finally {
     for (const callback of timers.values()) callback();
-    globalThis.setTimeout = originalSetTimeout;
-    globalThis.clearTimeout = originalClearTimeout;
     await handle?.shutdown().catch(() => undefined);
   }
 });
