@@ -133,6 +133,14 @@ export interface ModelsDevCatalogService {
 /** Capability reads are additive; existing catalog.v1 consumers stay unchanged. */
 export const MODELS_DEV_CAPABILITIES_SERVICE_ID = 'models-dev.capabilities.v1';
 export const MODELS_DEV_CAPABILITIES_CONTRACT_VERSION = 1;
+/** Upstream control values; null/default do not name a concrete effort level. */
+export type ModelsDevReasoningEffortValue = null | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'default';
+/** Validated models.dev reasoning_options, without inferred controls or levels. */
+export type ModelsDevReasoningOption =
+  | { readonly type: 'effort'; readonly values: readonly ModelsDevReasoningEffortValue[] }
+  | { readonly type: 'toggle' }
+  | { readonly type: 'budget_tokens'; readonly min?: number; readonly max?: number };
+export type ModelsDevReasoningOptionsStatus = 'known' | 'missing' | 'invalid';
 export interface ModelsDevCapabilities {
   readonly provider: string;
   readonly model: string;
@@ -141,9 +149,15 @@ export interface ModelsDevCapabilities {
   readonly outputLimit: number | null;
   readonly toolCall: boolean;
   readonly reasoning: boolean;
+  /** null for missing/invalid metadata; a validated empty list remains known. */
+  readonly reasoningOptions: readonly ModelsDevReasoningOption[] | null;
+  readonly reasoningOptionsStatus: ModelsDevReasoningOptionsStatus;
+  /** Version of the same complete snapshot that supplied all fields of this result. */
+  readonly catalogVersion: number;
   readonly inputModalities: readonly string[];
 }
 export interface ModelsDevCapabilitiesService {
   status(): ModelsDevCatalogStatus;
-  model(input: { readonly provider: string; readonly model: string }): ModelsDevCapabilities | null;
+  /** Without a provider, require a unique exact model or a declared API URL match. */
+  model(input: { readonly provider?: string; readonly model: string; readonly url?: string }): ModelsDevCapabilities | null;
 }

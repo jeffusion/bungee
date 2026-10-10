@@ -74,14 +74,17 @@ export class CatalogView implements ModelsDevCatalogService {
     return resolveModelInCatalog(this.#index, input);
   }
 
-  capabilities(input: { provider: string; model: string }): ModelsDevCapabilities | null {
-    const entry = this.#index?.byProvider.get(input.provider)?.models.get(input.model);
-    if (!entry || !entry.raw || typeof entry.raw !== 'object') return null;
+  capabilities(input: { provider?: string; model: string; url?: string }): ModelsDevCapabilities | null {
+    const index = this.#index;
+    const provider = input.provider ?? (input.url ? resolveProviderFromUrl(index,input.url)?.provider : index?.exactCapabilityProviders.get(input.model));
+    const entry = provider ? index?.byProvider.get(provider)?.models.get(input.model) : undefined;
+    if (!index || !entry || !entry.raw || typeof entry.raw !== 'object') return null;
     const raw = entry.raw as Record<string, any>;
     const limit = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
-    return Object.freeze({provider: input.provider, model: entry.id, name: entry.name,
+    return Object.freeze({provider: provider!, model: entry.id, name: entry.name,
       contextWindow: limit(raw.limit?.context), outputLimit: limit(raw.limit?.output),
       toolCall: raw.tool_call === true, reasoning: raw.reasoning === true,
+      ...entry.reasoningControls, catalogVersion: index.version,
       inputModalities: Object.freeze(Array.isArray(raw.modalities?.input)
         ? raw.modalities.input.filter((value: unknown): value is string => typeof value === 'string') : []),
     });

@@ -18,6 +18,7 @@ import type {
   ModelsDevProviderSummary,
 } from '../contract';
 import { canonicalModelName, estimateNames, modelDate, modelFamily, originalLab } from './model-names';
+import { parseReasoningOptions, type ParsedReasoningOptions } from './reasoning';
 
 export const MAX_PROVIDERS = 4_096;
 export const MAX_MODELS_PER_PROVIDER = 16_384;
@@ -38,6 +39,7 @@ interface CatalogModel {
   readonly id: string;
   readonly name: string;
   readonly price: NormalizedPrice | null;
+  readonly reasoningControls: ParsedReasoningOptions;
   /** Raw model entry, retained so every original field stays reachable. */
   readonly raw: unknown;
 }
@@ -61,6 +63,7 @@ export interface CatalogIndex {
   readonly byProvider: ReadonlyMap<string, CatalogProvider>;
   readonly modelCount: number;
   readonly exactModels: ReadonlyMap<string, ModelsDevModelMatch | null>;
+  readonly exactCapabilityProviders: ReadonlyMap<string, string | null>;
   readonly lowerModels: ReadonlyMap<string, ModelsDevModelMatch | null>;
   readonly familyModels: ReadonlyMap<string, ModelsDevModelMatch | null>;
   readonly byApiHost: ReadonlyMap<string, readonly CatalogProvider[]>;
@@ -183,7 +186,8 @@ export function buildCatalogIndex(record: CatalogRecord): CatalogIndex {
         const modelId = typeof modelValue.id === 'string' && modelValue.id.trim() ? modelValue.id.trim() : modelKey.trim();
         if (!modelId || modelId.length > 512) continue;
         const modelName = typeof modelValue.name === 'string' && modelValue.name.trim() ? modelValue.name.trim() : modelId;
-        models.set(modelId, Object.freeze({ id: modelId, name: modelName, price: normalizePrice(modelValue.cost), raw: modelValue }));
+        models.set(modelId, Object.freeze({ id: modelId, name: modelName, price: normalizePrice(modelValue.cost),
+          reasoningControls: parseReasoningOptions(modelValue.reasoning_options), raw: modelValue }));
         modelCount += 1;
       }
     }
@@ -198,6 +202,7 @@ export function buildCatalogIndex(record: CatalogRecord): CatalogIndex {
   }
   providers.sort((left, right) => left.id.localeCompare(right.id));
   const exactModels = new Map<string, ModelsDevModelMatch | null>();
+  const exactCapabilityProviders = new Map<string, string | null>();
   const lowerModels = new Map<string, ModelsDevModelMatch | null>();
   const familyModels = new Map<string, ModelsDevModelMatch | null>();
   const byApiHost = new Map<string, CatalogProvider[]>();
@@ -208,6 +213,7 @@ export function buildCatalogIndex(record: CatalogRecord): CatalogIndex {
       byApiHost.set(provider.apiHost, sameHost);
     }
     for (const model of provider.models.values()) {
+      exactCapabilityProviders.set(model.id, exactCapabilityProviders.has(model.id) ? null : provider.id);
       const match = catalogModelIn(provider, model.id);
       if (match === null) continue;
       exactModels.set(model.id, exactModels.has(model.id) ? null : match);
@@ -219,7 +225,7 @@ export function buildCatalogIndex(record: CatalogRecord): CatalogIndex {
     }
   }
   for (const providers of byApiHost.values()) Object.freeze(providers);
-  return Object.freeze({ version: record.version, fetchedAt: record.fetchedAt, providers: Object.freeze(providers), byProvider, modelCount, exactModels, lowerModels, familyModels, byApiHost });
+  return Object.freeze({ version: record.version, fetchedAt: record.fetchedAt, providers: Object.freeze(providers), byProvider, modelCount, exactModels, exactCapabilityProviders, lowerModels, familyModels, byApiHost });
 }
 
 export function emptyStatus(): ModelsDevCatalogStatus {
