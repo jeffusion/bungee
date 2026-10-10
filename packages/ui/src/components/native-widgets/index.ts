@@ -6,7 +6,7 @@
  *
  * 组件注册流程：
  * 1. 在插件的 manifest.json 中声明 ui.components
- * 2. 运行 `bun scripts/generate-widget-registry.ts` 生成注册表
+ * 2. 运行 `bun scripts/build/generate-widget-registry.ts` 生成注册表
  * 3. 在 contributes.nativeWidgets 中引用组件名称
  *
  * 安全说明：

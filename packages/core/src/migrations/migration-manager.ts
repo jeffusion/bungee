@@ -1,249 +1,50 @@
 import { Database } from 'bun:sqlite';
-import fs from 'fs';
-import path from 'path';
-import { logger } from '../logger';
+import { mkdirSync, existsSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { migrations } from './index';
 import { initializeAccessDatabaseConnection } from '../access-database';
-import type { Migration, MigrationResult, MigrationRecord } from './migration.types';
+import { verifyAccessSchema } from './schema-fingerprint';
+import type { Migration, MigrationRecord, MigrationResult } from './migration.types';
 
-/**
- * Migration Manager
- *
- * Handles database schema migrations with automatic recovery and degraded mode fallback.
- * Designed for consumer-facing applications where migration failures should not break the app.
- *
- * Features:
- * - Single execution (no concurrent migration issues)
- * - Transaction safety
- * - Automatic recovery from common errors
- * - Graceful degradation on failure
- */
+export function migrateAccessDatabase(db: Database, plan: readonly Migration[] = migrations): void {
+  db.transaction(() => {
+    if (!plan.length || plan[0] !== migrations[0] || plan.some((m,i) => !/^\d{3}$/.test(m.version) || i > 0 && Number(m.version) !== Number(plan[i-1]!.version)+1)
+      || new Set(plan.map(m => m.name)).size !== plan.length) throw new Error('access_migration_plan_invalid');
+    const count = db.query<{count:number},[]>("SELECT count(*) AS count FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").get()!.count;
+    let applied: MigrationRecord[] = [];
+    if (count) {
+      applied = db.query<MigrationRecord,[]>('SELECT version,name,applied_at FROM schema_migrations ORDER BY version').all();
+      if (!applied.length || applied.length > plan.length || applied.some((r,i) => r.version !== plan[i]?.version || r.name !== plan[i]?.name)) throw new Error('access_migration_history_invalid');
+      verifyAccessSchema(db,applied.at(-1)!.version,plan);
+    }
+    for (const migration of plan.slice(applied.length)) {
+      migration.up(db);
+      db.run('INSERT INTO schema_migrations(version,name,applied_at) VALUES(?,?,?)',[migration.version,migration.name,Date.now()]);
+    }
+    verifyAccessSchema(db,plan.at(-1)!.version,plan);
+  }).immediate();
+}
+
 export class MigrationManager {
-  private db: Database | null = null;
-
-  constructor(private dbPath: string) {}
-
-  /**
-   * Execute all pending migrations
-   *
-   * @returns Migration result with success status and optional error information
-   */
+  constructor(private readonly dbPath: string) {}
   async migrate(): Promise<MigrationResult> {
+    let db: Database | undefined;
     try {
-      // Ensure database directory exists
-      const dbDir = path.dirname(this.dbPath);
-      if (!fs.existsSync(dbDir)) {
-        fs.mkdirSync(dbDir, { recursive: true });
-      }
-
-      // Open database connection
-      this.db = new Database(this.dbPath, { create: true, readwrite: true, strict: true });
-      initializeAccessDatabaseConnection(this.db);
-
-      // Ensure migration tracking table exists
-      this.ensureMigrationTable();
-
-      // Get pending migrations
-      const pending = this.getPendingMigrations();
-
-      if (pending.length === 0) {
-        logger.debug('No pending migrations');
-        this.db.close(true);
-        return { success: true };
-      }
-
-      logger.info(
-        { count: pending.length, migrations: pending.map((m) => m.name) },
-        'Executing pending migrations'
-      );
-
-      // Execute migrations in a transaction
-      this.db.run('BEGIN TRANSACTION');
-      try {
-        for (const migration of pending) {
-          logger.debug({ migration: migration.name }, 'Applying migration');
-
-          // Execute migration
-          migration.up(this.db);
-
-          // Record migration
-          this.recordMigration(migration);
-
-          logger.info({ migration: migration.name }, 'Migration applied successfully');
-        }
-
-        this.db.run('COMMIT');
-        logger.info('All migrations completed successfully');
-        this.db.close(true);
-
-        return { success: true };
-      } catch (error) {
-        this.db.run('ROLLBACK');
-        throw error;
-      }
+      mkdirSync(dirname(this.dbPath),{recursive:true});
+      db = new Database(this.dbPath,{create:true,readwrite:true,strict:true});
+      initializeAccessDatabaseConnection(db);
+      migrateAccessDatabase(db);
+      return {success:true};
     } catch (error) {
-      logger.error({ error, dbPath: this.dbPath }, 'Migration failed');
-
-      // Attempt automatic recovery
-      const recovered = await this.attemptAutoRecovery(error as Error);
-
-      if (recovered) {
-        logger.info('Migration recovered automatically');
-        return { success: true, recovered: true };
-      }
-
-      // Close database connection
-      if (this.db) {
-        try {
-          this.db.close(true);
-        } catch {
-          // Ignore errors when closing
-        }
-      }
-
-      // Return degraded mode result
-      return {
-        success: false,
-        fallback: 'readonly',
-        userMessage: '数据库升级失败，日志功能将以只读模式运行。代理功能不受影响。',
-        error: (error as Error).message,
-      };
-    }
+      return {success:false,fallback:'readonly',userMessage:'数据库升级失败，日志功能以只读模式运行。',error:error instanceof Error ? error.message : String(error)};
+    } finally { db?.close(true); }
   }
-
-  /**
-   * Create migration tracking table if it doesn't exist
-   */
-  private ensureMigrationTable(): void {
-    if (!this.db) {
-      throw new Error('Database not initialized');
-    }
-
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS schema_migrations (
-        version TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        applied_at INTEGER NOT NULL
-      )
-    `);
-  }
-
-  /**
-   * Get list of pending migrations
-   */
-  private getPendingMigrations(): Migration[] {
-    if (!this.db) {
-      throw new Error('Database not initialized');
-    }
-
-    // Get applied migrations
-    const applied = this.db.query<MigrationRecord, []>('SELECT version FROM schema_migrations').all();
-    const appliedVersions = new Set(applied.map((r) => r.version));
-
-    // Filter out already applied migrations
-    return migrations.filter((m) => !appliedVersions.has(m.version));
-  }
-
-  /**
-   * Record migration as applied
-   */
-  private recordMigration(migration: Migration): void {
-    if (!this.db) {
-      throw new Error('Database not initialized');
-    }
-
-    // Bun 1.4.2: `.prepare()` statements are not Database-owned and outlive close(false);
-    // `.query()` statements are Database-owned and released by close().
-    this.db
-      .query('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)')
-      .run(migration.version, migration.name, Date.now());
-  }
-
-  /**
-   * Attempt automatic recovery from migration errors
-   *
-   * @returns true if recovery was successful, false otherwise
-   */
-  private async attemptAutoRecovery(error: Error): Promise<boolean> {
-    const errorMessage = error.message.toLowerCase();
-
-    // Scenario 1: Column already exists (concurrent migration or re-run)
-    if (errorMessage.includes('duplicate column') || errorMessage.includes('already exists')) {
-      logger.warn({ error: error.message }, 'Column already exists, marking migration as applied');
-
-      try {
-        // Re-open database if needed
-        if (!this.db) {
-          this.db = new Database(this.dbPath, { create: true, readwrite: true, strict: true });
-          initializeAccessDatabaseConnection(this.db);
-        }
-
-        // Try to mark the migration as applied (best effort)
-        // This is safe because the column already exists
-        return true;
-      } catch (recoveryError) {
-        logger.error({ error: recoveryError }, 'Failed to recover from duplicate column error');
-        return false;
-      }
-    }
-
-    // Scenario 2: Database is locked (wait and retry)
-    if (errorMessage.includes('database is locked')) {
-      logger.warn('Database is locked, waiting before retry');
-
-      // Wait 1 second
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-
-      // Retry migration once
-      try {
-        logger.info('Retrying migration after lock');
-        const result = await this.migrate();
-        return result.success;
-      } catch (retryError) {
-        logger.error({ error: retryError }, 'Retry failed');
-        return false;
-      }
-    }
-
-    // Scenario 3: Disk I/O error or disk full
-    if (errorMessage.includes('disk i/o error') || errorMessage.includes('disk full')) {
-      logger.error('Disk space issue detected, cannot auto-recover');
-      return false;
-    }
-
-    // Unknown error, cannot recover
-    logger.warn({ error: error.message }, 'Unknown error, cannot auto-recover');
-    return false;
-  }
-
-  /**
-   * Get migration status (for debugging/CLI)
-   */
-  async status(): Promise<Array<{ version: string; name: string; applied: boolean }>> {
+  async status(): Promise<Array<{version:string;name:string;applied:boolean}>> {
+    if (!existsSync(this.dbPath)) return migrations.map(m => ({version:m.version,name:m.name,applied:false}));
+    const db = new Database(this.dbPath,{readonly:true,strict:true});
     try {
-      const dbDir = path.dirname(this.dbPath);
-      if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
-      this.db = new Database(this.dbPath, { create: true, readwrite: true, strict: true });
-      initializeAccessDatabaseConnection(this.db);
-      this.ensureMigrationTable();
-
-      const applied = this.db.query<MigrationRecord, []>('SELECT version, name FROM schema_migrations').all();
-      const appliedVersions = new Set(applied.map((r) => r.version));
-
-      const status = migrations.map((m) => ({
-        version: m.version,
-        name: m.name,
-        applied: appliedVersions.has(m.version),
-      }));
-
-      this.db.close(true);
-      return status;
-    } catch (error) {
-      logger.error({ error }, 'Failed to get migration status');
-      if (this.db) {
-        try { this.db.close(true); } catch { /* best effort cleanup */ }
-      }
-      return [];
-    }
+      const records = db.query<MigrationRecord,[]>('SELECT version,name,applied_at FROM schema_migrations').all();
+      return migrations.map(m => ({version:m.version,name:m.name,applied:records.some(r => r.version===m.version && r.name===m.name)}));
+    } finally { db.close(); }
   }
 }

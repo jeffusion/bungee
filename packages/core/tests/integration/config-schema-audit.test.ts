@@ -1,3 +1,4 @@
+import { CONFIG_SCHEMA_STATEMENTS } from '../../src/config-storage/schema';
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -5,10 +6,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
 import { ConfigRepository, ConfigRepositoryError } from '../../src/config-storage';
-import { CONFIG_MIGRATION_V1 } from '../../src/config-storage/migrations/v1';
-import { CONFIG_MIGRATION_V2 } from '../../src/config-storage/migrations/v2';
-import { CONFIG_MIGRATION_V3 } from '../../src/config-storage/migrations/v3';
-import { CONFIG_SCHEMA_V1_STATEMENTS } from '../../src/config-storage/schema-v1';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 
 setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
@@ -111,7 +108,7 @@ describe('ConfigRepository initialized schema fingerprint', () => {
     const db = new Database(dbPath, { readwrite: true, strict: true });
     db.run('PRAGMA foreign_keys=OFF');
     db.run('DROP TABLE configuration_operations');
-    const operationStatement = CONFIG_SCHEMA_V1_STATEMENTS.find((statement) =>
+    const operationStatement = CONFIG_SCHEMA_STATEMENTS.find((statement) =>
       statement.startsWith('CREATE TABLE configuration_operations'));
     if (operationStatement === undefined) throw new Error('operation schema statement missing');
     db.run(operationStatement.replaceAll("'degraded'", "'DEGRADED'"));
@@ -417,27 +414,6 @@ describe('ConfigRepository cross-table audit', () => {
       repository.close();
     });
   }
-
-  test('audits every configuration state row instead of accepting an extra hidden row', () => {
-    // Given
-    const dbPath = databasePath();
-    const db = new Database(dbPath, { create: true, readwrite: true, strict: true });
-    db.transaction(() => {
-      CONFIG_MIGRATION_V1.up(db);
-      CONFIG_MIGRATION_V2.up(db);
-      db.run('PRAGMA ignore_check_constraints=ON');
-      db.run(`INSERT INTO configuration_state
-        (id,schema_version,active_revision,bootstrap_mode,bootstrap_completed_revision)
-        SELECT 2,schema_version,active_revision,bootstrap_mode,bootstrap_completed_revision
-        FROM configuration_state WHERE id=1`);
-      db.run('PRAGMA ignore_check_constraints=OFF');
-      CONFIG_MIGRATION_V3.up(db);
-    }).immediate();
-    db.close(true);
-
-    // When / Then
-    expectCorruptOpen(dbPath);
-  });
 
   test('rejects invalid persisted global scalar domains even when checks are bypassed', () => {
     // Given / When / Then

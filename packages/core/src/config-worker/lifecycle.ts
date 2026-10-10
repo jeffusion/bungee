@@ -11,6 +11,7 @@ import type { StartWorkerCommand } from '../config-publication/types';
 import type { PluginRuntimeOrchestratorStatusReport } from '../plugin-runtime-orchestrator';
 import type { RequestLoggerDependencies } from '../logger/request-logger';
 import { parseWorkerTransportSecret, restoreWorkerTransportRequest } from './private-transport';
+import { getWorkerPluginStorageFactory } from './runtime-dependencies';
 import type { PluginServiceHost } from '../plugin-services';
 
 type LifecycleServer = Pick<Server<unknown>, 'port' | 'stop'>;
@@ -279,7 +280,7 @@ export async function loadProductionResources(): Promise<ProductionResources> {
     initializeRuntimeState: runtimeState.initializeRuntimeState,
     cleanupRuntimeState: runtimeState.cleanupRuntimeState,
     initializePluginContext() {
-      pluginContexts.initializePluginContextManager(accessLogWriter.getDatabase());
+      pluginContexts.initializePluginContextManager(getWorkerPluginStorageFactory());
     },
     async cleanupPluginContexts() {
       if (pluginContexts.isPluginContextManagerInitialized()) {
@@ -289,7 +290,6 @@ export async function loadProductionResources(): Promise<ProductionResources> {
     async initializePluginRuntime(config, activatedPluginNames, services, beforeBootstrap) {
       const result = await pluginRuntime.initializePluginRuntime(config, {
         basePath: process.cwd(),
-        db: accessLogWriter.getDatabase(),
         activatedPluginNames,
         ...(services === undefined ? {} : { services }),
         ...(beforeBootstrap === undefined ? {} : { beforeBootstrap }),

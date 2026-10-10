@@ -165,7 +165,7 @@ export function supervisionFixture(
   const runtime = new MasterRuntime({
     workerCount: 2,
     expectedPluginCatalogHash: CATALOG_HASH,
-    repository: { getSnapshot: () => SNAPSHOT, close: () => undefined },
+    repository: { getSnapshot: () => SNAPSHOT, close: async () => undefined },
     coordinator: {
       async recoverAndPublish() { return null; },
       async startCurrent(_snapshot, survivors = [], _retireWorkers, signal) {

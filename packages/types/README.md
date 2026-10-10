@@ -13,13 +13,13 @@ bun add @jeffusion/bungee-types
 ## Usage
 
 ```typescript
-import type { AppConfig, RouteConfig, AuthConfig } from '@jeffusion/bungee-types';
+import type { AppConfig, RouteConfig } from '@jeffusion/bungee-types';
 
 const config: AppConfig = {
   routes: [
     {
       path: '/api',
-      upstreams: [
+      endpoints: [
         { target: 'http://localhost:3000' }
       ]
     }
@@ -32,8 +32,7 @@ const config: AppConfig = {
 ### Core Configuration Types
 - `AppConfig` - Main application configuration
 - `RouteConfig` - Route configuration with upstreams and plugins
-- `AuthConfig` - Authentication configuration
-- `Upstream` - Upstream server configuration
+- `Endpoint` - Upstream target, weight, conditions and directional rules
 
 ### Modification and Plugin Types
 - `ModificationRules` - Request/response modification rules
@@ -42,7 +41,7 @@ const config: AppConfig = {
 
 ## Type Exports
 
-### Default Export
+### Root Entry
 ```typescript
 import type { AppConfig } from '@jeffusion/bungee-types';
 ```
@@ -54,7 +53,9 @@ import type { RouteConfig } from '@jeffusion/bungee-types/types';
 
 ## Documentation
 
-For full documentation, visit [Bungee Documentation](https://github.com/jeffusion/bungee).
+For storage aggregates and runtime validation, see [configuration reference](../../docs/reference/configuration.md). Management identity and proxy Keys are plugin capabilities; an exported TypeScript shape does not bypass configuration validation.
+
+Plugin runtime interfaces use `@jeffusion/bungee-core/plugin`, not this package.
 
 ## License
 

@@ -26,24 +26,24 @@ describe('local accounts durable management provider', () => {
     const { c, db, path } = await setup(); const { data } = await login(c);
     const list = await call(c, '/self', 'GET', data.token); const text = await list.text(); expect(text).not.toContain('$argon2id'); expect(text).not.toContain('passwordHash'); expect(text).not.toContain(data.token);
     const self = await call(c, '/self', 'GET', data.token); expect(await self.text()).not.toContain('digest');
-    expect(new PluginDurableStateStore(db).forNamespace('other-plugin').get('accounts')).toBeNull();
-    const stored = JSON.stringify(new PluginDurableStateStore(db).forNamespace('local-accounts').get('accounts')); expect(stored).not.toContain(PASSWORD); expect(stored).not.toContain(data.token); expect(stored).toContain('$argon2id$v=19$m=65536,t=3');
-    c.dispose(); db.close(); dbs.splice(dbs.indexOf(db), 1); const reopened = new Database(path); dbs.push(reopened); const next = createControl(host(reopened), { now: () => 1_000_001 }); await next.start(); expect(next.hasIdentity()).toBe(true); expect(await next.authenticate(request('/self','GET',undefined,{ authorization: `Bearer ${data.token}` }))).not.toBeNull();
+    expect(await new PluginDurableStateStore(db).forNamespace('other-plugin').get('administrator')).toBeNull();
+    const stored = JSON.stringify(await new PluginDurableStateStore(db).forNamespace('local-accounts').get('administrator')); expect(stored).not.toContain(PASSWORD); expect(stored).not.toContain(data.token); expect(stored).toContain('$argon2id$v=19$m=65536,t=3');
+    c.dispose(); db.close(); dbs.splice(dbs.indexOf(db), 1); const reopened = new Database(path); dbs.push(reopened); const next = createControl(host(reopened), { now: () => 1_000_001 }); await next.start(); expect(await next.hasIdentity()).toBe(true); expect(await next.authenticate(request('/self','GET',undefined,{ authorization: `Bearer ${data.token}` }))).not.toBeNull();
     await expect(next.bootstrap({ username: 'new-owner', password: PASSWORD, passwordConfirmation: PASSWORD })).rejects.toThrow('invalid_credentials');
     await next.bootstrap({ username: 'owner', password: PASSWORD, passwordConfirmation: PASSWORD });
     expect((await call(next,'/self','GET',data.token)).status).toBe(200);
   }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
   test('missing durable capability and corrupt state fail closed', async () => {
     expect(() => createControl({ ...hostFor({} as never) })).toThrow('durable_state_required');
-    const { c, db } = await setup(); const state = host(db).durableState!; const old = state.get('accounts')!; state.execute({ commandId: 'corrupt', mutations: [{ key: 'accounts', expectedVersion: old.version, value: { schema: 1, members: [{ role: 'owner' }], sessions: [], failures: [] } }] });
+    const { c, db } = await setup(); const state = host(db).durableState!; const old = (await state.get('administrator'))!; await state.transact([{key: 'administrator', expectedVersion: old.version, value: {schema: 3, administrator: {id: 'bad'}}}]);
     await expect(c.authenticate(request('/self', 'GET', undefined, { authorization: `Bearer ${'a'.repeat(43)}` }))).rejects.toThrow('corrupt_state');
   }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
   test('single administrator has full access, spoofed identities fail and password change revokes every session', async () => {
     const { c } = await setup();
     const first = (await login(c)).data.token, second = (await login(c)).data.token;
     const subject = await c.authenticate(request('/self','GET',undefined,{ authorization: `Bearer ${first}` }));
-    for (const capability of ['config.read','config.write','logs.body','keys.write','plugins.code','auth.mode']) expect(c.authorize(subject!,capability)).toBe(true);
-    expect(c.authorize({ ...subject! }, 'config.write')).toBe(false);
+    for (const capability of ['config.read','config.write','logs.body','keys.write','plugins.code','auth.mode']) expect(await c.authorize(subject!,capability)).toBe(true);
+    expect(await c.authorize({ ...subject! }, 'config.write')).toBe(false);
     const self = await (await call(c,'/self','GET',first)).json() as any;
     expect(self.administrator.username).toBe('owner');
     for (const removed of ['members','member','role','subject']) expect(self[removed]).toBeUndefined();
@@ -52,7 +52,7 @@ describe('local accounts durable management provider', () => {
     expect((await call(c,'/password','POST',first,{currentPassword:PASSWORD,password:NEXT,passwordConfirmation:'mismatch'})).status).toBe(400);
     expect((await call(c,'/password','POST',first,{currentPassword:PASSWORD,password:NEXT,passwordConfirmation:NEXT})).status).toBe(200);
     for (const token of [first,second]) expect(await c.authenticate(request('/self','GET',undefined,{authorization:`Bearer ${token}`}))).toBeNull();
-    expect(c.authorize(subject!,'config.write')).toBe(false);
+    expect(await c.authorize(subject!,'config.write')).toBe(false);
     expect((await c.login(request('/login','POST',{username:'owner',password:PASSWORD,transport:'bearer'}))).status).toBe(401);
     expect((await login(c,'owner',NEXT)).data.administrator).toMatchObject({username:'owner'});
     await expect(c.bootstrap({username:'another',password:NEXT,passwordConfirmation:NEXT})).rejects.toThrow('invalid_credentials');
@@ -75,7 +75,7 @@ describe('local accounts durable management provider', () => {
     advance(30 * 60_000); expect(await c.authenticate(request('/self','GET',undefined,{ authorization: `Bearer ${token}` }))).toBeNull();
     token = (await login(c)).data.token; for (let i = 0; i < 16; i++) { advance(29 * 60_000); expect(await c.authenticate(request('/self','GET',undefined,{ authorization: `Bearer ${token}` }))).not.toBeNull(); }
     advance(16 * 60_000); expect(await c.authenticate(request('/self','GET',undefined,{ authorization: `Bearer ${token}` }))).toBeNull();
-    token = (await login(c)).data.token; c.revokeSessions(); expect(await c.authenticate(request('/self','GET',undefined,{ authorization: `Bearer ${token}` }))).toBeNull();
+    token = (await login(c)).data.token; await c.revokeSessions(); expect(await c.authenticate(request('/self','GET',undefined,{ authorization: `Bearer ${token}` }))).toBeNull();
   }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
   test('account and trusted source throttles ignore forwarded headers and indistinguishable bad credentials', async () => {
     const { c } = await setup();

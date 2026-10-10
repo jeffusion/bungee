@@ -97,7 +97,7 @@ test('missing response media type uses final request Accept only for valid SSE l
       const response = await handleRequest(new Request('http://gateway/test', { method: 'POST', body: '{"x":1}',
         headers: { accept: 'application/json', 'content-type': 'application/json' } }),
         config(target, { request: { headers: { replace: { Accept: fixture.accept } } } }), { logging });
-      expect(seenAccept).toBe(fixture.accept);
+      expect<string | null>(seenAccept).toBe(fixture.accept);
       expect(response.headers.get('content-type')).toBe(media || null);
       expect(await response.text()).toBe(payload);
       const row = (await rows()).at(-1)!;
@@ -110,7 +110,7 @@ test('missing response media type uses final request Accept only for valid SSE l
 
 test('opaque request and response logging preserve compressed, malformed and binary wire bytes', async () => {
   const { logging, storage, config, rows } = await setup();
-  let forwarded: Uint8Array | undefined;
+  let forwarded: Uint8Array<ArrayBuffer> | undefined;
   const server = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(req) {
     forwarded = new Uint8Array(await req.arrayBuffer());
     return new Response(forwarded, { headers: req.headers });
@@ -124,7 +124,7 @@ test('opaque request and response logging preserve compressed, malformed and bin
       { bytes: new Uint8Array([255, 128, 0, 1]), coding: 'unknown', expected: { encoding: 'base64', content_encoding: 'unknown', data: '/4AAAQ==' } },
     ];
     for (const { bytes, coding, expected } of cases) {
-      const response = await handleRequest(new Request('http://gateway/test', { method: 'POST', body: bytes,
+      const response = await handleRequest(new Request('http://gateway/test', { method: 'POST', body: Uint8Array.from(bytes),
         headers: { 'content-type': 'application/json', ...(coding ? { 'content-encoding': coding } : {}) } }), config(server.url.origin), { logging });
       expect(response.status).toBe(200);
       expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array(bytes));
@@ -288,7 +288,7 @@ test('all SSE body directions use the same array format while preserving compres
   try {
     for (const coding of ['', 'gzip', 'zstd']) {
       const bytes = coding === 'gzip' ? gzipSync(encoder.encode(text)) : coding === 'zstd' ? zstdCompressSync(encoder.encode(text)) : encoder.encode(text);
-      const response = await handleRequest(new Request('http://gateway/test', { method: 'POST', body: bytes,
+      const response = await handleRequest(new Request('http://gateway/test', { method: 'POST', body: Uint8Array.from(bytes),
         headers: { 'content-type': 'text/event-stream; charset=utf-8', ...(coding ? { 'content-encoding': coding } : {}) } }), config(server.url.origin), { logging });
       expect(response.headers.get('content-encoding') ?? '').toBe(coding);
       expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array(bytes));

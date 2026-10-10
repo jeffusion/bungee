@@ -44,7 +44,6 @@ config.json.backup.*
 .gemini/
 .omo/
 .sisyphus/
-AGENTS.md
 CLAUDE.md
 GEMINI.md
 openspec/

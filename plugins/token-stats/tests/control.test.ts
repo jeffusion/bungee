@@ -1,3 +1,4 @@
+import { initializeTokenStatsTestDatabase } from '../../../packages/core/tests/helpers/token-stats-database';
 import { fileURLToPath } from 'node:url';
 import { withTokenStatsMetering } from '../server/storage';
 type StatsTestStorage = ReturnType<typeof withTokenStatsMetering<SQLitePluginStorage>>;
@@ -7,9 +8,6 @@ import { Database } from 'bun:sqlite';
 import { createPluginHooks, type PluginLogger } from '../../../packages/core/src/hooks';
 import type { PluginStorage, TokenStatsAttempt } from '../../../packages/core/src/plugin.types';
 import { SQLitePluginStorage } from '../../../packages/core/src/plugin-storage';
-import { migration as pluginStorageMigration } from '../../../packages/core/src/migrations/versions/002_add_plugin_storage';
-import { migration as tokenStatsKeyMigration } from '../../../packages/core/src/migrations/versions/007_token_stats_key';
-import { migration as tokenStatsMeteringMigration } from '../../../packages/core/src/migrations/versions/005_token_stats_metering';
 import type { ControlHostContext, SecretStore } from '../../../packages/core/src/plugin-control/contracts';
 import { loadImmutableControlArtifact } from '../../../packages/core/src/plugin-control/artifact-loader';
 import { PluginManifestCatalog } from '../../../packages/core/src/plugin-manifest-catalog/catalog';
@@ -34,9 +32,7 @@ const costCatalog = {
 
 function createStorage(): StatsTestStorage {
   const db = new Database(':memory:');
-  pluginStorageMigration.up(db);
-  tokenStatsMeteringMigration.up(db);
-  tokenStatsKeyMigration.up(db);
+  initializeTokenStatsTestDatabase(db);
   databases.push(db);
   return withTokenStatsMetering(new SQLitePluginStorage(db, 'token-stats'));
 }

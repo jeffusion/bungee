@@ -1,3 +1,4 @@
+import { initializeTokenStatsTestDatabase } from '../../../packages/core/tests/helpers/token-stats-database';
 import { withTokenStatsMetering } from '../server/storage';
 type StatsTestStorage = ReturnType<typeof withTokenStatsMetering<SQLitePluginStorage>>;
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -6,9 +7,6 @@ import type { AttemptObservationEvent, PluginLogger, PluginInitContext } from '.
 import { createPluginHooks } from '../../../packages/core/src/hooks';
 import type { PluginStorage, TokenStatsAttempt } from '../../../packages/core/src/plugin.types';
 import { SQLitePluginStorage } from '../../../packages/core/src/plugin-storage';
-import { migration as pluginStorageMigration } from '../../../packages/core/src/migrations/versions/002_add_plugin_storage';
-import { migration as tokenStatsKeyMigration } from '../../../packages/core/src/migrations/versions/007_token_stats_key';
-import { migration as tokenStatsMeteringMigration } from '../../../packages/core/src/migrations/versions/005_token_stats_metering';
 import TokenMeteringPlugin from '../../token-metering/server/index';
 import { PluginServiceHost } from '../../../packages/core/src/plugin-services';
 import TokenStatsPlugin from '../server/index';
@@ -27,9 +25,7 @@ const grokCatalog = {
 
 function createFixture(): Fixture {
   const db = new Database(':memory:');
-  pluginStorageMigration.up(db);
-  tokenStatsMeteringMigration.up(db);
-  tokenStatsKeyMigration.up(db);
+  initializeTokenStatsTestDatabase(db);
   databases.push(db);
   return { db, storage: withTokenStatsMetering(new SQLitePluginStorage(db, 'token-stats')), events: [] };
 }

@@ -58,7 +58,7 @@ describe('plugin binding activation aggregation', () => {
   ] as const) {
     test(`serves when ${scope} binding is the enabled declaration`, async () => {
       const { root, pluginPath } = fixture();
-      const orchestrator = new PluginRuntimeOrchestrator(root, undefined, [pluginName]);
+      const orchestrator = new PluginRuntimeOrchestrator(root, [pluginName]);
       const runtimeConfig = config(pluginPath, globalEnabled, routeEnabled);
       try {
         const result = await orchestrator.applyConfig(runtimeConfig);
@@ -77,7 +77,7 @@ describe('plugin binding activation aggregation', () => {
 
   test('keeps all-disabled declarations disabled and not required', async () => {
     const { root, pluginPath } = fixture();
-    const orchestrator = new PluginRuntimeOrchestrator(root, undefined, [pluginName]);
+    const orchestrator = new PluginRuntimeOrchestrator(root, [pluginName]);
     const runtimeConfig = config(pluginPath, false, false);
     try {
       const result = await orchestrator.applyConfig(runtimeConfig);
@@ -112,7 +112,7 @@ describe('plugin binding activation aggregation', () => {
         },
       ],
     };
-    const orchestrator = new PluginRuntimeOrchestrator(root, undefined, [servicePlugin, endpointPlugin]);
+    const orchestrator = new PluginRuntimeOrchestrator(root, [servicePlugin, endpointPlugin]);
     try {
       const result = await orchestrator.applyConfig(runtimeConfig);
       const required = requiredPluginNames(runtimeConfig);

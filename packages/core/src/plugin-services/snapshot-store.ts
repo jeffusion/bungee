@@ -120,7 +120,8 @@ export class HostSnapshotStore {
     this.#maxBytes = maxBytes;
     // The family id is part of the persistent identity: two declared families of
     // one provider never share a current pointer, version index or pins.
-    const identity = familyId === '' ? `${store.namespace}/${options.owner}` : `${store.namespace}/${options.owner}/${familyId}`;
+    const provider = store.namespace.startsWith('channel.') ? store.namespace.slice('channel.'.length) : store.namespace;
+    const identity = familyId === '' ? `${provider}/${options.owner}` : `${provider}/${options.owner}/${familyId}`;
     this.#prefix = `hs:${createHash('sha256').update(identity).digest('hex').slice(0, 16)}`;
   }
 

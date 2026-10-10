@@ -1,14 +1,15 @@
+import {createDatabaseSecretStoreFactory,createDatabasePluginStorageFactory} from '../helpers/plugin-storage-backend';
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { Database } from 'bun:sqlite';
+import {initializePluginStateDatabase} from '../../src/plugin-state/schema';
 import { ConfigRepository } from '../../src/config-storage';
 import { PluginPathResolver } from '../../src/plugin-path-resolver';
 import { PluginManifestCatalog } from '../../src/plugin-manifest-catalog/catalog';
 import { loadPluginManifestRecord } from '../../src/plugin-manifest-catalog/manifest-filesystem';
 import {
-  createDatabaseSecretStoreFactory,
-  createDatabasePluginStorageFactory,
   createPluginControlHost,
   parsePluginSecretsKey,
   type PluginControlHandle,
@@ -25,6 +26,8 @@ setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 const repositoryRoots: string[] = [];
 const artifactRoots: string[] = [];
 const repositories: ConfigRepository[] = [];
+const pluginDatabases = new Map<ConfigRepository,Database>();
+function pluginDatabase(repository:ConfigRepository):Database {return pluginDatabases.get(repository)!;}
 const hosts: PluginControlHost[] = [];
 const KEY_A: SecretKeyMaterial = { keyId: 'BUNGEE_PLUGIN_SECRETS_KEY:v1', key: new Uint8Array(32).fill(1) };
 const KEY_B: SecretKeyMaterial = { keyId: 'BUNGEE_PLUGIN_SECRETS_KEY:v1', key: new Uint8Array(32).fill(2) };
@@ -35,6 +38,7 @@ function openRepository(): ConfigRepository {
   repositoryRoots.push(root);
   const repository = ConfigRepository.open(join(root, 'config.db'));
   repositories.push(repository);
+  const db=new Database(join(root,'plugin-state.db'),{create:true});initializePluginStateDatabase(db);pluginDatabases.set(repository,db);
   return repository;
 }
 
@@ -77,7 +81,7 @@ function keyMaterial(material: SecretKeyMaterial): string {
 }
 
 async function writeRealAccount(repository: ConfigRepository, material: SecretKeyMaterial): Promise<void> {
-  const factory = createDatabaseSecretStoreFactory(repository.getDatabase(), material);
+  const factory = createDatabaseSecretStoreFactory(pluginDatabase(repository), material);
   const store = factory.create('chatgpt-oauth');
   await new AccountStore(store).create('artifact-test', {
     accessToken: 'artifact-access',
@@ -99,7 +103,7 @@ afterEach(async () => {
   const ownedRepositoryRoots = repositoryRoots.splice(0);
   const ownedArtifactRoots = artifactRoots.splice(0);
   for (const host of ownedHosts) await host.dispose();
-  for (const repository of ownedRepositories) repository.close();
+  for (const repository of ownedRepositories) {pluginDatabases.get(repository)?.close();pluginDatabases.delete(repository);repository.close();}
   for (const root of ownedRepositoryRoots) rmSync(root, { recursive: true, force: true });
   for (const root of ownedArtifactRoots) rmSync(root, { recursive: true, force: true });
 });
@@ -112,8 +116,8 @@ describe('ChatGPT control artifact readiness lane', () => {
     const repository = openRepository();
     const host = createTrackedPluginControlHost({
       records: [record],
-      secretStores: createDatabaseSecretStoreFactory(repository.getDatabase(), parsePluginSecretsKey(keyMaterial(KEY_A))),
-      storage: createDatabasePluginStorageFactory(repository.getDatabase()),
+      secretStores: createDatabaseSecretStoreFactory(pluginDatabase(repository), parsePluginSecretsKey(keyMaterial(KEY_A))),
+      storage: createDatabasePluginStorageFactory(pluginDatabase(repository)),
     });
 
     await host.activate('chatgpt-oauth');
@@ -126,8 +130,8 @@ describe('ChatGPT control artifact readiness lane', () => {
     const repository = openRepository();
     const host = createTrackedPluginControlHost({
       records: [record],
-      secretStores: createDatabaseSecretStoreFactory(repository.getDatabase(), undefined),
-      storage: createDatabasePluginStorageFactory(repository.getDatabase()),
+      secretStores: createDatabaseSecretStoreFactory(pluginDatabase(repository), undefined),
+      storage: createDatabasePluginStorageFactory(pluginDatabase(repository)),
     });
 
     await expect(host.activate('chatgpt-oauth')).rejects.toMatchObject({ code: 'start_failed', cause: { code: 'key_unavailable' } });
@@ -139,8 +143,8 @@ describe('ChatGPT control artifact readiness lane', () => {
     const repository = openRepository();
     await writeRealAccount(repository, KEY_A);
     const host = createTrackedPluginControlHost({
-      records: [record], secretStores: createDatabaseSecretStoreFactory(repository.getDatabase(), KEY_B),
-      storage: createDatabasePluginStorageFactory(repository.getDatabase()),
+      records: [record], secretStores: createDatabaseSecretStoreFactory(pluginDatabase(repository), KEY_B),
+      storage: createDatabasePluginStorageFactory(pluginDatabase(repository)),
     });
 
     await expect(host.activate('chatgpt-oauth')).rejects.toMatchObject({
@@ -153,13 +157,13 @@ describe('ChatGPT control artifact readiness lane', () => {
     const record = await chatgptRecord();
     const repository = openRepository();
     await writeRealAccount(repository, KEY_A);
-    repository.getDatabase().run(
+    pluginDatabase(repository).run(
       'UPDATE secret_store_objects SET envelope=? WHERE namespace=? AND key=?',
       [new Uint8Array([1, 2, 3]), 'chatgpt-oauth', 'accounts.v1'],
     );
     const host = createTrackedPluginControlHost({
-      records: [record], secretStores: createDatabaseSecretStoreFactory(repository.getDatabase(), KEY_A),
-      storage: createDatabasePluginStorageFactory(repository.getDatabase()),
+      records: [record], secretStores: createDatabaseSecretStoreFactory(pluginDatabase(repository), KEY_A),
+      storage: createDatabasePluginStorageFactory(pluginDatabase(repository)),
     });
 
     await expect(host.activate('chatgpt-oauth')).rejects.toMatchObject({
@@ -181,8 +185,8 @@ describe('ChatGPT control artifact readiness lane', () => {
     const repository = openRepository();
     const host = createTrackedPluginControlHost({
       records: [mismatched],
-      secretStores: createDatabaseSecretStoreFactory(repository.getDatabase(), KEY_A),
-      storage: createDatabasePluginStorageFactory(repository.getDatabase()),
+      secretStores: createDatabaseSecretStoreFactory(pluginDatabase(repository), KEY_A),
+      storage: createDatabasePluginStorageFactory(pluginDatabase(repository)),
     });
 
     await expect(host.activate('chatgpt-oauth')).rejects.toMatchObject({
@@ -194,8 +198,8 @@ describe('ChatGPT control artifact readiness lane', () => {
   test('revokes the real artifact SecretStore handle on dispose without leaking it', async () => {
     const record = await chatgptRecord();
     const repository = openRepository();
-    const factory = createDatabaseSecretStoreFactory(repository.getDatabase(), KEY_A);
-    const host = createTrackedPluginControlHost({ records: [record], secretStores: factory, storage: createDatabasePluginStorageFactory(repository.getDatabase()) });
+    const factory = createDatabaseSecretStoreFactory(pluginDatabase(repository), KEY_A);
+    const host = createTrackedPluginControlHost({ records: [record], secretStores: factory, storage: createDatabasePluginStorageFactory(pluginDatabase(repository)) });
     const handle: PluginControlHandle = await host.activate('chatgpt-oauth');
 
     await host.dispose();

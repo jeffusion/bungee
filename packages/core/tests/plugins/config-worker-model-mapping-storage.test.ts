@@ -5,6 +5,9 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { MigrationManager } from '../../src/migrations/migration-manager';
+import { PluginStateClient } from '../../src/plugin-state/client';
+import { createSignedWorkerRpcServer, PLUGIN_STORAGE_RPC_PATH } from '../../src/data-admission/rpc';
+import type { PluginStorageOperation } from '../../src/plugin-state/storage-rpc';
 import { cleanupProcesses, ProcessRegistry } from '../fixtures/process-cleanup';
 
 const CORE_ROOT = resolve(import.meta.dir, '../..');
@@ -17,28 +20,45 @@ const emptyCatalogHostUrl = pathToFileURL(resolve(CORE_ROOT, 'tests/support/empt
 const catalogIndexUrl = pathToFileURL(resolve(REPO_ROOT, 'plugins/models-dev/server/catalog.ts')).href;
 const catalogViewUrl = pathToFileURL(resolve(REPO_ROOT, 'plugins/models-dev/server/local.ts')).href;
 const modelMappingControlUrl = pathToFileURL(resolve(CORE_ROOT, '../../plugins/model-mapping/server/control.ts')).href;
+const storageFactoryUrl = pathToFileURL(resolve(CORE_ROOT,'src/plugin-state/storage-rpc.ts')).href;
+const runtimeDependenciesUrl = pathToFileURL(resolve(CORE_ROOT,'src/config-worker/runtime-dependencies.ts')).href;
+const rpcUrl = pathToFileURL(resolve(CORE_ROOT,'src/data-admission/rpc.ts')).href;
 const processes = new ProcessRegistry();
 
 afterEach(async () => cleanupProcesses(processes));
 
-test('production config worker shares its access database while model-mapping reads the sole models-dev catalog', async () => {
+test('production config worker uses signed isolated storage while model-mapping reads the sole models-dev catalog', async () => {
   const root = await mkdtemp(join(tmpdir(), 'bungee-config-worker-model-mapping-'));
   const dbPath = join(root, 'access.db');
+  const statePath = join(root,'plugin-state.db');
+  const transportSecret = Buffer.alloc(32,9).toString('base64url');
+  const masterGeneration = '10000000-0000-4000-8000-000000000001';
+  const workerIdentity = {role:'worker' as const,master_generation:masterGeneration,process_instance_id:'20000000-0000-4000-8000-000000000001',boot_nonce:'30000000-0000-4000-8000-000000000001',worker_slot:1};
+  const serverIdentity = {role:'ingress' as const,process_instance_id:masterGeneration,boot_nonce:masterGeneration};
+  let state: PluginStateClient | undefined;
+  let bridge: Bun.Server<undefined> | undefined;
+  let storageCalls = 0;
   let exited: Promise<number> | undefined;
   let stdout: Promise<string> | undefined;
   let stderr: Promise<string> | undefined;
 
   try {
     expect((await new MigrationManager(dbPath).migrate()).success).toBe(true);
-    const seed = new Database(dbPath);
-    seed.query(`
-      INSERT INTO plugin_storage (plugin_name, key, value, ttl, updated_at)
-      VALUES (?, ?, ?, NULL, ?)
-    `).run('model-mapping', 'catalog:v1:data', JSON.stringify({
+    state = await PluginStateClient.open(statePath,{initialize:true});
+    await state.storage.create('model-mapping').set('catalog:v1:data', {
       fetchedAt: 1,
       models: [{ value: 'seed-model', label: 'Seed model', description: '', provider: 'seed' }],
-    }), Date.now());
-    seed.close(true);
+    });
+    const activated = new Set(['model-mapping','models-dev']);
+    const signed = createSignedWorkerRpcServer({transportSecret,identity:serverIdentity,
+      authorizeWorker:worker=>Object.entries(workerIdentity).every(([key,value])=>worker[key as keyof typeof worker]===value) ? 'active' : 'unknown',
+      handle:async(operation,payload)=>{
+        const value=payload as {namespace:string;operation:PluginStorageOperation;args:unknown[]};
+        if(operation!=='storage' || !activated.has(value.namespace))throw new Error('plugin_storage_namespace_forbidden');
+        storageCalls++;
+        return state!.storageOperation(value.namespace,value.operation,value.args);
+      }});
+    bridge=Bun.serve({hostname:'127.0.0.1',port:0,fetch:request=>new URL(request.url).pathname===PLUGIN_STORAGE_RPC_PATH ? signed(request) : new Response(null,{status:404})});
 
     const script = `
       const { createConfigWorkerLifecycle } = await import(${JSON.stringify(lifecycleUrl)});
@@ -49,6 +69,11 @@ test('production config worker shares its access database while model-mapping re
       const { emptyCatalogServiceHost } = await import(${JSON.stringify(emptyCatalogHostUrl)});
       const { buildCatalogIndex } = await import(${JSON.stringify(catalogIndexUrl)});
       const { CatalogView, catalogServiceOf } = await import(${JSON.stringify(catalogViewUrl)});
+      const {createRemotePluginStorageFactory} = await import(${JSON.stringify(storageFactoryUrl)});
+      const {setWorkerPluginStorageFactory} = await import(${JSON.stringify(runtimeDependenciesUrl)});
+      const {createSignedWorkerRpcClient} = await import(${JSON.stringify(rpcUrl)});
+      const storageRpc=createSignedWorkerRpcClient({transportSecret:${JSON.stringify(transportSecret)},worker:${JSON.stringify(workerIdentity)},expectedServer:${JSON.stringify(serverIdentity)},url:${JSON.stringify(`http://127.0.0.1:${bridge.port}${PLUGIN_STORAGE_RPC_PATH}`)},retry:false});
+      setWorkerPluginStorageFactory(createRemotePluginStorageFactory((namespace,operation,args)=>storageRpc('storage',{namespace,operation,args})));
 
       const lifecycle = createConfigWorkerLifecycle({
         transportSecret: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
@@ -65,14 +90,14 @@ test('production config worker shares its access database while model-mapping re
       );
       try {
         const runtime = getPluginRuntimeOrchestrator();
-        if (!runtime || (getPluginContextManager() as unknown as { db: unknown }).db !== runtime.getDatabase()) {
-          throw new Error('plugin context and runtime do not share the access database');
+        if (!runtime || 'getDatabase' in runtime || 'db' in getPluginContextManager()) {
+          throw new Error('plugin runtime exposed a database instead of the signed storage capability');
         }
         const storage = getPluginContextManager().getContext('model-mapping')?.storage;
         if (!storage) throw new Error('model-mapping control storage was not initialized');
         // The old private cache must not become a second catalog source.
         const legacy = await storage.get('catalog:v1:data');
-        if (!legacy || legacy.models?.[0]?.value !== 'seed-model') throw new Error('shared database storage was not initialized');
+        if (!legacy || legacy.models?.[0]?.value !== 'seed-model') throw new Error('isolated signed storage was not initialized');
         const serviceHost = new PluginServiceHost('control');
         const provider = serviceHost.createContext('models-dev');
         const view = new CatalogView();
@@ -131,7 +156,10 @@ test('production config worker shares its access database while model-mapping re
 
     expect(exitCode, `${output}\n${errors}`).toBe(0);
 
-    const persisted = new Database(dbPath);
+    expect(storageCalls).toBeGreaterThan(0);
+    const access = new Database(dbPath,{readonly:true});
+    try {expect(access.query("SELECT name FROM sqlite_schema WHERE type='table' AND name='plugin_storage'").get()).toBeNull();}finally{access.close(true);}
+    const persisted = new Database(statePath,{readonly:true});
     const row = persisted.query(`
       SELECT value FROM plugin_storage WHERE plugin_name = ? AND key = ?
     `).get('model-mapping', 'catalog:v1:data') as { value: string } | null;
@@ -141,6 +169,8 @@ test('production config worker shares its access database while model-mapping re
   } finally {
     await cleanupProcesses(processes);
     await Promise.all([stdout, stderr].filter((stream): stream is Promise<string> => stream !== undefined));
+    await bridge?.stop(true);
+    await state?.close();
     await rm(root, { recursive: true, force: true });
   }
 }, 15_000);

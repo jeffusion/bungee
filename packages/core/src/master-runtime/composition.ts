@@ -1,9 +1,13 @@
 import { PluginJournalRecovery } from './plugin-journal-recovery';
 import type { DaemonMetadataV1, Sha256Digest } from '@jeffusion/bungee-types';
-import type { Database } from 'bun:sqlite';
+import type { AsyncConfigRepository, AsyncConfigRepositoryOptions } from '../config-storage/async-config-repository';
+import { PluginStateClient, type PluginStateOpenOptions } from '../plugin-state/client';
+import { PLUGIN_STORAGE_OPERATIONS, type PluginStorageOperation } from '../plugin-state/storage-rpc';
+import { createSignedWorkerRpcServer, PLUGIN_STORAGE_RPC_PATH } from '../data-admission/rpc';
+import { resolveStorageWorkerUrls } from './process-options';
 import { PluginDependencyGraph } from '../plugin-dependencies';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { PluginDurableStateStore, type PluginDurableState } from '../plugin-durable-state';
+import { type PluginDurableState } from '../plugin-durable-state';
 import { ManagementAuthentication, parseManagementOrigin, validateManagementTransition, managementSetupFailure } from './management-auth';
 import { managementRequestSource, parseTrustedManagementProxies } from '../management-listener/request-source';
 import { parseAdmissionTarget, type WorkerStateRpcCall } from '../data-admission/rpc';
@@ -74,8 +78,6 @@ import { exactExitProof, isExactServingTarget } from './runtime-evidence';
 import { classifyControlError } from '../config-publication/recovery-disposition';
 import type { ControllerClaimCapability } from './instance-lock';
 import {
-  createDatabaseSecretStoreFactory,
-  createDatabasePluginStorageFactory,
   createPluginControlHost,
   parsePluginSecretsKey,
   type PluginControlHost,
@@ -87,8 +89,7 @@ import {
 import { PluginServiceHost } from '../plugin-services';
 import { ControlPeerBroker, pluginPeerLifecycleIdentity, type PluginPeerKernelFacts } from '../plugin-services/peer-broker';
 import { createPluginPeerJournalResolver, type PluginPeerJournalResolver } from '../plugin-services/peer-journal';
-import { HostChannelAdapter, createReliableEventLogFactory } from '../plugin-services/channels';
-import { PluginCommunicationStore } from '../plugin-services/persistence';
+import { HostChannelAdapter } from '../plugin-services/channels';
 import { createMasterPluginCatalogApi } from './master-plugin-catalog-api';
 import { reconcilePluginDependencies } from './reconcile-plugin-dependencies';
 import { createMasterUIHandler } from '../ui/server';
@@ -110,24 +111,12 @@ export interface MasterPluginCatalog {
   records?(): readonly import('../plugin-manifest-catalog/types').PluginManifestRecord[];
 }
 
-export type MasterProcessRepository = ConfigPublicationRepository & MasterRuntimeRepository & {
-  appendServingSnapshot(snapshot: RepositorySnapshot, pluginCatalogHash: Sha256Digest): void;
-  getServingSnapshot(key: ServingSnapshotKey): RepositorySnapshot | null;
-  commit(command: CommitConfigurationCommandV1): CommitConfigurationResult;
-  getOperationState(mutationId: string): ConfigurationOperationState | null;
-  getRecovery?(recoveryId: string): ConfigurationRecovery | null;
-  getCurrentOperationState(): ConfigurationOperationState | null;
-  getCurrentRecovery(): ConfigurationRecovery | null;
-  createManualRecovery(recoveryId: string, sourceMutationId: string, expectedRevision: number, now: number): ConfigurationRecovery;
-  claimRecoveryAttempt(recoveryId: string, previousAttemptCount: number, now: number): ConfigurationRecovery;
-  scheduleRecoveryRetry(recoveryId: string, attemptCount: number, nextRetryAt: number, now: number): ConfigurationRecovery;
-  succeedRecovery(recoveryId: string, attemptCount: number, reasonCode: ConfigurationRecoveryReasonCode, reasonDetail: string | null, now: number): ConfigurationRecovery;
-  stopRecovery(recoveryId: string, attemptCount: number, reasonCode: ConfigurationRecoveryReasonCode, reasonDetail: string | null, now: number): ConfigurationRecovery;
-  requeueRecovery(recoveryId: string, attemptCount: number, now: number): ConfigurationRecovery;
-  getDatabase?: () => Database;
-  getSupervisionState?(): import('../supervision/state-repository').SupervisionState;
-  claimControllerWithCapability?(capability: ControllerClaimCapability, controllerId: string, updatedAt: number): import('../supervision/state-repository').SupervisionState;
-};
+export type MasterProcessRepository = Pick<AsyncConfigRepository,
+  'getSnapshot' | 'getSupervisionState' | 'close' | 'commit' | 'getActivePublication'
+  | 'getOperationState' | 'getCurrentOperationState' | 'getRecovery' | 'getCurrentRecovery'
+  | 'appendServingSnapshot' | 'getServingSnapshot' | 'claimControllerWithCapability'
+  | 'beginPublication' | 'beginWorkerAttempt' | 'beginDrainingRecovery' | 'markDraining' | 'recordWorkerResult' | 'finalizePublication' | 'createManualRecovery' | 'claimRecoveryAttempt'
+  | 'scheduleRecoveryRetry' | 'succeedRecovery' | 'stopRecovery' | 'requeueRecovery'>;
 export type MasterProcessAdmission = WorkerAdmissionController
   & MasterRuntimeAdmission
   & AdmittedWorkerSelector;
@@ -181,14 +170,15 @@ export interface MasterProcessDependencies {
   }): CatalogPathResolver;
   buildPluginCatalog(resolver: CatalogPathResolver): Promise<MasterPluginCatalog>;
   readonly resolveAuthToken: (tokenExpression: string) => unknown;
-  openRepository(path: string, options: ConfigRepositoryOptions): MasterProcessRepository;
+  openRepository(path: string, options: AsyncConfigRepositoryOptions): Promise<MasterProcessRepository>;
+  readonly openPluginState?: (path: string, options: PluginStateOpenOptions) => Promise<PluginStateClient>;
   createAdmission(): MasterProcessAdmission;
   resolveWorkerLaunch(input: WorkerLaunchInput): WorkerLaunch;
   createWorkerFactory(options: SupervisedConfigWorkerFactoryOptions): MasterProcessWorkerFactory;
   createMasterGeneration(): string;
   createCoordinator(options: MasterConfigPublicationCoordinatorOptions): MasterProcessCoordinator;
   createManagementListener(options: ManagementListenerOptions): MasterRuntimePublicListener;
-  readonly createMasterStats?: (path: string) => MasterStatsApi;
+  readonly createMasterStats?: (path: string) => MasterStatsApi | Promise<MasterStatsApi>;
   readonly createControllerClaim?: (
     configLock: MasterRuntimeInstanceLock,
     accessLock: MasterRuntimeInstanceLock,
@@ -213,6 +203,7 @@ export interface MasterProcessHandle {
 type ConstructionResources = {
   locks: MasterRuntimeInstanceLock[];
   repository: MasterProcessRepository | null;
+  pluginState: PluginStateClient | null;
   admission: MasterProcessAdmission | null;
   workerFactory: MasterProcessWorkerFactory | null;
   listener: MasterRuntimePublicListener | null;
@@ -225,6 +216,7 @@ type ConstructionResources = {
   stopBackgroundTasks: (() => Promise<void>) | null;
   stats: MasterStatsApi | null;
   statsResourceUnreleased: boolean;
+  storageResourceUnreleased: boolean;
   ingressController: MasterIngressController | null;
 };
 
@@ -279,17 +271,17 @@ function activeControlNames(
     .filter((name) => declared.has(name));
 }
 
-function controlReadinessFailure(
+async function controlReadinessFailure(
   repository: MasterProcessRepository,
   active: ActiveConfigurationPublication,
   serving: readonly ServingConfigWorker[],
   error: unknown,
   now: number,
   phase: 'publish' | 'recover',
-): MasterPublicationOutcome {
+): Promise<MasterPublicationOutcome> {
   logger.error({ error: serializeErrorChain(error), phase, mutationId: active.operation.mutation_id, revision: active.snapshot.revision },
     'Plugin control readiness failed before configuration publication');
-  const operation = repository.finalizePublication(
+  const operation = await repository.finalizePublication(
     active.operation.mutation_id,
     { outcome: 'degraded', error_code: 'control_readiness_failed', error_detail: 'plugin control readiness failed',
       recovery_disposition: classifyControlError(error) },
@@ -408,14 +400,18 @@ async function cleanupConstruction(resources: ConstructionResources): Promise<re
     catch (error) { workersCleaned = false; errors.push(error); }
     exitsConfirmed = true;
   }
-  if (resources.repository !== null) await capture(() => resources.repository?.close());
-  if (exitsConfirmed && workersCleaned && statsClosed && listenerStopped && ingressDispositionKnown) {
+  let storageClosed = !resources.storageResourceUnreleased;
+  for (const store of [resources.pluginState, resources.repository]) if (store !== null) {
+    try { await store.close(); } catch (error) { storageClosed = false; errors.push(error); }
+  }
+  if (storageClosed && exitsConfirmed && workersCleaned && statsClosed && listenerStopped && ingressDispositionKnown) {
     for (const lock of [...resources.locks].reverse()) await capture(() => lock.release());
   }
-  if (resources.locks.length > 0 && (!exitsConfirmed || !workersCleaned || !statsClosed || !listenerStopped || !ingressDispositionKnown)) {
+  if (resources.locks.length > 0 && (!storageClosed || !exitsConfirmed || !workersCleaned || !statsClosed || !listenerStopped || !ingressDispositionKnown)) {
     errors.push(new MasterRuntimeError(
       'cleanup_failed',
-      !statsClosed ? 'master stats did not close; instance lock retained'
+      !storageClosed ? 'master storage did not close; instance lock retained'
+        : !statsClosed ? 'master stats did not close; instance lock retained'
         : !listenerStopped ? 'management listener did not stop; instance lock retained'
           : !workersCleaned ? 'startup worker cleanup did not complete; instance lock retained'
           : !ingressDispositionKnown ? 'startup ingress disposition was not reported; instance lock retained'
@@ -428,8 +424,9 @@ async function cleanupConstruction(resources: ConstructionResources): Promise<re
 /** A durable fail-closed guard survives absent artifacts and failed read capabilities. */
 export class DurableRouteProtections {
   readonly routes = new Map<string, readonly string[]>();
-  constructor(private readonly state?: PluginDurableState) {
-    for (const record of state?.list() ?? []) {
+  constructor(private readonly state?: PluginDurableState) {}
+  async initialize(): Promise<void> {
+    for (const record of await this.state?.list() ?? []) {
       if (record.value === null) continue;
       const value = record.value as {plugin?:unknown;routeIds?:unknown};
       if (typeof value.plugin !== 'string' || value.plugin !== record.key || !Array.isArray(value.routeIds)
@@ -446,10 +443,8 @@ export class DurableRouteProtections {
         continue;
       }
       if (!Array.isArray(routeIds) || routeIds.some(id => typeof id !== 'string' || !id || id.length > 256)) throw new Error('invalid_route_protection');
-      const previous = this.state?.get(name), value = {plugin:name,routeIds:[...routeIds]};
-      if (this.state && JSON.stringify(previous?.value) !== JSON.stringify(value)) this.state.execute({
-        commandId:randomUUID(),mutations:[{key:name,expectedVersion:previous?.version ?? 0,value}],
-      });
+      const previous = await this.state?.get(name), value = {plugin:name,routeIds:[...routeIds]};
+      if (this.state && JSON.stringify(previous?.value) !== JSON.stringify(value)) await this.state.transact([{key:name,expectedVersion:previous?.version ?? 0,value}]);
       if (routeIds.length) this.routes.set(name,[...routeIds]); else this.routes.delete(name);
     }
   }
@@ -463,9 +458,10 @@ export async function startMasterComposition(
   daemonBootstrap: DaemonBootstrap | null = null,
 ): Promise<MasterProcessHandle> {
   const resources: ConstructionResources = {
-    locks: [], repository: null, admission: null, workerFactory: null, listener: null, controlListener: null,
+    locks: [], repository: null, pluginState: null, admission: null, workerFactory: null, listener: null, controlListener: null,
     pluginControl: null, pluginControlBridge: null, pluginControlSubscriptions: null, pluginPeer: null, pluginPeerJournal: null, stopBackgroundTasks: null, stats: null,
     statsResourceUnreleased: false,
+    storageResourceUnreleased: false,
     ingressController: null,
   };
   let runtime: MasterProcessRuntime | null = null;
@@ -479,22 +475,26 @@ export async function startMasterComposition(
   let controlApi: ReturnType<typeof createConfigControlApi> | null = null;
   let masterUIHandler: ((request: Request) => Promise<Response | null>) | null = null;
   let daemonControl: ReturnType<typeof createDaemonShutdownHandler> | null = null;
+  let configurationStorageHealthy = true;
+  let pluginStorageHealthy = true;
+  const configurationStorageFailed = () => { configurationStorageHealthy = false; resources.storageResourceUnreleased = true; };
   try {
     const options = dependencies.readOptions();
     const configLock = await dependencies.acquireInstanceLock(options.configDbLockPath);
     resources.locks.push(configLock);
     const accessLock = await dependencies.acquireInstanceLock(`${dependencies.context.accessLogDbPath}.lock`);
     resources.locks.push(accessLock);
-    await dependencies.migrateAccessDatabase(dependencies.context.accessLogDbPath);
+    try { await dependencies.migrateAccessDatabase(dependencies.context.accessLogDbPath); }
+    catch (error) { resources.statsResourceUnreleased = hasUnreleasedMasterStatsResource(error); throw error; }
     let supervisionState: import('../supervision/state-repository').SupervisionState | null = null;
     if (dependencies.createIngressController !== undefined) {
-      const bootstrap = dependencies.openRepository(options.configDbPath, { workerCount: options.workerCount });
+      const bootstrap = await dependencies.openRepository(options.configDbPath, { onWorkerFailure: configurationStorageFailed });
       resources.repository = bootstrap;
       const createClaim = dependencies.createControllerClaim;
       if (createClaim === undefined || bootstrap.claimControllerWithCapability === undefined) {
         throw new MasterRuntimeError('startup_incomplete', 'supervision claim is unavailable');
       }
-      supervisionState = bootstrap.claimControllerWithCapability(
+      supervisionState = await bootstrap.claimControllerWithCapability(
         createClaim(configLock, accessLock), randomUUID(), dependencies.clock.now(),
       );
       await bootstrap.close();
@@ -506,12 +506,12 @@ export async function startMasterComposition(
     });
     const catalog = await dependencies.buildPluginCatalog(resolver);
     const compileOptions = catalog.toCompileOptions();
-    resources.repository = dependencies.openRepository(options.configDbPath, {
+    resources.repository = await dependencies.openRepository(options.configDbPath, {
       compileOptions,
-      workerCount: options.workerCount,
+      onWorkerFailure: configurationStorageFailed,
     });
     try {
-      resources.stats = dependencies.createMasterStats?.(dependencies.context.accessLogDbPath) ?? null;
+      resources.stats = await dependencies.createMasterStats?.(dependencies.context.accessLogDbPath) ?? null;
     } catch (error) {
       resources.statsResourceUnreleased = hasUnreleasedMasterStatsResource(error);
       throw error;
@@ -527,21 +527,47 @@ export async function startMasterComposition(
     }
     if (compileOptions.pluginDependencies) {
       const managementProviders = new Set((catalog.records?.() ?? []).filter(record => record.manifest.management).map(record => record.name));
-      reconcilePluginDependencies(resources.repository, compileOptions, options.workerCount, dependencies.clock.now(), managementProviders);
+      await reconcilePluginDependencies(resources.repository, compileOptions, options.workerCount, dependencies.clock.now(), managementProviders);
     }
-    const configDatabase = resources.repository.getDatabase?.();
-    const accessDatabase = resources.stats?.getDatabase?.();
-    const secretStores = configDatabase === undefined
-      ? {
-        create() { throw new Error('plugin control secret key is unavailable'); },
-        revoke() {},
-        clear() {},
+    const pluginStatePath = resolve(options.configDbPath, '..', 'plugin-state.db');
+    const pluginStateLock = await dependencies.acquireInstanceLock(`${pluginStatePath}.lock`);
+    resources.locks.push(pluginStateLock);
+    resources.pluginState = await (dependencies.openPluginState ?? PluginStateClient.open)(pluginStatePath, {
+      material, workerUrl: resolveStorageWorkerUrls(import.meta.url).pluginState,
+      onWorkerFailure: () => { pluginStorageHealthy = false; resources.storageResourceUnreleased = true; },
+    });
+    const pluginState = resources.pluginState;
+    const secretStores = pluginState.secretStores;
+    for (const record of catalog.records?.() ?? []) if (record.controlPath) {
+      try { await resources.stats?.registerObservationAdapter?.(record.name,record.controlPath); }
+      catch (error) {
+        logger.warn({plugin:record.name,error:serializeErrorChain(error)},'Plugin observation capability unavailable');
       }
-      : createDatabaseSecretStoreFactory(configDatabase, material);
-    const storage = accessDatabase === undefined
-      ? { create() { throw new Error('plugin control storage is unavailable'); } }
-      : createDatabasePluginStorageFactory(accessDatabase);
-    const durableState = configDatabase ? new PluginDurableStateStore(configDatabase) : undefined;
+    }
+    const revokeStorage = new WeakMap<import('../plugin.types').PluginStorage, () => void>();
+    const storage: import('../plugin-control').PluginStorageFactory = {
+      create(namespace) {
+        const kv = pluginState.storage.create(namespace);
+        const methods = resources.stats?.observationAdapter?.(namespace);
+        let revoked = false;
+        const adapter = methods ? Object.freeze(Object.fromEntries(Object.entries(methods).map(([method,call]) =>
+          [method, (...args:unknown[]) => {if(revoked)throw new Error('observation_capability_revoked');return call(...args);}]))) : undefined;
+        const capability = Object.freeze({...kv,...(adapter ? {metering:adapter as unknown as import('../plugin.types').TokenStatsMeteringStorage} : {}),uncached:()=>capability});
+        revokeStorage.set(capability,()=>{revoked=true;pluginState.storage.revoke(kv);});return capability;
+      },
+      revoke: value => revokeStorage.get(value)?.(),
+    };
+    const durableState = pluginState.durable;
+    // Only validated snapshots already fetched through storage IPC are consulted
+    // by synchronous peer/capability authorization callbacks.
+    const admissionSnapshots = new Map<string, RepositorySnapshot>();
+    const snapshotKey = (key: ServingSnapshotKey): string => `${key.revision}:${key.content_hash}:${key.plugin_catalog_hash}`;
+    const cachedSnapshot = (key: ServingSnapshotKey): RepositorySnapshot | null => admissionSnapshots.get(snapshotKey(key)) ?? null;
+    const loadSnapshot = async (key: ServingSnapshotKey): Promise<RepositorySnapshot | null> => {
+      const found = cachedSnapshot(key) ?? await resources.repository!.getServingSnapshot(key);
+      if (found) admissionSnapshots.set(snapshotKey(key), found);
+      return found;
+    };
     let publishPolicy: () => Promise<boolean> = async () => false;
     const managementOrigin = parseManagementOrigin(process.env.BUNGEE_PUBLIC_ORIGIN);
     const trustedProxyAddresses = parseTrustedManagementProxies(process.env.BUNGEE_TRUSTED_MANAGEMENT_PROXIES);
@@ -580,7 +606,7 @@ export async function startMasterComposition(
     let journalRecovery: PluginJournalRecovery | null = null;
     let peerJournal: PluginPeerJournalResolver | null = null;
     if (durableState !== undefined) {
-      try { peerJournal = createPluginPeerJournalResolver({ store: durableState, authorizeRecovery: request => journalRecovery?.authorize(request) ?? null }); }
+      try { peerJournal = createPluginPeerJournalResolver({ client: pluginState, authorizeRecovery: request => journalRecovery?.authorize(request) ?? null }); }
       catch { peerJournal = null; }
     }
     resources.pluginPeerJournal = peerJournal;
@@ -623,7 +649,7 @@ export async function startMasterComposition(
           const session=resources.workerFactory?.lookupPhysicalSession?.({...worker});
           const status=session?.status;
           if(!status || status.revision===null || status.revision!==host.revision || !status.content_hash || !status.plugin_catalog_hash)throw new Error('request_revision_invalid');
-          const snapshot=resources.repository?.getServingSnapshot({revision:status.revision,content_hash:status.content_hash,plugin_catalog_hash:status.plugin_catalog_hash});
+          const snapshot=cachedSnapshot({revision:status.revision,content_hash:status.content_hash,plugin_catalog_hash:status.plugin_catalog_hash});
           const route=snapshot?.aggregate.logical_configuration.routes.find(route=>route.id===target.routeId);
           if(!route || metadata.caller.subject!==`${caller}@route:${route.path}` || !route.plugins.some(binding=>binding.name===caller && binding.enabled) || !snapshot?.aggregate.plugin_activations.some(activation=>activation.plugin_name===caller))throw new Error('request_binding_invalid');
           let verified=false;
@@ -672,7 +698,7 @@ export async function startMasterComposition(
           };
         const snapshot = sourceIdentity === null
           ? null
-          : resources.repository?.getServingSnapshot(sourceIdentity) ?? null;
+          : cachedSnapshot(sourceIdentity);
         const activatedPlugins = Object.freeze(
           (snapshot?.aggregate.plugin_activations ?? []).map(activation => activation.plugin_name),
         );
@@ -695,23 +721,11 @@ export async function startMasterComposition(
     // link owned by the broker and the host communication store for durable
     // reliable-event logs. `setup: false` keeps the audited v14 schema as the
     // single source of the tables (no runtime DDL).
-    const channelStore = configDatabase === undefined
-      ? null
-      : new PluginCommunicationStore(configDatabase, undefined, { setup: false });
-    if (channelStore !== null && configDatabase !== undefined) {
-      journalRecovery = new PluginJournalRecovery(configDatabase, channelStore.forNamespace('host:rpc:executors'));
-    }
+    journalRecovery = new PluginJournalRecovery(pluginState);
     channelAdapterRef.current = new HostChannelAdapter({
-      hub: peerBroker.channels,
-      process: 'control',
-      ...(channelStore === null ? {} : { eventLog: createReliableEventLogFactory((plugin) => channelStore.forNamespace(plugin)) }),
-      // The same bounded communication store backs the host-managed snapshot
-      // version store (chunked, atomic, bounded retention) for providers.
-      ...(channelStore === null ? {} : { snapshotNamespace: (plugin: string) => channelStore.forNamespace(plugin) }),
-      // The outbox seam commits the event row inside the provider plugin's own
-      // durable-state transaction (same database, same immediate transaction).
-      durableState: (plugin) => durableState?.forNamespace(plugin) ?? null,
-      remoteTransport: () => true,
+      hub: peerBroker.channels, process: 'control', eventLog: pluginState.eventLogFactory,
+      snapshotStore: (plugin, options) => pluginState.snapshotStore(plugin, options),
+      durableState: (plugin) => durableState.forNamespace(plugin), remoteTransport: () => true,
     });
     // Provider-side lane leases come from the canonical control service host, so
     // a peer-originated task holds the exact providing owner's lease.
@@ -748,7 +762,9 @@ export async function startMasterComposition(
     const managementAuth = new ManagementAuthentication(resources.pluginControl,
       () => resources.repository!.getSnapshot().aggregate, managementProviders, managementOrigin,
       durableState?.forNamespace('core-management-auth'));
+    await managementAuth.initialize();
     const protections = new DurableRouteProtections(durableState?.forNamespace('core-route-protection'));
+    await protections.initialize();
     const routeProtections = protections.routes;
     const refreshRouteProtections = () => protections.refresh(
       (catalog.records?.() ?? []).filter(record => record.controlPath).map(record => record.name),resources.pluginControl!,
@@ -771,7 +787,7 @@ export async function startMasterComposition(
         runtimeVersion = Math.max(runtimeVersion, status.version ?? 0) + 1;
         const registry = controller.trustedAdmissionRegistryIfFresh();
         const active = registry?.active;
-        const source = snapshot ?? (active ? resources.repository!.getServingSnapshot({revision:active.revision,content_hash:active.content_hash,plugin_catalog_hash:active.plugin_catalog_hash}) : null);
+        const source = snapshot ?? (active ? cachedSnapshot({revision:active.revision,content_hash:active.content_hash,plugin_catalog_hash:active.plugin_catalog_hash}) : null);
         if (!source) return false;
         const names = new Set(source.aggregate.plugin_activations.map(value => value.plugin_name));
         const plugins = (catalog.records?.() ?? []).flatMap(record => {
@@ -792,10 +808,10 @@ export async function startMasterComposition(
     const stateLeases = new Map<string,StateLease>();
     const requestLeaseState = durableState?.forNamespace('core-worker-request-leases');
     const leaseState = durableState?.forNamespace('core-worker-state-leases');
-    for (const record of leaseState?.list() ?? []) if (record.value !== null) stateLeases.set(record.key,record.value as StateLease);
-    const saveStateLease = (id:string,lease:StateLease | null) => {
-      const previous = leaseState?.get(id);
-      leaseState?.execute({commandId:randomUUID(),mutations:[{key:id,expectedVersion:previous?.version ?? 0,value:lease ? {...lease} : null}]});
+    for (const record of await leaseState?.list() ?? []) if (record.value !== null) stateLeases.set(record.key,record.value as StateLease);
+    const saveStateLease = async (id:string,lease:StateLease | null) => {
+      const previous = await leaseState?.get(id);
+      await leaseState?.transact([{key:id,expectedVersion:previous?.version ?? 0,value:lease ? {...lease} : null}]);
       if (lease) stateLeases.set(id,lease); else stateLeases.delete(id);
     };
     const retainedControlNames = (snapshot: RepositorySnapshot): readonly string[] => {
@@ -803,7 +819,7 @@ export async function startMasterComposition(
       const registry = resources.ingressController?.trustedAdmissionRegistryIfFresh?.();
       for (const serving of [registry?.active,...(registry?.retired ?? [])]) {
         if (!serving) continue;
-        const old = resources.repository!.getServingSnapshot({revision:serving.revision,content_hash:serving.content_hash,plugin_catalog_hash:serving.plugin_catalog_hash});
+        const old = cachedSnapshot({revision:serving.revision,content_hash:serving.content_hash,plugin_catalog_hash:serving.plugin_catalog_hash});
         if (old) for (const name of activeControlNames(old,catalog)) names.add(name);
       }
       return [...names];
@@ -839,10 +855,10 @@ export async function startMasterComposition(
         if (!handle || !handle.durableState || handle.status !== 'ready' || handle.lifetime.signal.aborted) throw new Error('plugin_state_unavailable');
         const lease = stateLeases.get(id);
         const requestLeaseId = 'request:'+createHash('sha256').update(JSON.stringify([call.plugin,call.target.requestId])).digest('hex');
-        const requestLease = requestLeaseState?.get(requestLeaseId)?.value as StateLease | null | undefined;
+        const requestLease = (await requestLeaseState?.get(requestLeaseId))?.value as StateLease | null | undefined;
         if (requestLease && (requestLease.worker !== workerId || requestLease.principal !== principal)) throw new Error('request_lease_mismatch');
         const active = resources.ingressController?.trustedActiveAdmissionIfFresh();
-        const serving = active ? resources.repository!.getServingSnapshot({revision:active.revision,content_hash:active.content_hash,plugin_catalog_hash:active.plugin_catalog_hash}) : null;
+        const serving = active ? cachedSnapshot({revision:active.revision,content_hash:active.content_hash,plugin_catalog_hash:active.plugin_catalog_hash}) : null;
         const enabled = serving?.aggregate.plugin_activations.some(value => value.plugin_name === call.plugin);
         if (lease && (lease.worker !== workerId || lease.principal !== principal)) throw new Error('state_lease_mismatch');
         const activeWorker = active?.workers.some(value => value.master_generation === worker.master_generation && value.worker_instance_id === worker.process_instance_id && value.boot_nonce === worker.boot_nonce && value.worker_slot === worker.worker_slot);
@@ -856,14 +872,14 @@ export async function startMasterComposition(
             if (!verified) throw new Error('invalid_state_principal');
           }
           if (!lease && stateLeases.size >= 100000) throw new Error('state_lease_capacity');
-          if (!lease) saveStateLease(id,{worker:workerId,principal,plugin:call.plugin});
-          if (!requestLease) requestLeaseState?.execute({commandId:randomUUID(),mutations:[{key:requestLeaseId,expectedVersion:0,value:{worker:workerId,principal,plugin:call.plugin}}]});
+          if (!lease) await saveStateLease(id,{worker:workerId,principal,plugin:call.plugin});
+          if (!requestLease) await requestLeaseState?.transact([{key:requestLeaseId,expectedVersion:0,value:{worker:workerId,principal,plugin:call.plugin}}]);
         }
         if (call.method === 'settle') await resources.ingressController!.freezePluginKey(call.plugin,call.target.principal.keyId);
         const result = await stateCall.run(call.method, () => task(call.target));
         if (call.method === 'settle' || call.method === 'cancel') {
           if (!await publishDataState(undefined,undefined,[{plugin:call.plugin,keyId:call.target.principal.keyId}])) throw new Error('state_publication_pending');
-          saveStateLease(id,null);
+          await saveStateLease(id,null);
           await resources.pluginControl!.reconcile(retainedControlNames(resources.repository!.getSnapshot()));
         }
         return result;
@@ -874,13 +890,15 @@ export async function startMasterComposition(
         scopeSettlements.set(scope,settlementTask);
         try { return await settlementTask; } finally { if (scopeSettlements.get(scope) === settlementTask) scopeSettlements.delete(scope); }
     };
+    let storageRpc: ((request: Request) => Promise<Response>) | null = null;
     const hasControlPlugins = (catalog.records?.() ?? []).some(({ manifest }) => manifest.control !== undefined);
     resources.controlListener = dependencies.createManagementListener({
       profile: 'master-control',
       hostname: '127.0.0.1',
       port: options.masterControlPort,
       shutdownTimeoutMs: options.shutdownTimeoutMs,
-      controlApi: { handle: async () => null },
+      controlApi: { handle: async request => new URL(request.url).pathname === PLUGIN_STORAGE_RPC_PATH
+        ? storageRpc?.(request) ?? Response.json({error:'storage_unavailable'},{status:503}) : null },
       internalPluginPeer: peerBroker.websocket,
       ...(daemonBootstrap === null ? {} : {
         daemonControl: {
@@ -894,6 +912,21 @@ export async function startMasterComposition(
     resources.controlListener.start();
     resources.listener = dependencies.createManagementListener({
       profile: 'management',
+      health: () => {
+        const registry = resources.ingressController?.trustedActiveAdmissionIfFresh();
+        const admitted = trackedAdmission.snapshot();
+        const data = !!registry && registry.workers.length > 0 && admitted.length === registry.workers.length
+          && admitted.every(worker => resources.workerFactory?.owns(worker.process) === true
+            && registry.workers.some(peer => peer.worker_instance_id === worker.process.identity.worker_instance_id
+              && peer.boot_nonce === worker.boot_nonce && peer.master_generation === worker.process.identity.master_generation));
+        const selected = managementAuth.selected();
+        const management = !runtimeStopping && configurationStorageHealthy && pluginStorageHealthy
+          && resources.stats?.healthy?.() !== false
+          && (selected === null || resources.pluginControl?.status(selected) === 'ready');
+        const snapshot = resources.repository!.getSnapshot();
+        return {live:!runtimeStopping,management,data,degraded:!management || !data || admissionRecovering
+          || registry?.revision !== snapshot.revision || registry?.content_hash !== snapshot.content_hash};
+      },
       trustedProxyAddresses,
       hostname: options.managementHost,
       port: options.managementPort,
@@ -999,19 +1032,53 @@ export async function startMasterComposition(
               && candidate.boot_nonce === worker.boot_nonce
               && candidate.private_port === worker.private_port))) {
             trackedAdmission.adoptCommitted(startupServing, target);
-            const snapshotsReady = trackRememberedServing(startupServing);
+            const snapshotsReady = await trackRememberedServing(startupServing);
             resources.workerFactory!.markCommitted(startupServing.map(({ process }) => process));
             const current = resources.repository!.getSnapshot();
             admissionRecovering = !snapshotsReady || target.revision !== current.revision
               || target.content_hash !== current.content_hash || target.plugin_catalog_hash !== catalog.hash;
-            await resources.pluginControl?.reconcile(retainedControlNames(current));
+            await resources.pluginControl?.reconcile(retainedControlNames(current)).catch(error => logger.warn({error:serializeErrorChain(error)},'Control reconciliation degraded; serving admission retained'));
           }
           resources.pluginControlBridge?.syncActiveAdmission();
         },
       });
       await resources.ingressController.connect();
       admissionRecovering = resources.ingressController.hasTrustedActiveAdmission?.() === true;
+      const registry = resources.ingressController.trustedAdmissionRegistryIfFresh();
+      for (const serving of [registry?.active, registry?.prepared, ...(registry?.retired ?? [])]) if (serving) await loadSnapshot(serving);
     }
+    const installStorageRpc = (generation: string): void => {
+      storageRpc = createSignedWorkerRpcServer({transportSecret,
+        identity: {role:'ingress', process_instance_id:generation, boot_nonce:generation},
+        authorizeWorker(worker) {
+          const physical = resources.workerFactory?.lookupPhysicalSession?.({master_generation:worker.master_generation,
+            worker_instance_id:worker.process_instance_id,worker_slot:worker.worker_slot,boot_nonce:worker.boot_nonce});
+          return physical && physical.status.phase !== 'stopped'
+            && resources.workerFactory!.owns(physical.process) ? 'active' : 'unknown';
+        },
+        async handle(operation, payload, worker) {
+          if (!['storage','observe'].includes(operation) || !payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('invalid_storage_rpc');
+          const value = payload as {namespace:unknown;operation:unknown;args:unknown};
+          if (Object.keys(value).sort().join() !== 'args,namespace,operation' || typeof value.namespace !== 'string'
+            || typeof value.operation !== 'string' || (operation === 'storage' && !(PLUGIN_STORAGE_OPERATIONS as readonly unknown[]).includes(value.operation)) || !Array.isArray(value.args)) throw new Error('invalid_storage_rpc');
+          const physical = resources.workerFactory?.lookupPhysicalSession?.({master_generation:worker.master_generation,
+            worker_instance_id:worker.process_instance_id,worker_slot:worker.worker_slot,boot_nonce:worker.boot_nonce});
+          if (!physical || !resources.workerFactory!.owns(physical.process)) throw new Error('worker_not_owned');
+          const status = physical.status;
+          const target = status.revision !== null && status.content_hash !== null && status.plugin_catalog_hash !== null
+            ? {revision:status.revision,content_hash:status.content_hash,plugin_catalog_hash:status.plugin_catalog_hash}
+            : physical.configurationTarget;
+          const snapshot = target ? cachedSnapshot(target) : null;
+          if (!snapshot?.aggregate.plugin_activations.some(activation => activation.plugin_name === value.namespace)) throw new Error('plugin_storage_namespace_forbidden');
+          if (operation === 'observe') {
+            if (!resources.stats?.observationAdapter?.(value.namespace)?.[value.operation]) throw new Error('observation_capability_unavailable');
+            return resources.stats.observe!(value.namespace,value.operation,value.args);
+          }
+          return pluginState.storageOperation(value.namespace, value.operation as PluginStorageOperation, value.args);
+        },
+      });
+    };
+    resources.controlListener.ready?.();
     const launch = dependencies.resolveWorkerLaunch({
       executable: dependencies.context.executable,
       entry: dependencies.context.entry,
@@ -1025,7 +1092,6 @@ export async function startMasterComposition(
       shutdownTimeoutMs: options.shutdownTimeoutMs,
     };
     const servingSnapshots = new Map<ConfigPublicationWorkerProcess, ReturnType<MasterProcessRepository['getSnapshot']>>();
-    const admissionSnapshots = new Map<string, ReturnType<MasterProcessRepository['getSnapshot']>>();
     const syncPluginControlAdmission = (): void => {
       resources.pluginControlBridge?.syncActiveAdmission();
     };
@@ -1047,38 +1113,38 @@ export async function startMasterComposition(
         }
       }
     };
-    const rememberSnapshot = (
+    const rememberSnapshot = async (
       snapshot: ReturnType<MasterProcessRepository['getSnapshot']>,
       signal?: PublicationCancellationSignal,
-    ): void => {
+    ): Promise<void> => {
       const key = `${snapshot.revision}:${snapshot.content_hash}:${catalog.hash}`;
       if (admissionSnapshots.has(key)) return;
       throwIfPublicationCancelled(signal);
-      resources.repository!.appendServingSnapshot(snapshot, catalog.hash);
+      await resources.repository!.appendServingSnapshot(snapshot, catalog.hash);
       throwIfPublicationCancelled(signal);
       admissionSnapshots.set(key, snapshot);
     };
-    const servingSnapshotFor = (
+    const servingSnapshotFor = async (
       worker: ServingConfigWorker,
       signal?: PublicationCancellationSignal,
-    ): ReturnType<MasterProcessRepository['getSnapshot']> | null => {
+    ): Promise<RepositorySnapshot | null> => {
       if (worker.plugin_catalog_hash !== catalog.hash) return null;
       const current = resources.repository!.getSnapshot();
       if (worker.revision === current.revision && worker.content_hash === current.content_hash) {
-        rememberSnapshot(current, signal);
+        await rememberSnapshot(current, signal);
         return current;
       }
       const key = { revision: worker.revision, content_hash: worker.content_hash, plugin_catalog_hash: worker.plugin_catalog_hash };
-      return admissionSnapshots.get(evidenceKey(worker)) ?? resources.repository!.getServingSnapshot(key);
+      return loadSnapshot(key);
     };
-    const trackRememberedServing = (
+    const trackRememberedServing = async (
       workers: readonly ServingConfigWorker[],
       signal?: PublicationCancellationSignal,
-    ): boolean => {
+    ): Promise<boolean> => {
       let complete = true;
       for (const worker of workers) {
         throwIfPublicationCancelled(signal);
-        const snapshot = servingSnapshotFor(worker, signal);
+        const snapshot = await servingSnapshotFor(worker, signal);
         if (snapshot === null) { complete = false; continue; }
         trackServing([worker], snapshot);
       }
@@ -1183,7 +1249,7 @@ export async function startMasterComposition(
               register(remote, remotePrepared);
               if (durableState) {
                 const prepared = resources.ingressController.trustedAdmissionRegistryIfFresh()?.prepared;
-                const source = workers[0] ? servingSnapshotFor(workers[0], admissionSignal) : null;
+                const source = workers[0] ? await servingSnapshotFor(workers[0], admissionSignal) : null;
                 if (!prepared || !source || !await publishDataState(source, prepared.admission_sequence)) throw new Error('admission_policy_publication_pending');
               }
               checkPrepare();
@@ -1231,7 +1297,7 @@ export async function startMasterComposition(
                   syncPluginControlAdmission();
                   throw new Error('ingress boot recovery gate activated during admission commit');
                 }
-                trackRememberedServing(workers, admissionSignal);
+                await trackRememberedServing(workers, admissionSignal);
                 throwIfPublicationCancelled(admissionSignal);
                 if (runtimeReady) resources.workerFactory!.markCommitted(workers.map(({ process }) => process));
                 committedAdmission = workers;
@@ -1322,14 +1388,47 @@ export async function startMasterComposition(
       clear() { committedAdmission = []; resources.admission!.clear(); syncPluginControlAdmission(); },
       acquire: resources.admission.acquire.bind(resources.admission),
     };
+    const inflightSnapshots = new Map<string, number>();
     const pruneServing = (): void => {
       for (const process of servingSnapshots.keys()) {
         if (!resources.workerFactory?.owns(process)) servingSnapshots.delete(process);
       }
-      const retained = new Set([...servingSnapshots.values()].map((snapshot) =>
-        `${snapshot.revision}:${snapshot.content_hash}:${catalog.hash}`));
+      const current = resources.repository!.getSnapshot();
+      const retained = new Set([
+        `${current.revision}:${current.content_hash}:${catalog.hash}`,
+        ...inflightSnapshots.keys(),
+        ...[...servingSnapshots.values()].map((snapshot) =>
+          `${snapshot.revision}:${snapshot.content_hash}:${catalog.hash}`),
+      ]);
+      // An uncertain handoff can still be prepared or retired at ingress even
+      // after its caller returns. Its exact catalog is part of the cache key.
+      const registry = resources.ingressController?.trustedAdmissionRegistryIfFresh();
+      if (registry) for (const admission of [registry.active, registry.prepared, ...registry.retired]) {
+        if (admission !== null) retained.add(snapshotKey(admission));
+      }
       for (const key of admissionSnapshots.keys()) {
         if (!retained.has(key)) admissionSnapshots.delete(key);
+      }
+    };
+    const withSnapshotRetention = async <Result>(
+      operation: (pin: (snapshot: RepositorySnapshot) => void) => Promise<Result>,
+      snapshot?: RepositorySnapshot,
+    ): Promise<Result> => {
+      const pinned: string[] = [];
+      const pin = (value: RepositorySnapshot): void => {
+        const key = `${value.revision}:${value.content_hash}:${catalog.hash}`;
+        pinned.push(key);
+        inflightSnapshots.set(key, (inflightSnapshots.get(key) ?? 0) + 1);
+      };
+      if (snapshot) pin(snapshot);
+      try { return await operation(pin); }
+      finally {
+        for (const key of pinned) {
+          const count = inflightSnapshots.get(key)! - 1;
+          if (count === 0) inflightSnapshots.delete(key);
+          else inflightSnapshots.set(key, count);
+        }
+        pruneServing();
       }
     };
     const workerFactoryOptions = {
@@ -1417,6 +1516,12 @@ export async function startMasterComposition(
     // control publication without waiting for anything recursive.
     const masterGeneration = remoteAdmission?.master_generation ?? dependencies.createMasterGeneration();
     controlPeerFacts.masterGeneration = masterGeneration;
+    installStorageRpc(masterGeneration);
+    const selectedManagement = managementAuth.selected();
+    if (selectedManagement) {
+      try { await resources.pluginControl.activate(selectedManagement); }
+      catch (error) { logger.error({plugin:selectedManagement,error:serializeErrorChain(error)},'Selected management provider failed to initialize'); }
+    }
     const executorMarker = process.argv.find(argument => argument.startsWith('--bungee-process-identity='))?.split('=')[1];
     if (executorMarker && journalRecovery) {
       await journalRecovery.register(controlIdentityFacts(), dependencies.context.pid, executorMarker);
@@ -1427,25 +1532,25 @@ export async function startMasterComposition(
       if (adoption.kind === 'adopted') {
         trackedAdmission.adoptCommitted(adoption.serving, remoteAdmission);
         startupServing = adoption.serving;
-        const snapshotsReady = trackRememberedServing(adoption.serving);
+        const snapshotsReady = await trackRememberedServing(adoption.serving);
         resources.workerFactory.markCommitted(adoption.serving.map(({ process }) => process));
-        const recovery = resources.repository.getCurrentRecovery?.() ?? null;
+        const recovery = await resources.repository.getCurrentRecovery?.() ?? null;
         const exactCurrent = isExactServingTarget(adoption.serving, adoption.serving, current,
           catalog.hash, options.workerCount, resources.workerFactory);
         if (recovery === null || recovery.state === 'succeeded' || exactCurrent) {
-          await resources.pluginControl?.reconcile(retainedControlNames(current));
+          await resources.pluginControl?.reconcile(retainedControlNames(current)).catch(error => logger.warn({error:serializeErrorChain(error)},'Control reconciliation degraded; serving admission retained'));
         } else {
           const first = adoption.serving[0];
           const oldSnapshot = first === undefined || adoption.serving.some((worker) =>
             worker.revision !== first.revision || worker.content_hash !== first.content_hash
             || worker.plugin_catalog_hash !== first.plugin_catalog_hash)
             ? null
-            : resources.repository.getServingSnapshot({ revision: first.revision,
+            : cachedSnapshot({ revision: first.revision,
               content_hash: first.content_hash, plugin_catalog_hash: first.plugin_catalog_hash });
           if (oldSnapshot === null) {
             throw new MasterRuntimeError('startup_incomplete', 'adopted admission has no verified historical snapshot');
           }
-          await resources.pluginControl?.reconcile(retainedControlNames(oldSnapshot));
+          await resources.pluginControl?.reconcile(retainedControlNames(oldSnapshot)).catch(error => logger.warn({error:serializeErrorChain(error)},'Control reconciliation degraded; serving admission retained'));
         }
         syncPluginControlAdmission();
         admissionRecovering = !snapshotsReady || !(remoteAdmission.revision === current.revision
@@ -1497,6 +1602,7 @@ export async function startMasterComposition(
       },
     });
     let recoveryRunner: ConfigurationRecoveryRunner | null = null;
+    let activePublicationObserved = false;
     let publicationFatalReported = false;
     const consumePublicationRecovery = (outcome: MasterPublicationOutcome): void => {
       if (outcome.kind === 'outcome_unknown' && !outcome.fatal) {
@@ -1515,127 +1621,138 @@ export async function startMasterComposition(
     };
     const coordinator: MasterProcessCoordinator = {
       async recoverAndPublish(signal?: PublicationCancellationSignal) {
-        assertIngressBootRecoveryGateOpen();
-        const gateGeneration = ingressBootRecoveryGate.generation;
-        throwIfPublicationCancelled(signal);
-        let active: ActiveConfigurationPublication | null;
-        try { active = resources.repository!.getActivePublication(); }
-        catch (error) {
-          const code = errorCode(error);
-          if (terminalRecoveryCode(code)) {
-            logger.error({ code, error: serializeErrorChain(error) }, 'Master recovery repository failure is terminal');
-            throw error;
-          }
-          return { kind: 'outcome_unknown', fatal: false, code: 'recovery_replacements_failed', error, serving: [], pending: [] };
-        }
-        if (active === null) {
-          const current = resources.repository!.getCurrentOperationState();
-          const failed = currentControlReadinessFailure(current);
-          const recovery = resources.repository!.getCurrentRecovery?.() ?? null;
-          if (failed !== null && recovery?.state !== 'succeeded'
-            && !(recovery?.state === 'stopped' && recovery.final_reason_code === 'fatal_source_failure')) {
-            return {
-              kind: 'degraded', http_status: 202, error_code: 'control_readiness_failed',
-              failures: [], operation: failed, serving: [], recovery_disposition: 'retryable',
-            };
-          }
-        }
-        if (active !== null) {
+        return withSnapshotRetention(async (pin) => {
+          assertIngressBootRecoveryGateOpen();
+          const gateGeneration = ingressBootRecoveryGate.generation;
           throwIfPublicationCancelled(signal);
-          rememberSnapshot(active.snapshot, signal);
+          let active: ActiveConfigurationPublication | null;
+          try { active = await resources.repository!.getActivePublication(); activePublicationObserved = active !== null; }
+          catch (error) {
+            const code = errorCode(error);
+            if (terminalRecoveryCode(code)) {
+              logger.error({ code, error: serializeErrorChain(error) }, 'Master recovery repository failure is terminal');
+              throw error;
+            }
+            return { kind: 'outcome_unknown', fatal: false, code: 'recovery_replacements_failed', error, serving: [], pending: [] };
+          }
+          if (active === null) {
+            const current = await resources.repository!.getCurrentOperationState();
+            const failed = currentControlReadinessFailure(current);
+            const recovery = await resources.repository!.getCurrentRecovery?.() ?? null;
+            if (failed !== null && recovery?.state !== 'succeeded'
+              && !(recovery?.state === 'stopped' && recovery.final_reason_code === 'fatal_source_failure')) {
+              return {
+                kind: 'degraded', http_status: 202, error_code: 'control_readiness_failed',
+                failures: [], operation: failed, serving: [], recovery_disposition: 'retryable',
+              };
+            }
+          }
+          if (active !== null) {
+            pin(active.snapshot);
+            throwIfPublicationCancelled(signal);
+            await rememberSnapshot(active.snapshot, signal);
+            try {
+              throwIfPublicationCancelled(signal);
+              await resources.pluginControl?.reconcile(retainedControlNames(active.snapshot));
+              throwIfPublicationCancelled(signal);
+            } catch (error) {
+              if (isPublicationCancelled(error)) throw error;
+              admissionRecovering = true;
+              const failure = await controlReadinessFailure(resources.repository!, active, [], error, dependencies.clock.now(), 'recover');
+              activePublicationObserved = false;
+              consumePublicationRecovery(failure);
+              return failure;
+            }
+          } else {
+            throwIfPublicationCancelled(signal);
+            const current = resources.repository!.getSnapshot();
+            pin(current);
+            await rememberSnapshot(current, signal);
+          }
+          throwIfPublicationCancelled(signal);
+          const guardedSignal = signal === undefined
+            ? ingressBootRecoveryGate.signal
+            : AbortSignal.any([signal, ingressBootRecoveryGate.signal]);
+          const outcome = await baseCoordinator.recoverAndPublish(guardedSignal);
+          if (outcome?.kind !== 'outcome_unknown') activePublicationObserved = false;
+          assertIngressBootRecoveryGeneration(gateGeneration);
+          throwIfPublicationCancelled(signal);
+          if (outcome !== null && active !== null) trackServing(outcome.serving, active.snapshot);
+          return outcome;
+        });
+      },
+      async startCurrent(snapshot, existingWorkers, retireWorkers = [], signal?: PublicationCancellationSignal) {
+        return withSnapshotRetention(async () => {
+          assertIngressBootRecoveryGateOpen();
+          const gateGeneration = ingressBootRecoveryGate.generation;
+          throwIfPublicationCancelled(signal);
+          const durableRecovery = await resources.repository!.getCurrentRecovery?.() ?? null;
+          if (signal === undefined && !runtimeReady && durableRecovery !== null
+            && (durableRecovery.state === 'scheduled' || durableRecovery.state === 'running' || durableRecovery.state === 'stopped')) {
+            const serving = trackedAdmission.snapshot();
+            startupServing = serving;
+            admissionRecovering = true;
+            if (serving.length === options.workerCount) {
+              return { kind: 'startup_degraded' as const, http_status: 202 as const,
+                error_code: 'old_worker_drain_failed' as const, recovery_disposition: 'retryable' as const,
+                failures: [], serving };
+            }
+            return { kind: 'startup_failed' as const,
+              failures: [{ slot: -1, code: 'early_exit' as const, detail: 'durable recovery is pending', recovery_disposition: 'retryable' as const }],
+              serving };
+          }
+          throwIfPublicationCancelled(signal);
+          await rememberSnapshot(snapshot, signal);
           try {
             throwIfPublicationCancelled(signal);
-            await resources.pluginControl?.reconcile(retainedControlNames(active.snapshot));
+            await resources.pluginControl?.reconcile(retainedControlNames(snapshot));
             throwIfPublicationCancelled(signal);
           } catch (error) {
             if (isPublicationCancelled(error)) throw error;
             admissionRecovering = true;
-            const failure = controlReadinessFailure(resources.repository!, active, [], error, dependencies.clock.now(), 'recover');
+            logger.error({ error: serializeErrorChain(error), phase: 'start', revision: snapshot.revision },
+              'Plugin control readiness failed before startup publication');
+            const failure = {
+              kind: 'startup_degraded' as const, http_status: 202 as const, error_code: 'control_readiness_failed' as const,
+              failures: [], serving: existingWorkers ?? [], recovery_disposition: classifyControlError(error),
+            };
+            return failure;
+          }
+          throwIfPublicationCancelled(signal);
+          const guardedSignal = signal === undefined
+            ? ingressBootRecoveryGate.signal
+            : AbortSignal.any([signal, ingressBootRecoveryGate.signal]);
+          const outcome = await baseCoordinator.startCurrent(snapshot, existingWorkers, retireWorkers, guardedSignal);
+          assertIngressBootRecoveryGeneration(gateGeneration);
+          throwIfPublicationCancelled(signal);
+          if (outcome.kind === 'startup_ready' || outcome.kind === 'startup_degraded') startupServing = outcome.serving;
+          trackServing(outcome.serving, snapshot);
+          if (outcome.kind === 'startup_ready') admissionRecovering = false;
+          else if (outcome.kind === 'startup_degraded' && outcome.error_code === 'old_worker_drain_failed'
+            && completeCurrentServing(outcome.serving, snapshot, catalog, options.workerCount)) admissionRecovering = false;
+          else admissionRecovering = true;
+          return outcome;
+        }, snapshot);
+      },
+      async publish(active, oldWorkers, signal) {
+        return withSnapshotRetention(async () => {
+          activePublicationObserved = true;
+          await rememberSnapshot(active.snapshot);
+          try {
+            await resources.pluginControl?.reconcile(retainedControlNames(active.snapshot));
+          } catch (error) {
+            admissionRecovering = true;
+            const failure = await controlReadinessFailure(resources.repository!, active, oldWorkers, error, dependencies.clock.now(), 'publish');
+            activePublicationObserved = false;
             consumePublicationRecovery(failure);
             return failure;
           }
-        } else {
-          throwIfPublicationCancelled(signal);
-          rememberSnapshot(resources.repository!.getSnapshot(), signal);
-        }
-        throwIfPublicationCancelled(signal);
-        const guardedSignal = signal === undefined
-          ? ingressBootRecoveryGate.signal
-          : AbortSignal.any([signal, ingressBootRecoveryGate.signal]);
-        const outcome = await baseCoordinator.recoverAndPublish(guardedSignal);
-        assertIngressBootRecoveryGeneration(gateGeneration);
-        throwIfPublicationCancelled(signal);
-        if (outcome !== null && active !== null) trackServing(outcome.serving, active.snapshot);
-        pruneServing();
-        return outcome;
-      },
-      async startCurrent(snapshot, existingWorkers, retireWorkers = [], signal?: PublicationCancellationSignal) {
-        assertIngressBootRecoveryGateOpen();
-        const gateGeneration = ingressBootRecoveryGate.generation;
-        throwIfPublicationCancelled(signal);
-        const durableRecovery = resources.repository!.getCurrentRecovery?.() ?? null;
-        if (signal === undefined && !runtimeReady && durableRecovery !== null
-          && (durableRecovery.state === 'scheduled' || durableRecovery.state === 'running' || durableRecovery.state === 'stopped')) {
-          const serving = trackedAdmission.snapshot();
-          startupServing = serving;
-          admissionRecovering = true;
-          if (serving.length === options.workerCount) {
-            return { kind: 'startup_degraded' as const, http_status: 202 as const,
-              error_code: 'old_worker_drain_failed' as const, recovery_disposition: 'retryable' as const,
-              failures: [], serving };
-          }
-          return { kind: 'startup_failed' as const,
-            failures: [{ slot: -1, code: 'early_exit' as const, detail: 'durable recovery is pending', recovery_disposition: 'retryable' as const }],
-            serving };
-        }
-        throwIfPublicationCancelled(signal);
-        rememberSnapshot(snapshot, signal);
-        try {
-          throwIfPublicationCancelled(signal);
-          await resources.pluginControl?.reconcile(retainedControlNames(snapshot));
-          throwIfPublicationCancelled(signal);
-        } catch (error) {
-          if (isPublicationCancelled(error)) throw error;
-          admissionRecovering = true;
-          logger.error({ error: serializeErrorChain(error), phase: 'start', revision: snapshot.revision },
-            'Plugin control readiness failed before startup publication');
-          const failure = {
-            kind: 'startup_degraded' as const, http_status: 202 as const, error_code: 'control_readiness_failed' as const,
-            failures: [], serving: existingWorkers ?? [], recovery_disposition: classifyControlError(error),
-          };
-          return failure;
-        }
-        throwIfPublicationCancelled(signal);
-        const guardedSignal = signal === undefined
-          ? ingressBootRecoveryGate.signal
-          : AbortSignal.any([signal, ingressBootRecoveryGate.signal]);
-        const outcome = await baseCoordinator.startCurrent(snapshot, existingWorkers, retireWorkers, guardedSignal);
-        assertIngressBootRecoveryGeneration(gateGeneration);
-        throwIfPublicationCancelled(signal);
-        if (outcome.kind === 'startup_ready' || outcome.kind === 'startup_degraded') startupServing = outcome.serving;
-        trackServing(outcome.serving, snapshot);
-        pruneServing();
-        if (outcome.kind === 'startup_ready') admissionRecovering = false;
-        else if (outcome.kind === 'startup_degraded' && outcome.error_code === 'old_worker_drain_failed'
-          && completeCurrentServing(outcome.serving, snapshot, catalog, options.workerCount)) admissionRecovering = false;
-        else admissionRecovering = true;
-        return outcome;
-      },
-      async publish(active, oldWorkers, signal) {
-        rememberSnapshot(active.snapshot);
-        try {
-          await resources.pluginControl?.reconcile(retainedControlNames(active.snapshot));
-        } catch (error) {
-          admissionRecovering = true;
-          const failure = controlReadinessFailure(resources.repository!, active, oldWorkers, error, dependencies.clock.now(), 'publish');
-          consumePublicationRecovery(failure);
-          return failure;
-        }
-        const outcome = await baseCoordinator.publish(active, oldWorkers, signal);
-        trackServing(outcome.serving, active.snapshot);
-        pruneServing();
-        consumePublicationRecovery(outcome);
-        return outcome;
+          const outcome = await baseCoordinator.publish(active, oldWorkers, signal);
+          if (outcome.kind !== 'outcome_unknown') activePublicationObserved = false;
+          trackServing(outcome.serving, active.snapshot);
+          consumePublicationRecovery(outcome);
+          return outcome;
+        }, active.snapshot);
       },
     };
     const publicationTasks = new PublicationTaskManager({
@@ -1664,8 +1781,8 @@ export async function startMasterComposition(
         try { await journalRecovery?.maintain(); }
         catch (error) { logger.warn({ error: serializeErrorChain(error) }, 'Plugin executor recovery maintenance failed'); }
         if (communicationStopped) return;
-        const journalResult = peerJournal?.maintain();
-        const snapshotResult = channelAdapterRef.current?.maintainSnapshots();
+        const journalResult = await peerJournal?.maintain();
+        const snapshotResult = await channelAdapterRef.current?.maintainSnapshots();
         if (journalResult?.failures.length || snapshotResult?.failures) logger.warn({ journal: journalResult?.failures, snapshot: snapshotResult?.failures }, 'Plugin communication maintenance failed');
       })().catch(error => { logger.warn({ error: serializeErrorChain(error) }, 'Plugin communication maintenance failed'); }).finally(() => { communicationWork = null; });
       return communicationWork;
@@ -1732,13 +1849,9 @@ export async function startMasterComposition(
       if (!controllerReadiness.ready) return controllerReadiness;
       try {
         const snapshot = resources.repository!.getSnapshot();
-        const operation = resources.repository!.getCurrentOperationState();
         const evidence = {
-          revision: snapshot.revision,
-          content_hash: snapshot.content_hash,
-          plugin_catalog_hash: catalog.hash,
-          hasActiveOperation: resources.repository!.getActivePublication() !== null
-            || operation?.operation.result_status === null,
+          revision: snapshot.revision, content_hash: snapshot.content_hash, plugin_catalog_hash: catalog.hash,
+          hasActiveOperation: activePublicationObserved,
         };
         return controller.mutationReadiness(evidence);
       } catch {
@@ -1763,11 +1876,11 @@ export async function startMasterComposition(
       catalog: { records: () => catalogRecords },
       runtimeStatus: (name, enabled) => {
         const registry = resources.ingressController?.trustedAdmissionRegistryIfFresh();
-        const current = registry?.active ? resources.repository!.getServingSnapshot(registry.active) : null;
+        const current = registry?.active ? cachedSnapshot(registry.active) : null;
         const serving = current?.aggregate.plugin_activations.some(value => value.plugin_name === name) ?? false;
         const record = catalogRecords.find(value => value.name === name)!;
         const controlReady = !record.controlPath || resources.pluginControl!.status(name) === 'ready';
-        const retiring = registry?.retired.some(value => resources.repository!.getServingSnapshot(value)?.aggregate.plugin_activations.some(activation => activation.plugin_name === name)) ?? false;
+        const retiring = registry?.retired.some(value => cachedSnapshot(value)?.aggregate.plugin_activations.some(activation => activation.plugin_name === name)) ?? false;
         return {ready:serving && controlReady,lifecycle:!enabled && (serving || retiring) ? 'draining' : !enabled ? 'stopped' : serving && controlReady ? 'ready' : resources.pluginControl!.status(name) === 'degraded' ? 'degraded' : 'pending',
           ...(routeProtections.get(name)?.length ? {blockedReason:'protected_routes_require_plugin'} : !enabled && retiring ? {blockedReason:'in_flight_requests'} : {})};
       },
@@ -1784,7 +1897,7 @@ export async function startMasterComposition(
     const readKeyExtensions = async (keyId: string): Promise<readonly unknown[]> => {
         const registry = resources.ingressController?.trustedAdmissionRegistryIfFresh();
         const serving = registry?.active;
-        const snapshot = serving ? resources.repository!.getServingSnapshot(serving) : null;
+        const snapshot = serving ? cachedSnapshot(serving) : null;
         const activeNames = new Set(snapshot?.aggregate.plugin_activations.map(value => value.plugin_name) ?? []);
         return Promise.all(catalogRecords.flatMap(record => (record.manifest.contributes?.resourceExtensions ?? [])
           .filter(entry => entry.resource === 'api-key').map(async entry => {
@@ -1826,12 +1939,12 @@ export async function startMasterComposition(
         if (!managementAuth) return Response.json({error:'management_uninitialized'},{status:503});
         const before = managementAuth.selected(active), after = managementAuth.selected(next);
         if (before === after) return null;
-        if (!managementAuth.authorized(request,'auth.mode')) return Response.json({error:'forbidden'},{status:403});
+        if (!await managementAuth.authorized(request,'auth.mode')) return Response.json({error:'forbidden'},{status:403});
         if (after) {
           if (before) return Response.json({error:'management_provider_conflict'},{status:422});
           if (!setup) return Response.json({error:'management_setup_required'},{status:422});
           try { const handle = await resources.pluginControl!.activate(after); if (!handle.control.management) throw new Error('missing_provider');
-            await handle.control.management.bootstrap(setup); if (!handle.control.management.hasIdentity()) throw new Error('identity_required');
+            await handle.control.management.bootstrap(setup); if (!await handle.control.management.hasIdentity()) throw new Error('identity_required');
           } catch (error) { return managementSetupFailure(error); }
         }
         return null;
@@ -1888,10 +2001,11 @@ export async function startMasterComposition(
         };
       },
       statsApi: resources.stats ?? undefined,
-      onConfigurationCommitted: (snapshot) => {
-        managementAuth.rememberSelection(snapshot.aggregate);
+      onConfigurationCommitted: async (snapshot) => {
+        activePublicationObserved = true;
+        await managementAuth.rememberSelection(snapshot.aggregate);
         const selected = managementAuth?.selected(snapshot.aggregate) ?? null;
-        if (committedManagementProvider && committedManagementProvider !== selected) resources.pluginControl!.get(committedManagementProvider)?.control.management?.revokeSessions();
+        if (committedManagementProvider && committedManagementProvider !== selected) await resources.pluginControl!.get(committedManagementProvider)?.control.management?.revokeSessions();
         committedManagementProvider = selected;
         resources.stats?.configureLogging?.(snapshot.aggregate.logical_configuration.logging);
       },
@@ -1931,7 +2045,14 @@ export async function startMasterComposition(
         return cleanupWorkersAfterStartupFailure(resources.workerFactory, disposition);
       },
       stopAcceptingRecovery,
-      alwaysClose: () => resources.stats?.close(),
+      alwaysClose: async () => {
+        const failures: unknown[] = [];
+        for (const close of [() => resources.pluginPeer?.dispose(), () => peerJournal?.close(),
+          () => pluginState.close(), () => resources.stats?.close()]) {
+          try { await close(); } catch (error) { failures.push(error); }
+        }
+        if (failures.length) throw new AggregateError(failures, 'master storage resources did not close');
+      },
       ingressBootRecoveryGate,
       onWorkerUnavailable: (process) => {
         if (!trackedAdmission.snapshot().some((worker) => worker.process === process)) return;
@@ -2116,6 +2237,7 @@ export async function startMasterComposition(
     };
     requestShutdown = () => publicShutdown();
 
+    resources.listener.ready?.();
     await runtime.start();
     runtimeStarted = true;
     await recoveryRunner.start();

@@ -18,28 +18,28 @@ function harness(initial: any = {
   const events: string[] = [];
   const repository: any = {
     getSnapshot: () => snapshot,
-    getCurrentRecovery: () => recovery,
-    claimRecoveryAttempt: (_id: string, attempt: number) => {
+    getCurrentRecovery: async () => recovery,
+    claimRecoveryAttempt: async (_id: string, attempt: number) => {
       events.push(`claim:${attempt}`);
       recovery = { ...recovery, state: 'running', attempt_count: attempt + 1, updated_at: now };
       return recovery;
     },
-    scheduleRecoveryRetry: (_id: string, attempt: number, next: number) => {
+    scheduleRecoveryRetry: async (_id: string, attempt: number, next: number) => {
       events.push(`schedule:${next - now}`);
       recovery = { ...recovery, state: 'scheduled', attempt_count: attempt, next_retry_at: next, updated_at: now };
       return recovery;
     },
-    succeedRecovery: (_id: string, attempt: number, reason: string) => {
+    succeedRecovery: async (_id: string, attempt: number, reason: string) => {
       events.push(`succeed:${attempt}:${reason}`);
       recovery = { ...recovery, state: 'succeeded', attempt_count: attempt, final_reason_code: reason, next_retry_at: null };
       return recovery;
     },
-    stopRecovery: (_id: string, attempt: number, reason: string) => {
+    stopRecovery: async (_id: string, attempt: number, reason: string) => {
       events.push(`stop:${attempt}:${reason}`);
       recovery = { ...recovery, state: 'stopped', attempt_count: attempt, final_reason_code: reason, next_retry_at: null };
       return recovery;
     },
-    requeueRecovery: (_id: string, attempt: number) => {
+    requeueRecovery: async (_id: string, attempt: number) => {
       events.push(`requeue:${attempt}`);
       recovery = { ...recovery, state: 'scheduled', next_retry_at: null, updated_at: now };
       return recovery;
@@ -53,7 +53,7 @@ function harness(initial: any = {
   } };
   const tasks = new PublicationTaskManager({ publish: async () => ({ kind: 'converged' } as never) });
   tasks.setFatalHandler((error) => { throw error; });
-  return { repository, scheduler, tasks, events, delays, now: () => now, setNow: (value: number) => { now = value; }, worker };
+  return { repository, recovery: () => recovery, scheduler, tasks, events, delays, now: () => now, setNow: (value: number) => { now = value; }, worker };
 }
 
 describe('ConfigurationRecoveryRunner', () => {
@@ -77,7 +77,7 @@ describe('ConfigurationRecoveryRunner', () => {
   });
 
   test('requeues a running crash and succeeds an already-serving recovered attempt', async () => {
-    const h = harness({ ...harness().repository.getCurrentRecovery(), state: 'running', attempt_count: 1 });
+    const h = harness({ ...harness().recovery(), state: 'running', attempt_count: 1 });
     let starts = 0;
     const runner = new ConfigurationRecoveryRunner({
       repository: h.repository, publicationTasks: h.tasks, admission: { snapshot: () => [h.worker] },
@@ -91,7 +91,7 @@ describe('ConfigurationRecoveryRunner', () => {
   });
 
   test('uses the initial 250ms gate and exact retry delays before attempt six stops', async () => {
-    const h = harness({ ...harness().repository.getCurrentRecovery(), next_retry_at: 250 });
+    const h = harness({ ...harness().recovery(), next_retry_at: 250 });
     let starts = 0;
     const runner = new ConfigurationRecoveryRunner({
       repository: h.repository, publicationTasks: h.tasks, admission: { snapshot: () => [] },
@@ -175,7 +175,7 @@ describe('ConfigurationRecoveryRunner', () => {
   });
 
   test('fences duplicate timer generations and does not wake after shutdown', async () => {
-    const h = harness({ ...harness().repository.getCurrentRecovery(), next_retry_at: 250 });
+    const h = harness({ ...harness().recovery(), next_retry_at: 250 });
     const runner = new ConfigurationRecoveryRunner({
       repository: h.repository, publicationTasks: h.tasks, admission: { snapshot: () => [] },
       workerCount: 1, pluginCatalogHash: HASH, now: h.now, scheduler: h.scheduler,
@@ -194,7 +194,7 @@ describe('ConfigurationRecoveryRunner', () => {
   });
 
   test('does not claim or start a stopped recovery during runtime startup', async () => {
-    const h = harness({ ...harness().repository.getCurrentRecovery(), state: 'stopped', attempt_count: 1,
+    const h = harness({ ...harness().recovery(), state: 'stopped', attempt_count: 1,
       final_reason_code: 'deterministic_control_failure' });
     let starts = 0;
     const runner = new ConfigurationRecoveryRunner({
@@ -209,7 +209,7 @@ describe('ConfigurationRecoveryRunner', () => {
   });
 
   test('does not claim a stopped fatal source marker and permits a later manual cycle', async () => {
-    const h = harness({ ...harness().repository.getCurrentRecovery(), state: 'stopped', attempt_count: 0,
+    const h = harness({ ...harness().recovery(), state: 'stopped', attempt_count: 0,
       final_reason_code: 'fatal_source_failure' });
     let starts = 0;
     const runner = new ConfigurationRecoveryRunner({
@@ -240,7 +240,7 @@ describe('ConfigurationRecoveryRunner', () => {
   });
 
   test('reversible shutdown at attempt six stops retry_exhausted without a safety fatal', async () => {
-    const h = harness({ ...harness().repository.getCurrentRecovery(), attempt_count: 5 });
+    const h = harness({ ...harness().recovery(), attempt_count: 5 });
     const runner = new ConfigurationRecoveryRunner({
       repository: h.repository, publicationTasks: h.tasks, admission: { snapshot: () => [] },
       workerCount: 1, pluginCatalogHash: HASH, now: h.now, scheduler: h.scheduler,

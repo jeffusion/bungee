@@ -28,3 +28,13 @@ export function getBoundControlClient(
 export function hasBoundControlClientProvider(): boolean {
   return provider !== null;
 }
+
+
+let pluginStorageFactory: import('../plugin-control').PluginStorageFactory | null = null;
+export function setWorkerPluginStorageFactory(factory: import('../plugin-control').PluginStorageFactory | null): void {
+  pluginStorageFactory = factory;
+}
+export function getWorkerPluginStorageFactory(): import('../plugin-control').PluginStorageFactory {
+  if (!pluginStorageFactory) throw new Error('plugin_state_storage_capability_unavailable');
+  return pluginStorageFactory;
+}

@@ -21,9 +21,6 @@ export interface MigrationResult {
   /** Whether migration succeeded */
   success: boolean;
 
-  /** Whether the migration was automatically recovered from an error */
-  recovered?: boolean;
-
   /** Fallback mode if migration failed */
   fallback?: 'readonly';
 

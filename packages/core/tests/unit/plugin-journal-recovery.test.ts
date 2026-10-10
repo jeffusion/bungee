@@ -22,15 +22,19 @@ test('physical source proof authorizes recovery only after exact exit', async ()
     expect(JSON.parse(new TextDecoder().decode(value))).toEqual({ event: 'entered', source, pid: child.pid });
     db = new Database(path);
     const store = new PluginCommunicationStore(db);
-    const original = new PluginJournalRecovery(db, store.forNamespace('host:rpc:executors'));
+    const asyncStore = Object.fromEntries(Object.entries(store.forNamespace('host:rpc:executors')).map(([name,value])=>[name,typeof value==='function' ? async (...args:any[])=>value(...args) : value])) as any;
+    const client = {channelStore:()=>asyncStore,
+      executorProofPage:async(after:string,limit:number)=>db!.query<{key:string},[string,number]>("SELECT key FROM plugin_communication_records WHERE namespace='host:rpc:executors' AND key>? ORDER BY key LIMIT ?").all(after,limit),
+      executorHasPending:async(source:any)=>db!.query<{key:string},[string,string,string,number]>("SELECT key FROM plugin_communication_records WHERE namespace LIKE 'rpc.%' AND key LIKE 'j.%' AND json_valid(CAST(payload AS TEXT)) AND json_extract(CAST(payload AS TEXT),'$.state')='pending' AND json_extract(CAST(payload AS TEXT),'$.source.process')=? AND json_extract(CAST(payload AS TEXT),'$.source.instance')=? AND json_extract(CAST(payload AS TEXT),'$.source.catalog')=? AND json_extract(CAST(payload AS TEXT),'$.source.generation')=? LIMIT 1").get(source.process,source.instance,source.catalog,source.generation)!==null};
+    const original = new PluginJournalRecovery(client);
     await original.register(source, child.pid, marker);
-    const recovered = new PluginJournalRecovery(db, store.forNamespace('host:rpc:executors'));
+    const recovered = new PluginJournalRecovery(client);
     const journal = new CommandJournal({ db, namespace: 'rpc.proof', privateStateNamespace: 'test', setup: true, authorizeRecovery: recovered.authorize, resolveExternal: () => ({ reconcile: () => ({ status: 'unknown' }) }) });
     expect(journal.inspect('proof-op', { subject: 'caller' }).status).toBe('pending');
     await recovered.maintain();
     expect(journal.recoverPending()).toBe(0);
     expect(journal.inspect('proof-op', { subject: 'caller' }).status).toBe('pending');
-    const uncertain = new PluginJournalRecovery(db, store.forNamespace('host:rpc:executors'), async () => 'unknown');
+    const uncertain = new PluginJournalRecovery(client, async () => 'unknown');
     await uncertain.maintain();
     expect(uncertain.authorize({ source } as CommandRecoveryRequest)).toBeNull();
     child.kill('SIGKILL');

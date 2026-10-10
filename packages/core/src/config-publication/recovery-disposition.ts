@@ -77,7 +77,7 @@ export function classifyRecoveryError(error: unknown): PublicationRecoveryDispos
     && typeof error.code === 'string' ? error.code : undefined;
   if (code === 'invalid_options' || code === 'target_set_mismatch' || code === 'schema_corrupt'
     || code === 'connection_invariant' || code === 'migration_failed' || code === 'serving_snapshot_corrupt'
-    || code === 'repository_failure') return 'fatal';
+    || code === 'repository_failure' || code === 'result_unknown') return 'fatal';
   if (error instanceof MasterConfigPublicationError) {
     switch (error.code) {
       case 'invalid_options':
@@ -95,7 +95,9 @@ export function classifyRecoveryError(error: unknown): PublicationRecoveryDispos
       case 'migration_failed':
       case 'serving_snapshot_corrupt':
       case 'repository_failure':
+      case 'result_unknown':
         return 'fatal';
+      case 'queue_full':
       case 'invalid_operation':
       case 'cas_conflict':
       case 'retry_not_due':
@@ -118,7 +120,7 @@ export function classifyControlError(error: unknown): 'retryable' | 'determinist
     && typeof error.code === 'string' ? error.code : undefined;
   if (code === 'invalid_options' || code === 'target_set_mismatch' || code === 'schema_corrupt'
     || code === 'connection_invariant' || code === 'migration_failed' || code === 'serving_snapshot_corrupt'
-    || code === 'repository_failure') return 'fatal';
+    || code === 'repository_failure' || code === 'result_unknown') return 'fatal';
   if (code === 'not_declared' || code === 'method_not_allowed' || code === 'invalid_binding'
     || code === 'key_unavailable' || code === 'restart_required' || code === 'disposed') {
     return 'deterministic_control_failure';

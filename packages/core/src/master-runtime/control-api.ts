@@ -28,16 +28,16 @@ const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/;
 
 export interface ConfigControlRepository {
   getSnapshot(): RepositorySnapshot;
-  getActivePublication(): ActiveConfigurationPublication | null;
-  getCurrentRecovery?(): import('../config-storage').ConfigurationRecovery | null;
-  getRecovery?(recoveryId: string): import('../config-storage').ConfigurationRecovery | null;
-  getCurrentOperationState?(): ConfigurationOperationState | null;
-  getOperationState(mutationId: string): ConfigurationOperationState | null;
+  getActivePublication(): Promise<ActiveConfigurationPublication | null>;
+  getCurrentRecovery?(): Promise<import('../config-storage').ConfigurationRecovery | null>;
+  getRecovery?(recoveryId: string): Promise<import('../config-storage').ConfigurationRecovery | null>;
+  getCurrentOperationState?(): Promise<ConfigurationOperationState | null>;
+  getOperationState(mutationId: string): Promise<ConfigurationOperationState | null>;
   commit(command: {
     readonly mutation_id: string; readonly expected_revision: number;
     readonly aggregate: ConfigurationAggregateV2; readonly kind: 'config' | 'admin_state';
     readonly created_at: number; readonly target_worker_slots: readonly number[];
-  }): CommitConfigurationResult;
+  }): Promise<CommitConfigurationResult>;
 }
 
 export type ConfigControlApiOptions = {
@@ -48,7 +48,7 @@ export type ConfigControlApiOptions = {
   readonly resourceExtensions?: (keyId: string) => Promise<readonly unknown[]>;
   readonly guardDataTransition?: (active: ConfigurationAggregateV2, next: ConfigurationAggregateV2) => Promise<Response | null>;
   readonly guardManagementTransition?: (request: Request, active: ConfigurationAggregateV2, next: ConfigurationAggregateV2, setup?: unknown) => Promise<Response | null>;
-  readonly validateManagementTransition?: (request: Request, active: ConfigurationAggregateV2, next: ConfigurationAggregateV2) => Response | null;
+  readonly validateManagementTransition?: (request: Request, active: ConfigurationAggregateV2, next: ConfigurationAggregateV2) => Promise<Response | null>;
   readonly pluginCapability?: (request: Request) => string | null;
   readonly pluginDependencies?: import('../plugin-dependencies').PluginDependencyGraph;
   readonly repository: ConfigControlRepository;
@@ -81,7 +81,7 @@ export type ConfigControlApiOptions = {
     handle(request: Request): Promise<Response>;
   };
   /** Keep Master-owned logging retention in sync with the committed snapshot. */
-  readonly onConfigurationCommitted?: (snapshot: RepositorySnapshot) => void;
+  readonly onConfigurationCommitted?: (snapshot: RepositorySnapshot) => Promise<void>;
   readonly serializeMutation?: <T>(operation: () => Promise<T>) => Promise<T>;
   readonly requestManualRecovery?: (
     recoveryId: string, sourceMutationId: string, expectedRevision: number,
@@ -108,8 +108,8 @@ class RepositoryUnavailableError extends Error {
   }
 }
 
-function repositoryCall<T>(operation: () => T): T {
-  try { return operation(); }
+async function repositoryCall<T>(operation: () => Promise<T> | T): Promise<T> {
+  try { return await operation(); }
   catch (error) { throw new RepositoryUnavailableError(error); }
 }
 
@@ -173,7 +173,7 @@ async function verify(request: Request, options: ConfigControlApiOptions): Promi
   try {
     const mode = auth.selected() === null ? 'anonymous' : 'plugin';
     const identity = await auth.authenticate(request);
-    const sessionCookie = identity?.provider?.sessionCookie?.(request);
+    const sessionCookie = await identity?.provider?.sessionCookie?.(request);
     return identity ? Response.json({ success: true, mode, subject: identity.subject, capabilities: identity.subject.capabilities,
       ...(identity.provider?.csrfToken?.(request) ? { csrfToken: identity.provider.csrfToken(request) } : {}) },
       {status: 200, headers: {...JSON_HEADERS, ...(sessionCookie ? {'set-cookie': sessionCookie} : {})}})
@@ -248,14 +248,14 @@ async function validateRequest(request: Request, options: ConfigControlApiOption
   return parsed.ok ? json({ valid: true, errors: [] }) : json({ valid: false, errors: parsed.errors });
 }
 
-function acceptCommitted(
+async function acceptCommitted(
   mutationId: string,
   revision: number,
   options: ConfigControlApiOptions,
-): Response {
-  const state = repositoryCall(() => options.repository.getOperationState(mutationId));
+): Promise<Response> {
+  const state = await repositoryCall(() => options.repository.getOperationState(mutationId));
   if (state === null) return json({ error: 'operation_not_found' }, 500);
-  const active = repositoryCall(() => options.repository.getActivePublication());
+  const active = await repositoryCall(() => options.repository.getActivePublication());
   if (active !== null && active.operation.mutation_id === mutationId) {
     const oldWorkers = options.admission.snapshot();
     options.publicationTasks.enqueue(active, oldWorkers);
@@ -263,14 +263,14 @@ function acceptCommitted(
   return json({ operation_id: mutationId, revision, ...state }, 202);
 }
 
-function mapCommit(
+async function mapCommit(
   result: Exclude<CommitConfigurationResult, { readonly kind: 'committed' }>,
   options: ConfigControlApiOptions,
   snapshot: RepositorySnapshot,
-): Response {
+): Promise<Response> {
   switch (result.kind) {
     case 'duplicate': {
-      const state = repositoryCall(() => options.repository.getOperationState(result.operation.mutation_id));
+      const state = await repositoryCall(() => options.repository.getOperationState(result.operation.mutation_id));
       return state === null ? json({ error: 'operation_not_found' }, 500)
         : json({ operation_id: result.operation.mutation_id,
           revision: result.operation.committed_revision, ...state }, 202);
@@ -578,14 +578,14 @@ async function retryOperation(
     if (activeResult instanceof Response) return activeResult;
     const active = activeResult;
     if (!await options.managementAuth?.recheck(request) || !matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
-    const existing = repositoryCall(() => options.repository.getRecovery?.(requestId) ?? null);
+    const existing = await repositoryCall(() => options.repository.getRecovery?.(requestId) ?? null);
     if (existing !== null) {
       return recoveryIdentityMatches(existing, sourceMutationId, expectedRevision)
         ? recoveryResponse(existing)
         : json({ error: 'idempotency_key_reused' }, 409);
     }
 
-    const state = repositoryCall(() => options.repository.getOperationState(sourceMutationId));
+    const state = await repositoryCall(() => options.repository.getOperationState(sourceMutationId));
     if (state === null) return json({ error: 'operation_not_found' }, 404);
     const operation = state.operation;
     if (operation.state !== 'degraded') return json({ error: 'operation_not_degraded' }, 409);
@@ -599,7 +599,7 @@ async function retryOperation(
       && operation.error_code !== 'control_readiness_failed') {
       return json({ error: 'recovery_not_retryable' }, 409);
     }
-    const currentRecovery = repositoryCall(() => options.repository.getCurrentRecovery?.() ?? null);
+    const currentRecovery = await repositoryCall(() => options.repository.getCurrentRecovery?.() ?? null);
     if (currentRecovery === null) return json({ error: 'recovery_not_retryable' }, 409);
     if (currentRecovery.state === 'scheduled' || currentRecovery.state === 'running') {
       return json({ error: 'recovery_in_progress', recovery_id: currentRecovery.recovery_id,
@@ -641,8 +641,8 @@ function isMutationRequest(
     || (pluginToggleMatch !== null && method === 'POST');
 }
 
-function mutationReadinessResponse(options: ConfigControlApiOptions): Response | null {
-  const recovery = repositoryCall(() => options.repository.getCurrentRecovery?.());
+async function mutationReadinessResponse(options: ConfigControlApiOptions): Promise<Response | null> {
+  const recovery = await repositoryCall(() => options.repository.getCurrentRecovery?.());
   if (recovery !== null && recovery !== undefined && (recovery.state === 'scheduled' || recovery.state === 'running')) {
     return json({ error: 'recovery_in_progress', recovery_id: recovery.recovery_id,
       target_revision: recovery.target_revision, state: recovery.state }, 409);
@@ -665,7 +665,7 @@ async function commitConfigurationMutation(
   if (mutation.active.revision !== mutation.expectedRevision) {
     let result: CommitConfigurationResult;
     try {
-      result = options.repository.commit(Object.freeze({
+      result = await options.repository.commit(Object.freeze({
         mutation_id: mutation.mutationId,
         expected_revision: mutation.expectedRevision,
         aggregate: mutation.next,
@@ -678,7 +678,7 @@ async function commitConfigurationMutation(
       throw new RepositoryUnavailableError(error);
     }
     if (result.kind === 'committed') {
-      options.onConfigurationCommitted?.(result.snapshot);
+      await options.onConfigurationCommitted?.(result.snapshot);
       return acceptCommitted(mutation.mutationId, result.snapshot.revision, options);
     }
     return mapCommit(result, options, mutation.active);
@@ -687,7 +687,7 @@ async function commitConfigurationMutation(
   if (dataGuard) return dataGuard;
   const guard = await options.guardManagementTransition?.(request, mutation.active.aggregate, mutation.next, mutation.managementSetup);
   if (guard) return guard;
-  const initialReadiness = mutationReadinessResponse(options);
+  const initialReadiness = await mutationReadinessResponse(options);
   if (initialReadiness !== null) return initialReadiness;
   let activated: readonly string[];
   try {
@@ -713,9 +713,9 @@ async function commitConfigurationMutation(
   }
   const capability = /^\/api\/plugins\/[^/]+\/(enable|disable)$/.test(new URL(request.url).pathname)
     ? 'plugins.toggle' : 'config.write';
-  if (!auth.authorized(request, capability)
+  if (!await auth.authorized(request, capability)
     || (auth.selected(mutation.active.aggregate) !== auth.selected(mutation.next)
-      && !auth.authorized(request, 'auth.mode'))) {
+      && !await auth.authorized(request, 'auth.mode'))) {
     await rollbackControlActivations(activated, options);
     return json({ error: 'forbidden' }, 403);
   }
@@ -724,7 +724,7 @@ async function commitConfigurationMutation(
     return json({ error: 'stale_revision', expected_revision: freshResult.revision,
       active: snapshotBody(freshResult) }, 409);
   }
-  const postPreflightReadiness = mutationReadinessResponse(options);
+  const postPreflightReadiness = await mutationReadinessResponse(options);
   if (postPreflightReadiness !== null) {
     const rollbackErrors = await rollbackControlActivations(activated, options);
     if (rollbackErrors.length > 0) {
@@ -735,19 +735,19 @@ async function commitConfigurationMutation(
   }
   const finalDataGuard = await options.guardDataTransition?.(freshResult.aggregate, mutation.next);
   if (finalDataGuard) { await rollbackControlActivations(activated, options); return finalDataGuard; }
-  if (!await auth.recheck(request) || !auth.authorized(request, capability)) {
+  if (!await auth.recheck(request) || !await auth.authorized(request, capability)) {
     await rollbackControlActivations(activated, options);
     return json({error:'unauthorized'},401);
   }
-  auth.validateWrite(request);
-  const finalTransition = options.validateManagementTransition?.(request, freshResult.aggregate, mutation.next);
+  await auth.validateWrite(request);
+  const finalTransition = await options.validateManagementTransition?.(request, freshResult.aggregate, mutation.next);
   if (finalTransition) {
     await rollbackControlActivations(activated, options);
     return finalTransition;
   }
   let result: CommitConfigurationResult;
   try {
-    result = options.repository.commit(Object.freeze({
+    result = await options.repository.commit(Object.freeze({
       mutation_id: mutation.mutationId,
       expected_revision: mutation.expectedRevision,
       aggregate: mutation.next,
@@ -756,7 +756,11 @@ async function commitConfigurationMutation(
       target_worker_slots: Object.freeze(Array.from({ length: options.workerCount }, (_, slot) => slot)),
     }));
   } catch (error) {
-    await rollbackControlActivations(activated, options);
+    // An acknowledgement can be lost after a durable commit. Keep preflight
+    // controls intact until the original mutation ID is reconciled on restart.
+    if (!(error instanceof ConfigRepositoryError && error.code === 'result_unknown')) {
+      await rollbackControlActivations(activated, options);
+    }
     if (error instanceof ConfigRepositoryError) throw error;
     throw new RepositoryUnavailableError(error);
   }
@@ -764,16 +768,16 @@ async function commitConfigurationMutation(
     await rollbackControlActivations(activated, options);
   }
   if (result.kind === 'committed') {
-    options.onConfigurationCommitted?.(result.snapshot);
+    await options.onConfigurationCommitted?.(result.snapshot);
     return acceptCommitted(mutation.mutationId, result.snapshot.revision, options);
   }
   return mapCommit(result, options, mutation.active);
 }
 
-function unchangedMutationResponse(options: ConfigControlApiOptions, revision: number): Response {
-  const publication = repositoryCall(() => options.repository.getActivePublication());
+async function unchangedMutationResponse(options: ConfigControlApiOptions, revision: number): Promise<Response> {
+  const publication = await repositoryCall(() => options.repository.getActivePublication());
   if (publication?.snapshot.revision === revision) {
-    const state = repositoryCall(() => options.repository.getOperationState(publication.operation.mutation_id));
+    const state = await repositoryCall(() => options.repository.getOperationState(publication.operation.mutation_id));
     if (state === null) return json({ error: 'operation_not_found' }, 500);
     return json({
       operation_id: publication.operation.mutation_id,
@@ -942,8 +946,8 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
           : statsRequest || observabilityRequest ? (writing ? 'config.write' : 'logs.read')
           : writing ? 'config.write' : 'config.read';
         if (!capability && pluginControlMatch) return notFound();
-        if (!capability || !serializedOptions.managementAuth!.authorized(request, capability)) return json({ error: 'forbidden' }, 403);
-        if (writing) serializedOptions.managementAuth!.validateWrite(request);
+        if (!capability || !await serializedOptions.managementAuth!.authorized(request, capability)) return json({ error: 'forbidden' }, 403);
+        if (writing) await serializedOptions.managementAuth!.validateWrite(request);
       } catch (error) { const invalid = error instanceof Error && ['invalid_csrf','invalid_origin','csrf_validation_unavailable'].includes(error.message); return json({ error: invalid ? 'invalid_csrf' : 'management_provider_unavailable' }, invalid ? 403 : 503); }
       let snapshot: RepositorySnapshot;
       if (mutationRequest) {
@@ -998,8 +1002,8 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
           return await importConfig(request, serializedOptions);
         }
         if (path === '/api/config/runtime' && request.method === 'GET') {
-          const currentOperation = repositoryCall(() => serializedOptions.repository.getCurrentOperationState?.() ?? null);
-          const currentRecovery = repositoryCall(() => serializedOptions.repository.getCurrentRecovery?.() ?? null);
+          const currentOperation = await repositoryCall(() => serializedOptions.repository.getCurrentOperationState?.() ?? null);
+          const currentRecovery = await repositoryCall(() => serializedOptions.repository.getCurrentRecovery?.() ?? null);
           const evidence = serializedOptions.runtimePublicationEvidence?.()
             ?? { serving_complete: false, serving_revision: null };
           return json({ config: snapshot.aggregate, revision: snapshot.revision, content_hash: snapshot.content_hash,
@@ -1052,7 +1056,7 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
         if (operationMatch !== null && request.method === 'GET') {
           const mutationId = operationMatch[1];
           if (mutationId === undefined || !validateMutationId(mutationId)) return json({ error: 'invalid_request' }, 400);
-          const state = repositoryCall(() => serializedOptions.repository.getOperationState(mutationId));
+          const state = await repositoryCall(() => serializedOptions.repository.getOperationState(mutationId));
           return state === null ? json({ error: 'operation_not_found' }, 404) : operationResponse(state);
         }
         if (retryMatch !== null) {
@@ -1067,6 +1071,8 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
       } catch (error) {
         if (error instanceof RepositoryUnavailableError) return repositoryUnavailable();
         if (error instanceof ConfigRepositoryError) {
+          if (error.code === 'result_unknown') return json({ error: 'result_unknown',
+            mutation_id: 'mutationId' in error ? error.mutationId : undefined }, 503);
           if (error.code === 'invalid_command') return json({ error: 'invalid_request' }, 400);
           return json({ error: error.code === 'invalid_configuration' ? 'invalid_configuration' : 'repository_unavailable' },
             error.code === 'invalid_configuration' ? 422 : 503);

@@ -246,9 +246,11 @@ function requireSource(db: Database, sourceMutationId: string): { readonly commi
 }
 
 function requireNoActivePublication(db: Database): void {
-  const active = sqliteGet<{ readonly count: number }, []>(db,
-    `SELECT count(*) AS count FROM configuration_operations WHERE state IN ('committed','publishing','draining')`)?.count ?? 0;
-  if (active !== 0) invalid('an active publication already exists');
+  const active = sqliteGet<{ readonly mutation_id: string }, []>(db,
+    `SELECT mutation_id FROM configuration_operations
+     WHERE committed_revision=(SELECT active_revision FROM configuration_state WHERE id=1)
+       AND state IN ('committed','publishing','draining') LIMIT 1`);
+  if (active !== null) invalid('an active publication already exists');
 }
 
 function insertRecovery(
@@ -279,8 +281,10 @@ function insertRecovery(
   }
   const latest = readLatestRecovery(db, targetRevision);
   if (latest !== null && now < latest.updated_at) invalid('recovery timestamp regressed');
-  const latestCreatedAt = sqliteGet<{ readonly created_at: number | null }, []>(db,
-    'SELECT max(created_at) AS created_at FROM configuration_recoveries')?.created_at;
+  // Startup auditing establishes monotonic creation times. Reading the indexed
+  // last sequence keeps the transaction check constant with history growth.
+  const latestCreatedAt = sqliteGet<{ readonly created_at: number }, []>(db,
+    'SELECT created_at FROM configuration_recoveries ORDER BY recovery_sequence DESC LIMIT 1')?.created_at;
   if (latestCreatedAt !== null && latestCreatedAt !== undefined && now < latestCreatedAt) {
     invalid('recovery creation timestamp regressed');
   }

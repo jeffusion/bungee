@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { generateWidgetRegistry } from '../../../../scripts/generate-widget-registry';
+import { generateWidgetRegistry } from '../../../../scripts/build/generate-widget-registry';
 
 const roots: string[] = [];
 
@@ -44,7 +44,7 @@ describe('widget registry generator', () => {
     const output = join(root, 'generated.ts');
 
     const process = Bun.spawn({
-      cmd: ['bun', resolve(import.meta.dir, '../../../../scripts/generate-widget-registry.ts')],
+      cmd: ['bun', resolve(import.meta.dir, '../../../../scripts/build/generate-widget-registry.ts')],
       env: { ...Bun.env, BUNGEE_WIDGET_PLUGINS_DIR: root, BUNGEE_WIDGET_OUTPUT_FILE: output },
       stdout: 'pipe', stderr: 'pipe',
     });
@@ -72,7 +72,7 @@ describe('widget registry generator', () => {
     writeFileSync(output, 'unchanged');
 
     const process = Bun.spawn({
-      cmd: ['bun', resolve(import.meta.dir, '../../../../scripts/generate-widget-registry.ts')],
+      cmd: ['bun', resolve(import.meta.dir, '../../../../scripts/build/generate-widget-registry.ts')],
       env: { ...Bun.env, BUNGEE_WIDGET_PLUGINS_DIR: root, BUNGEE_WIDGET_OUTPUT_FILE: output },
       stdout: 'pipe', stderr: 'pipe',
     });
@@ -100,7 +100,7 @@ describe('widget registry generator', () => {
     writeFileSync(output, 'unchanged');
 
     const process = Bun.spawn({
-      cmd: ['bun', resolve(import.meta.dir, '../../../../scripts/generate-widget-registry.ts')],
+      cmd: ['bun', resolve(import.meta.dir, '../../../../scripts/build/generate-widget-registry.ts')],
       env: { ...Bun.env, BUNGEE_WIDGET_PLUGINS_DIR: root, BUNGEE_WIDGET_OUTPUT_FILE: output },
       stdout: 'pipe', stderr: 'pipe',
     });

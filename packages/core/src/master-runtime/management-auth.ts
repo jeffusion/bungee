@@ -11,28 +11,35 @@ export class ManagementAuthentication {
     private readonly aggregate: () => ConfigurationAggregateV2,
     providers: ReadonlySet<string>, private readonly managementOrigin?: string,
     private readonly selectionState?: PluginDurableState) {
-    const stored = selectionState?.get('selection')?.value as {providers?: unknown; selected?: unknown} | undefined;
-    if (stored && (!Array.isArray(stored.providers) || stored.providers.some(name => typeof name !== 'string')
-      || (stored.selected !== null && typeof stored.selected !== 'string'))) throw new Error('management_selection_corrupt');
-    this.knownProviders = new Set([...providers, ...((stored?.providers ?? []) as string[])]);
-    // Retain provider names independently of the current filesystem catalog.
-    if (selectionState) this.rememberSelection(this.aggregate(), false);
+    this.knownProviders = new Set(providers);
+  }
+  private persistedSelection: import('../plugin-durable-state').DurableRecord | null = null;
+  async initialize(): Promise<void> {
+    const stored = await this.selectionState?.get('selection') ?? null;
+    const value = stored?.value as {providers?: unknown; selected?: unknown} | undefined;
+    if (value && (!Array.isArray(value.providers) || value.providers.some(name => typeof name !== 'string')
+      || (value.selected !== null && typeof value.selected !== 'string'))) throw new Error('management_selection_corrupt');
+    for (const name of (value?.providers ?? []) as string[]) this.knownProviders.add(name);
+    this.persistedSelection = stored;
+    if (this.selectionState) await this.rememberSelection(this.aggregate(), false);
   }
   selected(aggregate = this.aggregate()): string | null {
     const names = aggregate.plugin_activations.filter(x => this.knownProviders.has(x.plugin_name));
     if (names.length > 1) throw new Error('multiple_management_providers');
-    const persisted = this.selectionState?.get('selection')?.value as {selected?: string | null} | undefined;
+    const persisted = this.persistedSelection?.value as {selected?: string | null} | undefined;
     if (arguments.length === 0 && persisted?.selected && names.length === 0) throw new Error('management_selection_mismatch');
     return names[0]?.plugin_name ?? null;
   }
-  rememberSelection(aggregate: ConfigurationAggregateV2, committed = true): void {
-    const previous = this.selectionState?.get('selection');
+  async rememberSelection(aggregate: ConfigurationAggregateV2, committed = true): Promise<void> {
+    const previous = await this.selectionState?.get('selection');
     const selected = this.selected(aggregate);
     const old = previous?.value as {selected?: string | null} | undefined;
     const value = {providers: [...this.knownProviders].sort(), selected: committed || !previous ? selected : old?.selected ?? null};
-    if (this.selectionState && JSON.stringify(previous?.value) !== JSON.stringify(value)) this.selectionState.execute({
-      commandId: crypto.randomUUID(), mutations: [{key:'selection',expectedVersion:previous?.version ?? 0,value}],
-    });
+    if (this.selectionState && JSON.stringify(previous?.value) !== JSON.stringify(value)) {
+      const records = await this.selectionState.transact([{key:'selection',expectedVersion:previous?.version ?? 0,value}]);
+      this.persistedSelection = records[0]!;
+    } else this.persistedSelection = previous ?? null;
+
   }
   provider(name = this.selected()): ManagementProvider | null {
     if (name === null) return null;
@@ -50,9 +57,9 @@ export class ManagementAuthentication {
   }
   identity(request: Request): ManagementIdentity | null { return this.identities.get(request) ?? null; }
   publicOrigin(request: Request): string { return this.managementOrigin ?? new URL(request.url).origin; }
-  authorized(request: Request, capability: string): boolean {
+  async authorized(request: Request, capability: string): Promise<boolean> {
     const identity = this.identity(request);
-    return !!identity && (identity.provider ? identity.provider.authorize(identity.subject, capability) : true);
+    return !!identity && (identity.provider ? await identity.provider.authorize(identity.subject, capability) : true);
   }
   async recheck(request: Request): Promise<boolean> { return !!await this.authenticate(request, true); }
   validateWrite(request: Request): void {
@@ -73,17 +80,17 @@ export function parseManagementOrigin(value: string | undefined): string | undef
   return url.origin;
 }
 
-/** Synchronous final check after asynchronous preflight, immediately before commit. */
-export function validateManagementTransition(
+/** Asynchronous identity and authorization preflight for a management mode change. */
+export async function validateManagementTransition(
   request: Request, active: ConfigurationAggregateV2, next: ConfigurationAggregateV2,
   managementAuth: ManagementAuthentication | undefined, host: PluginControlHost,
-): Response | null {
+): Promise<Response | null> {
   const before = managementAuth?.selected(active), after = managementAuth?.selected(next);
   if (before === after) return null;
   if (after) {
     const handle = host.get(after);
-    if (handle?.status !== 'ready' || !handle.admission || !handle.control.management?.hasIdentity()) return Response.json({error:'management_setup_failed'},{status:422});
-  } else if (!managementAuth?.identity(request)?.provider || managementAuth.identity(request)?.subject.provider !== before || !managementAuth.authorized(request, 'auth.mode')) {
+    if (handle?.status !== 'ready' || !handle.admission || !await handle.control.management?.hasIdentity()) return Response.json({error:'management_setup_failed'},{status:422});
+  } else if (!managementAuth?.identity(request)?.provider || managementAuth.identity(request)?.subject.provider !== before || !await managementAuth.authorized(request, 'auth.mode')) {
     return Response.json({error:'unauthorized'},{status:401});
   }
   return null;

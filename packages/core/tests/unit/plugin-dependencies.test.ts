@@ -1,4 +1,5 @@
 import { createManagementAuthFixture } from '../helpers/management-auth';
+import { configurationRepositoryFixture } from '../helpers/config-repository';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { PluginDependencyGraph, updatePluginActivations } from '../../src/plugin-dependencies';
 import { buildPluginManifestCatalog } from '../../src/plugin-manifest-catalog';
@@ -148,7 +149,7 @@ test.each(['enable', 'put', 'import'] as const)('$entry activation persists the 
       kind: 'config', created_at: ++time, target_worker_slots: [0] });
     settle();
     const startedControls: string[] = [];
-    const api = createConfigControlApi({ repository, managementAuth:credentials.managementAuth, pluginDependencies: graph, admission: { snapshot: () => [] },
+    const api = createConfigControlApi({ repository:configurationRepositoryFixture(repository), managementAuth:credentials.managementAuth, pluginDependencies: graph, admission: { snapshot: () => [] },
       workerCount: 1, clock: { now: () => ++time }, resolveAuthToken: value => value,
       parseAggregate: value => parseNormalizeCompileAggregate(value, compile),
       publicationTasks: { enqueue() {} }, isMutationReady: () => true,

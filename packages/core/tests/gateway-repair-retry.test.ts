@@ -50,7 +50,7 @@ test.each(['success','credential','http-error','network-error','cancel','deadlin
     if(mode==='cancel'||mode==='deadline')return new Promise<Response>((_resolve,reject)=>{init!.signal!.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')),{once:true});});
     return mode==='http-error'?Response.json({error:{code:'signature',message:'replacement-error'},usage:{output_tokens:9}},{status:502}):Response.json({ok:true,usage:{output_tokens:9}});
   },{preconnect(){}}) as typeof fetch;
-  const payload=gzipSync('{"input":"hello"}');
+  const payload=Uint8Array.from(gzipSync('{"input":"hello"}'));
   const original=new Request('http://local/repair',{method:'POST',body:payload,headers:{'content-type':'application/json','content-encoding':'gzip'},signal:controller.signal});
   const secret=generateWorkerTransportSecret();
   const restored=restoreWorkerTransportRequest(new Request('http://127.0.0.1/private',{method:'POST',body:payload,

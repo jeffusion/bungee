@@ -1,4 +1,5 @@
 import { isIP } from 'node:net';
+import { PLUGIN_STORAGE_RPC_PATH } from '../data-admission/rpc';
 import { attestManagementRequestSource } from './request-source';
 import { PLUGIN_PEER_WS_PATH, type PluginPeerConnectionData, type PluginPeerWebSocketServer } from '../plugin-services/peer-websocket';
 import {
@@ -28,6 +29,7 @@ export type ManagementListenerOptions = {
   readonly shutdownTimeoutMs?: number;
   readonly trustedProxyAddresses?: readonly string[];
   readonly masterUIHandler?: MasterUIHandler;
+  readonly health?: () => {live: boolean; management: boolean; data: boolean; degraded: boolean};
   readonly daemonControl?: DaemonShutdownHandler;
   /**
    * Optional plugin-peer WebSocket transport. It is consulted only on the
@@ -132,7 +134,7 @@ export function mergeManagementRequestSignals(requestSignal: AbortSignal, shutdo
 
 export async function handleManagementRequest(
   request: Request,
-  options: Pick<ManagementListenerOptions, 'controlApi' | 'masterUIHandler' | 'daemonControl' | 'profile'>,
+  options: Pick<ManagementListenerOptions, 'controlApi' | 'masterUIHandler' | 'daemonControl' | 'profile' | 'health'>,
   context?: DaemonControlRequestContext,
 ): Promise<Response> {
   const url = new URL(request.url);
@@ -142,13 +144,17 @@ export async function handleManagementRequest(
       if (url.pathname !== DAEMON_SHUTDOWN_PATH || options.daemonControl === undefined) return notFound();
       return options.daemonControl.handle(request, context);
     }
+    if (url.pathname === PLUGIN_STORAGE_RPC_PATH) return await options.controlApi.handle(request) ?? notFound();
     return notFound();
   }
   if (profile === 'management' && (url.pathname.startsWith('/__bungee/internal')
     || url.pathname === '/__ui' || url.pathname.startsWith('/__ui/'))) return notFound();
-  if (url.pathname === '/health' && (request.method === 'GET' || request.method === 'HEAD')) {
-    return new Response(request.method === 'HEAD' ? null : '{"status":"ok"}', {
-      headers: { 'content-type': 'application/json' },
+  if (['/health','/health/live','/health/management','/health/data'].includes(url.pathname) && (request.method === 'GET' || request.method === 'HEAD')) {
+    const health = options.health?.() ?? {live:true,management:true,data:false,degraded:true};
+    const check = url.pathname.split('/')[2] as 'live'|'management'|'data'|undefined;
+    const ready = check ? health[check] : health.live && health.management;
+    return new Response(request.method === 'HEAD' ? null : JSON.stringify({status:health.degraded ? 'degraded' : 'ok',...health}), {
+      status:ready ? 200 : 503, headers:JSON_HEADERS,
     });
   }
   const handled = await options.controlApi.handle(request);

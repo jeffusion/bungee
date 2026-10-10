@@ -1,3 +1,4 @@
+import {initializePluginStateFixture} from './support/plugin-state-fixture';
 import { ConfigRepository } from '../packages/core/src/config-storage';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
@@ -130,6 +131,7 @@ async function makeFixture(root: string, name: string, credentialPort: number): 
 `);
   const repository = ConfigRepository.open(dbPath);
   repository.close();
+  await initializePluginStateFixture(dbPath);
   return { root: fixtureRoot, dbPath, accessDbPath, configPath, pluginsPath, controlAuditPath, tlsCertPath };
 }
 
@@ -207,7 +209,8 @@ async function waitForHealth(port: number, child: ChildProcess): Promise<void> {
     if (child.exitCode !== null || child.signalCode !== null) throw new Error(`core exited before health: ${child.exitCode ?? child.signalCode}\n${childOutput.get(child)?.join('') ?? ''}`);
     try {
       const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.any([signal, AbortSignal.timeout(250)]) });
-      return response.status === 200 && await response.text() === '{"status":"ok"}';
+      const health = await response.json() as {live?: boolean; management?: boolean};
+      return response.status === 200 && health.live === true && health.management === true;
     } catch { return false; }
   }, 'management health did not become ready');
 }
@@ -1802,6 +1805,8 @@ describe.serial('B daemon', () => {
     const plugins = join(data, 'plugins'); const plugin = join(plugins, 'canonical-plugin');
     await Promise.all([mkdir(plugin, { recursive: true }), mkdir(logs, { recursive: true }), mkdir(runtime, { recursive: true })]);
     await Promise.all([writeFile(join(plugin, 'manifest.json'), JSON.stringify({ name: 'canonical-plugin', version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin', main: 'index.js', capabilities: ['hooks', 'dynamicRuntimeLoad'], uiExtensionMode: 'none', engines: { bungee: '^4.2.0 || ^5.0.0' }, builtin: false, contributes: {}, configSchema: [], metadata: { name: 'canonical-plugin', description: 'canonical', icon: 'test' } })), writeFile(join(plugin, 'index.js'), "export default class CanonicalPlugin { static version = '1.0.0'; bodyRequirements() { return { request: 'none' }; } register() {} };")]);
+    ConfigRepository.open(join(data, 'bungee.db')).close();
+    await initializePluginStateFixture(join(data, 'bungee.db'));
     const daemon = await createDaemonHarness(root, lease, undefined, 1, {
       home, dataDirectory: data, logsDirectory: logs, pluginsPath: plugins, managementPort: lease.base + 1,
       pluginSecretsKey: Buffer.alloc(32, 7).toString('base64'),

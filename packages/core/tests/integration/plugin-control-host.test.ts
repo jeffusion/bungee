@@ -1,3 +1,4 @@
+import {createDatabaseSecretStoreFactory,createDatabasePluginStorageFactory} from '../helpers/plugin-storage-backend';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -5,8 +6,6 @@ import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import type { PluginManifestRecord } from '../../src/plugin-manifest-catalog/types';
 import {
-  createDatabaseSecretStoreFactory,
-  createDatabasePluginStorageFactory,
   createPluginControlHost,
   type SecretStoreFactory,
   type PluginStorageFactory,

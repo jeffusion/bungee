@@ -31,10 +31,10 @@ COPY packages/types ./packages/types
 COPY packages/core ./packages/core
 COPY packages/llms ./packages/llms
 COPY plugins ./plugins
-COPY scripts/bundle-ui.ts ./scripts/
-COPY scripts/build-external-plugins.ts ./scripts/
-COPY scripts/check-gateway-architecture.ts ./scripts/
-COPY scripts/check-gateway-architecture.test.ts ./scripts/
+COPY scripts/build/bundle-ui.ts ./scripts/build/
+COPY scripts/build/build-external-plugins.ts ./scripts/build/
+COPY scripts/checks/check-gateway-architecture.ts ./scripts/checks/
+COPY scripts/checks/check-gateway-architecture.test.ts ./scripts/checks/
 
 # Run complete build pipeline
 # 1. Build Types (typescript) → packages/types/dist/
@@ -45,7 +45,10 @@ RUN bun run check:architecture && \
     bun run build:ui && \
     bun run bundle:ui && \
     bun run build:llms && \
-    bun run build:core
+    bun run build:core && \
+    test -s packages/core/dist/config-storage-worker.js && \
+    test -s packages/core/dist/plugin-state-worker.js && \
+    test -s packages/core/dist/observability-worker.js
 
 # ---- Production Stage ----
 FROM base AS production
@@ -70,8 +73,8 @@ COPY package.json ./
 COPY packages/core/package.json ./packages/core/
 
 # Copy healthcheck script
-COPY healthcheck.sh ./
-COPY scripts/docker-entrypoint.sh ./
+COPY scripts/runtime/healthcheck.sh ./
+COPY scripts/runtime/docker-entrypoint.sh ./
 RUN chmod 0755 healthcheck.sh docker-entrypoint.sh
 
 # Create data and logs directories with proper permissions

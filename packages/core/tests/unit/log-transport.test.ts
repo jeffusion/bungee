@@ -110,15 +110,10 @@ test('HTTP multi-value and transport filter validation is identical for query an
   }
 });
 
-test('migration does not infer historical transport from HTTP or protocol results', () => {
-  const db = new Database(':memory:');
-  try {
-    db.exec('CREATE TABLE access_logs (id INTEGER PRIMARY KEY,status INTEGER,success INTEGER,protocol_outcome TEXT)');
-    db.run("INSERT INTO access_logs VALUES (1,200,1,'completed')");
-    const migration = require('../../src/migrations/versions/008_add_transport_outcome').migration;
-    migration.up(db);
-    expect(db.query('SELECT transport_outcome,transport_code FROM access_logs').get()).toEqual({ transport_outcome: null, transport_code: null });
-  } finally { db.close(); }
+test('unknown transport remains null regardless of HTTP or protocol results', async () => {
+  const {writer,db}=await fixture();
+  writer.write(row('historical',{status:200,success:true,protocolOutcome:'completed'}));await writer.flush();
+  expect(db.query('SELECT transport_outcome,transport_code FROM access_logs WHERE request_id=?').get('historical')).toEqual({transport_outcome:null,transport_code:null});
 });
 
 test('request counts combine HTTP and completed transport while excluding cancellation, pending and unknown', async () => {

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createPluginStorageCapability, SQLitePluginStorage } from '../../src/plugin-storage';
-import { migrations } from '../../src/migrations';
+import {initializePluginStateDatabase} from '../../src/plugin-state/schema';
 
 const databases: Database[] = [];
 const directories: string[] = [];
@@ -18,7 +18,7 @@ afterEach(() => {
 
 function applyMigrations(db: Database): void {
   db.run('PRAGMA foreign_keys = ON');
-  db.transaction(() => { for (const migration of migrations) migration.up(db); })();
+  initializePluginStateDatabase(db);
 }
 
 function memoryDb(): Database {
@@ -38,7 +38,7 @@ function fileDb(file: string): Database {
 function newFile(): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'plugin-storage-'));
   directories.push(directory);
-  return path.join(directory, 'access.db');
+  return path.join(directory, 'plugin-state.db');
 }
 
 function insertRaw(db: Database, pluginName: string, key: string, value: string, ttl: number | null = null): void {

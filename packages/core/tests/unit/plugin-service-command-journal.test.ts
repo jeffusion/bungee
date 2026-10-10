@@ -451,10 +451,13 @@ describe('CommandJournal', () => {
         return { mutations: [], result: 'ok' };
       },
     });
-    for (const key of ['a', 'b', 'c']) seedRecord(db, 'svc.private', key, 1, key);
+    for (const key of ['a', 'b']) seedRecord(db, 'svc.private', key, 1, key);
     expect(await j.execute(execution({ operationId: 'reader', output: { type: 'string' } }))).toBe('ok');
     expect(captured).not.toBeNull();
     expect(codeOfSync(() => (captured as unknown as CommandAtomicReader).get('a'))).toBe('capability_unavailable');
+    seedRecord(db,'svc.private','c',1,'c');
+    expect(await codeOf(()=>j.execute(execution({operationId:'overflow-list',output:{type:'string'}})))).toBe('capability_unavailable');
+    expect(j.inspect('overflow-list',{subject:'caller-a'}).status).toBe('missing');
   });
 
   test('rejects a reader list on the byte budget before fetching or parsing any body', async () => {
@@ -1291,63 +1294,64 @@ describe('CommandJournal', () => {
 });
 
 describe('peer journal Host maintenance', () => {
-  test('resumes namespaces after resolver restart, advances past 128 pending rows, and preserves receipts', async () => {
+  test('resumes namespaces after storage restart, advances past 128 pending rows, and preserves receipts', async () => {
     const { createPluginPeerJournalResolver } = await import('../../src/plugin-services/peer-journal');
-    const { PluginDurableStateStore } = await import('../../src/plugin-durable-state');
-    const db = memory();
-    const { COMMAND_JOURNAL_SCHEMA_SQL } = await import('../../src/plugin-services/command-journal');
-    db.exec(COMMAND_JOURNAL_SCHEMA_SQL);
-    let now = 1000, terminal = false;
-    const make = () => createPluginPeerJournalResolver({ store: new PluginDurableStateStore(db), now: () => now,
-      authorizeRecovery: request => terminal ? { owner: request.owner, epoch: request.epoch, issuedAt: now } : null });
-    const first = make();
-    const request = { provider: 'provider', service: 'svc', major: 1, method: 'run', scope: 'global' as const,
-      policy: { deduplication: 'none' as const, resultRetentionMs: 10, maxResultBytes: 128, quotaBytes: 1_048_576 } };
-    const accepted = first.resolve(request)!;
-    expect(accepted).not.toBeNull();
-    for (let index = 0; index < 140; index++) {
-      void accepted.execute(execution({ operationId: `pending-${index}`, deduplication: 'none', resultRetentionMs: 10,
-        maxResultBytes: 128, quotaBytes: 1_048_576, business: () => new Promise<RpcJson>(() => undefined) })).catch(() => undefined);
-    }
-    const committed = first.resolve({ ...request, service: 'other' })!;
-    await committed.execute(execution({ operationId: 'expired-result', serviceId: 'other', deduplication: 'none', resultRetentionMs: 10,
-      maxResultBytes: 128, quotaBytes: 1_048_576 }));
-    first.close();
-    const restarted = make();
-    expect(restarted.maintain({ namespaceLimit: 1, recordLimit: 128 }).recovered).toBe(0);
-    expect(accepted.inspect('pending-139', { subject: 'caller-a' }).status).toBe('pending');
-    terminal = true; now += 20;
-    let recovered = 0, collected = 0;
-    for (let index = 0; index < 12; index++) {
-      const result = restarted.maintain({ namespaceLimit: 1, recordLimit: 128 });
-      expect(result.failures).toEqual([]); recovered += result.recovered; collected += result.collected;
-    }
-    expect(recovered).toBe(140);
-    expect(collected).toBe(1);
-    for (let index = 0; index < 140; index++) expect(accepted.inspect(`pending-${index}`, { subject: 'caller-a' }).status).toBe('unknown');
-    expect(accepted.status().reservedBytes).toBeGreaterThan(0);
-    expect(committed.inspect('expired-result', { subject: 'caller-a' }).status).toBe('expired');
-    expect(db.query<{ n: number }, []>('SELECT count(*) AS n FROM plugin_communication_receipts').get()!.n).toBe(1);
-    restarted.close();
+    const { PluginStateClient } = await import('../../src/plugin-state/client');
+    const directory=fs.mkdtempSync(path.join(os.tmpdir(),'peer-journal-worker-'));directories.push(directory);
+    const file=path.join(directory,'plugin-state.db');
+    let client=await PluginStateClient.open(file,{initialize:true,limits:WIDE,maxPendingRequests:256});
+    let terminal=false;
+    const make=()=>createPluginPeerJournalResolver({client,authorizeRecovery:request=>terminal
+      ? {owner:request.owner,epoch:request.epoch,issuedAt:Date.now()}:null});
+    const request={provider:'provider',service:'svc',major:1,method:'run',scope:'global' as const,
+      policy:{deduplication:'none' as const,resultRetentionMs:10,maxResultBytes:128,quotaBytes:1_048_576}};
+    try {
+      const first=make(),accepted=first.resolve(request)!;
+      let started=0;let allStarted!:()=>void;const begun=new Promise<void>(resolve=>{allStarted=resolve;});
+      for(let index=0;index<140;index++)void accepted.execute(execution({operationId:`pending-${index}`,deduplication:'none',
+        resultRetentionMs:10,maxResultBytes:128,quotaBytes:1_048_576,business:()=>{
+          if(++started===140)allStarted();return new Promise<RpcJson>(()=>undefined);
+        }})).catch(()=>undefined);
+      await begun;
+      const committed=first.resolve({...request,service:'other'})!;
+      await committed.execute(execution({operationId:'expired-result',serviceId:'other',deduplication:'none',resultRetentionMs:10,
+        maxResultBytes:128,quotaBytes:1_048_576}));
+      await first.close();await client.close();
+      client=await PluginStateClient.open(file,{limits:WIDE});
+      const restarted=make(),observed=restarted.resolve(request)!,other=restarted.resolve({...request,service:'other'})!;
+      const initial=await restarted.maintain({namespaceLimit:1,recordLimit:128});expect(initial.recovered).toBe(0);
+      expect((await observed.inspect('pending-139',{subject:'caller-a'})).status).toBe('pending');
+      terminal=true;await new Promise(resolve=>setTimeout(resolve,20));
+      let recovered=0,collected=initial.collected;
+      for(let index=0;index<12;index++) {
+        const result=await restarted.maintain({namespaceLimit:1,recordLimit:128});
+        expect(result.failures).toEqual([]);recovered+=result.recovered;collected+=result.collected;
+      }
+      expect(recovered).toBe(140);expect(collected).toBe(1);
+      for(let index=0;index<140;index++)expect((await observed.inspect(`pending-${index}`,{subject:'caller-a'})).status).toBe('unknown');
+      expect((await observed.status()).reservedBytes).toBeGreaterThan(0);
+      expect((await other.inspect('expired-result',{subject:'caller-a'})).status).toBe('expired');
+      await restarted.close();await client.close();
+      const db=new Database(file,{readonly:true});
+      expect(db.query<{n:number},[]>('SELECT count(*) AS n FROM plugin_communication_receipts').get()!.n).toBe(1);db.close();
+    } finally {await client.close();}
   });
 
   test('each command facade keeps its publication capability and maintenance never runs it', async () => {
     const { createPluginPeerJournalResolver } = await import('../../src/plugin-services/peer-journal');
-    const { PluginDurableStateStore } = await import('../../src/plugin-durable-state');
-    const { COMMAND_JOURNAL_SCHEMA_SQL } = await import('../../src/plugin-services/command-journal');
-    const db = memory(); db.exec(COMMAND_JOURNAL_SCHEMA_SQL);
-    const resolver = createPluginPeerJournalResolver({ store: new PluginDurableStateStore(db) });
-    const policy = { deduplication: 'local-transaction' as const, resultRetentionMs: null, quotaBytes: 8192, maxResultBytes: 1024 };
-    const key = { provider: 'provider', service: 'svc', major: 1, method: 'run', scope: 'global' as const, policy };
-    let oldCalls = 0, newCalls = 0;
-    const old = resolver.resolve({ ...key, atomic: () => { oldCalls++; return { mutations: [], result: 'old' }; } })!;
-    const replacement = resolver.resolve({ ...key, atomic: () => { newCalls++; return { mutations: [], result: 'new' }; } })!;
-    expect(await old.execute(execution({ operationId: 'old-call' }))).toBe('old');
-    expect(await replacement.execute(execution({ operationId: 'new-call' }))).toBe('new');
-    resolver.maintain();
-    expect([oldCalls, newCalls]).toEqual([1, 1]);
-    expect(await replacement.execute(execution({ operationId: 'old-call' }))).toBe('old');
-    expect([oldCalls, newCalls]).toEqual([1, 1]);
-    resolver.close();
+    const { PluginStateClient } = await import('../../src/plugin-state/client');
+    const client=await PluginStateClient.open(':memory:',{initialize:true});
+    const resolver=createPluginPeerJournalResolver({client});
+    try {
+      const policy={deduplication:'local-transaction' as const,resultRetentionMs:null,quotaBytes:8192,maxResultBytes:1024};
+      const key={provider:'provider',service:'svc',major:1,method:'run',scope:'global' as const,policy,atomicReadSet:()=>({keys:[]})};
+      let oldCalls=0,newCalls=0;
+      const old=resolver.resolve({...key,atomic:()=>{oldCalls++;return {mutations:[],result:'old'};}})!;
+      const replacement=resolver.resolve({...key,atomic:()=>{newCalls++;return {mutations:[],result:'new'};}})!;
+      expect(await old.execute(execution({operationId:'old-call'}))).toBe('old');
+      expect(await replacement.execute(execution({operationId:'new-call'}))).toBe('new');
+      await resolver.maintain();expect([oldCalls,newCalls]).toEqual([1,1]);
+      expect(await replacement.execute(execution({operationId:'old-call'}))).toBe('old');expect([oldCalls,newCalls]).toEqual([1,1]);
+    } finally {await resolver.close();await client.close();}
   });
 });

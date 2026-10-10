@@ -158,12 +158,12 @@ export interface OfflineRecoveryCapability {
 }
 
 export interface ControlPlugin {
-  readManagementSetup?(state: Pick<PluginDurableState, 'get' | 'list'>): {initialized:boolean};
+  readManagementSetup?(state: Pick<PluginDurableState, 'get' | 'list'>): Promise<{initialized:boolean}>;
   readonly offlineRecovery?: OfflineRecoveryCapability;
   createControl(context: ControlHostContext): PluginControl;
   /** Read persisted protections even while runtime/control is unavailable. */
-  readAdmissionRequirements?(state: Pick<PluginDurableState, 'get' | 'list'>): readonly string[];
-  verifyDataPrincipal?(principal: DataPrincipal, state: Pick<PluginDurableState, 'get' | 'list'>): boolean;
+  readAdmissionRequirements?(state: Pick<PluginDurableState, 'get' | 'list'>): Promise<readonly string[]>;
+  verifyDataPrincipal?(principal: DataPrincipal, state: Pick<PluginDurableState, 'get' | 'list'>): Promise<boolean>;
   readResourceCollection?(resource: string, state: Pick<PluginDurableState, 'get' | 'list'>): readonly unknown[] | Promise<readonly unknown[]>;
   /** Read a resource DTO without starting a disabled plugin or obtaining write capabilities. */
   readResource?(resource: string, id: string, state: Pick<PluginDurableState, 'get' | 'list'>):

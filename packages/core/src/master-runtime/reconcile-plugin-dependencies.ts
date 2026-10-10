@@ -4,16 +4,16 @@ import { ConfigRepositoryError, parseNormalizeCompileAggregate } from '../config
 import type { ConfigurationCompileOptions } from '../config-storage/plugin-schema';
 
 /** Called by the master while it owns the instance locks, before starting plugins. */
-export function reconcilePluginDependencies(
+export async function reconcilePluginDependencies(
   repository: {
     getSnapshot(): RepositorySnapshot;
-    commit(command: CommitConfigurationCommandV1): CommitConfigurationResult;
+    commit(command: CommitConfigurationCommandV1): Promise<CommitConfigurationResult>;
   },
   options: ConfigurationCompileOptions,
   workerCount: number,
   now: number,
   managementProviders: ReadonlySet<string>,
-): RepositorySnapshot {
+): Promise<RepositorySnapshot> {
   const current = repository.getSnapshot();
   if (!options.pluginDependencies) return current;
   const required = options.pluginDependencies.closure(current.aggregate.plugin_activations.map(value => value.plugin_name));
@@ -27,7 +27,7 @@ export function reconcilePluginDependencies(
   }
   // Use the ordinary revision/CAS transaction; never change an existing revision,
   // serving snapshot, operation identity, or a publication/recovery in progress.
-  const result = repository.commit({
+  const result = await repository.commit({
     mutation_id: randomUUID(), expected_revision: current.revision,
     aggregate: parsed.value, kind: 'config', created_at: now,
     target_worker_slots: Array.from({ length: workerCount }, (_, slot) => slot),

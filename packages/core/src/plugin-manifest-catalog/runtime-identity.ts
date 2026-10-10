@@ -6,6 +6,16 @@ export type RuntimeIdentityInput = Readonly<{
   bytes: Uint8Array;
 }>;
 
+/** Plugin artifacts share the host's log sink; host file transports are not plugin dependencies. */
+export function pluginRuntimeBuildSource(path: string): string | undefined {
+  if (resolve(path) !== resolve(import.meta.dir, '../logger.ts')) return undefined;
+  return `export { logger } from ${JSON.stringify(resolve(import.meta.dir, '../plugin-logger.ts'))};`;
+}
+
+export function externalRuntimeDependencyIdentity(imported: Readonly<{ path: string; original?: string }>): string {
+  return JSON.stringify([imported.original ?? imported.path, imported.path]);
+}
+
 export function normalizeRuntimeIdentity(pluginRoot: string, inputPath: string): string {
   const root = resolve(pluginRoot);
   const input = isAbsolute(inputPath) ? resolve(inputPath) : resolve(root, inputPath);

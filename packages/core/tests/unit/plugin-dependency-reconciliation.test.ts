@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { configurationRepositoryFixture } from '../helpers/config-repository';
 import { ConfigRepository, hashConfigurationContent, parseNormalizeCompileAggregate } from '../../src/config-storage';
 import { reconcilePluginDependencies } from '../../src/master-runtime/reconcile-plugin-dependencies';
 import { createCatalogSnapshotCompiler } from '../../src/config-worker/snapshot-compiler';
@@ -55,8 +56,8 @@ describe('master startup dependency reconciliation', () => {
     try {
       settle(repository);
       const oldOperation = repository.getCurrentOperationState();
-      expect(() => reconcilePluginDependencies(repository, catalog.toCompileOptions(), 2, 200,
-        new Set(['provider', 'existing-auth']))).toThrow('enable the provider through management setup');
+      await expect(reconcilePluginDependencies(configurationRepositoryFixture(repository), catalog.toCompileOptions(), 2, 200,
+        new Set(['provider', 'existing-auth']))).rejects.toThrow('enable the provider through management setup');
       expect(repository.getSnapshot()).toEqual(seeded.snapshot);
       expect(repository.getCurrentOperationState()).toEqual(oldOperation);
     } finally { repository.close(); }
@@ -67,7 +68,7 @@ describe('master startup dependency reconciliation', () => {
       settle(repository);
       repository.appendServingSnapshot(seeded.snapshot, catalog.hash);
       const oldOperation = repository.getOperationState('old-catalog-config');
-      const next = reconcilePluginDependencies(repository, catalog.toCompileOptions(), 2, 200, new Set());
+      const next = await reconcilePluginDependencies(configurationRepositoryFixture(repository), catalog.toCompileOptions(), 2, 200, new Set());
       expect(next.revision).toBe(seeded.snapshot.revision + 1);
       expect(next.aggregate.plugin_activations).toEqual([
         { plugin_name: 'consumer' }, { plugin_name: 'intermediate' }, { plugin_name: 'provider' },
@@ -80,7 +81,7 @@ describe('master startup dependency reconciliation', () => {
         content_hash: seeded.snapshot.content_hash, plugin_catalog_hash: catalog.hash })).toEqual(seeded.snapshot);
       expect(repository.getActivePublication()?.targets.map(value => value.worker_slot)).toEqual([0, 1]);
       // Repeated startup while this new revision is pending does not write again.
-      expect(reconcilePluginDependencies(repository, catalog.toCompileOptions(), 2, 201, new Set())).toEqual(next);
+      expect(await reconcilePluginDependencies(configurationRepositoryFixture(repository), catalog.toCompileOptions(), 2, 201, new Set())).toEqual(next);
       const command = { command: 'start-current-config-worker' as const, ...PROCESS_IDENTITY,
         ...next, plugin_catalog_hash: catalog.hash, publication: null,
         activated_plugin_names: next.aggregate.plugin_activations.map(value => value.plugin_name) };
@@ -109,7 +110,7 @@ describe('master startup dependency reconciliation', () => {
         repository.markDraining('old-catalog-config', ++now);
       }
       const oldOperation = repository.getOperationState('old-catalog-config');
-      expect(() => reconcilePluginDependencies(repository, catalog.toCompileOptions(), 2, 200, new Set())).toThrow('operation_in_progress');
+      await expect(reconcilePluginDependencies(configurationRepositoryFixture(repository), catalog.toCompileOptions(), 2, 200, new Set())).rejects.toThrow('operation_in_progress');
       expect(repository.getSnapshot()).toEqual(seeded.snapshot);
       expect(repository.getOperationState('old-catalog-config')).toEqual(oldOperation);
     } finally { repository.close(); }
@@ -119,7 +120,7 @@ describe('master startup dependency reconciliation', () => {
     const { repository, seeded } = await fixture();
     try {
       const options = { pluginSchemas: new Map() };
-      expect(reconcilePluginDependencies(repository, options, 2, 200, new Set())).toEqual(seeded.snapshot);
+      expect(await reconcilePluginDependencies(configurationRepositoryFixture(repository), options, 2, 200, new Set())).toEqual(seeded.snapshot);
     } finally { repository.close(); }
   });
 
@@ -139,7 +140,7 @@ describe('master startup dependency reconciliation', () => {
         recovery_disposition: 'retryable' }, ++now);
       const recovery = repository.getCurrentRecovery();
       expect(recovery?.state).toBe('scheduled');
-      expect(() => reconcilePluginDependencies(repository, catalog.toCompileOptions(), 2, 200, new Set())).toThrow('recovery_in_progress');
+      await expect(reconcilePluginDependencies(configurationRepositoryFixture(repository), catalog.toCompileOptions(), 2, 200, new Set())).rejects.toThrow('recovery_in_progress');
       expect(repository.getSnapshot()).toEqual(seeded.snapshot);
       expect(repository.getCurrentRecovery()).toEqual(recovery);
     } finally { repository.close(); }
@@ -152,7 +153,7 @@ describe('master startup dependency reconciliation', () => {
     const failing = ConfigRepository.open(dbPath, { compileOptions: catalog.toCompileOptions(),
       faultInjection(stage) { if (stage === 'after_materialization') throw new Error('simulated transaction failure'); } });
     try {
-      expect(() => reconcilePluginDependencies(failing, catalog.toCompileOptions(), 2, 200, new Set())).toThrow('configuration commit transaction failed');
+      await expect(reconcilePluginDependencies(configurationRepositoryFixture(failing), catalog.toCompileOptions(), 2, 200, new Set())).rejects.toThrow('configuration commit transaction failed');
       expect(failing.getSnapshot()).toEqual(seeded.snapshot);
       expect(failing.getCurrentOperationState()?.operation.state).toBe('converged');
     } finally { failing.close(); }

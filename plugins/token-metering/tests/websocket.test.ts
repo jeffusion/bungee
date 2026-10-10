@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite';
-import { migrations } from '../../../packages/core/src/migrations';
+import { initializeTokenStatsTestDatabase } from '../../../packages/core/tests/helpers/token-stats-database';
 import { createPluginStorageCapability } from '../../../packages/core/src/plugin-storage';
 import { SQLiteTokenStatsMetering } from '../../token-stats/server/storage';
 import { describe, expect, test } from 'bun:test';
@@ -170,7 +170,7 @@ describe('Responses WebSocket metering through the shared service', () => {
     expect(f.results.filter(result=>result.outcome==='aborted')).toHaveLength(1);
     expect(f.results.at(-1)).toMatchObject({model:'pending-new',observationIncomplete:true});
     const db=new Database(':memory:');
-    for(const migration of migrations)migration.up(db);
+    initializeTokenStatsTestDatabase(db);
     const storage=createPluginStorageCapability(db,'ws-replay-stats');
     try {
       const stats=new SQLiteTokenStatsMetering(storage.storage.observation!);

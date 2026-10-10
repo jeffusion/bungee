@@ -3,6 +3,7 @@ import { Database } from 'bun:sqlite';
 import type { PluginStorage } from '../../../packages/core/src/plugin.types';
 import { HostSnapshotStore } from '../../../packages/core/src/plugin-services/snapshot-store';
 import { PluginCommunicationStore } from '../../../packages/core/src/plugin-services/persistence';
+import { PluginStateClient } from '../../../packages/core/src/plugin-state/client';
 import { ModelsDevCatalogManager } from '../server/control';
 import { CatalogView, reconcileCatalogView } from '../server/local';
 
@@ -37,8 +38,8 @@ function manager(storage: MemoryStorage, fetchImpl: typeof fetch, store = snapsh
   const published: number[] = [];
   const injection = { failPublish: false };
   const instance = new ModelsDevCatalogManager(storage, {
-    current: () => store.current(),
-    publish(version, bytes) {
+    current: async () => store.current(),
+    async publish(version, bytes) {
       if (injection.failPublish) throw new Error('injected snapshot failure');
       store.publish(version, bytes); published.push(version);
     },
@@ -48,6 +49,47 @@ function manager(storage: MemoryStorage, fetchImpl: typeof fetch, store = snapsh
 const okFetch = (catalog: unknown): typeof fetch => (async () => Response.json(catalog)) as typeof fetch;
 
 describe('models-dev authoritative snapshot', () => {
+  test('the production async store restores and publishes only after the database commit', async () => {
+    const client = await PluginStateClient.open(':memory:', { initialize: true });
+    const storage = client.pluginStorage('models-dev');
+    await storage.set('catalog:settings:v2', { autoRefresh: false, intervalHours: 24, timeoutSeconds: 15 });
+    const store = client.snapshotStore('models-dev', { id: 'models-dev.catalog.v1', schemaVersion: 1 });
+    let unblock!: () => void;
+    let entered!: () => void;
+    const blocked = new Promise<void>(resolve => { unblock = resolve; });
+    const publishing = new Promise<void>(resolve => { entered = resolve; });
+    const instance = new ModelsDevCatalogManager(storage, {
+      current: () => store.current(),
+      publish: async (version, bytes) => { entered(); await blocked; return store.publish(version, bytes); },
+    }, { fetch: okFetch(smallCatalog), now: () => 1000 });
+    try {
+      await instance.start();
+      expect(instance.statusSnapshot()).toMatchObject({ state: 'empty', lastError: null });
+      const refresh = instance.refresh();
+      await publishing;
+      expect(instance.statusSnapshot().version).toBeNull();
+      expect(await store.current()).toBeNull();
+      unblock(); await refresh;
+      expect(instance.statusSnapshot()).toMatchObject({ state: 'ready', version: 1, lastError: null });
+      const restored = new ModelsDevCatalogManager(storage, store, { fetch: okFetch({}) });
+      try { await restored.start(); expect(restored.statusSnapshot()).toMatchObject({ version: 1, modelCount: 1 }); }
+      finally { await restored.stop(); }
+    } finally { unblock(); await instance.stop(); await client.close(); }
+  });
+
+  test('an async publication rejection preserves the committed catalog view', async () => {
+    const storage = new MemoryStorage(), store = snapshotStore();
+    store.publish(1, { version: 1, fetchedAt: 50, catalog: smallCatalog });
+    const instance = new ModelsDevCatalogManager(storage, {
+      current: async () => store.current(),
+      publish: async () => { await Promise.resolve(); throw new Error('commit failed'); },
+    }, { fetch: okFetch({}), schedule: () => 0 as any, cancel: () => {} });
+    try {
+      await instance.start(); await instance.refresh();
+      expect(instance.statusSnapshot()).toMatchObject({ version: 1, modelCount: 1, state: 'stale', lastError: 'snapshot' });
+      expect(store.current()!.descriptor.version).toBe(1);
+    } finally { await instance.stop(); }
+  });
   test('publishes one atomic record and never writes a catalog KV copy', async () => {
     const storage = new MemoryStorage();
     const { instance, store, published } = manager(storage, okFetch(smallCatalog));

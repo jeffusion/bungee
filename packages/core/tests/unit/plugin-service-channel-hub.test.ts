@@ -733,37 +733,18 @@ describe('store-backed reliable event log', () => {
     } finally { db.close(); }
   });
 
-  test('the outbox seam commits the event and the business state in one transaction', async () => {
-    const db = new Database(':memory:');
+  test('the storage leaf outbox seam commits event and state and rejects stale CAS', async () => {
+    const db=new Database(':memory:');
     try {
       db.exec(PLUGIN_DURABLE_STATE_SCHEMA_SQL);
-      const store = new PluginCommunicationStore(db, {}, { setup: true });
-      const log = new StoreBackedReliableEventLog(store.forNamespace('audit-provider'), 'audit.events', 8);
-      const durable = new PluginDurableStateStore(db);
-      const state = durable.forNamespace('audit-provider');
-
-      let appended: { readonly sequence: number; readonly eventId: string } | null = null;
-      state.execute({ commandId: 'commit-1', mutations: [{ key: 'balance', expectedVersion: 0, value: { value: 10 } }] }, {
-        extend: () => { appended = log.appendWithinTransaction(new TextEncoder().encode('debited')); },
-      });
-      expect(appended!.sequence).toBe(1);
-      expect(state.get('balance')?.value).toEqual({ value: 10 });
-      expect(log.latestSequence()).toBe(1);
-      expect((await log.list(1, 8)).map(entry => new TextDecoder().decode(entry.payload))).toEqual(['debited']);
-
-      // A conflicting command rolls BOTH the state and the outbox row back.
-      expect(() => state.execute({ commandId: 'commit-2', mutations: [{ key: 'balance', expectedVersion: 0, value: { value: 99 } }] }, {
-        extend: () => { log.appendWithinTransaction(new TextEncoder().encode('never')); },
-      })).toThrow();
-      expect(state.get('balance')?.value).toEqual({ value: 10 });
-      expect(log.latestSequence()).toBe(1);
-
-      // An idempotent replay never runs the outbox seam again.
-      state.execute({ commandId: 'commit-1', mutations: [{ key: 'balance', expectedVersion: 0, value: { value: 10 } }] }, {
-        extend: () => { log.appendWithinTransaction(new TextEncoder().encode('duplicate')); },
-      });
-      expect(log.latestSequence()).toBe(1);
-    } finally { db.close(); }
+      const store=new PluginCommunicationStore(db,{}, {setup:true});
+      const log=new StoreBackedReliableEventLog(store.forNamespace('audit-provider'),'audit.events',8);
+      const state=new PluginDurableStateStore(db).forStorageNamespace('audit-provider');
+      state.transact([{key:'balance',expectedVersion:0,value:{value:10}}],()=>log.appendWithinTransaction(new TextEncoder().encode('debited')));
+      expect(state.get('balance')?.value).toEqual({value:10});expect(log.latestSequence()).toBe(1);
+      expect(()=>state.transact([{key:'balance',expectedVersion:0,value:{value:99}}],()=>log.appendWithinTransaction(new TextEncoder().encode('never')))).toThrow();
+      expect(state.get('balance')?.value).toEqual({value:10});expect(log.latestSequence()).toBe(1);
+    }finally{db.close();}
   });
 
   test('a durable outbox receipt returns the FIRST result on an idempotent retry', async () => {
@@ -1337,7 +1318,7 @@ test('snapshot GC failure after commit preserves publish success and retries thr
       return result;
     } };
     const fixture = makeFixture();
-    const adapter = new HostChannelAdapter({ hub: fixture.controlHub, process: 'control', snapshotNamespace: () => wrapped });
+    const adapter = new HostChannelAdapter({ hub: fixture.controlHub, process: 'control', snapshotStore: (_plugin,options) => {const leaf=new HostSnapshotStore(wrapped,{...options,owner:'snapshot-provider'});return {publish:async(v,b)=>leaf.publish(v,b),current:async()=>leaf.current(),version:async(v)=>leaf.version(v),collect:async()=>leaf.collect(),maintain:async()=>leaf.maintain(),maintenanceStatus:async()=>leaf.maintenanceStatus()};} });
     const owner = adapter.createOwner({
       plugin: 'snapshot-provider', scope: 'global', dependencies: {}, declarations: {},
       lifecycle: { endpoint: 'endpoint', instance: 'instance', generation: 1, catalog: 'catalog', subject: 'snapshot-provider' },
@@ -1345,15 +1326,15 @@ test('snapshot GC failure after commit preserves publish success and retries thr
       beginOperation: () => ({ purpose: 'background', release: () => {} }),
     });
     const versioned = owner.snapshot!.store!({ id: 'snapshot.test', schemaVersion: 1, maxVersions: 1 })!;
-    const descriptor = versioned.publish(1, { n: 1 });
+    const descriptor = await versioned.publish(1, { n: 1 });
     expect(descriptor.version).toBe(1);
-    expect(versioned.current()!.descriptor).toEqual(descriptor);
-    expect(versioned.maintenanceStatus()).toEqual({ pending: true, error: 'storage_failure' });
+    expect((await versioned.current())!.descriptor).toEqual(descriptor);
+    expect(await versioned.maintenanceStatus()).toEqual({ pending: true, error: 'storage_failure' });
     fail = false;
-    expect(adapter.maintainSnapshots(1)).toEqual({ stores: 1, removed: 0, failures: 0 });
-    expect(versioned.maintenanceStatus()).toEqual({ pending: false, error: null });
+    expect(await adapter.maintainSnapshots(1)).toEqual({ stores: 1, removed: 0, failures: 0 });
+    expect(await versioned.maintenanceStatus()).toEqual({ pending: false, error: null });
     await owner.dispose();
-    expect(adapter.maintainSnapshots(1)).toEqual({ stores: 0, removed: 0, failures: 0 });
+    expect(await adapter.maintainSnapshots(1)).toEqual({ stores: 0, removed: 0, failures: 0 });
   } finally { db.close(); }
 });
 

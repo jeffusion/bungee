@@ -24,7 +24,7 @@ import type { PluginServiceDeclarations, PluginServiceProcess, PluginServiceScop
 import type { HostRpcLifecycleIdentity, HostRpcLifecycleState } from './host-rpc';
 import type { InferRpcData, RpcCallPurpose, RpcDataSchema, RpcJson } from './wire-contract';
 import { assertRpcData, assertRpcDataSchema, decodeRpcJson, encodeRpcJson } from './wire-contract';
-import type { DurableCommand, PluginDurableState } from '../plugin-durable-state';
+import type { DurableMutation, PluginDurableState } from '../plugin-durable-state';
 import {
   CHANNEL_EVENT_MAX_PAYLOAD_BYTES,
   CHANNEL_EVENT_REPLAY_BATCH,
@@ -47,7 +47,7 @@ import {
 } from './peer-channel-hub';
 import type { ChannelSnapshotDescriptor, PluginChannelTarget } from './peer-channel-protocol';
 import type { CommunicationMutator, CommunicationNamespaceStore } from './persistence';
-import { HostSnapshotStore } from './snapshot-store';
+import type { AsyncHostSnapshotStore } from '../plugin-state/client';
 
 /** Manifest lane kind → hub lane name. */
 const CHANNEL_KINDS = new Set(['events', 'snapshot', 'stream']);
@@ -165,15 +165,15 @@ export interface HostSnapshotStoreOptionsView {
 export interface PluginSnapshotVersionSource {
   readonly descriptor: ChannelSnapshotDescriptor;
   read(offset: number, length: number): Promise<Uint8Array>;
-  retain?(): void;
-  release?(): void;
+  retain?(): void | Promise<void>;
+  release?(): void | Promise<void>;
 }
 
 export interface PluginSnapshotServices {
   /** Provider side: single writer of the current immutable snapshot + retained versions. */
   provide<S extends RpcDataSchema>(contract: PluginSnapshotContract<S>, provider: {
-    current(): PluginSnapshotVersionSource | null;
-    version(version: number): PluginSnapshotVersionSource | null;
+    current(): PluginSnapshotVersionSource | null | Promise<PluginSnapshotVersionSource | null>;
+    version(version: number): PluginSnapshotVersionSource | null | Promise<PluginSnapshotVersionSource | null>;
   }): PluginChannelPublication;
   /** Consumer side: the host-managed local view of the peer's current version. */
   consume<S extends RpcDataSchema>(provider: string, contract: PluginSnapshotContract<S>): PluginSnapshotView;
@@ -183,7 +183,7 @@ export interface PluginSnapshotServices {
    * store). `null` when this process has no durable host store: a provider then
    * keeps its own in-memory source rather than inventing its own persistence.
    */
-  store?(options: HostSnapshotStoreOptionsView): HostSnapshotStore | null;
+  store?(options: HostSnapshotStoreOptionsView): AsyncHostSnapshotStore | null;
 }
 
 export interface PluginSnapshotStatus {
@@ -250,7 +250,7 @@ export interface PluginEventPublisher<S extends RpcDataSchema = RpcDataSchema> {
    * Reliable outbox: commits the event and the plugin's business state in ONE
    * durable transaction (the same Host database). Never a distributed promise.
    */
-  publishWithState(payload: InferRpcData<S>, command: DurableCommand): Promise<number>;
+  publishWithState(payload: InferRpcData<S>, mutations: readonly DurableMutation[]): Promise<number>;
   /** Transient: best-effort fan-out; `false` means it was not admitted. */
   notify(payload: InferRpcData<S>): boolean;
 }
@@ -344,7 +344,7 @@ export interface HostChannelAdapterOptions {
    * Host durable namespace for the snapshot version store of one provider plugin.
    * Absent (e.g. a worker without a durable store) means `store()` returns null.
    */
-  readonly snapshotNamespace?: (plugin: string) => CommunicationNamespaceStore | null;
+  readonly snapshotStore?: (plugin: string, options: HostSnapshotStoreOptionsView) => AsyncHostSnapshotStore | null;
 }
 
 interface LaneDeclaration {
@@ -448,7 +448,7 @@ export class HostChannelAdapter {
   readonly #options: HostChannelAdapterOptions;
   readonly #local = new Map<string, LocalRegistration>();
   readonly #views = new Map<string, SnapshotViewState>();
-  readonly #snapshotStores = new Set<HostSnapshotStore>();
+  readonly #snapshotStores = new Set<AsyncHostSnapshotStore>();
 
   constructor(options: HostChannelAdapterOptions) {
     this.#options = options;
@@ -475,7 +475,7 @@ export class HostChannelAdapter {
      * never inherit a previous, already-disposed owner's snapshot view state. */
     const ownerToken = randomUUID();
     const viewKeys = new Set<string>();
-    const snapshotStores = new Set<HostSnapshotStore>();
+    const snapshotStores = new Set<AsyncHostSnapshotStore>();
     let disposed = false;
     const assertActive = (): void => {
       if (disposed) throw channelError('revoked', 'channel owner was disposed');
@@ -620,8 +620,8 @@ export class HostChannelAdapter {
 
     const snapshot: PluginSnapshotServices = {
       provide: <S extends RpcDataSchema>(contract: PluginSnapshotContract<S>, provider: {
-        current(): { readonly descriptor: ChannelSnapshotDescriptor; read(offset: number, length: number): Promise<Uint8Array> } | null;
-        version(version: number): { readonly descriptor: ChannelSnapshotDescriptor; read(offset: number, length: number): Promise<Uint8Array> } | null;
+        current(): PluginSnapshotVersionSource | null | Promise<PluginSnapshotVersionSource | null>;
+        version(version: number): PluginSnapshotVersionSource | null | Promise<PluginSnapshotVersionSource | null>;
       }): PluginChannelPublication => {
         const operation = begin();
         try {
@@ -649,17 +649,10 @@ export class HostChannelAdapter {
         this.#assertLocalReadiness('snapshot', target, hash);
         return this.#snapshotView(target, hash, input, ownerToken, viewKeys, contract.content as RpcDataSchema, assertActive);
       },
-      store: (options: HostSnapshotStoreOptionsView): HostSnapshotStore | null => {
+      store: (options: HostSnapshotStoreOptionsView): AsyncHostSnapshotStore | null => {
         assertActive();
-        const namespace = this.#options.snapshotNamespace?.(input.plugin) ?? null;
-        if (namespace === null) return null;
-        const store = new HostSnapshotStore(namespace, {
-          owner: input.plugin, id: options.id, schemaVersion: options.schemaVersion,
-          ...(options.epoch === undefined ? {} : { epoch: options.epoch }),
-          ...(options.maxVersions === undefined ? {} : { maxVersions: options.maxVersions }),
-          ...(options.maxBytes === undefined ? {} : { maxBytes: options.maxBytes }),
-          ...(options.chunkBytes === undefined ? {} : { chunkBytes: options.chunkBytes }),
-        });
+        const store = this.#options.snapshotStore?.(input.plugin, options) ?? null;
+        if (store === null) return null;
         this.#snapshotStores.add(store); snapshotStores.add(store);
         return store;
       },
@@ -708,13 +701,12 @@ export class HostChannelAdapter {
             input.trackPending(pending.catch(() => undefined));
             return pending.finally(() => operation.release());
           };
-          const publishWithState = (payload: InferRpcData<S>, command: DurableCommand): Promise<number> => {
+          const publishWithState = (payload: InferRpcData<S>, mutations: readonly DurableMutation[]): Promise<number> => {
             assertActive();
             if (contract.delivery !== 'reliable') throw channelError('invalid', 'a transient topic has no durable publish');
-            const durable = this.#options.durableState?.(input.plugin) ?? null;
             const transactionLog = resolvedLog;
-            const appendWithin = transactionLog?.appendWithinTransaction;
-            if (durable === null || transactionLog === null || appendWithin === undefined) {
+            const appendWithState = transactionLog?.appendWithState;
+            if (transactionLog === null || appendWithState === undefined) {
               throw channelError('capability_unavailable', 'same-transaction state + outbox commit is unavailable in this process');
             }
             assertRpcData(contract.event, payload);
@@ -724,24 +716,7 @@ export class HostChannelAdapter {
             const start = (): Promise<number> => {
               try {
                 const bytes = encodeEventPayload(payload);
-                const payloadHash = createHash('sha256').update(bytes).digest('hex');
-                // The outbox receipt id is derived from the stable command id, so the
-                // same command can never produce a second event after a retry/restart.
-                const receiptId = `outbox:${command.commandId}`;
-                const appendRow = appendWithin.bind(transactionLog);
-                const appendPlan = (payloadBytes: Uint8Array): { readonly sequence: number; readonly eventId: string } => {
-                  let appended: { readonly sequence: number; readonly eventId: string } | null = null;
-                  durable.execute(command, { extend: () => { appended = appendRow(payloadBytes, receiptId); } });
-                  if (appended !== null) return appended;
-                  // Idempotent replay: the first committed run already appended the
-                  // event AND its durable receipt in the same transaction, so recover
-                  // the first result instead of appending a second event.
-                  const receipt = transactionLog.receipt?.(receiptId) ?? null;
-                  if (receipt === null) throw channelError('failed', 'outbox receipt is missing after an idempotent replay');
-                  if (receipt.payloadHash !== payloadHash) throw channelError('conflict', 'outbox command id was reused with a different event payload');
-                  return { sequence: receipt.sequence, eventId: receipt.eventId };
-                };
-                return this.#options.hub.publishReliable(handle, bytes, appendPlan);
+                return this.#options.hub.publishReliable(handle, bytes, payloadBytes => appendWithState.call(transactionLog, payloadBytes, mutations));
               } catch (error) { operation.release(); throw error; }
             };
             const pending = start();
@@ -850,16 +825,16 @@ export class HostChannelAdapter {
   }
 
   /** Bounded, rotating retry of snapshot retention; publication success is independent. */
-  maintainSnapshots(limit = 8): { readonly stores: number; readonly removed: number; readonly failures: number } {
+  async maintainSnapshots(limit = 8): Promise<{ readonly stores: number; readonly removed: number; readonly failures: number }> {
     if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('invalid snapshot maintenance limit');
-    const selected: HostSnapshotStore[] = [];
+    const selected: AsyncHostSnapshotStore[] = [];
     for (const store of this.#snapshotStores) {
       selected.push(store);
       if (selected.length >= Math.min(limit, 32)) break;
     }
     let removed = 0, failures = 0;
     for (const store of selected) {
-      const result = store.maintain();
+      const result = await store.maintain();
       removed += result.removed;
       if (result.error !== null) failures += 1;
       this.#snapshotStores.delete(store); this.#snapshotStores.add(store);
@@ -1171,8 +1146,8 @@ function wrapStreamProvider<S extends RpcDataSchema>(
 }
 
 function wrapSnapshotProvider(provider: {
-  current(): PluginSnapshotVersionSource | null;
-  version(version: number): PluginSnapshotVersionSource | null;
+  current(): PluginSnapshotVersionSource | null | Promise<PluginSnapshotVersionSource | null>;
+  version(version: number): PluginSnapshotVersionSource | null | Promise<PluginSnapshotVersionSource | null>;
 }): PluginChannelSnapshotProvider {
   const wrap = (value: PluginSnapshotVersionSource | null): PluginChannelSnapshotSource | null => {
     if (value === null) return null;
@@ -1187,8 +1162,8 @@ function wrapSnapshotProvider(provider: {
     });
   };
   const wrapped: PluginChannelSnapshotProvider = {
-    current: () => wrap(provider.current()),
-    version: (version: number) => wrap(provider.version(version)),
+    current: async () => wrap(await provider.current()),
+    version: async (version: number) => wrap(await provider.version(version)),
   };
   return Object.freeze(wrapped);
 }
@@ -1286,7 +1261,8 @@ export class StoreBackedReliableEventLog implements PluginChannelReliableEventLo
     // Stable and unique per (namespace, topic, major, sequence): never a payload
     // hash, so two events with identical content stay distinct, and a different
     // contract major can never alias this log.
-    return createHash('sha256').update(`${this.#store.namespace}\0${this.#namespaceKey}\0${String(sequence)}`).digest('hex');
+    const provider = this.#store.namespace.startsWith('channel.') ? this.#store.namespace.slice('channel.'.length) : this.#store.namespace;
+    return createHash('sha256').update(`${provider}\0${this.#namespaceKey}\0${String(sequence)}`).digest('hex');
   }
 
   /**

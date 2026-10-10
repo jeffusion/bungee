@@ -180,7 +180,7 @@ export class MasterConfigPublicationCoordinator {
     this.acquire();
     try {
       let active: ActiveConfigurationPublication | null;
-      try { active = this.options.repository.getActivePublication(); }
+      try { active = await this.options.repository.getActivePublication(); }
       catch (error) {
         return { kind: 'outcome_unknown', fatal: true, code: 'repository_failure', error,
           serving: [], pending: [] };

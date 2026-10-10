@@ -21,7 +21,7 @@ test('cleanup stops listener then waits publication and repair before clearing a
   const cleanup = closeForNormalShutdown({
     workerCount: 1,
     expectedPluginCatalogHash: 'sha256:' + 'b'.repeat(64),
-    repository: { getSnapshot() { throw new Error('unused'); }, close() { calls.push('repository.close'); } },
+    repository: { getSnapshot() { throw new Error('unused'); }, async close() { calls.push('repository.close'); } },
     coordinator: { async recoverAndPublish() { return null; }, async startCurrent() { throw new Error('unused'); } },
     publicationTasks: { enqueue() {}, async enqueueRecovery(task) { return task(); }, setFatalHandler() {},
       async stop() { calls.push('publication.wait'); await publication; } },
@@ -47,7 +47,7 @@ test('requires both listeners to close before releasing the instance lock', asyn
   const calls: string[] = [];
   const errors = await closeForNormalShutdown({
     workerCount: 0, expectedPluginCatalogHash: 'sha256:' + 'b'.repeat(64),
-    repository: { getSnapshot() { throw new Error('unused'); }, close() { calls.push('repository.close'); } },
+    repository: { getSnapshot() { throw new Error('unused'); }, async close() { calls.push('repository.close'); } },
     coordinator: { async recoverAndPublish() { return null; }, async startCurrent() { throw new Error('unused'); } },
     publicationTasks: { enqueue() {}, async enqueueRecovery(task) { return task(); }, setFatalHandler() {}, async stop() {} },
     admission: { prepare() { throw new Error('unused'); }, adoptCommitted() {}, snapshot: () => [], clear() {} },
@@ -66,7 +66,7 @@ test('closes private control before releasing the lock on success', async () => 
   const calls: string[] = [];
   const errors = await closeForNormalShutdown({
     workerCount: 0, expectedPluginCatalogHash: 'sha256:' + 'b'.repeat(64),
-    repository: { getSnapshot() { throw new Error('unused'); }, close() { calls.push('repository.close'); } },
+    repository: { getSnapshot() { throw new Error('unused'); }, async close() { calls.push('repository.close'); } },
     coordinator: { async recoverAndPublish() { return null; }, async startCurrent() { throw new Error('unused'); } },
     publicationTasks: { enqueue() {}, async enqueueRecovery(task) { return task(); }, setFatalHandler() {}, async stop() {} },
     admission: { prepare() { throw new Error('unused'); }, adoptCommitted() {}, snapshot: () => [], clear() {} },
@@ -85,7 +85,7 @@ test('runs beforeCleanup for startup cleanup and retains the lock when it fails'
   const errors = await cleanupAfterStartupFailure({
     workerCount: 1,
     expectedPluginCatalogHash: 'sha256:' + 'b'.repeat(64),
-    repository: { getSnapshot() { throw new Error('unused'); }, close() { calls.push('repository.close'); } },
+    repository: { getSnapshot() { throw new Error('unused'); }, async close() { calls.push('repository.close'); } },
     coordinator: { async recoverAndPublish() { return null; }, async startCurrent() { throw new Error('unused'); } },
     publicationTasks: { async stop() { calls.push('publication.stop'); } },
     admission: { prepare() { throw new Error('unused'); }, adoptCommitted() {}, snapshot: () => [], clear() { calls.push('admission.clear'); } },
@@ -110,7 +110,7 @@ test('normal shutdown never closes ingress without exact worker exit proof', asy
     const process = { pid: 41 };
     const errors = await closeForNormalShutdown({
       workerCount: 1,
-      repository: { getSnapshot() { throw new Error('unused'); }, close() {} },
+      repository: { getSnapshot() { throw new Error('unused'); }, async close() {} },
       coordinator: { async recoverAndPublish() { return null; }, async startCurrent() { throw new Error('unused'); } },
       publicationTasks: { async stop() {} },
       admission: { prepare() { throw new Error('unused'); }, adoptCommitted() {}, snapshot() { return []; }, clear() {} },
@@ -139,7 +139,7 @@ test('safe-empty startup cleanup stays pending until worker shutdown settles', a
   let lockReleased = false;
   const cleanup = cleanupAfterStartupFailure({
     workerCount: 0,
-    repository: { getSnapshot() { throw new Error('unused'); }, close() {} },
+    repository: { getSnapshot() { throw new Error('unused'); }, async close() {} },
     coordinator: { async recoverAndPublish() { return null; }, async startCurrent() { throw new Error('unused'); } },
     publicationTasks: { async stop() {} },
     admission: { prepare() { throw new Error('unused'); }, adoptCommitted() {}, snapshot() { return []; }, clear() {} },

@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import { PLUGIN_DURABLE_STATE_SCHEMA_SQL, PluginDurableStateStore } from '../../../packages/core/src/plugin-durable-state';
 import type { ControlHostContext } from '../../../packages/core/src/plugin-control/contracts';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../../../packages/core/tests/helpers/test-budgets';
@@ -46,7 +47,7 @@ async function fixture() {
 describe('configurable local management session policy', () => {
   test('an independently bundled control provider recognizes host-side SQLite version conflicts', async () => {
     const f = await fixture();
-    const build = await Bun.build({entrypoints: [fileURLToPath(new URL('../server/control.ts', import.meta.url))], target: 'bun', format: 'esm', write: false});
+    const build = await Bun.build({entrypoints: [fileURLToPath(new URL('../server/control.ts', import.meta.url))], target: 'bun', format: 'esm'});
     expect(build.success).toBe(true);
     const moduleUrl = URL.createObjectURL(new Blob([await build.outputs[0]!.text()], {type: 'text/javascript'}));
     try {
@@ -57,7 +58,7 @@ describe('configurable local management session policy', () => {
       const subject = await control.authenticate(request);
       const response = await control.api.find(x => x.path === '/session-policy')!.invoke({...f.host, request, requestSignal: request.signal, subject: subject!});
       expect(response.status).toBe(409); expect(await response.json()).toEqual({error: 'version_conflict'});
-      expect(f.state.get('session-policy')!.value).toEqual({idleTimeoutMinutes: 0, absoluteTimeoutMinutes: 0});
+      expect((await f.state.get('session-policy'))!.value).toEqual({idleTimeoutMinutes: 0, absoluteTimeoutMinutes: 0});
       control.dispose();
     } finally {URL.revokeObjectURL(moduleUrl);}
   }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
@@ -70,11 +71,11 @@ describe('configurable local management session policy', () => {
       {idleTimeoutMinutes: 30, absoluteTimeoutMinutes: 480, other: 1}]) {
       expect((await f.invoke('PUT', {version: 0, policy})).status).toBe(400);
     }
-    expect(f.state.get('session-policy')).toBeNull();
+    expect(await f.state.get('session-policy')).toBeNull();
     expect(await f.save(0, 30 * 24 * 60)).toEqual({version: 1, policy: {idleTimeoutMinutes: 0, absoluteTimeoutMinutes: 43200}});
     expect((await f.invoke('PUT', {version: 0, policy: {idleTimeoutMinutes: 1, absoluteTimeoutMinutes: 1}})).status).toBe(409);
     expect((await f.invoke('GET')).status).toBe(200);
-    expect(f.state.get('session-policy')!.version).toBe(1);
+    expect((await f.state.get('session-policy'))!.version).toBe(1);
     expect((await f.invoke('PUT', {version: -1, policy: {idleTimeoutMinutes: 0, absoluteTimeoutMinutes: 0}})).status).toBe(400);
   }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
@@ -101,14 +102,15 @@ describe('configurable local management session policy', () => {
     expect((await f.invoke('PUT', {version: policy.version, policy: {idleTimeoutMinutes: 0, absoluteTimeoutMinutes: 0}}, noAbsolute.headers)).status).toBe(200);
     const unlimited = await f.login(); f.advance(800 * 24 * 60 * 60_000);
     expect(await f.control.authenticate(req('/self', 'GET', undefined, unlimited.headers))).not.toBeNull();
-    f.control.revokeSessions(); expect(await f.control.authenticate(req('/self', 'GET', undefined, unlimited.headers))).toBeNull();
+    await f.control.revokeSessions(); expect(await f.control.authenticate(req('/self', 'GET', undefined, unlimited.headers))).toBeNull();
   }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
   test('settings only affect new sessions; legacy sessions without a snapshot retain old defaults', async () => {
     const f = await fixture(); const old = await f.login();
-    const record = f.state.get('accounts')!, account = record.value as any;
-    for (const session of account.sessions) delete session.policy;
-    f.state.execute({commandId: 'legacy-session', mutations: [{key: 'accounts', expectedVersion: record.version, value: account}]});
+    for (const record of (await f.state.list()).filter(r => r.key.startsWith('session:'))) {
+      const value = record.value as any; if (value.session) delete value.session.policy;
+      await f.state.transact([{key: record.key, expectedVersion: record.version, value}]);
+    }
     await f.save(0, 0); const unlimited = await f.login();
     f.advance(30 * 60_000);
     expect(await f.control.authenticate(req('/self', 'GET', undefined, old.headers))).toBeNull();
@@ -126,36 +128,36 @@ describe('configurable local management session policy', () => {
     const reopened = new Database(f.path); resources.push({db: reopened, dir: f.dir});
     const state = new PluginDurableStateStore(reopened).forNamespace('local-accounts');
     const control = createControl({...f.host, durableState: state}, {now: () => f.now() + 365 * 24 * 60 * 60_000}); await control.start();
-    expect(state.get('session-policy')!.value).toEqual({idleTimeoutMinutes: 0, absoluteTimeoutMinutes: 0});
+    expect((await state.get('session-policy'))!.value).toEqual({idleTimeoutMinutes: 0, absoluteTimeoutMinutes: 0});
     expect(await control.authenticate(req('/self', 'GET', undefined, session.headers))).not.toBeNull();
-    expect(JSON.stringify(state.list())).not.toContain(session.data.token);
+    expect(JSON.stringify(await state.list())).not.toContain(session.data.token);
     await recoverIdentity({username: 'owner', password: 'recovered-session-password', reason: 'test recovery'}, {durableState: state});
     expect(await control.authenticate(req('/self', 'GET', undefined, session.headers))).toBeNull();
-    expect(state.get('session-policy')!.value).toEqual({idleTimeoutMinutes: 0, absoluteTimeoutMinutes: 0});
+    expect((await state.get('session-policy'))!.value).toEqual({idleTimeoutMinutes: 0, absoluteTimeoutMinutes: 0});
   }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
   test('cookie age matches custom lifetime, renewal preserves the absolute deadline and unlimited uses a browser lease', async () => {
     const f = await fixture(); await f.save(0, 60); const finite = await f.login('cookie');
     expect(finite.response.headers.get('set-cookie')).toContain('Max-Age=3600');
     f.advance(15 * 60_000);
-    expect(f.control.sessionCookie(req('/verify', 'GET', undefined, finite.headers))).toContain('Max-Age=2700');
+    expect(await f.control.sessionCookie(req('/verify', 'GET', undefined, finite.headers))).toContain('Max-Age=2700');
     f.advance(45 * 60_000 - 1001);
-    expect(f.control.sessionCookie(req('/verify', 'GET', undefined, finite.headers))).toContain('Max-Age=1');
-    f.advance(2); expect(f.control.sessionCookie(req('/verify', 'GET', undefined, finite.headers))).toContain('Max-Age=0');
-    f.advance(998); expect(f.control.sessionCookie(req('/verify', 'GET', undefined, finite.headers))).toContain('Max-Age=0');
-    f.advance(1); expect(f.control.sessionCookie(req('/verify', 'GET', undefined, finite.headers))).toBeUndefined();
+    expect(await f.control.sessionCookie(req('/verify', 'GET', undefined, finite.headers))).toContain('Max-Age=1');
+    f.advance(2); expect(await f.control.sessionCookie(req('/verify', 'GET', undefined, finite.headers))).toContain('Max-Age=0');
+    f.advance(998); expect(await f.control.sessionCookie(req('/verify', 'GET', undefined, finite.headers))).toContain('Max-Age=0');
+    f.advance(1); expect(await f.control.sessionCookie(req('/verify', 'GET', undefined, finite.headers))).toBeUndefined();
     const admin = await f.login();
     const settings = await (await f.invoke('GET', undefined, admin.headers)).json() as {version: number};
     expect((await f.invoke('PUT', {version: settings.version, policy: {idleTimeoutMinutes: 0, absoluteTimeoutMinutes: 0}}, admin.headers)).status).toBe(200);
     const infinite = await f.login('cookie'); expect(infinite.response.headers.get('set-cookie')).toContain('Max-Age=34560000');
     f.advance(30 * 24 * 60 * 60_000);
-    const renewed = f.control.sessionCookie(req('/verify', 'GET', undefined, infinite.headers))!;
+    const renewed = await f.control.sessionCookie(req('/verify', 'GET', undefined, infinite.headers))!;
     for (const flag of ['Max-Age=34560000', 'HttpOnly', 'SameSite=Strict', 'Secure']) expect(renewed).toContain(flag);
-    expect(f.control.sessionCookie(req('/verify', 'GET', undefined, admin.headers))).toBeUndefined();
-    expect(f.control.sessionCookie(req('/verify', 'GET', undefined, {cookie: 'bungee_local_session=' + 'x'.repeat(43)}))).toBeUndefined();
+    expect(await f.control.sessionCookie(req('/verify', 'GET', undefined, admin.headers))).toBeUndefined();
+    expect(await f.control.sessionCookie(req('/verify', 'GET', undefined, {cookie: 'bungee_local_session=' + 'x'.repeat(43)}))).toBeUndefined();
     const logout = await f.control.logout(req('/logout', 'POST', undefined, {...infinite.headers, origin: 'https://example.com', 'x-csrf-token': infinite.data.csrfToken}));
     expect(logout.status).toBe(200); expect(logout.headers.get('set-cookie')).toContain('Max-Age=0');
-    expect(f.control.sessionCookie(req('/verify', 'GET', undefined, infinite.headers))).toBeUndefined();
+    expect(await f.control.sessionCookie(req('/verify', 'GET', undefined, infinite.headers))).toBeUndefined();
   }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
   test('policy writes require a live issued subject, correct origin and CSRF', async () => {
@@ -164,22 +166,23 @@ describe('configurable local management session policy', () => {
     expect((await f.invoke('GET', undefined, {})).status).toBe(403);
     expect((await f.invoke('PUT', change, session.headers)).status).toBe(403);
     expect((await f.invoke('PUT', change, {...session.headers, origin: 'https://evil.example', 'x-csrf-token': session.data.csrfToken})).status).toBe(403);
-    expect(f.state.get('session-policy')).toBeNull();
+    expect(await f.state.get('session-policy')).toBeNull();
     expect((await f.invoke('PUT', change, {...session.headers, origin: 'https://example.com', 'x-csrf-token': session.data.csrfToken})).status).toBe(200);
     const request = req('/session-policy', 'PUT', {...change, version: 1}, f.administrator.headers);
-    const subject = await f.control.authenticate(request); f.control.revokeSessions();
+    const subject = await f.control.authenticate(request); await f.control.revokeSessions();
     expect((await f.control.api.find(x => x.path === '/session-policy')!.invoke({...f.host, request, requestSignal: request.signal, subject: subject!})).status).toBe(403);
   }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
   test('corrupt persisted policy or session snapshot fails closed; clock rollback is not an unlimited-session bypass', async () => {
     const f = await fixture(); await f.save(0, 0); const unlimited = await f.login();
     f.advance(-1); expect(await f.control.authenticate(req('/self', 'GET', undefined, unlimited.headers))).toBeNull(); f.advance(1);
-    const policy = f.state.get('session-policy')!;
-    f.state.execute({commandId: 'corrupt-policy', mutations: [{key: 'session-policy', expectedVersion: policy.version, value: {idleTimeoutMinutes: 0, absoluteTimeoutMinutes: -1}}]});
+    const policy = (await f.state.get('session-policy'))!;
+    await f.state.transact([{key: 'session-policy', expectedVersion: policy.version, value: {idleTimeoutMinutes: 0, absoluteTimeoutMinutes: -1}}]);
     await expect(createControl(f.host).start()).rejects.toThrow('corrupt_state');
     expect((await f.control.login(req('/login', 'POST', {username: 'owner', password, transport: 'bearer'}))).status).toBe(503);
-    const accounts = f.state.get('accounts')!, value = accounts.value as any; value.sessions[0].policy = {idleTimeoutMinutes: 0};
-    f.state.execute({commandId: 'corrupt-snapshot', mutations: [{key: 'accounts', expectedVersion: accounts.version, value}]});
+    const tokenDigest = createHash('sha256').update(unlimited.data.token).digest('hex');
+    const record = (await f.state.list()).find(r => r.key.startsWith('session:') && (r.value as any).session?.digest === tokenDigest)!, value = record.value as any; value.session.policy = {idleTimeoutMinutes: 0};
+    await f.state.transact([{key: record.key, expectedVersion: record.version, value}]);
     await expect(f.control.authenticate(req('/self', 'GET', undefined, unlimited.headers))).rejects.toThrow('corrupt_state');
   }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 });

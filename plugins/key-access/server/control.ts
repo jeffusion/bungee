@@ -6,9 +6,9 @@ import { validatePolicy, validatePublication, stringIds, validPrincipal, type Ac
 
 type ReadState = Pick<PluginDurableState, 'get' | 'list'>;
 const empty = (): AccessPublication => ({byKey: {}, protectedRouteIds: [], credentials: []});
-function current(state: ReadState): AccessPublication {
-  const value = state.get('policies')?.value;
-  return value === undefined ? empty() : validatePublication(value);
+async function current(state: ReadState): Promise<AccessPublication> {
+  const value = (await state.get('policies'))?.value;
+  return value === undefined ? empty() : structuredClone(validatePublication(value));
 }
 function routeKeyBindings(value: AccessPublication) {
   const routeIds = [...new Set([...value.protectedRouteIds, ...Object.values(value.byKey).flatMap(scope => scope?.routes ?? [])])];
@@ -33,17 +33,21 @@ export function createControl(host: ControlHostContext): PluginControl {
   const state = host.durableState;
   let running = false, publishedVersion = -1;
   let writes: Promise<unknown> = Promise.resolve();
-  const policy = () => ({version: state.get('policies')?.version ?? 0, value: current(state) as unknown as DurableJson});
+  let cachedPolicy = {version:0,value:empty() as unknown as DurableJson};
+  const policy = () => cachedPolicy;
+  const refresh = async () => {const record=await state.get('policies');cachedPolicy={version:record?.version ?? 0,value:record?.value ?? empty() as unknown as DurableJson};};
   const ready = () => running && !host.signal.aborted && publishedVersion === policy().version;
   async function publish() {
     if (!host.publishPolicy) throw new Error('publication_unavailable');
+    await refresh();
     const next = policy();
     await host.publishPolicy(next);
     publishedVersion = next.version;
   }
   async function save(value: AccessPublication, result: Record<string, unknown>, status = 200): Promise<Response> {
-    const old = state.get('policies');
-    state.execute({commandId: randomUUID(), mutations: [{key: 'policies', expectedVersion: old?.version ?? 0, value: value as unknown as DurableJson}]});
+    const old = await state.get('policies');
+    await state.transact([{key:'policies',expectedVersion:old?.version ?? 0,value:value as unknown as DurableJson}]);
+    await refresh();
     try { await publish(); return json({...result, version: policy().version, ready: ready(), published: true}, status); }
     catch { return json({...result, error: 'key-access.publication_pending', persisted: true, version: policy().version, ready: false, active: false, published: false}, 503); }
   }
@@ -57,7 +61,7 @@ export function createControl(host: ControlHostContext): PluginControl {
   return {policy, rpc: [], api: [
     {path: '/credentials', methods: ['GET', 'POST'], handler: 'credentials', async invoke(ctx) {
       if (ctx.request.method === 'GET') {
-        const keys = await Promise.all(current(state).credentials.map(async key => ({...metadata(key),
+        const keys = await Promise.all((await current(state)).credentials.map(async key => ({...metadata(key),
           ...(host.readResourceExtensions ? {extensions: await host.readResourceExtensions(key.id)} : {})})));
         return json({keys, ready: ready(), published: ready()});
       }
@@ -67,7 +71,7 @@ export function createControl(host: ControlHostContext): PluginControl {
           || !input.name.trim() || input.name.length > 128 || /[\x00-\x1f\x7f]/.test(input.name)) return json({error: 'invalid_key_name'}, 422);
         const expiresAt = input.expiresAt ?? null, now = Date.now();
         if (expiresAt !== null && (!Number.isSafeInteger(expiresAt) || expiresAt <= now)) return json({error: 'invalid_expiration'}, 422);
-        const next = current(state);
+        const next = await current(state);
         if (next.credentials.some(key => key.name.trim() === input.name.trim())) return json({error: 'key_name_exists'}, 409);
         const token = `bng_data_${randomBytes(32).toString('base64url')}`;
         const key: AccessCredential = {id: randomUUID(), domain: 'data', name: input.name.trim(), prefix: token.slice(0, 17),
@@ -80,7 +84,7 @@ export function createControl(host: ControlHostContext): PluginControl {
         try { return await save(next, {key: metadata(key), token}, 201); }
         catch (error) {
           // A failed publication still persisted the credential; only clean up an uncommitted secret.
-          if (!current(state).credentials.some(item => item.id === key.id)) {
+          if (!(await current(state)).credentials.some(item => item.id === key.id)) {
             const stored = await host.secretStore.get('credential:' + key.id);
             if (stored) await host.secretStore.delete('credential:' + key.id, stored.version);
           }
@@ -91,18 +95,18 @@ export function createControl(host: ControlHostContext): PluginControl {
     {path: '/credentials/:keyId', methods: ['GET', 'PUT', 'DELETE'], handler: 'credential', async invoke(ctx) {
       const id = keyId(ctx.request);
       if (ctx.request.method === 'GET') {
-        const key = current(state).credentials.find(key => key.id === id);
+        const key = (await current(state)).credentials.find(key => key.id === id);
         if (!key) return json({error: 'key_not_found'}, 404);
         try {
           const stored = await host.secretStore.get('credential:' + id);
           if (!stored) return json({error: 'key_secret_not_stored'}, 409);
-          if (!current(state).credentials.some(key => key.id === id)) return json({error: 'key_not_found'}, 404);
+          if (!(await current(state)).credentials.some(key => key.id === id)) return json({error: 'key_not_found'}, 404);
           if (createHash('sha256').update(stored.value).digest('hex') !== key.digest) return json({error: 'key_secret_unavailable'}, 503);
           return json({token: stored.value});
         } catch { return json({error: 'key_secret_unavailable'}, 503); }
       }
       return write(async () => {
-        const next = current(state), key = next.credentials.find(key => key.id === id);
+        const next = await current(state), key = next.credentials.find(key => key.id === id);
         if (ctx.request.method === 'DELETE') {
           next.credentials = next.credentials.filter(key => key.id !== id);
           delete next.byKey[id];
@@ -128,14 +132,14 @@ export function createControl(host: ControlHostContext): PluginControl {
       });
     }},
     {path: '/routes', methods: ['GET', 'PUT'], handler: 'routeProtection', async invoke(ctx) {
-      if (ctx.request.method === 'GET') { const value = current(state); return json({...routeAccess(value), version: policy().version, ready: ready(), published: ready()}); }
+      if (ctx.request.method === 'GET') { const value = await current(state); return json({...routeAccess(value), version: policy().version, ready: ready(), published: ready()}); }
       return write(async () => {
         const input = await ctx.request.json();
         if (!input || Object.keys(input).join() !== 'protectedRouteIds') return json({error: 'invalid_routes'}, 422);
         const protectedRouteIds = stringIds(input.protectedRouteIds);
         if (!host.validateRouteReferences) return json({error: 'reference_validator_unavailable'}, 503);
         if (!await host.validateRouteReferences(protectedRouteIds)) return json({error: 'invalid_references'}, 422);
-        const next = {...current(state), protectedRouteIds};
+        const next = {...await current(state), protectedRouteIds};
         return save(next, routeAccess(next));
       });
     }},
@@ -145,7 +149,7 @@ export function createControl(host: ControlHostContext): PluginControl {
         if (!input || Object.keys(input).some(k => !['routeId','keyId','protect'].includes(k))
           || typeof input.routeId !== 'string' || typeof input.keyId !== 'string'
           || (input.protect !== undefined && typeof input.protect !== 'boolean')) return json({error:'invalid_binding'},422);
-        const next = current(state);
+        const next = await current(state);
         if (!next.credentials.some(key => key.id === input.keyId && key.revokedAt === null)) return json({error:'key_not_found'},404);
         if (!host.validateRouteReferences || !host.validateKeyPolicyReferences) return json({error:'reference_validator_unavailable'},503);
         if (!await host.validateRouteReferences([input.routeId])) return json({error:'invalid_references'},422);
@@ -159,9 +163,9 @@ export function createControl(host: ControlHostContext): PluginControl {
     }},
     {path: '/keys/:keyId', methods: ['GET', 'PUT'], handler: 'keyPolicy', async invoke(ctx) {
       const id = keyId(ctx.request);
-      if (ctx.request.method === 'GET') return json({keyId: id, version: policy().version, value: current(state).byKey[id] ?? null, active: ready(), ready: ready()});
+      if (ctx.request.method === 'GET') return json({keyId: id, version: policy().version, value: (await current(state)).byKey[id] ?? null, active: ready(), ready: ready()});
       return write(async () => {
-        const next = current(state);
+        const next = await current(state);
         if (!next.credentials.some(key => key.id === id && key.revokedAt === null)) return json({error: 'key_not_found'}, 404);
         const value = validatePolicy(await ctx.request.json());
         if (!host.validateKeyPolicyReferences) return json({error: 'reference_validator_unavailable'}, 503);
@@ -175,14 +179,14 @@ export function createControl(host: ControlHostContext): PluginControl {
     dispose() { running = false; },
   };
 }
-export function readResource(resource: string, keyId: string, state: ReadState) {
+export async function readResource(resource: string, keyId: string, state: ReadState) {
   if (resource !== 'api-key') throw new Error('resource_not_supported');
-  return {value: current(state).byKey[keyId] ?? null};
+  return {value: (await current(state)).byKey[keyId] ?? null};
 }
-export function readResourceCollection(resource: string, state: ReadState): readonly unknown[] {
+export async function readResourceCollection(resource: string, state: ReadState): Promise<readonly unknown[]> {
   if (resource !== 'api-key') throw new Error('resource_not_supported');
-  return current(state).credentials.map(metadata);
+  return (await current(state)).credentials.map(metadata);
 }
-export function readAdmissionRequirements(state: ReadState): readonly string[] { return current(state).protectedRouteIds; }
-export function verifyDataPrincipal(principal: DataPrincipal, state: ReadState): boolean { return validPrincipal(principal, current(state), Date.now()); }
+export async function readAdmissionRequirements(state: ReadState): Promise<readonly string[]> { return (await current(state)).protectedRouteIds; }
+export async function verifyDataPrincipal(principal: DataPrincipal, state: ReadState): Promise<boolean> { return validPrincipal(principal, await current(state), Date.now()); }
 export default {createControl, readResource, readResourceCollection, readAdmissionRequirements, verifyDataPrincipal};

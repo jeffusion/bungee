@@ -75,10 +75,9 @@ const emptyDatabaseTemplate = (() => {
       const counts = {
         operations: inspector.query<{ count: number }, []>('SELECT count(*) AS count FROM configuration_operations').get()?.count ?? -1,
         workers: inspector.query<{ count: number }, []>('SELECT count(*) AS count FROM configuration_operation_workers').get()?.count ?? -1,
-        secretNamespaces: inspector.query<{ count: number }, []>('SELECT count(*) AS count FROM secret_store_namespaces').get()?.count ?? -1,
-        secretObjects: inspector.query<{ count: number }, []>('SELECT count(*) AS count FROM secret_store_objects').get()?.count ?? -1,
+        migratedPluginTables: inspector.query<{ count: number }, []>("SELECT count(*) AS count FROM sqlite_schema WHERE type='table' AND name IN ('secret_store_namespaces','secret_store_objects')").get()?.count ?? -1,
       };
-      if (counts.operations !== 0 || counts.workers !== 0 || counts.secretNamespaces !== 0 || counts.secretObjects !== 0) {
+      if (counts.operations !== 0 || counts.workers !== 0 || counts.migratedPluginTables !== 0) {
         throw new Error(`empty template contains business data: ${JSON.stringify(counts)}`);
       }
     } finally {

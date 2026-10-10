@@ -1,3 +1,4 @@
+import {pluginStateFixturePath} from './support/plugin-state-fixture';
 /**
  * Real production-entry plugin RPC acceptance: a REAL master plus its two supervised
  * workers (the same DaemonManager launch path as `token-stats-gateway-real-process`)
@@ -293,7 +294,7 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
         const calls = (state as any).crashEntered ?? [];
         return calls.filter((call: any) => call.pid === targetWorker.pid).length === 64;
       }, 'the original worker did not occupy all 64 caller slots');
-      const db = new Database(currentFixture.configDbPath, {readonly: true});
+      const db = new Database(pluginStateFixturePath(currentFixture.configDbPath), {readonly: true});
       let pending: Array<{payload: string}>;
       let savedProof: any;
       try {
@@ -328,7 +329,7 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
       }, 'surviving workers did not recover all terminal barriers/capacity', 40000);
       // No accepted query or command is automatically resent to the replacement executor.
       expect((recovered as any).crashEntered).toEqual([]);
-      const recoveredDb = new Database(currentFixture.configDbPath, {readonly: true});
+      const recoveredDb = new Database(pluginStateFixturePath(currentFixture.configDbPath), {readonly: true});
       try {
         const terminal = recoveredDb.query<{state: string}, []>(`SELECT json_extract(CAST(payload AS TEXT), '$.state') AS state
           FROM plugin_communication_records WHERE namespace LIKE 'rpc.%' AND key LIKE 'j.%'

@@ -1,19 +1,12 @@
 import { readHostRpcCalleeFrame } from '../plugin-services/host-rpc';
-import type { Database } from 'bun:sqlite';
 import type { PluginDurableState } from '../plugin-durable-state';
 import type { ManagementSubject, PluginPolicyPublication, DataPrincipal } from '../plugin-extensions';
 import type { PluginManifestRecord } from '../plugin-manifest-catalog/types';
-import { createPluginStorageCapability } from '../plugin-storage';
 import type { PluginStorage } from '../plugin.types';
 import { PluginDependencyGraph } from '../plugin-dependencies';
 import { PluginServiceCleanupError, PluginServiceHost, type PluginServices } from '../plugin-services';
 import { loadImmutableControlArtifact } from './artifact-loader';
-import {
-  clearSecretStore,
-  createSecretStore,
-  revokeSecretStore,
-  type SecretKeyMaterial,
-} from './secret-store';
+import type { SecretKeyMaterial } from './secret-store';
 import type {
   BoundAttemptContext,
   ControlApiHandlerContext,
@@ -30,7 +23,7 @@ const CONTROL_START_TIMEOUT_MS = 15_000;
 export type SecretStoreFactory = {
   create(namespace: string): SecretStore;
   revoke(store: SecretStore): void;
-  clear(store: SecretStore): void;
+  clear(store: SecretStore): void | Promise<void>;
 };
 
 export type PluginStorageFactory = {
@@ -157,29 +150,6 @@ function samePath(declared: string, actual: string): boolean {
 
 function methodAllowed(methods: readonly string[], method: string): boolean {
   return methods.includes(method.toUpperCase());
-}
-
-export function createDatabaseSecretStoreFactory(
-  db: Database,
-  material: SecretKeyMaterial | null | undefined,
-): SecretStoreFactory {
-  return {
-    create(namespace) { return createSecretStore(db, namespace, material); },
-    revoke: revokeSecretStore,
-    clear: clearSecretStore,
-  };
-}
-
-export function createDatabasePluginStorageFactory(db: Database): PluginStorageFactory {
-  const revocations = new WeakMap<PluginStorage, () => void>();
-  return {
-    create(pluginName) {
-      const capability = createPluginStorageCapability(db, pluginName);
-      revocations.set(capability.storage, capability.revoke);
-      return capability.storage;
-    },
-    revoke(storage) { revocations.get(storage)?.(); },
-  };
 }
 
 export function parsePluginSecretsKey(value: string | undefined): SecretKeyMaterial | undefined {
@@ -850,7 +820,7 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
       if (!record?.manifest.management || !state) throw new PluginControlHostError('not_declared', 'management provider unavailable');
       const module = await readModule(record);
       if (!module.readManagementSetup) throw new PluginControlHostError('not_declared', 'management setup reader unavailable');
-      const result = module.readManagementSetup(Object.freeze({get:state.get.bind(state),list:state.list.bind(state)}));
+      const result = await module.readManagementSetup(Object.freeze({get:state.get.bind(state),list:state.list.bind(state)}));
       if (typeof result?.initialized !== 'boolean') throw new Error('invalid management setup status');
       return {initialized:result.initialized};
     },

@@ -26,6 +26,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import type { DurableMutation } from '../plugin-durable-state';
 import type { PluginServiceProcess } from './contracts';
 import type { PluginPeerLaneEmit, PluginPeerLaneHandler, PluginPeerRpcRequestExecution } from './peer-rpc-link';
 import type { RpcCallPurpose, RpcJson } from './wire-contract';
@@ -159,20 +160,20 @@ export interface PluginChannelSnapshotSource {
    * Retains exactly this immutable version for one whole-body read. Called by the
    * hub when it pins the source for a session, before any chunk is read.
    */
-  retain?(): void;
+  retain?(): void | Promise<void>;
   /**
    * Releases the provider-side retention of exactly this immutable version. The
    * hub calls it once when the read session (which pinned this source for the
    * WHOLE body) ends; a bound store uses it to keep an in-use version alive.
    */
-  release?(): void;
+  release?(): void | Promise<void>;
 }
 
 export interface PluginChannelSnapshotProvider {
   /** Current immutable descriptor + reader, or `null` when no valid snapshot exists. */
-  current(): PluginChannelSnapshotSource | null;
+  current(): PluginChannelSnapshotSource | null | Promise<PluginChannelSnapshotSource | null>;
   /** One explicitly named still-retained version, or `null` once it was evicted. */
-  version(version: number): PluginChannelSnapshotSource | null;
+  version(version: number): PluginChannelSnapshotSource | null | Promise<PluginChannelSnapshotSource | null>;
 }
 
 export interface PluginChannelEventEntry {
@@ -188,29 +189,20 @@ export interface PluginChannelEventAck {
 
 export interface PluginChannelReliableEventLog {
   /** Oldest still-replayable sequence, or `null` when the log holds no events. */
-  oldestSequence(): number | null;
-  latestSequence(): number;
+  oldestSequence(): number | null | Promise<number | null>;
+  latestSequence(): number | Promise<number>;
   /** Highest sequence already pruned; a `from` at or below it is an explicit gap. */
-  prunedThrough(): number;
+  prunedThrough(): number | Promise<number>;
   /** Bounded replay from `from`; a contiguous run, never sparse. */
   list(fromSequence: number, limit: number): Promise<readonly PluginChannelEventEntry[]>;
   /** Highest durable checkpoint for this consumer (0 when none). */
-  checkpoint(consumerId: string): number;
+  checkpoint(consumerId: string): number | Promise<number>;
   /** Monotonic durable ack: an older sequence never lowers the stored checkpoint. */
-  ack(consumerId: string, sequence: number): PluginChannelEventAck;
+  ack(consumerId: string, sequence: number): PluginChannelEventAck | Promise<PluginChannelEventAck>;
   /** Durable append; the returned sequence and event id are stable and unique. */
-  append(payload: Uint8Array): { readonly sequence: number; readonly eventId: string };
-  /**
-   * Outbox primitive: writes ONLY the event row on the caller's already-open
-   * transaction (the provider's business-state transaction on the same
-   * connection), so both commit or both roll back. Never opens its own. When a
-   * `receiptId` is given, a durable (sequence, eventId, payloadHash) receipt is
-   * written in the same transaction, so an idempotent replay can return the FIRST
-   * result instead of appending a second event.
-   */
-  appendWithinTransaction?(payload: Uint8Array, receiptId?: string): { readonly sequence: number; readonly eventId: string };
-  /** Durable outbox receipt for `receiptId`, or `null` when none exists. */
-  receipt?(receiptId: string): { readonly sequence: number; readonly eventId: string; readonly payloadHash: string } | null;
+  append(payload: Uint8Array): { readonly sequence: number; readonly eventId: string } | Promise<{readonly sequence:number;readonly eventId:string}>;
+  appendWithState?(payload:Uint8Array,mutations:readonly DurableMutation[]):Promise<{readonly sequence:number;readonly eventId:string}>;
+
 }
 
 export interface PluginChannelEventProvider {
@@ -507,6 +499,7 @@ interface SnapshotSession {
   /** Real `source.read` calls still in flight; release waits for these. */
   activeReads: number;
   released: boolean;
+  releaseTask?: Promise<void>;
   /** Callers of a release waiting for every active read to drain. */
   drainWaiters: Array<() => void>;
 }
@@ -778,7 +771,7 @@ export class PluginPeerChannelHub {
   async publishReliable(
     handle: PluginChannelProviderHandle,
     payload: Uint8Array,
-    appendPlan?: (payload: Uint8Array) => { readonly sequence: number; readonly eventId: string },
+    appendPlan?: (payload: Uint8Array) => { readonly sequence: number; readonly eventId: string } | Promise<{readonly sequence:number;readonly eventId:string}>,
   ): Promise<number> {
     const registration = this.#registrationOf(handle);
     const log = registration.event?.log;
@@ -786,7 +779,7 @@ export class PluginPeerChannelHub {
     if (payload.byteLength > CHANNEL_EVENT_MAX_PAYLOAD_BYTES) throw new ChannelError('invalid', 'channel event payload exceeds the frame budget');
     // `appendPlan` lets the host commit the event inside the provider's own
     // business-state transaction; the fan-out happens only after that commit.
-    const appended = appendPlan === undefined ? log.append(payload) : appendPlan(payload);
+    const appended = await (appendPlan === undefined ? log.append(payload) : appendPlan(payload));
     this.#fanOut(registration, { sequence: appended.sequence, eventId: appended.eventId, payload: new Uint8Array(payload) }, 'reliable');
     return appended.sequence;
   }
@@ -1657,12 +1650,12 @@ export class PluginPeerChannelHub {
       case 'stream.open-write': return this.#onStreamOpenWrite(link, payload, deadlineAt, signal);
       case 'stream.open-duplex': return this.#onStreamOpenDuplex(link, payload, deadlineAt, signal);
       case 'stream.finish': return this.#onStreamFinish(link, payload);
-      case 'snapshot.describe': return this.#onSnapshotDescribe(link, payload);
-      case 'snapshot.open': return this.#onSnapshotOpen(link, payload, deadlineAt, signal);
+      case 'snapshot.describe': return this.#deferred(this.#onSnapshotDescribe(link, payload));
+      case 'snapshot.open': return this.#deferred(this.#onSnapshotOpen(link, payload, deadlineAt, signal));
       case 'snapshot.chunk': return this.#onSnapshotChunk(link, payload);
       case 'snapshot.release': return this.#onSnapshotRelease(link, payload);
-      case 'event.subscribe': return this.#onEventSubscribe(link, payload, deadlineAt, signal);
-      case 'event.ack': return this.#onEventAck(link, payload);
+      case 'event.subscribe': return this.#deferred(this.#onEventSubscribe(link, payload, deadlineAt, signal));
+      case 'event.ack': return this.#deferred(this.#onEventAck(link, payload));
       default: return null;
     }
   }
@@ -1699,6 +1692,11 @@ export class PluginPeerChannelHub {
 
   #rejected(lane: PluginChannelLane, code: PluginChannelErrorCode | 'invalid'): void {
     try { this.#options.onDiagnostic?.({ kind: 'rejected', lane, code }); } catch { /* diagnostics never affect admission */ }
+  }
+
+  #deferred(pending:Promise<PluginPeerRpcRequestExecution|null>):PluginPeerRpcRequestExecution {
+    const execution=pending.then(value=>value ?? this.#immediate(errorBody('failed')));
+    return Object.freeze({result:execution.then(value=>value.result),terminal:execution.then(value=>value.terminal)});
   }
 
   #immediate(body: Uint8Array): PluginPeerRpcRequestExecution {
@@ -2121,7 +2119,7 @@ export class PluginPeerChannelHub {
     for (const resolve of transfer.creditWaiters.splice(0)) resolve();
   }
 
-  #onSnapshotDescribe(link: PluginChannelLinkPort, payload: unknown): PluginPeerRpcRequestExecution | null {
+  async #onSnapshotDescribe(link: PluginChannelLinkPort, payload: unknown): Promise<PluginPeerRpcRequestExecution | null> {
     const request = decodeSnapshotDescribeRequest(payload);
     if (request === null) { this.#rejected('snapshot', 'invalid'); return null; }
     const registration = this.#registrationFor('snapshot', request.target);
@@ -2133,11 +2131,13 @@ export class PluginPeerChannelHub {
     }
     let source: PluginChannelSnapshotSource | null;
     try {
-      source = request.request.version === null ? registration.snapshot.current() : registration.snapshot.version(request.request.version);
+      source = await (request.request.version === null ? registration.snapshot.current() : registration.snapshot.version(request.request.version));
     } catch { return this.#immediate(errorBody('failed')); }
     if (source === null) return this.#immediate(errorBody(request.request.version === null ? 'unavailable' : 'conflict'));
-    if (source.descriptor.size > CHANNEL_SNAPSHOT_MAX_BYTES) return this.#immediate(errorBody('overloaded'));
-    return this.#immediate(successBody({ ...source.descriptor }));
+    if (source.descriptor.size > CHANNEL_SNAPSHOT_MAX_BYTES) {await source.release?.();return this.#immediate(errorBody('overloaded'));}
+    const descriptor=source.descriptor;
+    try { await source.release?.(); } catch { return this.#immediate(errorBody('failed')); }
+    return this.#immediate(successBody({ ...descriptor }));
   }
 
   /**
@@ -2146,7 +2146,7 @@ export class PluginPeerChannelHub {
    * is released (or idle-expires), so a concurrent refresh or version eviction can
    * never swap or free the body mid-read.
    */
-  #onSnapshotOpen(link: PluginChannelLinkPort, payload: unknown, deadlineAt: number, signal: AbortSignal): PluginPeerRpcRequestExecution | null {
+  async #onSnapshotOpen(link: PluginChannelLinkPort, payload: unknown, deadlineAt: number, signal: AbortSignal): Promise<PluginPeerRpcRequestExecution | null> {
     const request = decodeSnapshotOpenRequest(payload);
     if (request === null) { this.#rejected('snapshot', 'invalid'); return null; }
     const registration = this.#registrationFor('snapshot', request.target);
@@ -2158,17 +2158,19 @@ export class PluginPeerChannelHub {
     }
     let source: PluginChannelSnapshotSource | null;
     try {
-      source = request.request.version === null ? registration.snapshot.current() : registration.snapshot.version(request.request.version);
+      source = await (request.request.version === null ? registration.snapshot.current() : registration.snapshot.version(request.request.version));
     } catch { return this.#immediate(errorBody('failed')); }
     if (source === null) return this.#immediate(errorBody(request.request.version === null ? 'unavailable' : 'conflict'));
-    if (source.descriptor.size > CHANNEL_SNAPSHOT_MAX_BYTES) return this.#immediate(errorBody('overloaded'));
-    if (this.#snapshotSessions.size >= CHANNEL_SNAPSHOT_MAX_SESSIONS) return this.#immediate(errorBody('overloaded'));
+    if (source.descriptor.size > CHANNEL_SNAPSHOT_MAX_BYTES) {await source.release?.();return this.#immediate(errorBody('overloaded'));}
+    if (this.#snapshotSessions.size >= CHANNEL_SNAPSHOT_MAX_SESSIONS) {await source.release?.();return this.#immediate(errorBody('overloaded'));}
     // Retain the exact version BEFORE any byte is read, so a concurrent publish or
     // GC can never free/replace the body under this whole-body read.
-    try { source.retain?.(); } catch { return this.#immediate(errorBody('failed')); }
+    try { await source.retain?.(); } catch { await source.release?.();return this.#immediate(errorBody('failed')); }
+    // Async storage permits other admissions while the retain is pending.
+    if(this.#snapshotSessions.size>=CHANNEL_SNAPSHOT_MAX_SESSIONS || this.#disposed || registration.retiring){await source.release?.();return this.#immediate(errorBody('overloaded'));}
     const release = this.#beginProvider(registration.provider, { purpose: request.purpose, deadlineAt, signal });
     if (release === null) {
-      try { source.release?.(); } catch { /* provider-owned */ }
+      try { await source.release?.(); } catch { /* provider-owned */ }
       return this.#immediate(errorBody('overloaded'));
     }
     const sessionId = randomUUID();
@@ -2211,15 +2213,15 @@ export class PluginPeerChannelHub {
   }
 
   #releaseSnapshotSession(session: SnapshotSession): Promise<void> {
-    if (session.released) return Promise.resolve();
+    if (session.released) return session.releaseTask ?? Promise.resolve();
     if (session.activeReads > 0) {
       return new Promise<void>((resolve) => { session.drainWaiters.push(resolve); });
     }
     session.released = true;
-    try { session.source.release?.(); } catch { /* provider-owned */ }
-    session.release?.();
-    for (const resolve of session.drainWaiters.splice(0)) resolve();
-    return Promise.resolve();
+    session.releaseTask=Promise.resolve().then(()=>session.source.release?.()).catch(()=>undefined).then(()=>{
+      session.release?.();for(const resolve of session.drainWaiters.splice(0))resolve();
+    });
+    return session.releaseTask;
   }
 
   #onSnapshotChunk(link: PluginChannelLinkPort, payload: unknown): PluginPeerRpcRequestExecution | null {
@@ -2282,7 +2284,7 @@ export class PluginPeerChannelHub {
     return Object.freeze({ result: drained.then(() => successBody({})), terminal: drained });
   }
 
-  #onEventSubscribe(link: PluginChannelLinkPort, payload: unknown, deadlineAt: number, signal: AbortSignal): PluginPeerRpcRequestExecution | null {
+  async #onEventSubscribe(link: PluginChannelLinkPort, payload: unknown, deadlineAt: number, signal: AbortSignal): Promise<PluginPeerRpcRequestExecution | null> {
     const request = decodeEventSubscribeRequest(payload);
     if (request === null) { this.#rejected('event', 'invalid'); return null; }
     const registration = this.#registrationFor('event', request.target);
@@ -2307,9 +2309,9 @@ export class PluginPeerChannelHub {
     if (provider.delivery === 'reliable' && provider.log !== undefined) {
       const log = provider.log;
       try {
-        oldest = log.oldestSequence();
-        prunedThrough = log.prunedThrough();
-        if (from === null) from = log.checkpoint(consumerKey) + 1;
+        oldest = await log.oldestSequence();
+        prunedThrough = await log.prunedThrough();
+        if (from === null) from = await log.checkpoint(consumerKey) + 1;
         if (from < 1) from = 1;
         if ((oldest !== null && from < oldest) || from <= prunedThrough) {
           return this.#immediate(errorBody('gap', { oldestSequence: oldest, prunedThrough }));
@@ -2318,6 +2320,10 @@ export class PluginPeerChannelHub {
     } else {
       from = 1;
     }
+    // Re-check after durable cursor IPC: another subscription may have admitted.
+    if(this.#disposed || registration.retiring)return this.#immediate(errorBody('unavailable'));
+    if(this.#eventInbound.size>=CHANNEL_MAX_SUBSCRIPTIONS)return this.#immediate(errorBody('overloaded'));
+    if(this.#eventInbound.has(request.request.clientId))return this.#immediate(errorBody('conflict'));
     const subscriptionId = request.request.clientId;
     const release = this.#beginProvider(registration.provider, { purpose: request.purpose, deadlineAt, signal });
     if (release === null) return this.#immediate(errorBody('overloaded'));
@@ -2489,7 +2495,7 @@ export class PluginPeerChannelHub {
     subscription.release?.();
   }
 
-  #onEventAck(link: PluginChannelLinkPort, payload: unknown): PluginPeerRpcRequestExecution | null {
+  async #onEventAck(link: PluginChannelLinkPort, payload: unknown): Promise<PluginPeerRpcRequestExecution | null> {
     const request = decodeEventAckRequest(payload);
     if (request === null) { this.#rejected('event', 'invalid'); return null; }
     // An already-accepted subscription must keep ACKing after its provider retires.
@@ -2517,7 +2523,7 @@ export class PluginPeerChannelHub {
     const log = registration.event.log;
     let acked = sequence;
     if (registration.event.delivery === 'reliable' && log !== undefined) {
-      try { acked = log.ack(subscription.consumerId, sequence).acked; }
+      try { acked = (await log.ack(subscription.consumerId, sequence)).acked; }
       catch { return this.#immediate(errorBody('failed')); }
     }
     subscription.lastAcked = Math.max(subscription.lastAcked, acked);

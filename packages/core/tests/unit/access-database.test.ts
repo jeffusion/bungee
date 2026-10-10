@@ -155,8 +155,10 @@ describe('access database SQLite contract', () => {
     }
   }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
-  test('MigrationManager migrate and status reject an unknown journal mode', async () => {
+  test('MigrationManager rejects an unknown journal mode and status does not create a database', async () => {
     expect((await new MigrationManager(':memory:').migrate()).success).toBeFalse();
-    expect(await new MigrationManager(':memory:').status()).toEqual([]);
+    const path=join(tmpdir(),'bungee-status-'+crypto.randomUUID()+'.db');
+    expect(await new MigrationManager(path).status()).toEqual([{version:'001',name:'current_access_baseline',applied:false}]);
+    await expect(readFile(path)).rejects.toThrow();
   });
 });

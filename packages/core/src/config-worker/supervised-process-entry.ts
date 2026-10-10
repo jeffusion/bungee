@@ -14,8 +14,10 @@ import {
   type SupervisedWorkerEnvironment,
 } from './process-environment';
 import {
-  setBoundControlClientProvider,
+  setBoundControlClientProvider, setWorkerPluginStorageFactory,
 } from './runtime-dependencies';
+import { createRemotePluginStorageFactory } from '../plugin-state/storage-rpc';
+import { createSignedWorkerRpcClient, PLUGIN_STORAGE_RPC_PATH } from '../data-admission/rpc';
 import { createWorkerPluginControlPeerProvider } from './http-provider';
 import {
   createWorkerRateLimitHttpProvider,
@@ -81,6 +83,7 @@ export async function runSupervisedWorkerProcess(
         try { peerBroker.dispose(); } catch (error) { cleanupErrors.push(error); }
         try { rateLimit?.dispose(); } catch (error) { cleanupErrors.push(error); }
         setBoundControlClientProvider(null);
+        setWorkerPluginStorageFactory(null);
         setWorkerRateLimitClient(null);
         setWorkerRateLimitFailureObserver(null);
         try { await server?.stop(); } catch (error) { cleanupErrors.push(error); }
@@ -253,6 +256,27 @@ export async function runSupervisedWorkerProcess(
     if (!peerBroker.status.retired) await peerBroker.waitUntilDirectoryLoaded({ signal, timeoutMs: 5_000 });
   });
   setBoundControlClientProvider(pluginControl.provider);
+  const storageRpc = createSignedWorkerRpcClient({transportSecret:environment.transportSecret,
+    worker:{role:'worker',process_instance_id:environment.identity.worker_instance_id,boot_nonce:bootNonce,
+      master_generation:environment.identity.master_generation,worker_slot:environment.identity.worker_slot},
+    expectedServer:{role:'ingress',process_instance_id:environment.identity.master_generation,boot_nonce:environment.identity.master_generation},
+    url:`http://127.0.0.1:${environment.masterControlPort}${PLUGIN_STORAGE_RPC_PATH}`,retry:false});
+  const sendStorage = async (operation:string,namespace:string,method:string,args:readonly unknown[]) => {
+    if (!appliedActivatedPlugins.includes(namespace) || shuttingDown) throw new Error('plugin_storage_namespace_forbidden');
+    return storageRpc(operation,{namespace,operation:method,args});
+  };
+  const remoteStorage = createRemotePluginStorageFactory((namespace,operation,args)=>sendStorage('storage',namespace,operation,args));
+  const originalStorage = new WeakMap<import('../plugin.types').PluginStorage,()=>void>();
+  setWorkerPluginStorageFactory({
+    create(namespace) {
+      const kv=remoteStorage.create(namespace);let revoked=false;
+      const invoke=(method:string,args:readonly unknown[])=>{if(revoked)throw new Error('observation_capability_revoked');return sendStorage('observe',namespace,method,args);};
+      const metering=Object.freeze({recordAttempt:(row:any)=>invoke('recordAttempt',[row]),queryWindowSnapshot:(input:any)=>invoke('queryWindowSnapshot',[input]),listClientModels:(input:any)=>invoke('listClientModels',[input])}) as import('../plugin.types').TokenStatsMeteringStorage;
+      const capability=Object.freeze({...kv,metering,uncached:()=>capability});
+      originalStorage.set(capability,()=>{revoked=true;remoteStorage.revoke(kv);});return capability;
+    },
+    revoke:value=>originalStorage.get(value)?.(),
+  });
   if (environment.rateLimitSession !== undefined) {
     rateLimit = createWorkerRateLimitHttpProvider({
       transportSecret: environment.transportSecret,

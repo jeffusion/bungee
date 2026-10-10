@@ -23,13 +23,13 @@ export function createManagementAuthFixture(aggregate: () => ConfigurationAggreg
       issued.set(subject, session.id);
       return subject;
     },
-    authorize(subject) { return activeSessions.has(issued.get(subject) ?? ''); },
+    async authorize(subject) { return activeSessions.has(issued.get(subject) ?? ''); },
     async login(request) {
       const {token} = await request.json() as {token?: string};
       return Response.json({}, {status: token && sessions.authenticate(token) ? 200 : 401});
     },
     async logout() { return Response.json({success: true}); },
-    async bootstrap() {}, hasIdentity: () => true, revokeSessions() { activeSessions.clear(); },
+    async bootstrap() {}, hasIdentity: async () => true, async revokeSessions() { activeSessions.clear(); },
   };
   const host = { get: () => options.provider ? {status:'ready', admission:true, control:{management:provider}} : undefined } as unknown as PluginControlHost;
   const authAggregate = options.provider ? () => ({...aggregate(), plugin_activations:[{plugin_name:'test-provider'}]}) : aggregate;

@@ -173,12 +173,12 @@ function addAttempt(
   return attempt;
 }
 
-function beginAttempts(
+async function beginAttempts(
   options: PublicationRunOptions,
   active: ActiveConfigurationPublication,
   recovery: boolean,
   attemptsAlreadyBegun = false,
-): readonly ReplacementAttempt[] {
+): Promise<readonly ReplacementAttempt[]> {
   const attempts: ReplacementAttempt[] = [];
   const identities = options.identities.allocate(active.targets.map(({ worker_slot }) => worker_slot));
   for (const [index, target] of active.targets.entries()) {
@@ -187,7 +187,7 @@ function beginAttempts(
       throw new MasterConfigPublicationError('invalid_options', 'worker identity allocation missing');
     }
     throwIfPublicationCancelled(options.signal);
-    const begun = attemptsAlreadyBegun ? target : options.repository.beginWorkerAttempt(
+    const begun = attemptsAlreadyBegun ? target : await options.repository.beginWorkerAttempt(
       active.operation.mutation_id, target.worker_slot, target.attempt_no,
       recovery ? 'master_recovery' : target.attempt_no === 0 ? 'initial' : 'retry', options.clock.now(),
     );
@@ -234,7 +234,7 @@ async function awaitReplacements(
         : { kind: 'failed', attempt_no: attempt.publication.attempt_no,
           error: decision.failure.detail.slice(0, 512) };
       throwIfPublicationCancelled(options.signal);
-      options.repository.recordWorkerResult(
+      await options.repository.recordWorkerResult(
         active.operation.mutation_id, attempt.target.worker_slot, result, options.clock.now(),
       );
       return decision.kind === 'failed' ? decision.failure : null;
@@ -281,12 +281,12 @@ async function cleanupPreCommitFailure(
     return { kind: 'outcome_unknown', fatal: true, code: 'repository_failure',
       error, serving: oldWorkers, pending: [] };
   }
-  const active = options.repository.getActivePublication();
+  const active = await options.repository.getActivePublication();
   if (active === null) {
     return { kind: 'outcome_unknown', fatal: true, code: 'repository_failure',
       error: new Error('active publication disappeared before admission commit'), serving: oldWorkers, pending: [] };
   }
-  const operation = options.repository.finalizePublication(active.operation.mutation_id, {
+  const operation = await options.repository.finalizePublication(active.operation.mutation_id, {
     outcome: 'degraded', error_code: 'control_readiness_failed',
     error_detail: processError(error, 'admission preparation failed'), recovery_disposition: 'retryable',
   }, options.clock.now());
@@ -316,21 +316,21 @@ export async function runPublication(
     }
     if (initialState === 'committed') {
       throwIfPublicationCancelled(options.signal);
-      options.repository.beginPublication(active.operation.mutation_id, options.clock.now());
+      await options.repository.beginPublication(active.operation.mutation_id, options.clock.now());
     }
-    let refreshed = options.repository.getActivePublication();
+    let refreshed = await options.repository.getActivePublication();
     if (refreshed === null) throw new TypeError('active publication disappeared');
     let attemptsAlreadyBegun = false;
     if (initialState === 'draining') {
       throwIfPublicationCancelled(options.signal);
-      options.repository.beginDrainingRecovery(
+      await options.repository.beginDrainingRecovery(
         refreshed.operation.mutation_id, refreshed.operation.drain_recovery_generation, options.clock.now(),
       );
-      refreshed = options.repository.getActivePublication();
+      refreshed = await options.repository.getActivePublication();
       if (refreshed === null) throw new TypeError('active publication disappeared after recovery fencing');
       attemptsAlreadyBegun = true;
     }
-    const attempts = beginAttempts(options, refreshed, options.recoveringMaster, attemptsAlreadyBegun);
+    const attempts = await beginAttempts(options, refreshed, options.recoveringMaster, attemptsAlreadyBegun);
     const failures = await awaitReplacements(options, refreshed, attempts);
     throwIfPublicationCancelled(options.signal);
     if (failures.length > 0) {
@@ -340,7 +340,7 @@ export async function runPublication(
       if (cleaned.kind === 'outcome_unknown' && cleaned.code === 'worker_exit_unconfirmed') return cleaned;
       if (options.recoveringMaster && initialState === 'draining') return cleaned;
       throwIfPublicationCancelled(options.signal);
-      const operation = options.repository.finalizePublication(refreshed.operation.mutation_id, {
+      const operation = await options.repository.finalizePublication(refreshed.operation.mutation_id, {
         outcome: 'degraded', error_code: 'replacement_convergence_failed',
         error_detail: failureDetail(failures), recovery_disposition: failures.some(({ recovery_disposition }) => recovery_disposition === 'deterministic_worker_rejection')
           ? 'deterministic_worker_rejection' : failures.some(({ recovery_disposition }) => recovery_disposition === 'deterministic_protocol_failure')
@@ -366,7 +366,7 @@ export async function runPublication(
         throwIfPublicationCancelled(options.signal);
         publicationPhase(options, refreshed, 'markDraining', 'enter');
         try {
-          options.repository.markDraining(refreshed.operation.mutation_id, options.clock.now());
+          await options.repository.markDraining(refreshed.operation.mutation_id, options.clock.now());
         } finally {
           publicationPhase(options, refreshed, 'markDraining', 'exit');
         }
@@ -437,7 +437,7 @@ export async function runPublication(
           : 'old generation drained with exact exit proof after master recovery',
         old_workers_exited: true, recovery_disposition: 'retryable' };
     throwIfPublicationCancelled(options.signal, admissionCommitMayHaveBeenSent);
-    const operation = options.repository.finalizePublication(
+    const operation = await options.repository.finalizePublication(
       refreshed.operation.mutation_id, outcome, options.clock.now(),
     );
     return failuresDuringDrain.length === 0 && !drainedAfterRecoveryFence

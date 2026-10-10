@@ -1,5 +1,8 @@
 export { parseNormalizeCompileAggregate } from './aggregate';
 export { ConfigRepository } from './config-repository';
+export { AsyncConfigRepository } from './async-config-repository';
+export type { AsyncConfigRepositoryOptions } from './async-config-repository';
+export { ConfigurationStorageResultUnknownError } from './storage-protocol';
 export { withConsistentRead } from './consistent-read';
 export { canonicalJson, ConfigurationHashError, hashConfigurationContent, hashConfigurationRequest } from './content-hash';
 export { parseNormalizeCompile } from './compiler';

@@ -7,6 +7,7 @@ import { requireSafeInteger } from './persisted-validation';
 import { ConfigRepositoryError } from './repository-types';
 import { validateDigest } from './repository-validation';
 import { sqliteAll } from './sqlite-query';
+import { validateOperationRelations } from './operation-relations';
 
 type StateRow = {
   readonly id: number; readonly active_revision: number; readonly schema_version: number;
@@ -81,58 +82,7 @@ export function auditConfigurationTables(db: Database): AuditedConfigurationStat
   }
   for (const operation of operations) {
     const workers = workersByMutation.get(operation.mutation_id) ?? [];
-    if (workers.length !== operation.target_worker_count) {
-      throw new ConfigRepositoryError('schema_corrupt', 'operation target cardinality is incoherent');
-    }
-    if (workers.some(({ drain_recovery_generation }) =>
-      drain_recovery_generation !== operation.drain_recovery_generation)) {
-      throw new ConfigRepositoryError('schema_corrupt', 'operation recovery generation is incoherent');
-    }
-    if (operation.state === 'committed' && workers.some(({ state: workerState, attempt_no }) =>
-      workerState !== 'pending' || attempt_no !== 0)) {
-      throw new ConfigRepositoryError('schema_corrupt', 'committed operation has terminal worker state');
-    }
-    if (operation.state === 'draining' &&
-        workers.some(({ state: workerState, attempt_no }) => workerState !== 'converged' || attempt_no === 0)) {
-      const invalidRecovery = workers.some(({ state: workerState, attempt_no, last_begin_reason }) =>
-        attempt_no === 0 || (workerState !== 'converged' &&
-          last_begin_reason !== 'master_recovery' && last_begin_reason !== 'retry'));
-      if (invalidRecovery) {
-        throw new ConfigRepositoryError('schema_corrupt', 'draining operation targets are incoherent');
-      }
-    }
-    if (operation.state === 'draining' && operation.drain_recovery_generation > 0 &&
-        workers.some(({ last_begin_reason }) =>
-          last_begin_reason !== 'master_recovery' && last_begin_reason !== 'retry')) {
-      throw new ConfigRepositoryError('schema_corrupt', 'draining recovery targets are not fully fenced');
-    }
-    if (operation.state === 'draining' && operation.drain_recovery_generation === 0 &&
-        workers.some(({ state: workerState }) => workerState !== 'converged')) {
-      throw new ConfigRepositoryError('schema_corrupt', 'unfenced draining operation has active recovery targets');
-    }
-    if (operation.state === 'converged' &&
-        workers.some(({ state: workerState }) => workerState !== 'converged')) {
-      throw new ConfigRepositoryError('schema_corrupt', 'converged operation targets are incoherent');
-    }
-    if (operation.state === 'degraded') {
-      if (operation.error_code === 'replacement_convergence_failed' &&
-          (workers.some(({ state: workerState }) => workerState === 'pending') ||
-           !workers.some(({ state: workerState }) => workerState === 'failed'))) {
-        throw new ConfigRepositoryError('schema_corrupt', 'replacement failure targets are incoherent');
-      }
-      if (operation.error_code === 'old_worker_drain_failed' &&
-          workers.some(({ state: workerState, attempt_no }) => workerState !== 'converged' || attempt_no === 0)) {
-        throw new ConfigRepositoryError('schema_corrupt', 'drain failure targets are incoherent');
-      }
-      if (operation.drain_recovery_generation > 0 && operation.error_code !== 'old_worker_drain_failed'
-          && operation.error_code !== 'control_readiness_failed') {
-        throw new ConfigRepositoryError('schema_corrupt', 'drain recovery terminal result is incoherent');
-      }
-      if (operation.drain_recovery_generation > 0 && workers.some(({ last_begin_reason }) =>
-        last_begin_reason !== 'master_recovery' && last_begin_reason !== 'retry')) {
-        throw new ConfigRepositoryError('schema_corrupt', 'drain recovery terminal targets are not fully fenced');
-      }
-    }
+    validateOperationRelations(operation, workers);
     if (operation.committed_revision !== state.active_revision &&
         (operation.state === 'committed' || operation.state === 'publishing' || operation.state === 'draining')) {
       throw new ConfigRepositoryError('schema_corrupt', 'non-active operation is not terminal');

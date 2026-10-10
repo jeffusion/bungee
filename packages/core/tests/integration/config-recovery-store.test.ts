@@ -1,19 +1,11 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { rmSync, mkdtempSync } from 'node:fs';
+import { rmSync, mkdtempSync, writeFileSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
 import { ConfigRepository, ConfigRepositoryError, hashConfigurationContent, hashConfigurationRequest,
   type ConfigRepositoryOptions } from '../../src/config-storage';
-import { CONFIG_MIGRATION_V1 } from '../../src/config-storage/migrations/v1';
-import { CONFIG_MIGRATION_V2 } from '../../src/config-storage/migrations/v2';
-import { CONFIG_MIGRATION_V3 } from '../../src/config-storage/migrations/v3';
-import { CONFIG_MIGRATION_V4 } from '../../src/config-storage/migrations/v4';
-import { CONFIG_MIGRATION_V5 } from '../../src/config-storage/migrations/v5';
-import { CONFIG_MIGRATION_V6 } from '../../src/config-storage/migrations/v6';
-import { CONFIG_MIGRATION_V7 } from '../../src/config-storage/migrations/v7';
-import { CONFIG_MIGRATION_V8 } from '../../src/config-storage/migrations/v8';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 
 setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
@@ -76,6 +68,7 @@ type RaceMessage =
 type RaceChild = {
   readonly identity: string;
   readonly action: RaceAction;
+  readonly inputPath: string;
   readonly process: Bun.Subprocess<'pipe', 'pipe', 'pipe'>;
   readonly ready: Promise<RaceMessage>;
   readonly terminal: Promise<RaceMessage>;
@@ -87,6 +80,7 @@ type RaceChild = {
 const RACE_CHILD_WAIT_MS = 5_000;
 const RACE_CHILD = `
   const { ConfigRepository } = await import('./src/config-storage/index.ts');
+  const { readFile } = await import('node:fs/promises');
   const identity = process.env.BUNGEE_RACE_CHILD;
   const action = process.env.BUNGEE_RACE_ACTION;
   const dbPath = process.env.BUNGEE_RACE_DB;
@@ -177,28 +171,30 @@ const RACE_CHILD = `
     fail('open', error);
   }
   if (!protocolFailed) {
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', (chunk) => {
-      buffer += chunk;
-      let newline = buffer.indexOf('\\n');
-      while (newline >= 0) {
-        const line = buffer.slice(0, newline).trim();
-        buffer = buffer.slice(newline + 1);
-        if (line.length > 0) handleLine(line);
-        newline = buffer.indexOf('\\n');
-      }
-    });
-    process.stdin.on('end', () => {
-      if (buffer.trim().length > 0) fail('protocol', Object.assign(new Error('stdin ended with residual data'), { code: 'eof_with_buffer' }));
-      else if (!started) fail('protocol', Object.assign(new Error('stdin ended before start'), { code: 'eof_before_start' }));
-      else if (!terminal) fail('protocol', Object.assign(new Error('stdin ended before result'), { code: 'eof_before_result' }));
-      else repository?.close();
-    });
     emit({ phase: 'ready' });
     if (negative === 'terminal-before-start') {
       terminal = true;
       emit({ phase: 'result', result: { kind: 'committed', revision: 3 } });
     }
+    // File handshake avoids Bun's pipe flush EPERM while exercising real processes
+    // and the same framed-command / EOF parser, including all negative probes.
+    let input;
+    while (input === undefined) {
+      try { input = await readFile(process.env.BUNGEE_RACE_INPUT, 'utf8'); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; await new Promise(resolve => setTimeout(resolve, 2)); }
+    }
+    buffer = input;
+    let newline = buffer.indexOf('\\n');
+    while (newline >= 0) {
+      const line = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
+      if (line.length > 0) handleLine(line);
+      newline = buffer.indexOf('\\n');
+    }
+    if (buffer.trim().length > 0) fail('protocol', Object.assign(new Error('stdin ended with residual data'), { code: 'eof_with_buffer' }));
+    else if (!started) fail('protocol', Object.assign(new Error('stdin ended before start'), { code: 'eof_before_start' }));
+    else if (!terminal) fail('protocol', Object.assign(new Error('stdin ended before result'), { code: 'eof_before_result' }));
+    else repository?.close();
   }
 `;
 
@@ -328,11 +324,12 @@ function spawnRaceChild(
   dbPath: string, action: RaceAction, source: string, mutation: string, recoveryId: string, identity: string,
   negative?: RaceNegative,
 ): RaceChild {
+  const inputPath = join(dirname(dbPath), `${identity}.input`);
   const child = Bun.spawn([process.execPath, '-e', RACE_CHILD], {
     cwd: join(import.meta.dir, '../..'), stdout: 'pipe', stderr: 'pipe', stdin: 'pipe',
     env: { BUNGEE_RACE_DB: dbPath, BUNGEE_RACE_ACTION: action, BUNGEE_RACE_SOURCE: source,
       BUNGEE_RACE_MUTATION: mutation, BUNGEE_RACE_ID: recoveryId, BUNGEE_RACE_CHILD: identity,
-      BUNGEE_RACE_NEGATIVE: negative ?? '' },
+      BUNGEE_RACE_NEGATIVE: negative ?? '', BUNGEE_RACE_INPUT: inputPath },
   });
   const ready = deferred<RaceMessage>();
   const terminal = deferred<RaceMessage>();
@@ -364,7 +361,7 @@ function spawnRaceChild(
   void stderrDone.catch(() => undefined);
   void ready.promise.catch(() => undefined);
   void terminal.promise.catch(() => undefined);
-  return { identity, action, process: child, ready: ready.promise, terminal: terminal.promise, stdoutDone, stderrDone,
+  return { identity, action, inputPath, process: child, ready: ready.promise, terminal: terminal.promise, stdoutDone, stderrDone,
     markStartSent: () => { startSent = true; } };
 }
 
@@ -381,10 +378,14 @@ async function bounded<T>(promise: Promise<T>, label: string): Promise<T> {
 }
 
 async function sendRaceInput(child: RaceChild, input: string): Promise<void> {
-  child.process.stdin.write(input);
   child.markStartSent();
-  await bounded(Promise.resolve(child.process.stdin.flush()), `${child.identity} start send`);
+  publishRaceInput(child, input);
   child.process.stdin.end();
+}
+
+function publishRaceInput(child: RaceChild, input: string): void {
+  writeFileSync(`${child.inputPath}.pending`, input);
+  renameSync(`${child.inputPath}.pending`, child.inputPath);
 }
 
 async function sendRaceStart(child: RaceChild): Promise<void> {
@@ -470,6 +471,7 @@ async function expectNegativeRaceCase(negative: RaceNegative): Promise<void> {
     const startedAt = performance.now();
     let stdoutError: unknown;
     if (negative === 'terminal-before-start') {
+      publishRaceInput(child, '');
       child.process.stdin.end();
       stdoutError = await captureNegativeProtocolError(
         bounded(child.stdoutDone, `${child.identity} stdout close`), negative, 'Error', /terminal before start/, 'terminal_before_start',
@@ -522,44 +524,6 @@ async function captureNegativeProtocolError(
   expect(error.message).toMatch(message);
   if (code !== undefined) expect('code' in error ? error.code : undefined).toBe(code);
   return error;
-}
-
-function v8Fixture(errorCode: 'replacement_convergence_failed' | 'control_readiness_failed' | 'old_worker_drain_failed' | null): string {
-  const root = mkdtempSync(join(tmpdir(), 'bungee-recovery-v8-'));
-  ROOTS.push(root);
-  const dbPath = join(root, 'config.db');
-  const db = new Database(dbPath, { create: true, readwrite: true, strict: true });
-  db.transaction(() => {
-    CONFIG_MIGRATION_V1.up(db); CONFIG_MIGRATION_V2.up(db); CONFIG_MIGRATION_V3.up(db); CONFIG_MIGRATION_V4.up(db);
-    CONFIG_MIGRATION_V5.up(db); CONFIG_MIGRATION_V6.up(db); CONFIG_MIGRATION_V7.up(db); CONFIG_MIGRATION_V8.up(db);
-    db.run(`INSERT INTO configuration_revisions(revision,content_hash,kind,created_at)
-      VALUES (2,?,'config',10)`, [hashConfigurationContent(AGGREGATE)]);
-    const slots = errorCode === 'replacement_convergence_failed' || errorCode === 'old_worker_drain_failed' ? [0] : [];
-    const state = errorCode === null ? 'converged' : 'degraded';
-    const requestHash = hashConfigurationRequest({ kind: 'config', expected_revision: 1,
-      aggregate: AGGREGATE, target_worker_slots: slots });
-    db.run(`INSERT INTO configuration_operations
-      (mutation_id,request_hash,expected_revision,committed_revision,kind,target_worker_count,state,
-       result_status,error_code,error_detail,drain_recovery_generation,last_drain_recovery_previous_generation,created_at,updated_at)
-      VALUES ('v8-source',?,1,2,'config',?,?,?, ?,?,0,NULL,10,10)`, [
-      requestHash, slots.length, state, state === 'converged' ? 200 : 202,
-      errorCode, errorCode === null ? null : 'v8 failure',
-    ]);
-    if (errorCode === 'replacement_convergence_failed') {
-      db.run(`INSERT INTO configuration_operation_workers
-        (mutation_id,worker_slot,target_revision,drain_recovery_generation,attempt_no,last_begin_previous_attempt_no,
-         last_begin_reason,state,applied_revision,last_error,updated_at)
-        VALUES ('v8-source',0,2,0,1,0,'initial','failed',NULL,'v8 failure',10)`);
-    } else if (errorCode === 'old_worker_drain_failed') {
-      db.run(`INSERT INTO configuration_operation_workers
-        (mutation_id,worker_slot,target_revision,drain_recovery_generation,attempt_no,last_begin_previous_attempt_no,
-         last_begin_reason,state,applied_revision,last_error,updated_at)
-        VALUES ('v8-source',0,2,0,1,0,'initial','converged',2,NULL,10)`);
-    }
-    db.run('UPDATE configuration_state SET active_revision=2,updated_at=10 WHERE id=1');
-  }).immediate();
-  db.close(true);
-  return dbPath;
 }
 
 afterEach(() => {
@@ -697,7 +661,9 @@ describe('durable configuration recoveries', () => {
     ).get('33333333-3333-4333-8333-333333333333')?.recovery_sequence).toBe(2);
     expect(() => db.run('DELETE FROM configuration_recoveries WHERE recovery_id=?', [automaticId])).toThrow();
     db.run("UPDATE sqlite_sequence SET seq=99 WHERE name='configuration_recoveries'");
-    expectRecoveryError(() => repository.getSnapshot(), 'schema_corrupt');
+    // Cached reads never scan SQL; global sequence and historical drift belong to maintenance.
+    expect(repository.getSnapshot().revision).toBe(2);
+    expectRecoveryError(() => repository.verify(), 'schema_corrupt');
   });
 
   test('audits global creation time and sequence order after trigger-restored corruption', () => {
@@ -723,16 +689,17 @@ describe('durable configuration recoveries', () => {
         VALUES (NULL,?,'sequence-order-source',2,'manual','stopped',0,6,'deterministic_worker_rejection','stopped',?,?)`,
       [id, createdAt, createdAt]);
     }
+    const sequenceGuard = db.query<{ sql: string }, []>(`SELECT sql FROM sqlite_schema
+      WHERE name='configuration_recoveries_sequence_update_guard'`).get()?.sql;
+    if (!sequenceGuard) throw new Error('sequence update guard missing');
     db.run('DROP TRIGGER configuration_recoveries_sequence_update_guard');
     db.run('UPDATE configuration_recoveries SET recovery_sequence=99 WHERE recovery_sequence=1');
     db.run('UPDATE configuration_recoveries SET recovery_sequence=1 WHERE recovery_sequence=2');
     db.run('UPDATE configuration_recoveries SET recovery_sequence=2 WHERE recovery_sequence=99');
-    db.run(`CREATE TRIGGER configuration_recoveries_sequence_update_guard
-      BEFORE UPDATE OF recovery_sequence ON configuration_recoveries
-      BEGIN
-        SELECT RAISE(ABORT,'recovery sequence is immutable');
-      END`);
-    expectRecoveryError(() => repository.getSnapshot(), 'schema_corrupt');
+    db.run(sequenceGuard);
+    // Cached reads never scan SQL; global sequence and historical drift belong to maintenance.
+    expect(repository.getSnapshot().revision).toBe(2);
+    expectRecoveryError(() => repository.verify(), 'schema_corrupt');
   });
 
   test('uses an independent canonical UUID when the mutation ID is already a UUID', () => {
@@ -790,10 +757,17 @@ describe('durable configuration recoveries', () => {
       } else {
         expect(winner).toMatchObject({ revision: 3 });
         expect(loser).toMatchObject({ action: 'manual', code: 'stale_revision' });
-        expect(repository.getSnapshot().revision).toBe(3);
-        expect(repository.getOperation(mutation)).toMatchObject({ mutation_id: mutation, committed_revision: 3 });
-        expect(repository.getRecovery(recoveryId)).toBeNull();
-        expect(activeRecoveryCount(repository)).toBe(0);
+        // This fixture deliberately permits independent processes; the master normally owns
+        // the configuration lock. Its cache stays at the last locally confirmed revision.
+        expect(repository.getSnapshot().revision).toBe(2);
+        repository.close();
+        REPOSITORIES.splice(REPOSITORIES.indexOf(repository), 1);
+        const restarted = ConfigRepository.open(dbPath);
+        REPOSITORIES.push(restarted);
+        expect(restarted.getSnapshot().revision).toBe(3);
+        expect(restarted.getOperation(mutation)).toMatchObject({ mutation_id: mutation, committed_revision: 3 });
+        expect(restarted.getRecovery(recoveryId)).toBeNull();
+        expect(activeRecoveryCount(restarted)).toBe(0);
       }
     }
   }, { timeout: 90_000 });
@@ -923,7 +897,9 @@ describe('durable configuration recoveries', () => {
        last_begin_reason,state,applied_revision,last_error,updated_at)
       VALUES ('drift-target',0,3,0,1,0,'initial','converged',3,NULL,${NOW + 10})`);
     db.run('UPDATE configuration_state SET active_revision=3,updated_at=? WHERE id=1', [NOW + 10]);
-    expectRecoveryError(() => repository.getSnapshot(), 'schema_corrupt');
+    // Cached reads never scan SQL; global sequence and historical drift belong to maintenance.
+    expect(repository.getSnapshot().revision).toBe(2);
+    expectRecoveryError(() => repository.verify(), 'schema_corrupt');
     expectRecoveryError(() => repository.claimRecoveryAttempt(manualId, 0, NOW + 11), 'stale_revision');
     const stopped = repository.stopRecovery(manualId, 0, 'revision_superseded', null, NOW + 12);
     expect(stopped).toMatchObject({
@@ -982,43 +958,5 @@ describe('durable configuration recoveries', () => {
     expect(repository.stopRecovery(id, 6, 'retry_exhausted', null, NOW + 31)).toMatchObject({
       state: 'stopped', attempt_count: 6, final_reason_code: 'retry_exhausted',
     });
-  });
-
-  test('backfills only active replacement/control degraded v8 operations with independent UUIDs', () => {
-    for (const errorCode of ['replacement_convergence_failed', 'control_readiness_failed', 'old_worker_drain_failed', null] as const) {
-      const dbPath = v8Fixture(errorCode);
-      const beforeDb = new Database(dbPath, { create: false, readwrite: false, strict: true });
-      const beforeOperation = beforeDb.query<Record<string, unknown>, []>(
-        'SELECT * FROM configuration_operations',
-      ).get();
-      beforeDb.close(true);
-      const repository = ConfigRepository.open(dbPath);
-      REPOSITORIES.push(repository);
-      const afterOperation = repository['db'].query<Record<string, unknown>, []>(
-        'SELECT * FROM configuration_operations',
-      ).get();
-      expect(afterOperation).toEqual(beforeOperation);
-      const recovery = repository['db'].query<{ readonly recovery_id: string; readonly source_mutation_id: string; readonly next_retry_at: number | null }, []>(
-        'SELECT recovery_id,source_mutation_id,next_retry_at FROM configuration_recoveries',
-      ).get();
-      if (errorCode === null || errorCode === 'old_worker_drain_failed') {
-        expect(recovery).toBeNull();
-      } else {
-        expect(recovery).toMatchObject({ source_mutation_id: 'v8-source' });
-        expect(recovery?.next_retry_at).toBe(260);
-        expect(recovery?.recovery_id).not.toBe('v8-source');
-        expect(recovery?.recovery_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-        repository.close();
-        REPOSITORIES.splice(REPOSITORIES.indexOf(repository), 1);
-        const reopened = ConfigRepository.open(dbPath);
-        REPOSITORIES.push(reopened);
-        expect(reopened['db'].query<{ readonly count: number }, []>(
-          'SELECT count(*) AS count FROM configuration_recoveries',
-        ).get()?.count).toBe(1);
-        expect(reopened['db'].query<{ readonly recovery_id: string }, []>(
-          'SELECT recovery_id FROM configuration_recoveries',
-        ).get()?.recovery_id).toBe(recovery?.recovery_id);
-      }
-    }
   });
 });

@@ -1,3 +1,4 @@
+import { configurationRepositoryFixture } from '../helpers/config-repository';
 import { createManagementAuthFixture } from '../helpers/management-auth';
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -98,7 +99,7 @@ function fixture(
   publicationManagers.push(publicationTasks);
   const credential = createManagementAuthFixture(() => repository.getSnapshot().aggregate, {provider:useProvider});
   credentials.push(credential); TOKEN = credential.current.token; NEXT_TOKEN = credential.next.token;
-  const apiOptions = { managementAuth: credential.managementAuth, repository, admission, workerCount,
+  const apiOptions = { managementAuth: credential.managementAuth, repository: configurationRepositoryFixture(repository), admission, workerCount,
     clock: { now: monotonicNow }, resolveAuthToken,
     parseAggregate: parseNormalizeCompileAggregate, publicationTasks, isMutationReady, pluginControlPreflight,
     statsApi: {

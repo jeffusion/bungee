@@ -14,7 +14,7 @@ import {
   markDraining as markOperationDraining,
   recordWorkerResult as recordOperationWorkerResult,
 } from './operation-store';
-import { readAllOperations, readOperationWorkers } from './operation-records';
+import { OPERATION_SELECT, operationFromRow, type OperationRow, readOperationWorkers } from './operation-records';
 import { prepareCommitCommand } from './prepared-command';
 import { readRepositorySnapshot, verifyRepositoryIntegrity } from './repository-snapshot';
 import { appendServingSnapshot, getServingSnapshot } from './serving-snapshot';
@@ -56,6 +56,11 @@ import type { ControllerClaimCapability } from '../master-runtime/instance-lock'
 import { consumeControllerClaimCapability } from '../master-runtime/instance-lock';
 import { withConsistentRead } from './consistent-read';
 import { isSqliteBusyError, repositoryFailure } from './sqlite-errors';
+import { freezeSnapshot } from './immutable-snapshot';
+import type { PreparedCommitCommand } from './prepared-command';
+import { readActiveRevision } from './current-revision';
+import { validateOperationRelations, validateActiveOperationIdentity } from './operation-relations';
+import { readSchemaObjectFingerprint } from './schema-fingerprint';
 function configureConnection(db: Database): void {
   const encoding = sqliteGet<{ readonly encoding: string }, []>(db, 'PRAGMA encoding')?.encoding;
   if (encoding !== 'UTF-8') {
@@ -85,21 +90,26 @@ function runRepositoryAction<Result>(action: () => Result): Result {
 }
 
 export class ConfigRepository {
+  private readonly schemaObjects: string;
   private constructor(
     private readonly db: Database,
     private readonly options: ConfigRepositoryOptions,
+    private snapshot: RepositorySnapshot,
     private readonly supervision = new SupervisionStateRepository(db),
-  ) {}
+  ) {
+    this.schemaObjects = readSchemaObjectFingerprint(db);
+  }
 
-  /** Opens a repository connection safe to use alongside other repository connections. */
+  /** Synchronous backend for the exclusive storage executor and stopped-instance tools. */
   static open(dbPath: string, options: ConfigRepositoryOptions = {}): ConfigRepository {
     let db: Database | undefined;
     try {
       mkdirSync(dirname(dbPath), { recursive: true });
       db = new Database(dbPath, { create: true, readwrite: true, strict: true });
       configureConnection(db);
-      migrateConfigurationDatabase(db, options.workerCount, options.faultInjection);
-      const repository = new ConfigRepository(db, options);
+      migrateConfigurationDatabase(db);
+      verifyRepositoryIntegrity(db);
+      const repository = new ConfigRepository(db, options, freezeSnapshot(readRepositorySnapshot(db)));
       repository.getSnapshot();
       repository.getSupervisionState();
       return repository;
@@ -115,19 +125,19 @@ export class ConfigRepository {
     this.db.close(true);
   }
 
-  /** Host-owned extensions may share the already configured connection. */
+  /** Offline tools only. Production extensions own a separate storage connection. */
   getDatabase(): Database {
     return this.db;
   }
 
   getSnapshot(): RepositorySnapshot {
-    return readRepositorySnapshot(this.db);
+    return this.snapshot;
   }
 
   appendServingSnapshot(snapshot: RepositorySnapshot, pluginCatalogHash: Sha256Digest): void {
-    return runRepositoryAction(() => appendServingSnapshot(
+    return runRepositoryAction(() => this.mutationTransaction(() => appendServingSnapshot(
       this.db, snapshot, pluginCatalogHash,
-    ));
+    )));
   }
 
   getServingSnapshot(key: ServingSnapshotKey): RepositorySnapshot | null {
@@ -144,29 +154,29 @@ export class ConfigRepository {
     updatedAt: number,
   ): SupervisionState {
     return runRepositoryAction(() => consumeControllerClaimCapability(
-      capability, () => this.supervision.claim(controllerId, updatedAt),
+      capability, () => this.mutationTransaction(() => this.supervision.claim(controllerId, updatedAt)),
     ));
   }
 
   getActivePublication(): ActiveConfigurationPublication | null {
-    return runRepositoryAction(() => withConsistentRead(this.db, () => readActivePublication(this.db)));
+    return runRepositoryAction(() => withConsistentRead(this.db, () => readActivePublication(this.db, this.snapshot)));
   }
 
   commit(command: CommitConfigurationCommandV1): CommitConfigurationResult {
-    const prepared = prepareCommitCommand(command, this.options.compileOptions);
+    return this.commitPrepared(prepareCommitCommand(command, this.options.compileOptions));
+  }
+
+  /** Executes a main-thread compiled command in the exclusive storage thread. */
+  commitPrepared(prepared: PreparedCommitCommand): CommitConfigurationResult {
     try {
-      const decide = this.db.transaction(() => commitTransaction(this.db, prepared, this.options));
-      const decision = decide.immediate();
+      const decision = this.mutationTransaction(() => commitTransaction(this.db, prepared, this.options, this.snapshot));
       if (decision.kind === 'committed') {
-        return {
-          kind: 'committed',
-          snapshot: {
-            revision: decision.operation.committed_revision,
-            content_hash: prepared.contentHash,
-            aggregate: prepared.aggregate,
-          },
-          operation: decision.operation,
-        };
+        this.snapshot = freezeSnapshot({
+          revision: decision.operation.committed_revision,
+          content_hash: prepared.contentHash,
+          aggregate: prepared.aggregate,
+        });
+        return { kind: 'committed', snapshot: this.snapshot, operation: decision.operation };
       }
       return decision;
     } catch (error) {
@@ -178,33 +188,30 @@ export class ConfigRepository {
 
   getOperation(mutationId: string): ConfigurationOperation | null {
     return runRepositoryAction(() => withConsistentRead(this.db, () => {
-      readRepositorySnapshot(this.db);
       return readOperation(this.db, mutationId);
     }));
   }
 
   getOperationState(mutationId: string): ConfigurationOperationState | null {
     return runRepositoryAction(() => withConsistentRead(this.db, () => {
-      readRepositorySnapshot(this.db);
       const operation = readOperation(this.db, mutationId);
-      return operation === null ? null : {
-        operation,
-        workers: readOperationWorkers(this.db, mutationId),
-      };
+      if (operation === null) return null;
+      const workers = readOperationWorkers(this.db, mutationId);
+      validateOperationRelations(operation, workers);
+      return { operation, workers };
     }));
   }
 
   getRecovery(recoveryId: string): ConfigurationRecovery | null {
     return runRepositoryAction(() => withConsistentRead(this.db, () => {
-      readRepositorySnapshot(this.db);
       return readRecovery(this.db, recoveryId);
     }));
   }
 
   getCurrentRecovery(): ConfigurationRecovery | null {
     return runRepositoryAction(() => withConsistentRead(this.db, () => {
-      const snapshot = readRepositorySnapshot(this.db);
-      return readCurrentRecovery(this.db, snapshot.revision);
+      const revision = readActiveRevision(this.db);
+      return readCurrentRecovery(this.db, revision);
     }));
   }
 
@@ -213,7 +220,6 @@ export class ConfigRepository {
       if (!Number.isSafeInteger(targetRevision) || targetRevision <= 0) {
         throw new ConfigRepositoryError('invalid_operation', 'recovery target revision is invalid');
       }
-      readRepositorySnapshot(this.db);
       return readLatestRecovery(this.db, targetRevision);
     }));
   }
@@ -221,88 +227,72 @@ export class ConfigRepository {
   createManualRecovery(
     recoveryId: string, sourceMutationId: string, expectedRevision: number, now: number,
   ): ConfigurationRecovery {
-    return runRepositoryAction(() => this.db.transaction(() => {
-      readRepositorySnapshot(this.db);
+    return runRepositoryAction(() => this.mutationTransaction(() => {
       const recovery = createManualRecovery(this.db, recoveryId, sourceMutationId, expectedRevision, now);
-      verifyRepositoryIntegrity(this.db);
       return recovery;
-    }).immediate());
+    }));
   }
 
   claimRecoveryAttempt(recoveryId: string, previousAttemptCount: number, now: number): ConfigurationRecovery {
-    return runRepositoryAction(() => this.db.transaction(() => {
-      readRepositorySnapshot(this.db, true);
+    return runRepositoryAction(() => this.mutationTransaction(() => {
       const recovery = claimRecoveryAttempt(this.db, recoveryId, previousAttemptCount, now);
-      verifyRepositoryIntegrity(this.db);
       return recovery;
-    }).immediate());
+    }));
   }
 
   scheduleRecoveryRetry(
     recoveryId: string, attemptCount: number, nextRetryAt: number, now: number,
   ): ConfigurationRecovery {
-    return runRepositoryAction(() => this.db.transaction(() => {
-      readRepositorySnapshot(this.db, true);
+    return runRepositoryAction(() => this.mutationTransaction(() => {
       const recovery = scheduleRecoveryRetry(this.db, recoveryId, attemptCount, nextRetryAt, now);
-      verifyRepositoryIntegrity(this.db);
       return recovery;
-    }).immediate());
+    }));
   }
 
   succeedRecovery(
     recoveryId: string, attemptCount: number, reasonCode: ConfigurationRecoveryReasonCode,
     reasonDetail: string | null, now: number,
   ): ConfigurationRecovery {
-    return runRepositoryAction(() => this.db.transaction(() => {
-      readRepositorySnapshot(this.db, true);
+    return runRepositoryAction(() => this.mutationTransaction(() => {
       const recovery = succeedRecovery(this.db, recoveryId, attemptCount, reasonCode, reasonDetail, now);
-      verifyRepositoryIntegrity(this.db);
       return recovery;
-    }).immediate());
+    }));
   }
 
   stopRecovery(
     recoveryId: string, attemptCount: number, reasonCode: ConfigurationRecoveryReasonCode,
     reasonDetail: string | null, now: number,
   ): ConfigurationRecovery {
-    return runRepositoryAction(() => this.db.transaction(() => {
-      readRepositorySnapshot(this.db, reasonCode === 'revision_superseded');
+    return runRepositoryAction(() => this.mutationTransaction(() => {
       const recovery = stopRecovery(this.db, recoveryId, attemptCount, reasonCode, reasonDetail, now);
-      verifyRepositoryIntegrity(this.db);
       return recovery;
-    }).immediate());
+    }));
   }
 
   requeueRecovery(recoveryId: string, attemptCount: number, now: number): ConfigurationRecovery {
-    return runRepositoryAction(() => this.db.transaction(() => {
-      readRepositorySnapshot(this.db, true);
+    return runRepositoryAction(() => this.mutationTransaction(() => {
       const recovery = requeueRecovery(this.db, recoveryId, attemptCount, now);
-      verifyRepositoryIntegrity(this.db);
       return recovery;
-    }).immediate());
+    }));
   }
 
   getCurrentOperationState(): ConfigurationOperationState | null {
     return runRepositoryAction(() => withConsistentRead(this.db, () => {
-      const snapshot = readRepositorySnapshot(this.db);
-      const operation = readAllOperations(this.db).find(
-        ({ committed_revision }) => committed_revision === snapshot.revision,
-      );
-      return operation === undefined ? null : {
-        operation,
-        workers: readOperationWorkers(this.db, operation.mutation_id),
-      };
+      const revision = readActiveRevision(this.db);
+      const row = sqliteGet<OperationRow, [number]>(this.db, `${OPERATION_SELECT} WHERE committed_revision=?`, revision);
+      const operation = row === null ? null : operationFromRow(row);
+      if (operation === null) return null;
+      const workers = readOperationWorkers(this.db, operation.mutation_id);
+      validateOperationRelations(operation, workers);
+      return { operation, workers };
     }));
   }
 
   beginPublication(mutationId: string, updatedAt: number): ConfigurationOperation {
-    return runRepositoryAction(() => this.db.transaction(() => {
-      const snapshot = readRepositorySnapshot(this.db);
-      this.requireActiveOperation(mutationId, snapshot.revision);
+    return runRepositoryAction(() => this.publicationTransaction(mutationId, () => {
       const operation = beginOperationPublication(this.db, mutationId, updatedAt);
-      verifyRepositoryIntegrity(this.db);
       return operation;
-    }).immediate());
+    }));
   }
 
   beginWorkerAttempt(
@@ -312,15 +302,12 @@ export class ConfigRepository {
     reason: WorkerAttemptReason,
     updatedAt: number,
   ): ConfigurationOperationWorker {
-    return runRepositoryAction(() => this.db.transaction(() => {
-      const snapshot = readRepositorySnapshot(this.db);
-      this.requireActiveOperation(mutationId, snapshot.revision);
+    return runRepositoryAction(() => this.publicationTransaction(mutationId, () => {
       const worker = beginOperationWorkerAttempt(
         this.db, mutationId, workerSlot, previousAttemptNo, reason, updatedAt,
       );
-      verifyRepositoryIntegrity(this.db);
       return worker;
-    }).immediate());
+    }));
   }
 
   beginDrainingRecovery(
@@ -328,13 +315,10 @@ export class ConfigRepository {
     previousGeneration: number,
     updatedAt: number,
   ): ConfigurationOperation {
-    return runRepositoryAction(() => this.db.transaction(() => {
-      const snapshot = readRepositorySnapshot(this.db);
-      this.requireActiveOperation(mutationId, snapshot.revision);
+    return runRepositoryAction(() => this.publicationTransaction(mutationId, () => {
       const operation = beginOperationDrainingRecovery(this.db, mutationId, previousGeneration, updatedAt);
-      verifyRepositoryIntegrity(this.db);
       return operation;
-    }).immediate());
+    }));
   }
 
   recordWorkerResult(
@@ -343,13 +327,10 @@ export class ConfigRepository {
     result: WorkerPublicationResult,
     updatedAt: number,
   ): ConfigurationOperationWorker {
-    return runRepositoryAction(() => this.db.transaction(() => {
-      const snapshot = readRepositorySnapshot(this.db);
-      this.requireActiveOperation(mutationId, snapshot.revision);
+    return runRepositoryAction(() => this.publicationTransaction(mutationId, () => {
       const worker = recordOperationWorkerResult(this.db, mutationId, workerSlot, result, updatedAt);
-      verifyRepositoryIntegrity(this.db);
       return worker;
-    }).immediate());
+    }));
   }
 
   finalizePublication(
@@ -357,9 +338,7 @@ export class ConfigRepository {
     outcome: FinalizePublicationOutcome,
     updatedAt: number,
   ): ConfigurationOperation {
-    return runRepositoryAction(() => this.db.transaction(() => {
-      const snapshot = readRepositorySnapshot(this.db);
-      this.requireActiveOperation(mutationId, snapshot.revision);
+    return runRepositoryAction(() => this.publicationTransaction(mutationId, () => {
       const before = readOperation(this.db, mutationId);
       if (before === null) throw new ConfigRepositoryError('invalid_operation', 'configuration operation was not found');
       const operation = finalizeOperationPublication(this.db, mutationId, outcome, updatedAt);
@@ -385,19 +364,45 @@ export class ConfigRepository {
           }
         }
       }
-      verifyRepositoryIntegrity(this.db);
       return operation;
-    }).immediate());
+    }));
   }
 
   markDraining(mutationId: string, updatedAt: number): ConfigurationOperation {
-    return runRepositoryAction(() => this.db.transaction(() => {
-      const snapshot = readRepositorySnapshot(this.db);
-      this.requireActiveOperation(mutationId, snapshot.revision);
+    return runRepositoryAction(() => this.publicationTransaction(mutationId, () => {
       const operation = markOperationDraining(this.db, mutationId, updatedAt);
-      verifyRepositoryIntegrity(this.db);
       return operation;
-    }).immediate());
+    }));
+  }
+
+  /** Startup/explicit verification may audit the complete repository. */
+  verify(): void {
+    verifyRepositoryIntegrity(this.db);
+    readRepositorySnapshot(this.db);
+  }
+
+  /** Internal execution endpoint. The client consumes the lock capability before IPC. */
+  claimController(controllerId: string, updatedAt: number): SupervisionState {
+    return runRepositoryAction(() => this.mutationTransaction(() => this.supervision.claim(controllerId, updatedAt)));
+  }
+
+  private publicationTransaction<Result>(mutationId: string, action: () => Result): Result {
+    return this.mutationTransaction(() => {
+      const revision = readActiveRevision(this.db);
+      this.requireActiveOperation(mutationId, revision);
+      const result = action();
+      this.requireActiveOperation(mutationId, revision);
+      return result;
+    });
+  }
+
+  private mutationTransaction<Result>(action: () => Result): Result {
+    return this.db.transaction(() => {
+      if (readSchemaObjectFingerprint(this.db) !== this.schemaObjects) {
+        throw new ConfigRepositoryError('schema_corrupt', 'configuration schema objects changed before mutation');
+      }
+      return action();
+    }).immediate();
   }
 
   private requireActiveOperation(mutationId: string, activeRevision: number): void {
@@ -405,6 +410,7 @@ export class ConfigRepository {
     if (operation === null || operation.committed_revision !== activeRevision) {
       throw new ConfigRepositoryError('invalid_operation', 'only the active revision operation may publish');
     }
+    validateActiveOperationIdentity(this.db, operation, readOperationWorkers(this.db, mutationId), this.snapshot);
   }
 
 }

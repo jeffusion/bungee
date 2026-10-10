@@ -258,3 +258,14 @@ export function resolveWorkerLaunch(input: WorkerLaunchInput): WorkerLaunch {
     args: Object.freeze([input.entry]),
   });
 }
+
+/** Source entries preserve their directories; bundles carry explicit sibling artifacts. */
+export function resolveStorageWorkerUrls(moduleUrl: string | URL): {
+  configuration: URL; pluginState: URL;
+} {
+  const url = new URL(moduleUrl);
+  const source = url.pathname.endsWith('.ts') && !url.pathname.includes('/$bunfs/');
+  return source
+    ? { configuration: new URL(url.pathname.includes('/master-runtime/') ? '../config-storage/storage-worker.ts' : './config-storage/storage-worker.ts', url), pluginState: new URL(url.pathname.includes('/master-runtime/') ? '../plugin-state/worker.ts' : './plugin-state/worker.ts', url) }
+    : { configuration: new URL('./config-storage-worker.js', url), pluginState: new URL('./plugin-state-worker.js', url) };
+}

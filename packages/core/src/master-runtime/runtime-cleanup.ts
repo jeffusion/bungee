@@ -27,6 +27,7 @@ async function cleanupMasterRuntimeLifecycle(
 ): Promise<readonly unknown[]> {
   const errors: unknown[] = [];
   let alwaysClosed = true;
+  let repositoryClosed = true;
   let backgroundStopped = true;
   let listenerStopped = true;
   let controlListenerStopped = true;
@@ -119,11 +120,16 @@ async function cleanupMasterRuntimeLifecycle(
         ? error : new MasterRuntimeError('cleanup_failed', 'master always-close resource cleanup failed', error));
     }
   }
-    await capture('repository', () => options.repository.close());
-    if (alwaysClosed && backgroundStopped && listenerStopped && controlListenerStopped && startupIngressCleaned && startupWorkersCleaned && startupDispositionKnown) await capture('instance_lock', () => options.instanceLock.release());
+    await capture('repository', async () => {
+      try { await options.repository.close(); }
+      catch (error) { repositoryClosed = false; throw error; }
+    });
+    if (repositoryClosed && alwaysClosed && backgroundStopped && listenerStopped && controlListenerStopped && startupIngressCleaned && startupWorkersCleaned && startupDispositionKnown) await capture('instance_lock', () => options.instanceLock.release());
     else errors.push(new MasterRuntimeError(
       'cleanup_failed',
-      !backgroundStopped
+      !repositoryClosed
+        ? 'configuration storage did not close; instance lock retained'
+        : !backgroundStopped
         ? 'master background cleanup did not stop; instance lock retained'
         : !alwaysClosed
         ? 'master always-close resource did not close; instance lock retained'
@@ -200,13 +206,18 @@ async function cleanupMasterRuntimeLifecycle(
         ? error : new MasterRuntimeError('cleanup_failed', 'master always-close resource cleanup failed', error));
     }
   }
-  await capture('repository', () => options.repository.close());
+  await capture('repository', async () => {
+    try { await options.repository.close(); }
+    catch (error) { repositoryClosed = false; throw error; }
+  });
 
-   if (exitsConfirmed && alwaysClosed && backgroundStopped && listenerStopped && controlListenerStopped) await capture('instance_lock', () => options.instanceLock.release());
+   if (repositoryClosed && exitsConfirmed && alwaysClosed && backgroundStopped && listenerStopped && controlListenerStopped) await capture('instance_lock', () => options.instanceLock.release());
   else errors.push(exitsConfirmed
     ? new MasterRuntimeError(
       'cleanup_failed',
-      !backgroundStopped
+      !repositoryClosed
+        ? 'configuration storage did not close; instance lock retained'
+        : !backgroundStopped
         ? 'master background cleanup did not stop; instance lock retained'
         : !alwaysClosed
          ? 'master always-close resource did not close; instance lock retained'

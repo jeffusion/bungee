@@ -1,10 +1,12 @@
-import { basename, dirname, resolve } from 'node:path';
-import { ConfigRepository } from '../config-storage';
-import { PluginDurableStateStore } from '../plugin-durable-state';
+import { basename, dirname, resolve, join } from 'node:path';
+import { AsyncConfigRepository } from '../config-storage/async-config-repository';
+import { PluginStateClient } from '../plugin-state/client';
+import { parsePluginSecretsKey } from '../plugin-control/host';
+import { resolveStorageWorkerUrls } from './process-options';
 import { buildPluginManifestCatalog } from '../plugin-manifest-catalog';
 import { PluginPathResolver } from '../plugin-path-resolver';
 import { loadImmutableControlArtifact } from '../plugin-control/artifact-loader';
-import { acquireStoppedInstanceLock } from './stopped-instance-lock';
+import { withOfflineStorageSession } from './offline-storage-session';
 
 /** Local stopped-instance operation. No HTTP route and no raw database plugin capability. */
 export async function recoverOffline(configDbPath: string, input: unknown): Promise<unknown> {
@@ -14,12 +16,12 @@ export async function recoverOffline(configDbPath: string, input: unknown): Prom
   const fields = ['kind', 'plugin', 'payload'];
   if (Object.keys(b).some(k => !fields.includes(k))) throw new Error('invalid_recovery_input');
   const path = resolve(configDbPath);
-  const lock = await acquireStoppedInstanceLock(path);
-  try {
+  return withOfflineStorageSession(path, async session => {
+    const urls = resolveStorageWorkerUrls(import.meta.url);
+    const material = parsePluginSecretsKey(process.env.BUNGEE_PLUGIN_SECRETS_KEY);
     const baseDir = basename(import.meta.dir) === 'master-runtime' ? dirname(import.meta.dir) : import.meta.dir;
     const catalog = await buildPluginManifestCatalog({pathResolver: new PluginPathResolver(baseDir, process.cwd())});
-    const repository = ConfigRepository.open(path, {compileOptions: catalog.toCompileOptions()});
-    try {
+    const repository = await session.open(() => AsyncConfigRepository.open(path, {compileOptions: catalog.toCompileOptions(), workerUrl: urls.configuration}));
       const aggregate = repository.getSnapshot().aggregate;
       if (aggregate.plugin_activations.some(x => !catalog.has(x.plugin_name))) throw new Error('recovery_active_plugin_not_installed');
       const selected = aggregate.plugin_activations.filter(x => catalog.get(x.plugin_name)?.manifest.management);
@@ -31,9 +33,9 @@ export async function recoverOffline(configDbPath: string, input: unknown): Prom
       const module = await loadImmutableControlArtifact(record);
       const capability = module.offlineRecovery;
       if (!capability || capability.kind !== b.kind) throw new Error('offline_recovery_not_supported');
-      return await capability.recover(b.payload, {durableState: new PluginDurableStateStore(repository.getDatabase()).forNamespace(record.name)});
-    } finally { repository.close(); }
-  } finally { await lock.release(); }
+      const state = await session.open(() => PluginStateClient.open(join(dirname(path), 'plugin-state.db'), {workerUrl: urls.pluginState, material}));
+      return capability.recover(b.payload, {durableState: state.durableState(record.name)});
+  });
 }
 
 /** Bound input before parsing; secret values travel exclusively through stdin. */

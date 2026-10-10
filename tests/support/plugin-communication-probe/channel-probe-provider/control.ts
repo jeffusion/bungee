@@ -204,7 +204,7 @@ export function createControl(context: any) {
       path: '/state',
       methods: ['GET'],
       handler: 'state',
-      invoke: () => Response.json({
+      invoke: async () => Response.json({
         reports: state.reports,
         snapshotVersion: state.snapshotVersion,
         snapshotBumps: state.snapshotBumps,
@@ -236,7 +236,7 @@ export function createControl(context: any) {
         publishedAck: state.publishedAck,
         transientPublished: state.transientPublished,
         outboxCounter: state.outboxCounter,
-        outboxRecord: context.durableState.get('audit.counter'),
+        outboxRecord: await context.durableState.get('audit.counter'),
         outboxRollback: state.outboxRollback,
         gapFirst: state.gapFirst,
         gapLast: state.gapLast,
@@ -248,12 +248,9 @@ export function createControl(context: any) {
         const index = input?.index;
         if (!Number.isSafeInteger(index) || index < 0 || index >= CHANNEL_RELIABLE_EVENTS) return Response.json({ error: 'invalid_input' }, { status: 400 });
         try {
-          const sequence = await reliablePublisher.publishWithState({ topic: 'audit', index, at: input.changed === true ? 1 : 0 }, {
-            commandId: `audit-${index}`,
-            mutations: [{ key: 'audit.counter', expectedVersion: index, value: { value: index + 1 } }],
-          });
-          return Response.json({ sequence, record: context.durableState.get('audit.counter') });
-        } catch { return Response.json({ error: 'outbox_conflict', record: context.durableState.get('audit.counter') }, { status: 409 }); }
+          const sequence = await reliablePublisher.publishWithState({ topic: 'audit', index, at: input.changed === true ? 1 : 0 }, [{ key: 'audit.counter', expectedVersion: index, value: { value: index + 1 } }]);
+          return Response.json({ sequence, record: await context.durableState.get('audit.counter') });
+        } catch { return Response.json({ error: 'outbox_conflict', record: await context.durableState.get('audit.counter') }, { status: 409 }); }
       },
     }],
     rpc: [],
@@ -397,12 +394,13 @@ export function createControl(context: any) {
         const message = error instanceof Error ? error.message : String(error);
         if (state.snapshotPublishError === '') state.snapshotPublishError = message.slice(0, 200);
       };
-      const restoredSnapshot = snapshotStore?.current();
+      const restoredSnapshot = await snapshotStore?.current();
       if (restoredSnapshot) {
         state.snapshotVersion = restoredSnapshot.descriptor.version;
         state.snapshotStoreVersion = state.snapshotVersion;
+        await restoredSnapshot.release?.();
       } else {
-        try { snapshotStore?.publish(1, snapshotBytes(1)); state.snapshotStoreVersion = 1; } catch (error) { recordPublishError(error); }
+        try { await snapshotStore?.publish(1, snapshotBytes(1)); state.snapshotStoreVersion = 1; } catch (error) { recordPublishError(error); }
       }
       const memorySource = (version: number) => ({
         descriptor: descriptorOf(version, snapshotBytes(version)),
@@ -419,7 +417,9 @@ export function createControl(context: any) {
           catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             if (state.snapshotReadError === '') {
-              state.snapshotReadError = `v${version}@${offset}+${length} cur=${snapshotStore.current()?.descriptor.version ?? 'null'}: ${message}`.slice(0, 240);
+              const current = await snapshotStore.current();
+              state.snapshotReadError = `v${version}@${offset}+${length} cur=${current?.descriptor.version ?? 'null'}: ${message}`.slice(0, 240);
+              await current?.release?.();
             }
             throw error;
           } finally {
@@ -432,8 +432,8 @@ export function createControl(context: any) {
       });
       context.services.snapshot.provide(CHANNEL_SNAPSHOT_CONTRACT, snapshotStore !== null
         ? {
-          current: () => guard(snapshotStore.current(), snapshotStore.current()?.descriptor.version ?? null),
-          version: (version: number) => guard(snapshotStore.version(version), version),
+          current: async () => { const source = await snapshotStore.current(); return guard(source, source?.descriptor.version ?? null); },
+          version: async (version: number) => guard(await snapshotStore.version(version), version),
         }
         : {
           current: () => memorySource(state.snapshotVersion),
@@ -462,13 +462,11 @@ export function createControl(context: any) {
       for (let index = 0; index < CHANNEL_RELIABLE_EVENTS; index += 1) {
         const next = index + 1;
         const payload = { topic: 'audit', index, at: 0 };
-        const plan = {
-          commandId: `audit-${index}`,
-          mutations: [{ key: 'audit.counter', expectedVersion: index, value: { value: next } }],
-        };
-        const sequence = await reliablePublisher.publishWithState(payload, plan);
-        if (await reliablePublisher.publishWithState(payload, plan) !== sequence) throw new Error('outbox retry changed its durable sequence');
-        state.outboxCounter = context.durableState.get('audit.counter')?.value.value ?? 0;
+        const mutations = [{ key: 'audit.counter', expectedVersion: index, value: { value: next } }];
+        await reliablePublisher.publishWithState(payload, mutations);
+        try { await reliablePublisher.publishWithState(payload, mutations); throw new Error('outbox retry accepted stale CAS'); }
+        catch (error) { if ((error as any)?.code !== 'durable_state_conflict') throw error; }
+        state.outboxCounter = (await context.durableState.get('audit.counter'))?.value.value ?? 0;
         state.publishedReliable += 1;
       }
       for (let index = 0; index < CHANNEL_ACK_EVENTS; index += 1) {
@@ -477,10 +475,7 @@ export function createControl(context: any) {
       }
       // A conflicting outbox command must roll the event row back with the state.
       try {
-        await reliablePublisher.publishWithState({ topic: 'audit', index: 99, at: Date.now() }, {
-          commandId: 'audit-conflict',
-          mutations: [{ key: 'audit.counter', expectedVersion: 0, value: { value: 9999 } }],
-        });
+        await reliablePublisher.publishWithState({ topic: 'audit', index: 99, at: Date.now() }, [{ key: 'audit.counter', expectedVersion: 0, value: { value: 9999 } }]);
       } catch {
         state.outboxRollback = true;
       }
@@ -489,13 +484,17 @@ export function createControl(context: any) {
       // a consumer always has a newer version to reconcile against (and the store's
       // bounded retention is exercised continuously).
       bumpTimer = setInterval(() => {
-        state.snapshotVersion += 1;
-        const startedAt = Date.now();
-        try { snapshotStore?.publish(state.snapshotVersion, snapshotBytes(state.snapshotVersion)); state.snapshotStoreVersion = state.snapshotVersion; } catch (error) { recordPublishError(error); }
-        const elapsed = Date.now() - startedAt;
-        state.snapshotPublishMs += elapsed;
-        if (elapsed > state.snapshotPublishMaxMs) state.snapshotPublishMaxMs = elapsed;
-        state.snapshotBumps += 1;
+        try {
+          context.services.runBackground(async () => {
+            state.snapshotVersion += 1;
+            const startedAt = Date.now();
+            try { await snapshotStore?.publish(state.snapshotVersion, snapshotBytes(state.snapshotVersion)); state.snapshotStoreVersion = state.snapshotVersion; } catch (error) { recordPublishError(error); }
+            const elapsed = Date.now() - startedAt;
+            state.snapshotPublishMs += elapsed;
+            if (elapsed > state.snapshotPublishMaxMs) state.snapshotPublishMaxMs = elapsed;
+            state.snapshotBumps += 1;
+          });
+        } catch (error) { recordPublishError(error); }
       }, 2_000);
       if (typeof bumpTimer?.unref === 'function') bumpTimer.unref();
 

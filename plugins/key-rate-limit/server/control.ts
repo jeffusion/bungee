@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import type { ControlHostContext, PluginControl } from '@jeffusion/bungee-core/plugin';
 import { validatePolicy } from './policy';
 
@@ -9,7 +8,9 @@ function json(value:unknown,status=200) {return new Response(JSON.stringify(valu
 export function createControl(host:PolicyControlHost):PluginControl {
   if(!host.durableState) throw new Error('key-rate-limit.durable_state_required');
   const state=host.durableState;let ready=false;
-  const policy=()=>{const r=state.get('policies');return {version:r?.version??0,value:r?.value??{byKey:{}}};};
+  let cached={version:0,value:{byKey:{}} as import('@jeffusion/bungee-core/plugin').DurableJson};
+  const policy=()=>cached;
+  const refresh=async()=>{const r=await state.get('policies');cached={version:r?.version??0,value:r?.value??{byKey:{}}};};
   return {policy,rpc:[],
     api:[{path:'/keys/:keyId',methods:['GET','PUT'],handler:'keyPolicy',async invoke(ctx){
       const keyId=decodeURIComponent(new URL(ctx.request.url).pathname.split('/').pop()??'');
@@ -21,16 +22,16 @@ export function createControl(host:PolicyControlHost):PluginControl {
         if(!host.validateKeyPolicyReferences)return json({error:'reference_validator_unavailable'},503);
         const value=validatePolicy(await ctx.request.json());
         if(!await host.validateKeyPolicyReferences(keyId,value))return json({error:'invalid_references'},422);
-        const old=state.get('policies');const byKey={...((old?.value as any)?.byKey??{}),[keyId]:value};state.execute({commandId:randomUUID(),mutations:[{key:'policies',expectedVersion:old?.version??0,value:{byKey}}]});
+        const old=await state.get('policies');const byKey={...((old?.value as any)?.byKey??{}),[keyId]:value};await state.transact([{key:'policies',expectedVersion:old?.version??0,value:{byKey}}]);await refresh();
         const next=policy();await host.publishPolicy?.(next);return json({keyId,version:next.version,value:(policy().value as any).byKey[keyId]??null});
       }catch{return json({error:'key-rate-limit.policy_write_failed'},422);}
     }}],
-    async start(){if(host.signal.aborted)throw new Error('inactive');await host.publishPolicy?.(policy());ready=true;},
+    async start(){if(host.signal.aborted)throw new Error('inactive');await refresh();await host.publishPolicy?.(policy());ready=true;},
     dispose(){ready=false;},
   };
 }
-export function readResource(resource:string,keyId:string,state:Pick<NonNullable<ControlHostContext['durableState']>,'get'|'list'>) {
+export async function readResource(resource:string,keyId:string,state:Pick<NonNullable<ControlHostContext['durableState']>,'get'|'list'>) {
   if(resource!=='api-key')throw new Error('resource_not_supported');
-  return {value:(state.get('policies')?.value as any)?.byKey?.[keyId]??null};
+  return {value:((await state.get('policies'))?.value as any)?.byKey?.[keyId]??null};
 }
 export default {createControl,readResource};

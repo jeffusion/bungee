@@ -1,6 +1,5 @@
 import { PluginDependencyGraph } from './plugin-dependencies';
 import type { AppConfig } from '@jeffusion/bungee-types';
-import type { Database } from 'bun:sqlite';
 import { logger } from './logger';
 import { PluginRegistry } from './plugin-registry';
 import {
@@ -54,7 +53,6 @@ export class PluginRuntimeOrchestrator {
 
   constructor(
     private readonly configBasePath: string = process.cwd(),
-    private readonly db?: Database,
     activatedPluginNames: readonly string[] = [],
     /**
      * Canonical worker-process service host. The runtime injects its configured
@@ -77,10 +75,6 @@ export class PluginRuntimeOrchestrator {
 
   getScopedRegistry(): ScopedPluginRegistry | null {
     return this.scopedRegistry;
-  }
-
-  getDatabase(): Database | undefined {
-    return this.db;
   }
 
   getStatusReport(): PluginRuntimeOrchestratorStatusReport {

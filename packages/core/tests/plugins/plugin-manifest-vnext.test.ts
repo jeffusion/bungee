@@ -83,7 +83,7 @@ describe('plugin manifest vNext contract', () => {
         main: 'server/index.ts', runtimeScope: 'global', capabilities: ['hooks', 'dynamicRuntimeLoad'],
         uiExtensionMode: 'none', engines: { bungee: `^${CORE_HOST_VERSION}` },
       });
-      const orchestrator = new PluginRuntimeOrchestrator(root, undefined, activated ? [name] : []);
+      const orchestrator = new PluginRuntimeOrchestrator(root, activated ? [name] : []);
       try {
         const result = await orchestrator.applyConfig({ routes: [{ path: '/any', endpoints: [{ target: 'http://example.test' }] }] });
         const status = result.status.plugins.find((plugin) => plugin.pluginName === name);
@@ -102,7 +102,7 @@ describe('plugin manifest vNext contract', () => {
       uiExtensionMode: 'none', engines: { bungee: `^${CORE_HOST_VERSION}` },
     });
     const binding = { name, path: join(dir, 'server/index.ts') };
-    const orchestrator = new PluginRuntimeOrchestrator(root, undefined, [name]);
+    const orchestrator = new PluginRuntimeOrchestrator(root, [name]);
     try {
       const result = await orchestrator.applyConfig({
         plugins: [{ ...binding, enabled: false }],
@@ -127,7 +127,7 @@ describe('plugin manifest vNext contract', () => {
       static name = '${name}'; static version = '1.0.0';
       static async createHandler() { throw new Error('fixture init failure'); }
     }`);
-    const orchestrator = new PluginRuntimeOrchestrator(root, undefined, [name]);
+    const orchestrator = new PluginRuntimeOrchestrator(root, [name]);
     try {
       await expect(orchestrator.applyConfig({ routes: [] })).rejects.toThrow('Activated global plugins failed to start');
     } finally { await orchestrator.destroy(); }
@@ -354,7 +354,7 @@ describe('plugin manifest vNext contract', () => {
     });
     rmSync(join(missingArtifactDir, 'dist'), { recursive: true, force: true });
 
-    const rejected = new PluginRuntimeOrchestrator(root, undefined, [
+    const rejected = new PluginRuntimeOrchestrator(root, [
       'manifest-vnext-serve-ok',
       'manifest-vnext-status-unsupported-capability',
       'manifest-vnext-status-missing-artifact',
@@ -367,7 +367,7 @@ describe('plugin manifest vNext contract', () => {
       ], routes: [] })).rejects.toThrow('plugin is not present in the dependency catalog');
       expect(rejected.getScopedRegistry()).toBeNull();
     } finally { await rejected.destroy(); }
-    const orchestrator = new PluginRuntimeOrchestrator(root, undefined, ['manifest-vnext-serve-ok']);
+    const orchestrator = new PluginRuntimeOrchestrator(root, ['manifest-vnext-serve-ok']);
 
     try {
       const result = await orchestrator.applyConfig({
@@ -439,7 +439,7 @@ describe('plugin manifest vNext contract', () => {
       },
     });
 
-    const orchestrator = new PluginRuntimeOrchestrator(root, undefined, ['manifest-vnext-source-entry']);
+    const orchestrator = new PluginRuntimeOrchestrator(root, ['manifest-vnext-source-entry']);
 
     try {
       const result = await orchestrator.applyConfig({

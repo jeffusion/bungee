@@ -12,10 +12,12 @@ test('control artifact loader tracks require aliases and rejects unlocked loads'
   expect(portablePath(relative(WORKSPACE_ROOT, ARTIFACT_LOADER_PATH)))
     .toBe('packages/core/src/plugin-control/artifact-loader.ts');
   expect(source).toContain("const aliases = new Set<string>(['require']);");
-  expect(source).toContain('aliases.has(initializer.text)');
-  expect(source).toContain('isRequireAlias');
+  expect(source).toContain('aliases.has(value.text)');
+  expect(source).toContain('isRequireReference(node.initializer)');
+  expect(source).toContain('isRequireReference(node.right)');
   expect(source).toContain('isRequireProperty');
-  expect(source).toContain('isStaticSpecifier(node.arguments[0])');
+  expect(source).toContain('isStaticSpecifier(specifier)');
+  expect(source).toContain('ts.isElementAccessExpression(callee)');
 });
 
 test('Windows separators and CRLF in alias fixtures normalize deterministically', () => {

@@ -30,12 +30,12 @@ function makeStreamingResponse(chunks: Uint8Array[], status = 200, headers: Reco
   });
 }
 
-function concatBytes(...arrays: Uint8Array<ArrayBufferLike>[]): Uint8Array {
+function concatBytes(...arrays: Uint8Array<ArrayBufferLike>[]): Uint8Array<ArrayBuffer> {
   const total = arrays.reduce((sum, a) => sum + a.length, 0);
   const result = new Uint8Array(total);
   let offset = 0;
   for (const a of arrays) {
-    result.set(new Uint8Array(a.buffer as ArrayBuffer, a.byteOffset, a.byteLength), offset);
+    result.set(a, offset);
     offset += a.length;
   }
   return result;
@@ -175,7 +175,7 @@ test('SSE prefix returns before a delayed tail or EOF, preserving every byte', a
 test.each(['gzip','zstd'] as const)('compressed %s keyword inspection uses the registered body provider and retains wire', async coding => {
   const previous=getScopedPluginRegistry();const providers=createGatewayHooks();
   setScopedPluginRegistry({getGatewayHooks(){return providers;}} as any);
-  const wire=coding==='gzip'?gzipSync('{"error":"busy"}'):zstdCompressSync('{"error":"busy"}');
+  const wire=Uint8Array.from(coding==='gzip'?gzipSync('{"error":"busy"}'):zstdCompressSync('{"error":"busy"}'));
   try {
     const response=()=>new Response(wire,{headers:{'content-type':'application/json','content-encoding':coding}});
     const miss=await checkResponseForFailover(response(),['absent']);

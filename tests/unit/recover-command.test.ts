@@ -1,3 +1,4 @@
+import {PluginStateClient} from '../../packages/core/src/plugin-state/client';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {expect,test} from 'bun:test';
 import {mkdtemp,rm,mkdir,writeFile,chmod,symlink} from 'node:fs/promises';
@@ -50,6 +51,9 @@ test('CLI recovery file input rejects public files and symlinks, accepts owner-o
    expect(acl.ownerSid).toBe(acl.currentSid);
   }else await chmod(file,0o600);
   expect((await run(link)).code).toBe(1);expect(await Bun.file(join(dir,'config.db')).exists()).toBe(false);
+  const initialize=Bun.spawn([process.execPath,entry,'--initialize-config',join(dir,'config.db')],{stdout:'pipe',stderr:'pipe',env});
+  const [initError,initOutput]=await Promise.all([new Response(initialize.stderr).text(),new Response(initialize.stdout).text()]);
+  expect(await initialize.exited,initError+initOutput).toBe(0);
   const result=await run(file);expect(result.code,result.stderr).toBe(0);expect(result.stdout).toContain('"username":"admin"');expect(result.stdout+result.stderr).not.toContain('recovery password');
  }finally{await rm(dir,{recursive:true,force:true});}
 },30000);
@@ -58,16 +62,16 @@ test('compiled native core recovers plugin identity and keeps secrets out of log
  const dir=await mkdtemp(join(tmpdir(),'bungee-native-recover-'));
  try {
   const binary=join(dir,process.platform==='win32'?'core.exe':'core');
-  // Match scripts/build-binaries.ts. Bun 1.4.2's CLI folds the entrypoint's
+  // Match scripts/build/build-binaries.ts. Bun 1.4.2's CLI folds the entrypoint's
   // import.meta.main to true; its API compile path leaves a runtime path check
   // that compares mismatched Windows VFS separators and silently skips main.
-  const entry=fileURLToPath(new URL('../../packages/core/src/main.ts', import.meta.url));
+  const entry=fileURLToPath(new URL('../../packages/core/dist/main.js', import.meta.url));
   const target=`bun-${process.platform==='win32'?'windows':process.platform}-${process.arch}`;
-  const build=Bun.spawn([process.execPath,'build','--compile',`--target=${target}`,entry,'--outfile',binary],{stdout:'pipe',stderr:'pipe'});
+  const build=Bun.spawn([process.execPath,'build','--compile',`--target=${target}`,entry,...['config-storage-worker.js','plugin-state-worker.js','observability-worker.js'].map(name=>fileURLToPath(new URL('../../packages/core/dist/'+name,import.meta.url))),'--outfile',binary],{stdout:'pipe',stderr:'pipe'});
   const [buildOut,buildError]=await Promise.all([new Response(build.stdout).text(),new Response(build.stderr).text()]);
   expect(await build.exited,`Native recovery build failed: ${buildOut}${buildError}`).toBe(0);
   const db=join(dir,'config.db');
-  const env={...process.env,BUNGEE_ROLE:'master',BUNGEE_INCLUDE_SYSTEM_PLUGINS:'false',PLUGINS_DIR:fileURLToPath(new URL('../../plugins', import.meta.url))};
+  const env={...process.env,BUNGEE_ROLE:'master',BUNGEE_INCLUDE_SYSTEM_PLUGINS:'false',PLUGINS_DIR:fileURLToPath(new URL('../../packages/core/dist/plugins', import.meta.url))};
   // This rejects before reading stdin: a pass establishes the compiled entrypoint
   // and argv path separately from the pipe reader's lifecycle.
   const invalidArgs=Bun.spawn([binary,'--recover'],{stdin:'ignore',stdout:'pipe',stderr:'pipe',env});
@@ -90,9 +94,20 @@ test('compiled native core recovers plugin identity and keeps secrets out of log
    expect(await Bun.file(db).exists()).toBe(false);
    expect(rejected.stdout+rejected.stderr).not.toContain('RECOVERY-SECRET-MUST-NOT-LEAK');
   }
+  const initialize=Bun.spawn([binary,'--initialize-config',db],{stdout:'pipe',stderr:'pipe',env});
+  const [initError,initOutput]=await Promise.all([new Response(initialize.stderr).text(),new Response(initialize.stdout).text()]);
+  expect(await initialize.exited,initError+initOutput).toBe(0);
+  expect(await Bun.file(join(dir,'plugin-state.db')).exists()).toBe(true);
   const result=await run({kind:'identity',plugin:'local-accounts',payload:{username:'admin',password:'Native recovery password 2026!',reason:'Recover test administrator'}});
   expect(result.code,result.stderr).toBe(0);
-  expect(await Bun.file(db).exists(),'Recovery must reach durable storage before reporting success').toBe(true);
+  const state=await PluginStateClient.open(join(dir,'plugin-state.db'));
+  try {
+   const record=await state.durableState('local-accounts').get('administrator');
+   expect(record?.version,'Recovery must reach plugin durable storage before reporting success').toBe(1);
+   const value=record!.value as {schema:number;administrator:{username:string;passwordHash:string}};
+   expect(value.schema).toBe(3);expect(value.administrator.username).toBe('admin');
+   expect(await Bun.password.verify('Native recovery password 2026!',value.administrator.passwordHash)).toBe(true);
+  }finally{await state.close();}
   expect(result.stdout).toContain('"username":"admin"');expect(result.stdout+result.stderr).not.toContain('recovery password');
   const denied=await run({kind:'identity',plugin:'local-accounts',payload:{password:'RECOVERY-SECRET-MUST-NOT-LEAK'}});
   expect(denied.code).toBe(1);expect(denied.stdout+denied.stderr).not.toContain('RECOVERY-SECRET-MUST-NOT-LEAK');

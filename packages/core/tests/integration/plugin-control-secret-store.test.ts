@@ -3,7 +3,7 @@ import { Database } from 'bun:sqlite';
 import { copyFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ConfigRepository } from '../../src/config-storage';
+import { initializePluginStateDatabase } from '../../src/plugin-state/schema';
 import {
   clearSecretStore,
   createSecretStore,
@@ -17,7 +17,7 @@ import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
 const roots: string[] = [];
-const repositories: ConfigRepository[] = [];
+const databases: Database[] = [];
 let templateRoot: string | undefined;
 let templatePath: string | undefined;
 const MATERIAL: SecretKeyMaterial = { keyId: 'test-key-1', key: new Uint8Array(32).fill(7) };
@@ -26,13 +26,13 @@ const OTHER_MATERIAL: SecretKeyMaterial = { keyId: 'test-key-1', key: new Uint8A
 function openDatabase(): Database {
   if (templatePath === undefined) throw new Error('secret-store database template was not initialized');
   const root = mkdtempSync(join(tmpdir(), 'bungee-secret-store-'));
-  const path = join(root, 'bungee.db');
+  const path = join(root, 'plugin-state.db');
   try {
     copyFileSync(templatePath, path);
-    const repository = ConfigRepository.open(path);
+    const database = new Database(path);
     roots.push(root);
-    repositories.push(repository);
-    return repository.getDatabase();
+    databases.push(database);
+    return database;
   } catch (error) {
     rmSync(root, { recursive: true, force: true });
     throw error;
@@ -61,26 +61,22 @@ async function expectAsyncError(action: () => Promise<unknown>, code: SecretStor
 }
 
 afterEach(() => {
-  for (const repository of repositories.splice(0)) repository.close();
+  for (const database of databases.splice(0)) database.close(true);
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 beforeAll(() => {
   templateRoot = mkdtempSync(join(tmpdir(), 'bungee-secret-store-template-'));
-  templatePath = join(templateRoot, 'bungee.db');
+  templatePath = join(templateRoot, 'plugin-state.db');
   try {
-    const repository = ConfigRepository.open(templatePath);
+    const db = new Database(templatePath,{create:true});
     try {
-      const snapshot = repository.getSnapshot();
-      const db = repository.getDatabase();
-      expect(snapshot.revision).toBe(1);
-      expect(db.query<{ revision: number }, []>('SELECT active_revision AS revision FROM configuration_state WHERE id=1').get()?.revision).toBe(1);
-      expect(db.query<{ count: number }, []>('SELECT count(*) AS count FROM configuration_operations').get()?.count).toBe(0);
-      expect(db.query<{ count: number }, []>('SELECT count(*) AS count FROM configuration_operation_workers').get()?.count).toBe(0);
+      initializePluginStateDatabase(db);
+      expect(db.query<{ count:number }, []>("SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name LIKE 'configuration_%'").get()?.count).toBe(0);
       expect(db.query<{ count: number }, []>('SELECT count(*) AS count FROM secret_store_namespaces').get()?.count).toBe(0);
       expect(db.query<{ count: number }, []>('SELECT count(*) AS count FROM secret_store_objects').get()?.count).toBe(0);
     } finally {
-      repository.close();
+      db.close(true);
     }
   } catch (error) {
     rmSync(templateRoot, { recursive: true, force: true });

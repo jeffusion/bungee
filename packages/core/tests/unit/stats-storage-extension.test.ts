@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { createPluginStorageCapability } from '../../src/plugin-storage';
-import { migrations } from '../../src/migrations';
+import { initializeTokenStatsTestDatabase } from '../helpers/token-stats-database';
 import type { TokenStatsAttempt } from '../../src/plugin.types';
 import { SQLiteTokenStatsMetering } from '../../../../plugins/token-stats/server/storage';
 import { TokenStatsRepository, REPORTING_INCOMPLETE_KEY } from '../../../../plugins/token-stats/server/repository';
@@ -11,7 +11,7 @@ const databases: Database[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 function accessDatabase(): Database {
   const db = new Database(':memory:');
-  for (const migration of migrations) migration.up(db);
+  initializeTokenStatsTestDatabase(db);
   databases.push(db);
   return db;
 }

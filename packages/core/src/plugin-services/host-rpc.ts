@@ -1,3 +1,5 @@
+import { logger } from '../logger';
+import type { AtomicReadSetResolver } from '../plugin-state/client';
 /**
  * Same-process host RPC adapter (P4): lets the canonical `PluginServiceHost`
  * lifecycle own RPC publications/consumption without a second plugin framework
@@ -52,6 +54,7 @@ import {
   type CommandExternalExecutor,
   type CommandJournal,
 } from './command-journal';
+import type { AsyncCommandJournal } from '../plugin-state/client';
 import {
   defineRpcService,
   assertRpcData,
@@ -229,6 +232,8 @@ export type HostRpcAcquireLease = (request: HostRpcLeaseRequest) => HostRpcLease
 export interface HostRpcMethodCapability {
   /** Synchronous private-state CAS planner for a `local-transaction` command. */
   readonly atomic?: CommandAtomicPlanner;
+  /** Explicit bounded read set for the production storage Worker. */
+  readonly atomicReadSet?: AtomicReadSetResolver;
   /** Reconcile capability for an `external-contract` command. */
   readonly external?: CommandExternalExecutor;
 }
@@ -299,11 +304,13 @@ export interface HostRpcJournalRequest {
   readonly bindingScope?: string;
   readonly policy: RpcCommandPolicy;
   readonly atomic?: CommandAtomicPlanner;
+  /** Explicit bounded read set for the production storage Worker. */
+  readonly atomicReadSet?: AtomicReadSetResolver;
   readonly external?: CommandExternalExecutor;
 }
 
 /** Host-owned durable journal factory; `null` refuses commands for this key. */
-export type HostRpcJournalResolver = (request: HostRpcJournalRequest) => CommandJournal | null;
+export type HostRpcJournalResolver = (request: HostRpcJournalRequest) => AsyncCommandJournal | CommandJournal | null;
 
 /** Trusted opaque callee context resolver. */
 export type HostRpcCalleeResolver = (request: RpcAdmissionRequest, publication: HostRpcServiceDescriptor) => unknown;
@@ -324,7 +331,13 @@ export interface HostRpcHandlerFrame {
   readonly operationId: string | null;
 }
 
+export interface HostRpcJournalCleanupFailure {
+  readonly operationId: string;
+  readonly code: string;
+}
 export interface HostRpcAdapterOptions {
+  /** Resource cleanup reports separately and never replaces a business outcome. */
+  readonly onJournalCleanupFailure?: (failure:HostRpcJournalCleanupFailure)=>void;
   readonly process: PluginServiceProcess;
   readonly limits?: RpcRuntimeLimits;
   readonly hostLifetime?: AbortSignal;
@@ -574,22 +587,27 @@ function snapshotCapability(value: unknown): HostRpcMethodCapability {
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null) throw new RpcServiceError('invalid_registration');
   let atomic: CommandAtomicPlanner | undefined;
+  let atomicReadSet: AtomicReadSetResolver | undefined;
   let external: CommandExternalExecutor | undefined;
   for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== 'string' || (key !== 'atomic' && key !== 'external')) throw new RpcServiceError('invalid_registration');
+    if (typeof key !== 'string' || (key !== 'atomic' && key !== 'atomicReadSet' && key !== 'external')) throw new RpcServiceError('invalid_registration');
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor)) {
       throw new RpcServiceError('invalid_registration');
     }
-    if (key === 'atomic') {
+    if (key === 'atomicReadSet') {
+      if (typeof descriptor.value !== 'function') throw new RpcServiceError('invalid_registration');
+      atomicReadSet = descriptor.value as AtomicReadSetResolver;
+    } else if (key === 'atomic') {
       if (typeof descriptor.value !== 'function') throw new RpcServiceError('invalid_registration');
       atomic = descriptor.value as CommandAtomicPlanner;
     } else {
       external = snapshotExternal(descriptor.value);
     }
   }
-  const record: { atomic?: CommandAtomicPlanner; external?: CommandExternalExecutor } = {};
+  const record: { atomic?: CommandAtomicPlanner; atomicReadSet?: AtomicReadSetResolver; external?: CommandExternalExecutor } = {};
   if (atomic !== undefined) record.atomic = atomic;
+  if (atomicReadSet !== undefined) record.atomicReadSet = atomicReadSet;
   if (external !== undefined) record.external = external;
   return Object.freeze(record);
 }
@@ -1332,11 +1350,26 @@ export class HostRpcAdapter {
       // Every journal action (execute/query/reconcile) runs inside the real RPC frame so
       // the business handler and any nested external-reconcile RPC inherit purpose,
       // chain, deadline, and cancellation. Commands are framed once here, not in #wrapHandler.
-      return this.#runInFrame(execution.context, chainKey, () => {
-        if (action === 'execute') return journal.execute(execution as RpcCommandExecution<unknown>);
-        if (action === 'query-result') return journal.query(execution.operationId, execution.context.caller);
-        return journal.reconcile(execution);
-      });
+      try {
+        return await this.#runInFrame(execution.context, chainKey, () => {
+          if (action === 'execute') return journal.execute(execution as RpcCommandExecution<unknown>);
+          if (action === 'query-result') return journal.query(execution.operationId, execution.context.caller);
+          return journal.reconcile(execution);
+        });
+      } finally {
+        if ('close' in journal) {
+          // Capability release is resource cleanup, separate from the acknowledged command.
+          // A stuck or failed cleanup must not replace success, unknown, or its operation ID.
+          void Promise.resolve().then(()=>journal.close()).catch(error=>{
+            const rawCode=ownStringProperty(error,'code');
+            const code=rawCode!==null&&['worker_failed','request_timeout','request_failed','close_unconfirmed','cleanup_overloaded','queue_full','result_unknown','storage_failure'].includes(rawCode)?rawCode:'failed';
+            const failure=Object.freeze({operationId:execution.operationId,code});
+            try{logger.error(failure,'Host RPC journal cleanup failed');}catch{/* Reporting cannot change the command outcome. */}
+            try{this.#options.onJournalCleanupFailure?.(failure);}catch{/* Host reporting is independent of business completion. */}
+          });
+        }
+      }
+
     };
     return {
       execute: (execution) => run(execution, 'execute'),
@@ -1348,7 +1381,7 @@ export class HostRpcAdapter {
   #journalFor(
     info: CalleeInfo,
     execution: Omit<RpcCommandExecution<unknown>, 'executeBusiness'>,
-  ): CommandJournal | null {
+  ): AsyncCommandJournal | CommandJournal | null {
     const policy = execution.definition.command;
     if (policy === undefined) throw new RpcServiceError('capability_unavailable', execution.operationId);
     const capability = this.#capabilities.get(
@@ -1364,6 +1397,7 @@ export class HostRpcAdapter {
         ...(info.scope === 'binding' ? { bindingScope: info.scopeKey } : {}),
         policy,
         ...(capability?.atomic === undefined ? {} : { atomic: capability.atomic }),
+        ...(capability?.atomicReadSet === undefined ? {} : { atomicReadSet: capability.atomicReadSet }),
         ...(capability?.external === undefined ? {} : { external: capability.external }),
       }) ?? null;
     } catch {

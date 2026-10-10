@@ -10,22 +10,22 @@ import {DurableRouteProtections} from '../../src/master-runtime/composition';
 test('disabled resource reads expose only get/list without creating control, capabilities, or writes', async () => {
   const db = new Database(':memory:'); db.exec(PLUGIN_DURABLE_STATE_SCHEMA_SQL);
   const state = new PluginDurableStateStore(db).forNamespace('key-access');
-  state.execute({commandId: 'seed', mutations: [{key: 'policies', expectedVersion: 0, value: {protectedRouteIds: ['route'], credentials: [], byKey: {key1: {routes: null, models: ['gemini-2.5-pro']}}}}]});
-  const before = state.list();
+  await state.transact([{key: 'policies', expectedVersion: 0, value: {protectedRouteIds: ['route'], credentials: [], byKey: {key1: {routes: null, models: ['gemini-2.5-pro']}}}}]);
+  const before = await state.list();
   const raw = await loadPluginManifestRecord(fileURLToPath(new URL('../../../../plugins/key-access', import.meta.url)));
   const record = {...raw, runtimeHash: 'sha256:'+'0'.repeat(64)} as any;
   let creates = 0, starts = 0, writes = 0, loads = 0, capabilities = 0;
-  const host = createPluginControlHost({records: [record], durableState: () => ({...state, execute(command) {writes++;return state.execute(command);}}),
+  const host = createPluginControlHost({records: [record], durableState: () => ({...state, transact(mutations,options) {writes++;return state.transact(mutations,options);}}),
     secretStores: {create() {capabilities++;throw new Error('unexpected secret capability');}, revoke() {}, clear() {}},
     storage: {create() {capabilities++;throw new Error('unexpected storage capability');}},
     loadControl: async () => {loads++;return {
       readAdmissionRequirements, verifyDataPrincipal, readResourceCollection,
       createControl() {creates++;return {api: [], rpc: [], start() {starts++;}, dispose() {}};},
-      readResource(resource, id, readonlyState) {
+      async readResource(resource, id, readonlyState) {
         expect(Object.keys(readonlyState).sort()).toEqual(['get', 'list']);
         expect(Object.isFrozen(readonlyState)).toBe(true);
-        expect('execute' in readonlyState).toBe(false);
-        expect(readonlyState.list()).toEqual(before);
+        expect('transact' in readonlyState).toBe(false);
+        expect(await readonlyState.list()).toEqual(before);
         return readKeyPolicy(resource, id, readonlyState);
       },
     };},
@@ -41,8 +41,8 @@ test('disabled resource reads expose only get/list without creating control, cap
     expect(await host.readResourceCollection('key-access', 'api-key')).toEqual([]);
     expect(await host.readAdmissionRequirements('key-access')).toEqual(['route']);
     expect(await host.verifyDataPrincipal('key-access', {domain: 'data', keyId: 'missing', credentialVersion: 1})).toBe(false);
-    expect(state.list()).toEqual(before);
-    expect(db.query('SELECT COUNT(*) AS count FROM plugin_durable_commands').get()).toEqual({count: 1});
+    expect(await state.list()).toEqual(before);
+    expect(db.query("SELECT name FROM sqlite_master WHERE name='plugin_durable_commands'").get()).toBeNull();
   } finally {await host.dispose();db.close();}
 });
 
@@ -50,10 +50,10 @@ test('missing admission reader or artifact cannot clear a durable protection; on
   const db = new Database(':memory:'); db.exec(PLUGIN_DURABLE_STATE_SCHEMA_SQL);
   const store = new PluginDurableStateStore(db);
   const persisted = store.forNamespace('core-route-protection');
-  persisted.execute({commandId:'seed',mutations:[{key:'key-access',expectedVersion:0,value:{plugin:'key-access',routeIds:['protected']}}]});
+  await persisted.transact([{key:'key-access',expectedVersion:0,value:{plugin:'key-access',routeIds:['protected']}}]);
   const raw = await loadPluginManifestRecord(fileURLToPath(new URL('../../../../plugins/key-access', import.meta.url)));
   const record = {...raw,runtimeHash:'sha256:'+'0'.repeat(64)} as any;
-  let reader: (() => readonly string[]) | undefined;
+  let reader: (() => Promise<readonly string[]>) | undefined;
   const host = createPluginControlHost({records:[record],durableState:name=>store.forNamespace(name),
     secretStores:{create(){throw Error('must remain inactive');},revoke(){},clear(){}},
     storage:{create(){throw Error('must remain inactive');}},
@@ -61,18 +61,20 @@ test('missing admission reader or artifact cannot clear a durable protection; on
   });
   try {
     const guards = new DurableRouteProtections(persisted);
+    await guards.initialize();
     await expect(host.readAdmissionRequirements('key-access')).rejects.toMatchObject({code:'not_declared'});
     await guards.refresh(['key-access'],host);
     expect(guards.requirements()).toEqual([{plugin:'key-access',routeIds:['protected']}]);
     await guards.refresh([],host); // The entire plugin directory disappeared.
-    expect(new DurableRouteProtections(persisted).requirements()).toEqual(guards.requirements());
-    reader=()=>{throw Error('read failed');};
+    const reloaded=new DurableRouteProtections(persisted);await reloaded.initialize();
+    expect(reloaded.requirements()).toEqual(guards.requirements());
+    reader=async()=>{throw Error('read failed');};
     await guards.refresh(['key-access'],host);
     expect(guards.requirements()).toEqual([{plugin:'key-access',routeIds:['protected']}]);
-    reader=()=>[];
+    reader=async()=>[];
     await guards.refresh(['key-access'],host);
     expect(guards.requirements()).toEqual([]);
-    expect(new DurableRouteProtections(persisted).requirements()).toEqual([]);
+    const emptied=new DurableRouteProtections(persisted);await emptied.initialize();expect(emptied.requirements()).toEqual([]);
     expect(host.status('key-access')).toBe('inactive');
   } finally {await host.dispose();db.close();}
 });
@@ -93,7 +95,7 @@ test('failed immutable module load retries; successful module reuse still reads 
   try {
     await expect(host.readAdmissionRequirements('key-access')).rejects.toThrow('temporary artifact read failure');
     expect(await host.readAdmissionRequirements('key-access')).toEqual([]);
-    state.execute({commandId:'write',mutations:[{key:'policies',expectedVersion:0,value:{protectedRouteIds:['fresh-route'],credentials:[],byKey:{}}}]});
+    await state.transact([{key:'policies',expectedVersion:0,value:{protectedRouteIds:['fresh-route'],credentials:[],byKey:{}}}]);
     expect(await host.readAdmissionRequirements('key-access')).toEqual(['fresh-route']);
     expect(loads).toBe(2);
     expect(host.status('key-access')).toBe('inactive');

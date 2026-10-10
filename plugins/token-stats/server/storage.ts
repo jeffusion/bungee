@@ -107,6 +107,21 @@ export class SQLiteTokenStatsMetering implements TokenStatsMeteringStorage {
       };
     });
   }
+  async listClientModels(input: {page?:number;pageSize?:number;keyword?:string}) {
+    const page=input.page ?? 1,pageSize=input.pageSize ?? 20,keyword=input.keyword;
+    if(!Number.isSafeInteger(page)||page<1||page>400||!Number.isSafeInteger(pageSize)||pageSize<1||pageSize>100
+      || keyword!==undefined&&(typeof keyword!=='string'||keyword.length>256))throw new Error('invalid token-stats client models page');
+    const since=Date.now()-TOKEN_STATS_RETENTION_MS;
+    const search=keyword ? `%${keyword.replace(/[\\%_]/g, character=>`\\${character}`)}%` : null;
+    return this.observation.withDatabase(db=>{
+      const filter=search ? " AND model LIKE ? ESCAPE '\\'" : '';
+      const params:(string|number)[]=search ? [since,search] : [since];
+      const total=Number(db.query<{total:number},(string|number)[]>(`SELECT COUNT(DISTINCT model) AS total FROM token_stats_attempts WHERE finished_at_ms >= ?${filter}`).get(...params)?.total ?? 0);
+      const rows=db.query<{model:string},(string|number)[]>(`SELECT DISTINCT model FROM token_stats_attempts WHERE finished_at_ms >= ?${filter} ORDER BY model ASC LIMIT ? OFFSET ?`).all(...params,pageSize,(page-1)*pageSize);
+      return {models:rows.map(row=>String(row.model)),total:Number.isSafeInteger(total)&&total>=0 ? total : 0,page,pageSize};
+    });
+  }
+
 }
 
 export function buildTokenStatsWindowSnapshotQuery(input: {

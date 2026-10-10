@@ -16,7 +16,7 @@ import type { MasterIngressStartupFailureDisposition } from '../ingress/master-c
 
 export interface MasterRuntimeRepository {
   getSnapshot(): RepositorySnapshot;
-  close(): void;
+  close(): Promise<void>;
 }
 
 export interface MasterRuntimeCoordinator {

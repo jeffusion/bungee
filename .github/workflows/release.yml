@@ -263,6 +263,6 @@ jobs:
 
       - name: Upload binaries to GitHub Release
         if: steps.release-state.outputs.published == 'true'
-        run: bun scripts/upload-binaries.ts ${{ steps.package-version.outputs.version }}
+        run: bun scripts/release/upload-binaries.ts ${{ steps.package-version.outputs.version }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

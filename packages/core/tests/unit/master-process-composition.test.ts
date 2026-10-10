@@ -1,7 +1,7 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { resolve } from 'node:path';
 import type { Sha256Digest } from '@jeffusion/bungee-types';
-import { startMasterComposition, type MasterProcessDependencies } from '../../src/master-runtime/composition';
+import { startMasterComposition, type MasterProcessDependencies, type MasterProcessCoordinator } from '../../src/master-runtime/composition';
 import { handleManagementRequest, trackManagementResponse } from '../../src/management-listener';
 import { MasterRuntime } from '../../src/master-runtime/runtime';
 import { MasterStatsInitializationError } from '../../src/master-runtime/master-stats';
@@ -11,6 +11,9 @@ import type { DaemonMetadataV1 } from '@jeffusion/bungee-types';
 import { DAEMON_AUTHORIZATION_HEADER, DAEMON_BOOT_HEADER, DAEMON_INSTANCE_HEADER, DAEMON_PID_HEADER, DAEMON_SHUTDOWN_PATH } from '../../src/daemon-control';
 import { installMasterSignalHandlers } from '../../src/master-runtime/signal-handlers';
 import { WorkerAdmissionRegistry } from '../../src/public-listener/admission-registry';
+import { runtimePluginState } from '../helpers/runtime-plugin-state';
+import type { RepositorySnapshot } from '../../src/config-storage';
+import { throwIfPublicationCancelled } from '../../src/config-publication/publication-runner';
 
 const HASH: Sha256Digest = `sha256:${'a'.repeat(64)}`;
 const OPTIONS = Object.freeze({
@@ -30,7 +33,7 @@ const OPTIONS = Object.freeze({
 });
 
 type Stage =
-  | 'config-lock' | 'access-lock' | 'migration' | 'claim' | 'resolver' | 'catalog' | 'repository'
+  | 'config-lock' | 'access-lock' | 'plugin-lock' | 'migration' | 'claim' | 'resolver' | 'catalog' | 'repository'
   | 'admission' | 'secret' | 'ingress' | 'launch' | 'factory' | 'coordinator'
   | 'generation' | 'listener' | 'runtime' | 'runtime-start' | 'signals';
 
@@ -51,6 +54,7 @@ function fixture(
   let failReadinessSnapshotOnThirdRead = false;
   let readinessSnapshotReads = 0;
   let workerDisconnects = 0;
+  let publishedVersion = 0;
   const cleanupProcess = {
     slot: 0,
     identity: {
@@ -71,12 +75,14 @@ function fixture(
       if (failReadinessSnapshotOnThirdRead && readinessSnapshotReads++ === 2) throw new Error('readiness snapshot failed');
       return recoverySnapshot();
     } : recoverySnapshot,
-    getServingSnapshot: unused,
-    appendServingSnapshot: realRuntime ? () => undefined : unused,
-    getActivePublication: realRuntime ? () => null : unused,
+    getServingSnapshot: async () => null,
+    appendServingSnapshot: async () => undefined,
+    getActivePublication: async () => null,
     getOperationState: unused,
-    getCurrentOperationState: realRuntime ? () => null : unused,
-    getCurrentRecovery: () => null,
+    getCurrentOperationState: async () => null,
+    getCurrentRecovery: async () => null,
+    getRecovery: async () => null,
+    getSupervisionState: unused,
     createManualRecovery: unused,
     claimRecoveryAttempt: unused,
     scheduleRecoveryRetry: unused,
@@ -90,8 +96,8 @@ function fixture(
     recordWorkerResult: unused,
     markDraining: unused,
     finalizePublication: unused,
-    close: () => { events.push('repository.close'); },
-    claimControllerWithCapability: (_capability: unknown, controllerId: string) => {
+    close: async () => { events.push('repository.close'); },
+    claimControllerWithCapability: async (_capability: unknown, controllerId: string) => {
       fail('claim');
       return { instance_id: '11111111-1111-4111-8111-111111111111', controller_epoch: 1,
         current_controller_id: controllerId, updated_at: 123 };
@@ -167,7 +173,7 @@ function fixture(
       return OPTIONS;
     },
     acquireInstanceLock: async (path) => {
-      const stage = path === OPTIONS.configDbLockPath ? 'config-lock' : 'access-lock';
+      const stage = path === OPTIONS.configDbLockPath ? 'config-lock' : path.endsWith('plugin-state.db.lock') ? 'plugin-lock' : 'access-lock';
       fail(stage);
       return { release: async () => { events.push(`${stage}.release`); } };
     },
@@ -178,12 +184,13 @@ function fixture(
       return { hash: HASH, toCompileOptions: () => compileOptions };
     },
     resolveAuthToken: (token: string) => `resolved:${token}`,
-    openRepository: (_path, options) => {
+    openRepository: async (_path, options) => {
       fail('repository');
-      expect(options.workerCount).toBe(OPTIONS.workerCount);
+      expect(options).not.toHaveProperty('workerCount');
       if (options.compileOptions !== undefined) expect(options.compileOptions).toBe(compileOptions);
       return repository;
     },
+    openPluginState: async () => runtimePluginState(() => events.push('plugin-state.close')),
     createAdmission: () => { fail('admission'); return admission; },
     deriveTransportSecret: () => { fail('secret'); return Buffer.alloc(32, 7).toString('base64url'); },
     createControllerClaim: () => ({ consume<Result>(claim: () => Result): Result { return claim(); } }),
@@ -199,13 +206,13 @@ function fixture(
       expect(options.accessLogDbPath).toBe('/work/logs/access.db');
       return workerFactory;
     },
-    createMasterGeneration: () => { fail('generation'); return 'master-generation'; },
+    createMasterGeneration: () => { fail('generation'); return '10000000-0000-4000-8000-000000000001'; },
     createCoordinator: (options) => {
       fail('coordinator');
       expect(options).toMatchObject({
         repository, workerFactory, admission,
         workerCount: 2, startupApplyTimeoutMs: 101, drainTimeoutMs: 102,
-        pluginCatalogHash: HASH, masterGeneration: 'master-generation',
+        pluginCatalogHash: HASH, masterGeneration: '10000000-0000-4000-8000-000000000001',
       });
       return realRuntime ? {
         recoverAndPublish: async () => ({
@@ -281,7 +288,10 @@ function fixture(
           } : {}),
           prepare: unused,
           status: unused,
+          queryRuntimeState: async () => ({version: publishedVersion}),
+          publishRuntimeState: async (state: {version: number}) => { publishedVersion = state.version; },
           trustedActiveAdmission: () => null,
+          trustedAdmissionRegistryIfFresh: () => ({ active: null, prepared: null, retired: [] }),
           mutationReadiness: () => ingressMutationReadiness,
         } as unknown as import('../../src/ingress/master-controller').MasterIngressController;
       },
@@ -311,6 +321,38 @@ function fixture(
 }
 
 describe('master process composition', () => {
+  test.each(['configuration', 'plugin'] as const)('storage %s failure removes management readiness and retains locks without close proof', async (storage) => {
+    const harness = fixture(undefined, true, false, true, undefined, true);
+    let failure: (() => void) | undefined;
+    const closeFailure = new Error('storage close unconfirmed');
+    const dependencies: MasterProcessDependencies = {
+      ...harness.dependencies,
+      openRepository: async (path, options) => {
+        const repository = await harness.dependencies.openRepository(path, options);
+        if (storage === 'configuration') {
+          failure = () => options.onWorkerFailure?.(closeFailure as never);
+          repository.close = async () => { throw closeFailure; };
+        }
+        return repository;
+      },
+      openPluginState: async (_path, options) => {
+        const client = runtimePluginState();
+        if (storage === 'plugin') {
+          failure = () => options.onWorkerFailure?.(closeFailure as never);
+          client.close = async () => { throw closeFailure; };
+        }
+        return client;
+      },
+    };
+    const handle = await startMasterComposition(dependencies);
+    expect(harness.managementOptions()!.health().management).toBe(true);
+    failure!();
+    expect(harness.managementOptions()!.health()).toMatchObject({live:true,management:false,data:false,degraded:true});
+    const shutdownFailure = await handle.shutdown().catch(error => error);
+    expect(shutdownFailure).toBeInstanceOf(AggregateError);
+    expect(harness.events.some(event => event.endsWith('.release'))).toBe(false);
+    handle.removeSignalHandlers();
+  });
   test('constructs the production admission registry without relying on a mock acquire interface', async () => {
     const { dependencies } = fixture();
     const admission = new WorkerAdmissionRegistry();
@@ -362,9 +404,9 @@ describe('master process composition', () => {
     const processHandle = await startMasterComposition(dependencies);
 
     expect(events).toEqual([
-      'options', 'config-lock', 'access-lock', 'migration', 'resolver', 'catalog', 'repository',
-       'admission', 'master-control.bind', 'management.bind', 'launch', 'factory', 'generation', 'coordinator',
-      'runtime', 'runtime-start', 'worker/admission', 'management.ready', 'signals',
+      'options', 'config-lock', 'access-lock', 'migration', 'resolver', 'catalog', 'repository', 'plugin-lock',
+       'admission', 'master-control.bind', 'management.bind', 'management.ready', 'launch', 'factory', 'generation', 'coordinator',
+      'runtime', 'management.ready', 'runtime-start', 'worker/admission', 'management.ready', 'signals',
     ]);
     processHandle.removeSignalHandlers();
   });
@@ -378,7 +420,7 @@ describe('master process composition', () => {
       expect(events.indexOf('management.bind')).toBeLessThan(events.indexOf('ingress-connect'));
       expect(events.indexOf('management.bind')).toBeLessThan(events.indexOf('factory'));
       expect(events.indexOf('ingress-connect')).toBeLessThan(events.indexOf('worker/admission'));
-      expect(events.indexOf('worker/admission')).toBeLessThan(events.indexOf('management.ready'));
+      expect(events.indexOf('management.ready')).toBeLessThan(events.indexOf('worker/admission'));
       handle.removeSignalHandlers();
     } finally {
       if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
@@ -808,7 +850,7 @@ describe('master process composition', () => {
 
   test('closes constructed resources in reverse at every failed boundary', async () => {
     const stages: Stage[] = [
-      'config-lock', 'access-lock', 'migration', 'resolver', 'catalog', 'repository', 'admission',
+      'config-lock', 'access-lock', 'migration', 'resolver', 'catalog', 'repository', 'plugin-lock', 'admission',
       'launch', 'factory', 'coordinator', 'listener', 'runtime',
       'generation', 'runtime-start', 'signals',
     ];
@@ -950,6 +992,9 @@ function recoveryDependencies(input: {
   readonly realRuntime?: boolean;
   readonly primeRuntime?: boolean;
   readonly getActivePublication?: () => unknown;
+  readonly getSnapshot?: () => RepositorySnapshot;
+  readonly getCurrentRecovery?: () => unknown;
+  readonly publish?: () => Promise<unknown>;
   readonly recoverAndPublish?: (options: { readonly admission: { prepare(workers: readonly ServingConfigWorker[]): Promise<{ commit(): Promise<void> }> } }) => Promise<unknown>;
   readonly startCurrent?: (options: { readonly admission: { prepare(workers: readonly ServingConfigWorker[]): Promise<{ commit(): Promise<void> }> } }, serving: ServingConfigWorker) => Promise<unknown>;
   readonly retireForIngressBootChange?: (process: ConfigPublicationWorkerProcess, broadcastExit: () => void, record: (event: string) => void) => Promise<unknown>;
@@ -959,7 +1004,7 @@ function recoveryDependencies(input: {
   readonly fenceAndStatus?: (token?: number) => Promise<unknown>;
 }) {
   const events: string[] = [];
-  const snapshot = recoverySnapshot();
+  const snapshot = input.getSnapshot?.() ?? recoverySnapshot();
   const process = {
     slot: 0,
     identity: {
@@ -973,12 +1018,12 @@ function recoveryDependencies(input: {
     subscribeExit: () => () => undefined,
     terminate: async () => { events.push('terminate'); },
   } as ConfigPublicationWorkerProcess;
-  const serving = recoveryWorker(process);
+  const serving = { ...recoveryWorker(process), revision: snapshot.revision, content_hash: snapshot.content_hash };
   let admitted: readonly ServingConfigWorker[] = [];
   let ingressOptions: { onRecovered?: (event: unknown) => Promise<unknown>; onNewBootAccepted?: (event: unknown) => void } | undefined;
   let runtimeReady = false;
   let runtime: { start(): Promise<void>; shutdown(): Promise<void>; reportAsynchronousFailure(error: Error): void };
-  let composedCoordinator: { recoverAndPublish(): Promise<unknown> } | undefined;
+  let composedCoordinator: MasterProcessCoordinator | undefined;
   let composedAdmission: { prepare(workers: readonly ServingConfigWorker[], signal?: AbortSignal): Promise<PreparedWorkerAdmission> } | undefined;
   let recoveryGate: {
     readonly generation: number;
@@ -993,14 +1038,18 @@ function recoveryDependencies(input: {
   let reports = 0;
   let recoveryReads = 0;
   let latestRateLimitSession: unknown;
+  let publishedVersion = 0;
+  let preparedAdmission: {admission_sequence:number}|null = null;
   const repository = {
-    getSnapshot: () => snapshot,
-    getActivePublication: () => input.getActivePublication?.() ?? null,
-    getServingSnapshot: () => null,
-    appendServingSnapshot: () => { events.push('append'); },
-    getOperationState: () => null,
-    getCurrentOperationState: () => null,
-    getCurrentRecovery: () => { recoveryReads += 1; return null; },
+    getSnapshot: () => input.getSnapshot?.() ?? snapshot,
+    getActivePublication: async () => input.getActivePublication?.() ?? null,
+    getServingSnapshot: async () => null,
+    appendServingSnapshot: async () => { events.push('append'); },
+    getOperationState: async () => null,
+    getCurrentOperationState: async () => null,
+    getCurrentRecovery: async () => { recoveryReads += 1; return input.getCurrentRecovery?.() ?? null; },
+    getRecovery: async () => null,
+    getSupervisionState: () => ({}),
     beginPublication: () => null,
     beginWorkerAttempt: () => null,
     beginDrainingRecovery: () => null,
@@ -1008,8 +1057,8 @@ function recoveryDependencies(input: {
     markDraining: () => null,
     finalizePublication: () => null,
     commit: () => null,
-    close: () => undefined,
-    claimControllerWithCapability: () => ({
+    close: async () => undefined,
+    claimControllerWithCapability: async () => ({
       instance_id: '11111111-1111-4111-8111-111111111111', controller_epoch: 1,
       current_controller_id: '00000000-0000-4000-8000-000000000001', updated_at: 1,
     }),
@@ -1059,7 +1108,8 @@ function recoveryDependencies(input: {
     createPluginPathResolver: () => ({}),
     buildPluginCatalog: async () => ({ hash: HASH, toCompileOptions: () => ({ pluginSchemas: new Map(), availablePlugins: new Set(), pluginCatalogHash: HASH }) }),
     resolveAuthToken: () => undefined,
-    openRepository: () => repository,
+    openRepository: async () => repository,
+    openPluginState: async () => runtimePluginState(),
     createAdmission: () => admission,
     resolveWorkerLaunch: () => ({ source: 'source', executable: '/bun', args: [] }),
     createWorkerFactory: () => workerFactory,
@@ -1072,7 +1122,7 @@ function recoveryDependencies(input: {
         events.push('startCurrent');
         return input.startCurrent?.(options, serving) ?? defaultStart(options);
       },
-      publish: async () => ({ kind: 'converged', http_status: 200, operation: {} as never, serving: [serving] }),
+      publish: async () => input.publish?.() ?? ({ kind: 'converged', http_status: 200, operation: {} as never, serving: [serving] }),
       });
     },
     createManagementListener: () => ({ port: 8089, start: () => undefined, stop: async () => undefined }),
@@ -1089,13 +1139,18 @@ function recoveryDependencies(input: {
           } }),
           connect: async () => undefined, stop: async () => undefined,
           disconnect: async () => undefined, shutdownDataPlane: async () => undefined,
-          trustedActiveAdmission: () => null, hasTrustedActiveAdmission: () => false,
+          queryRuntimeState: async () => ({version: publishedVersion}),
+          publishRuntimeState: async (state: {version: number}) => { publishedVersion = state.version; },
+          trustedActiveAdmission: () => null,
+          trustedAdmissionRegistryIfFresh: () => ({ active: null, prepared: preparedAdmission, retired: [] }), hasTrustedActiveAdmission: () => false,
           trustedActiveAdmissionIfFresh: () => null,
           isMutationReady: () => true,
           subscribeEligibilityChange: () => () => undefined,
           prepare: async (workers: readonly ServingConfigWorker[], signal?: AbortSignal) => {
             events.push('ingress-prepare');
-            return input.remotePrepare?.(workers, signal) ?? { commit: async () => undefined, abort: async () => undefined };
+            const prepared = await input.remotePrepare?.(workers, signal) ?? { commit: async () => undefined, abort: async () => undefined };
+            preparedAdmission = {admission_sequence:1};
+            return prepared;
           },
           status: async () => ({ state: 'attached', registry: { active: null, prepared: null, retired: [] } }),
           fenceAndStatus: async (_token?: number) => {
@@ -1143,6 +1198,7 @@ function recoveryDependencies(input: {
       return event;
     },
     recover: () => composedCoordinator!.recoverAndPublish(),
+    coordinator: () => composedCoordinator!,
     admission: () => composedAdmission!,
     gate: () => recoveryGate!,
     latestRateLimitSession: () => latestRateLimitSession,
@@ -1382,7 +1438,7 @@ test('new-boot gate aborts an in-flight admission before cleanup and retries rep
     expect(events).toContain('admission-commit-1');
     expect(events).toContain('admission-abort-2');
     expect(events.indexOf('admission-abort-2')).toBeLessThan(events.indexOf('retire-finished'));
-    for (let attempt = 0; attempt < 20 && !events.includes('admission-commit-3'); attempt += 1) await Promise.resolve();
+    for (let attempt = 0; attempt < 200 && !events.includes('admission-commit-3'); attempt += 1) await Promise.resolve();
     expect(events.indexOf('admission-commit-3')).toBeGreaterThan(events.indexOf('retire-finished'));
   } finally {
     release();
@@ -1464,7 +1520,7 @@ test('stops reconciliation without ingress and never revives repository work aft
       return { kind: 'startup_failed', failures: [], serving: [] };
     },
   });
-  harness.repository.appendServingSnapshot = () => { appends += 1; };
+  harness.repository.appendServingSnapshot = async () => { appends += 1; };
   harness.workerFactory.spawn = () => { spawns += 1; return harness.serving.process; };
   let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
   try {
@@ -1926,6 +1982,228 @@ test('GATE publishes the latest rate-limit session before its recovery callback 
   } finally {
     callbackReady.resolve(undefined);
     await handle?.shutdown().catch(() => undefined);
+    if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+    else process.env.BUNGEE_PLUGIN_SECRETS_KEY = previousSecret;
+  }
+});
+
+
+// Capture the actual private cache without adding a production diagnostics API.
+// Only the string-keyed map storing this exact snapshot is an admission cache.
+function observeAdmissionCache(snapshot: RepositorySnapshot) {
+  let cache: Map<string, RepositorySnapshot> | undefined;
+  const original = Map.prototype.set;
+  const observer = spyOn(Map.prototype, 'set').mockImplementation(function (this: Map<unknown, unknown>, key, value) {
+    if (typeof key === 'string' && value === snapshot && key === `${snapshot.revision}:${snapshot.content_hash}:${HASH}`) {
+      cache = this as Map<string, RepositorySnapshot>;
+    }
+    return original.call(this, key, value);
+  });
+  return { restore: () => observer.mockRestore(), cache: () => {
+    expect(cache).toBeDefined();
+    return cache!;
+  } };
+}
+
+function changedSnapshot(revision: number) {
+  const initial: RepositorySnapshot = recoverySnapshot();
+  return { ...initial, revision };
+}
+
+const stoppedSnapshotRecovery = { state: 'stopped', final_reason_code: 'fatal_source_failure' };
+
+test.each(['failed', 'throw', 'cancel'] as const)(
+  'bounds cached revisions after repeated %s publications and recovery, retaining the old admission', async mode => {
+    let current = changedSnapshot(1);
+    let active: any = null;
+    const cancelled = new AbortController();
+    const harness = recoveryDependencies({
+      primeRuntime: true,
+      getSnapshot: () => current,
+      getActivePublication: () => active,
+      publish: async () => {
+        if (mode === 'throw') throw new Error('fixture publication exception');
+        if (mode === 'cancel') {
+          cancelled.abort('fixture cancellation');
+          throwIfPublicationCancelled(cancelled.signal);
+        }
+        return { kind: 'degraded', http_status: 202, error_code: 'replacement_convergence_failed',
+          recovery_disposition: 'deterministic_worker_rejection', failures: [], operation: {}, serving: [harness.serving] };
+      },
+      recoverAndPublish: async () => { throw new Error('fixture recovery exception'); },
+      startCurrent: async (options, serving) => {
+        if (current.revision !== 1) return { kind: 'startup_failed', failures: [], serving: [serving] };
+        await (await options.admission.prepare([serving])).commit();
+        return { kind: 'startup_ready', serving: [serving] };
+      },
+    });
+    const admission = new WorkerAdmissionRegistry();
+    const observer = observeAdmissionCache(current);
+    let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
+    try {
+      handle = await startMasterComposition({ ...harness.dependencies, createAdmission: () => admission });
+      observer.restore();
+      const cache = observer.cache();
+      for (let revision = 2; revision <= 65; revision++) {
+        current = changedSnapshot(revision);
+        active = { snapshot: current, operation: {} };
+        const result = await harness.coordinator().publish(active, [harness.serving], cancelled.signal).catch(error => error);
+        if (mode === 'failed') expect(result.kind).toBe('degraded');
+        else expect(result).toBeInstanceOf(Error);
+        await expect(harness.recover()).rejects.toThrow('fixture recovery exception');
+        expect((await harness.coordinator().startCurrent(current, [harness.serving])).kind).toBe('startup_failed');
+        expect(cache.size).toBe(2);
+        expect([...cache.values()].map(value => value.revision).sort((a,b) => a-b)).toEqual([1, revision]);
+        const lease = admission.acquire();
+        expect(lease.worker).toEqual(harness.serving);
+        expect(lease.worker!.process).toBe(harness.serving.process);
+        lease.release();
+      }
+    } finally {
+      observer.restore();
+      await handle?.shutdown();
+    }
+  },
+);
+
+test('prunes all stopped-recovery startup exits and repeated stopped recovery without replacing the old worker', async () => {
+  let current = changedSnapshot(1);
+  let recovery: unknown = null;
+  let starts = 0;
+  const harness = recoveryDependencies({ getSnapshot: () => current, getCurrentRecovery: () => recovery,
+    startCurrent: async (options, serving) => {
+      starts++;
+      await (await options.admission.prepare([serving])).commit();
+      return { kind: 'startup_ready', serving: [serving] };
+    },
+  });
+  const observer = observeAdmissionCache(current);
+  let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
+  let composed!: MasterProcessCoordinator;
+  try {
+    handle = await startMasterComposition({ ...harness.dependencies,
+      createRuntime: (options) => {
+        composed = options.coordinator as MasterProcessCoordinator;
+        return { start: async () => {
+          await composed.startCurrent(current);
+          observer.restore();
+          const cache = observer.cache();
+          recovery = stoppedSnapshotRecovery;
+          for (let revision = 2; revision <= 65; revision++) {
+            current = changedSnapshot(revision);
+            const outcome = await composed.startCurrent(current);
+            expect(outcome.kind).toBe('startup_degraded');
+            expect(outcome.serving).toEqual([harness.serving]);
+            expect(cache.size).toBe(1); // Stopped startup never remembers an unused target.
+            expect([...cache.values()].map(value => value.revision)).toEqual([1]);
+          }
+        }, shutdown: async () => undefined, reportAsynchronousFailure: () => undefined };
+      },
+    });
+    for (let revision = 66; revision <= 129; revision++) {
+      current = changedSnapshot(revision);
+      expect(await composed.recoverAndPublish()).toBeNull();
+      expect(observer.cache().size).toBe(2);
+      expect([...observer.cache().values()].map(value => value.revision)).toEqual([1, revision]);
+      expect(harness.counts().admitted).toEqual([harness.serving]);
+    }
+    expect(starts).toBe(1);
+    expect(harness.events.filter(value => value === 'worker-spawn')).toHaveLength(0);
+  } finally {
+    observer.restore();
+    await handle?.shutdown();
+  }
+});
+
+test('retains concurrent publication snapshots until their last caller settles, then prunes them', async () => {
+  let current = changedSnapshot(1);
+  const blockers = [deferred<void>(), deferred<void>()];
+  let calls = 0;
+  const harness = recoveryDependencies({ primeRuntime: true, getSnapshot: () => current,
+    publish: async () => {
+      const index = calls++;
+      if (index < 2) await blockers[index]!.promise;
+      return { kind: 'degraded', http_status: 202, error_code: 'replacement_convergence_failed',
+        recovery_disposition: 'deterministic_worker_rejection', failures: [], operation: {}, serving: [harness.serving] };
+    },
+  });
+  const observer = observeAdmissionCache(current);
+  let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
+  let first: Promise<unknown> | undefined, second: Promise<unknown> | undefined;
+  try {
+    handle = await startMasterComposition(harness.dependencies);
+    observer.restore();
+    current = changedSnapshot(2);
+    const active = { snapshot: current, operation: {} } as any;
+    first = harness.coordinator().publish(active, [harness.serving]);
+    second = harness.coordinator().publish(active, [harness.serving]);
+    while (calls < 2) await Promise.resolve();
+    current = changedSnapshot(3);
+    await harness.coordinator().publish({ snapshot: current, operation: {} } as any, [harness.serving]);
+    expect([...observer.cache().values()].map(value => value.revision)).toEqual([1, 2, 3]);
+    blockers[0]!.resolve();
+    await first;
+    expect(observer.cache().size).toBe(3);
+    blockers[1]!.resolve();
+    await second;
+    expect([...observer.cache().values()].map(value => value.revision)).toEqual([1, 3]);
+    expect(harness.counts().admitted).toEqual([harness.serving]);
+  } finally {
+    observer.restore();
+    blockers.forEach(blocker => blocker.resolve());
+    await Promise.allSettled([first, second]);
+    await handle?.shutdown();
+  }
+});
+
+test('retains exact historical catalog snapshots for ingress handoff and removes them after release', async () => {
+  const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+  process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 1).toString('base64');
+  let current = changedSnapshot(1);
+  const preparedSnapshot = changedSnapshot(8), retiredSnapshot = changedSnapshot(9);
+  const historicalCatalog: Sha256Digest = `sha256:${'b'.repeat(64)}`;
+  const admissionFor = (snapshot: RepositorySnapshot) => ({
+    master_generation: '10000000-0000-4000-8000-000000000001', admission_sequence: snapshot.revision,
+    revision: snapshot.revision, content_hash: snapshot.content_hash, plugin_catalog_hash: historicalCatalog, workers: [],
+  });
+  let prepared: ReturnType<typeof admissionFor> | null = admissionFor(preparedSnapshot);
+  let retired = [admissionFor(retiredSnapshot)];
+  const harness = recoveryDependencies({ withIngress: true, primeRuntime: true, getSnapshot: () => current,
+    publish: async () => { throw new Error('fixture publication failure'); },
+  });
+  const observer = observeAdmissionCache(current);
+  let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
+  try {
+    handle = await startMasterComposition({ ...harness.dependencies,
+      openRepository: async (path, options) => ({ ...await harness.dependencies.openRepository(path, options),
+        getServingSnapshot: async key => key.plugin_catalog_hash !== historicalCatalog ? null
+          : key.revision === preparedSnapshot.revision ? preparedSnapshot
+          : key.revision === retiredSnapshot.revision ? retiredSnapshot : null,
+      }),
+      createIngressController: options => {
+        const ingress = harness.dependencies.createIngressController!(options);
+        ingress.trustedAdmissionRegistryIfFresh = () => ({ active: null, prepared, retired });
+        return ingress;
+      },
+    });
+    observer.restore();
+    expect(observer.cache().size).toBe(3);
+    expect(observer.cache().has(`8:${HASH}:${historicalCatalog}`)).toBe(true);
+    expect(observer.cache().has(`9:${HASH}:${historicalCatalog}`)).toBe(true);
+    current = changedSnapshot(2);
+    prepared = null;
+    await expect(harness.coordinator().publish({ snapshot: current, operation: {} } as any, [harness.serving])).rejects.toThrow('fixture publication failure');
+    expect(observer.cache().size).toBe(3);
+    expect(observer.cache().has(`8:${HASH}:${historicalCatalog}`)).toBe(false);
+    expect(observer.cache().has(`9:${HASH}:${historicalCatalog}`)).toBe(true);
+    retired = [];
+    current = changedSnapshot(3);
+    await expect(harness.coordinator().publish({ snapshot: current, operation: {} } as any, [harness.serving])).rejects.toThrow('fixture publication failure');
+    expect([...observer.cache().values()].map(value => value.revision)).toEqual([1, 3]);
+    expect(harness.counts().admitted).toEqual([harness.serving]);
+  } finally {
+    observer.restore();
+    await handle?.shutdown();
     if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
     else process.env.BUNGEE_PLUGIN_SECRETS_KEY = previousSecret;
   }
