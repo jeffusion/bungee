@@ -65,6 +65,7 @@ export function createControl(context: any) {
     calls: [] as Array<{ method: string; purpose: string | null; pid: number | null }>,
     reports: [] as Array<{ purpose: string | null; payload: any }>,
     slow: { entered: false, aborted: false },
+    slowRequests: [] as Array<{ pid: number; settled: boolean; aborted: boolean }>,
   };
   const record = (method: string, input: any, purpose: any): void => {
     state.calls.push({ method, purpose: purpose ?? null, pid: typeof input?.pid === 'number' ? input.pid : null });
@@ -92,6 +93,7 @@ export function createControl(context: any) {
         calls: state.calls,
         reports: state.reports,
         slow: state.slow,
+        slowRequests: state.slowRequests,
       }),
     }],
     rpc: [],
@@ -103,7 +105,8 @@ export function createControl(context: any) {
             try { await new Promise(resolve => setTimeout(resolve, 1_000)); }
             finally { state.shutdownActivePids.delete(input.pid); }
           }
-          return { armed: state.crashArmed, pid: state.crashTarget };
+          return { armed: state.crashArmed, pid: state.crashTarget,
+            slow: state.slowRequests.find(request => request.pid === input.pid) ?? null };
         },
         crashHold: (input: any) => { state.crashEntered.push({pid: input.pid, kind: 'query'}); return new Promise(() => {}); },
         crashCommand: (input: any) => { state.crashEntered.push({pid: input.pid, kind: 'command'}); return new Promise(() => {}); },
@@ -114,17 +117,26 @@ export function createControl(context: any) {
         // that aborts therefore never receives a business result.
         slow: (input: any, ctx: any) => new Promise((resolve) => {
           state.slow.entered = true;
+          const request = { pid: input.pid, settled: false, aborted: false };
+          state.slowRequests.push(request);
+          const signal = ctx?.signal;
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const onAbort = () => finish(true);
           const finish = (aborted: boolean): void => {
+            if (request.settled) return;
+            request.settled = true;
+            request.aborted = aborted;
+            if (timer !== undefined) clearTimeout(timer);
+            signal?.removeEventListener?.('abort', onAbort);
             state.slow.aborted ||= aborted;
             record('slow', input, ctx?.purpose);
             resolve({ ok: true, aborted });
           };
-          const signal = ctx?.signal;
           if (signal?.aborted === true) { finish(true); return; }
-          if (typeof signal?.addEventListener === 'function') signal.addEventListener('abort', () => finish(true), { once: true });
+          if (typeof signal?.addEventListener === 'function') signal.addEventListener('abort', onAbort, { once: true });
           // Bounded fallback so a caller that never cancels (or a cancellation the transport
           // does not propagate) still settles the handler instead of leaking a pending task.
-          const timer = setTimeout(() => finish(false), 2_000);
+          timer = setTimeout(() => finish(false), 2_000);
           if (typeof timer?.unref === 'function') timer.unref();
         }),
         report: (input: any, ctx: any) => {

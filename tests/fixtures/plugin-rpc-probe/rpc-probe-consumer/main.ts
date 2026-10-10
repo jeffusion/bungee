@@ -150,7 +150,7 @@ export class RpcProbeConsumer {
       adminCode,
     });
 
-    backgroundTask = () => this.runBackground(pid);
+    backgroundTask = () => context.services.runBackground(() => this.runBackground(pid));
   }
 
   private async runBackground(pid: number): Promise<void> {
@@ -166,10 +166,23 @@ export class RpcProbeConsumer {
       // remote revocation must not become an unhandled worker rejection.
       const slowCall = client.slow({ pid }, { signal: controller.signal })
         .then(() => 'resolved', (error: any) => codeOf(error));
-      // Let the gated handler start, then cancel it. The call must terminate with a fixed
-      // cancellation code and must never deliver a business result.
-      await new Promise(resolve => setTimeout(resolve, 50));
-      controller.abort();
+      // Observe this worker's actual callee entry before cancellation; elapsed time
+      // cannot establish that a request has crossed the authenticated transport.
+      const waitForSlow = async (aborted: boolean) => {
+        const deadline = Date.now() + 5_000;
+        for (;;) {
+          const status = await client.crashStatus({ pid }, { timeoutMs: 5_000 });
+          if (status.slow !== null && (!aborted || status.slow.aborted)) return status.slow;
+          if (Date.now() >= deadline) throw new Error(`slow callee ${aborted ? 'abort' : 'entry'} not observed`);
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+      };
+      let calleeEntered = false;
+      try {
+        const entered = await waitForSlow(false);
+        if (entered.settled) throw new Error('slow callee settled before caller cancellation');
+        calleeEntered = true;
+      } finally { controller.abort(); }
       let timer: ReturnType<typeof setTimeout> | undefined;
       const bounded = new Promise<string>(resolve => { timer = setTimeout(() => resolve('no-terminal'), 5_000); });
       let cancelCode = 'no-terminal';
@@ -181,6 +194,7 @@ export class RpcProbeConsumer {
       } finally {
         if (timer !== undefined) clearTimeout(timer);
       }
+      const callee = await waitForSlow(true);
 
       await client.report({
         pid,
@@ -189,6 +203,8 @@ export class RpcProbeConsumer {
         commandValue,
         persisted,
         cancelCode,
+        calleeEntered,
+        calleeAborted: callee.aborted,
       });
     } catch (error) {
       try { await client.report({ pid, phase: 'background-error', error: codeOf(error) }); } catch { /* best effort */ }

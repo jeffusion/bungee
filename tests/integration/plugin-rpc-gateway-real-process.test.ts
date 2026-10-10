@@ -226,6 +226,8 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
         expect(report.payload.commandValue.value).toBe(expectedCommandValue);
         expect(report.payload.persisted.value).toBe(expectedCommandValue);
         expect(report.payload.cancelCode).toBe('cancelled');
+        expect(report.payload.calleeEntered).toBe(true);
+        expect(report.payload.calleeAborted).toBe(true);
       }
 
       // ---- restart: the durable journal must serve the same committed result.
