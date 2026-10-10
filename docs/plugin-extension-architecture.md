@@ -47,7 +47,7 @@ Bungee 的基础层负责个人反代的 Route、Service、上游及通用插件
 | token-budget | 全局策略插件，control/worker/ingress | key-access、token-metering | Key 额度、周期、准入、可靠账本与恢复 |
 | token-stats | 全局观测插件，worker/control | token-metering | 统计、费用展示和可降级报表 |
 
-以上插件全部按需启用，官方随发行版提供不等于自动开启。现有 model-mapping、ai-transformer 等请求变换插件继续使用原有 scoped 模型。现有路由级限流保持兼容，此次不扩大为全面重写路由限流；它与可选的 Key 限速各自生效。
+以上插件全部按需启用，官方随发行版提供不等于自动开启。model-mapping 使用 scoped 模型；llm-protocol-adapter 使用 global-and-scoped，同时提供自动全局服务与显式协议转换绑定。现有路由级限流保持兼容，此次不扩大为全面重写路由限流；它与可选的 Key 限速各自生效。
 
 ```mermaid
 flowchart TD

@@ -46,6 +46,11 @@ jobs:
       - name: Run tests
         run: bun test
 
+      - name: Run isolated protocol adapter form regression
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 2
+        run: bun packages/ui/tests/protocol-adapter.browser.ts
+
       # - name: Repeat Windows process regressions
       #   if: matrix.os == 'windows-latest'
       #   timeout-minutes: 15

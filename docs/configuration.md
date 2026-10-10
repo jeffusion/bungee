@@ -77,7 +77,7 @@ Every write replaces one complete `ConfigurationAggregateV2`. Entity IDs are sta
     }],
     "plugins": []
   },
-  "plugin_activations": [{ "plugin_name": "ai-transformer" }]
+  "plugin_activations": [{ "plugin_name": "llm-protocol-adapter" }]
 }
 ```
 
