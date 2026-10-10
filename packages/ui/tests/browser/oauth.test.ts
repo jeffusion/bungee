@@ -2,13 +2,13 @@ import { test as browserTest } from 'bun:test';
 import assert from 'node:assert/strict';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 import { chromium } from 'playwright';
+import { expect } from 'playwright/test';
 import { readFile } from 'node:fs/promises';
 
 browserTest('oauth', async () => {
 const manifest = JSON.parse(await readFile(new URL('../../../../plugins/chatgpt-oauth/manifest.json', import.meta.url), 'utf8'));
 
-const uiRuntime = await startUiRuntime(['tests/fixtures/oauth.html']);
-const server = uiRuntime.server;
+const uiRuntime = await startUiRuntime({ mode: 'component-fixture', entries: ['tests/fixtures/oauth.html'] });
 console.log('Fixture server ready');
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
 try {
@@ -132,9 +132,7 @@ try {
     if (url.pathname.startsWith('/api/config')) return respond({ config, revision: 1, content_hash: 'fixture' });
     throw new Error(`Unmocked API: ${request.method()} ${url.pathname}`);
   });
-  const address = server.httpServer!.address();
-  assert(address && typeof address !== 'string');
-  const base = `http://127.0.0.1:${address.port}/tests/fixtures/oauth.html`;
+  const base = `${uiRuntime.origin}/tests/fixtures/oauth.html`;
   const dialog = page.getByRole('dialog');
   const startLogin = async () => {
     const siwc = dialog.getByRole('radio', { name: 'Sign in with ChatGPT', exact: true });
@@ -143,9 +141,14 @@ try {
   };
   const close = () => dialog.getByRole('button', { name: 'Close', exact: true }).first().click();
   const dialogGeometry: unknown[] = [];
-  const standardDialog = async () => {
+  const settleDialog = async () => {
     await dialog.waitFor();
-    await page.waitForTimeout(220);
+    await dialog.evaluate(async element => {
+      await Promise.all(element.getAnimations({ subtree: true }).map(animation => animation.finished));
+    });
+  };
+  const standardDialog = async () => {
+    await settleDialog();
     const labelledBy = await dialog.getAttribute('aria-labelledby'), describedBy = await dialog.getAttribute('aria-describedby');
     assert(labelledBy && describedBy);
     assert(await page.locator(`[id="${labelledBy}"]`).textContent());
@@ -185,7 +188,9 @@ try {
   const accountCards = () => page.locator('[data-testid="chatgpt-accounts-page"] .nx-panel-raised');
   const assertGrid = async (width: number, columns: number, screenshot: string) => {
     const postsBeforeLayout = resetPosts;
-    await page.setViewportSize({ width, height: 900 }); await page.waitForTimeout(80);
+    await page.setViewportSize({ width, height: 900 });
+    await expect.poll(() => accountCards().evaluateAll(elements =>
+      new Set(elements.map(element => Math.round(element.getBoundingClientRect().x))).size)).toBe(columns);
     const zh = await page.getByRole('button', { name: '添加账号', exact: true }).count() > 0;
     const boxes = await accountCards().evaluateAll(elements => elements.map(element => {
       const box = element.getBoundingClientRect(); return { x: Math.round(box.x), y: Math.round(box.y), width: box.width, height: box.height };
@@ -199,37 +204,48 @@ try {
     assert(boxes.every(box => box.width <= 430), 'desktop cards must stay near the 400px target width');
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     assert.equal(await accountCards().locator('.nx-corner').count(), 0, 'peer cards must not have corner brackets');
-    for (const [index, card] of (await accountCards().all()).entries()) {
-      const account = accounts[index];
-      const status = card.getByTestId('account-status');
-      const expected = account.available ? (zh ? '可用' : 'AVAILABLE') : account.status === 'disabled' ? (zh ? '已禁用' : 'DISABLED') : account.status === 'revoked' ? (zh ? '已移除' : 'REMOVED') : (zh ? '需要重新登录' : 'SIGN IN AGAIN REQUIRED');
-      assert.equal((await status.innerText()).trim(), expected);
-      assert.equal(await card.locator('header').getByTestId('account-status').count(), 1);
-      assert.equal(await card.locator('.nx-panel-body').getByTestId('account-status').count(), 0);
-      assert(await status.locator('span').evaluate((element, variant) => element.classList.contains(`nx-badge-${variant}`), account.available ? 'active' : account.status === 'revoked' ? 'muted' : 'standby'));
-      assert.equal(await card.getByTestId('account-identity').locator('[class*="nx-badge-"]').count(), 0, 'identity body has no bare account status');
-      const plan = account.identity?.planType;
-      assert.equal(await card.getByTestId('account-type').count(), plan ? 1 : 0);
-      if (plan) assert.equal(await card.getByTestId('account-type').innerText(), zh ? `账号类型：${plan}` : `Account type: ${plan}`);
-      const header = card.locator('header');
-      assert(await header.evaluate(element => {
-        const title = element.querySelector('.truncate')!.getBoundingClientRect();
-        const badge = element.querySelector('[data-testid="account-status"]')!;
-        const box = badge.getBoundingClientRect(), bounds = element.getBoundingClientRect();
-        return element.scrollWidth <= element.clientWidth && badge.scrollWidth <= badge.clientWidth
+    // Keep the original accessible button scope: the 24px auto-reset switch has a distinct role.
+    const buttonHeights = await Promise.all((await accountCards().all()).map(card =>
+      card.getByRole('button').evaluateAll(buttons => buttons.map(button => button.getBoundingClientRect().height))));
+    // Sample the same rendered contracts once per viewport, including every credit button.
+    const details = await accountCards().evaluateAll(cards => cards.map(card => {
+      const status = card.querySelector('[data-testid="account-status"]')!;
+      const header = card.querySelector('header')!;
+      const title = header.querySelector('.truncate')!.getBoundingClientRect();
+      const box = status.getBoundingClientRect(), bounds = header.getBoundingClientRect();
+      const viewport = card.querySelector<HTMLElement>('[data-testid="credit-viewport"]');
+      const heading = card.querySelector<HTMLElement>('[data-testid="reset-heading"]');
+      return {
+        status: (status as HTMLElement).innerText.trim(), variant: status.querySelector('span')!.className,
+        headerStatuses: header.querySelectorAll('[data-testid="account-status"]').length,
+        bodyStatuses: card.querySelector('.nx-panel-body')!.querySelectorAll('[data-testid="account-status"]').length,
+        identityBadges: card.querySelector('[data-testid="account-identity"]')!.querySelectorAll('[class*="nx-badge-"]').length,
+        types: [...card.querySelectorAll<HTMLElement>('[data-testid="account-type"]')].map(node => node.innerText),
+        headerFits: header.scrollWidth <= header.clientWidth && status.scrollWidth <= status.clientWidth
           && box.left >= bounds.left && box.right <= bounds.right && box.bottom <= bounds.bottom
-          && (title.right <= box.left || title.bottom <= box.top || box.bottom <= title.top);
-      }), 'header title/status must not overlap, overflow or clip');
-      assert(await card.evaluate(element => element.scrollWidth <= element.clientWidth), 'card content must not overflow');
-      const footer = card.getByTestId('account-actions');
-      assert.equal(await footer.evaluate(element => getComputedStyle(element).justifyContent), 'flex-end');
-      for (const button of await card.getByRole('button').all()) {
-        const box = await button.boundingBox(); assert(box && box.height === 28, 'card buttons use the actual 28px primitive sm size');
-      }
-      const viewport = card.getByTestId('credit-viewport');
-      if (await viewport.count()) assert(await viewport.evaluate(element => element.clientHeight === 112 && getComputedStyle(element).overflowY === 'auto'), 'credit list has a fixed 112px scroll viewport');
-      const heading = card.getByTestId('reset-heading');
-      if (await heading.count()) assert(await heading.isVisible(), 'reset heading remains readable');
+          && (title.right <= box.left || title.bottom <= box.top || box.bottom <= title.top),
+        fits: card.scrollWidth <= card.clientWidth,
+        footerAlignment: getComputedStyle(card.querySelector('[data-testid="account-actions"]')!).justifyContent,
+        creditViewport: viewport ? { height: viewport.clientHeight, overflow: getComputedStyle(viewport).overflowY } : null,
+        headingVisible: heading ? heading.checkVisibility() && heading.getBoundingClientRect().height > 0 : null,
+      };
+    }));
+    for (const [index, detail] of details.entries()) {
+      const account = accounts[index];
+      const expected = account.available ? (zh ? '可用' : 'AVAILABLE') : account.status === 'disabled' ? (zh ? '已禁用' : 'DISABLED') : account.status === 'revoked' ? (zh ? '已移除' : 'REMOVED') : (zh ? '需要重新登录' : 'SIGN IN AGAIN REQUIRED');
+      assert.equal(detail.status, expected);
+      assert.equal(detail.headerStatuses, 1); assert.equal(detail.bodyStatuses, 0);
+      const variant = account.available ? 'active' : account.status === 'revoked' ? 'muted' : 'standby';
+      assert(detail.variant.split(' ').includes(`nx-badge-${variant}`));
+      assert.equal(detail.identityBadges, 0, 'identity body has no bare account status');
+      const plan = account.identity?.planType;
+      assert.deepEqual(detail.types, plan ? [zh ? `账号类型：${plan}` : `Account type: ${plan}`] : []);
+      assert(detail.headerFits, 'header title/status must not overlap, overflow or clip');
+      assert(detail.fits, 'card content must not overflow');
+      assert.equal(detail.footerAlignment, 'flex-end');
+      assert(buttonHeights[index].every(height => height === 28), 'every card button keeps the actual 28px primitive sm size');
+      if (detail.creditViewport) assert.deepEqual(detail.creditViewport, { height: 112, overflow: 'auto' });
+      if (detail.headingVisible !== null) assert(detail.headingVisible, 'reset heading remains readable');
     }
     if (width === 1440) {
       const pair = page.locator('.account-card').filter({ hasText: /Multiple credits|Primary only/ });
@@ -244,9 +260,11 @@ try {
       }
     }
     await page.evaluate(() => window.scrollTo(0, 0));
-    await page.screenshot({ path: screenshot, fullPage: true });
-    await page.screenshot({ path: screenshot.replace('.png', '-viewport.png') });
-    await page.locator('.account-card').filter({ hasText: 'Multiple credits' }).screenshot({ path: screenshot.replace('.png', '-credits.png') });
+    // Responsive DOM assertions cover all widths/locales; representative success images cover both languages and mobile/desktop.
+    if (width === 1440 || zh && width === 390) {
+      await page.screenshot({ path: screenshot, fullPage: true });
+      await page.locator('.account-card').filter({ hasText: 'Multiple credits' }).screenshot({ path: screenshot.replace('.png', '-credits.png') });
+    }
     if (zh && [390, 1440].includes(width)) {
       await page.locator('.account-card').filter({ hasText: 'Free monthly' }).screenshot({ path: `/tmp/bungee-oauth-header-zh-${width}-plan.png` });
       await page.locator('.account-card').filter({ hasText: 'long.account.with.production.length@example.department.test' }).screenshot({ path: `/tmp/bungee-oauth-header-zh-${width}-long.png` });
@@ -317,7 +335,7 @@ try {
   await page.screenshot({ path: '/tmp/bungee-oauth-use-focus.png' });
   await page.keyboard.press('Enter');
   await dialog.getByText('Rate-limit reset opportunity', { exact: true }).waitFor();
-  await page.waitForTimeout(220);
+  await settleDialog();
   for (let index = 0; index < 4; index++) { await page.keyboard.press('Tab'); assert(await dialog.evaluate(element => element.contains(document.activeElement))); }
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click(); await dialog.waitFor({ state: 'hidden' });
   assert.equal(resetPosts, 0);
@@ -422,7 +440,7 @@ try {
   await primary().getByRole('button', { name: /More actions/ }).click();
   await page.getByRole('menuitem', { name: 'Account impact', exact: true }).click();
   await dialog.getByText('Current configuration references only; runtime usage is unknown.', { exact: true }).waitFor();
-  await page.waitForTimeout(250);
+  await settleDialog();
   assert.equal(await dialog.locator('footer').count(), 0, 'read-only references must not render a footer');
   assert(await dialog.evaluate(element => {
     const body = element.querySelector('[data-dialog-body]')!;
@@ -451,7 +469,8 @@ try {
   const verifyDropdown = async (size: string) => {
     await dialog.getByLabel('Choose service', { exact: true }).click();
     const list = page.getByRole('listbox');
-    await list.waitFor(); await page.waitForTimeout(250);
+    await list.waitFor();
+    await list.evaluate(async element => { await Promise.all(element.getAnimations({ subtree: true }).map(animation => animation.finished)); });
     assert.equal(await list.getByRole('option').count(), 13);
     const geometry = await list.evaluate(element => {
       const rect = element.getBoundingClientRect(), modal = document.querySelector('[role="dialog"]')!.getBoundingClientRect();
@@ -543,10 +562,8 @@ try {
   await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label')?.startsWith('更多操作:'));
   assert(await moreZh.evaluate(element => element === document.activeElement));
   await page.evaluate(() => (window as any).setTestLocale('en'));
-  await page.screenshot({ path: '/tmp/bungee-oauth-fixture.png' });
   await page.setViewportSize({ width: 390, height: 844 });
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
-  await page.screenshot({ path: '/tmp/bungee-oauth-mobile-fixture.png' });
   await page.setViewportSize({ width: 1100, height: 850 });
   // Direct shadcn source/account primitives: disabled, missing current and retry states.
   await page.goto(`${base}?picker=manual`);
@@ -588,7 +605,7 @@ try {
   const exampleTrigger = page.getByRole('button', { name: /Open industrial dialog/ });
   await exampleTrigger.scrollIntoViewIfNeeded();
   await page.screenshot({ path: '/tmp/bungee-industrial-dialog-design-catalog.png' });
-  await exampleTrigger.click(); await dialog.waitFor(); await page.waitForTimeout(250);
+  await exampleTrigger.click(); await dialog.waitFor(); await settleDialog();
   const body = dialog.locator('[data-dialog-body]');
   const before = await dialog.locator('header, footer').evaluateAll(elements => elements.map(element => element.getBoundingClientRect().toJSON()));
   await body.evaluate(element => element.scrollTop = element.scrollHeight);
@@ -600,12 +617,12 @@ try {
   for (let i = 0; i < 5; i++) { await page.keyboard.press('Tab'); assert(await dialog.evaluate(element => element.contains(document.activeElement)), 'focus stays trapped'); }
   await page.keyboard.press('Escape'); await dialog.waitFor({ state: 'hidden' });
   assert(await exampleTrigger.evaluate(element => element === document.activeElement), 'focus returns to opener');
-  await exampleTrigger.click(); await dialog.waitFor(); await page.waitForTimeout(250);
+  await exampleTrigger.click(); await dialog.waitFor(); await settleDialog();
   await page.mouse.click(3, 3); await dialog.waitFor({ state: 'hidden' });
   // Success must close before a held account refresh, and never close a subsequently opened login.
   const loginResetPosts = resetPosts;
   for (const method of ['device', 'pkce']) {
-    await page.goto(base); await page.waitForTimeout(1000); await page.getByRole('button', { name: 'Refresh', exact: true }).and(page.locator('[aria-busy="false"]')).waitFor();
+    await page.goto(base); await page.getByRole('button', { name: 'Refresh', exact: true }).and(page.locator('[aria-busy="false"]')).waitFor();
     await page.getByRole('button', { name: 'Add account', exact: true }).click();
     if (method === 'pkce') await dialog.getByRole('radio', { name: 'Codex browser sign-in', exact: true }).click();
     await startLogin();
@@ -708,7 +725,7 @@ try {
       assert(clip.x >= 0 && clip.y >= 0 && clip.x + clip.width <= 900 && clip.y + clip.height <= 700);
       await page.screenshot({ path: `/tmp/bungee-dialog-${kind}-close-${state}.png`, clip });
     };
-    await opener.click(); await dialog.waitFor(); await page.waitForTimeout(250);
+    await opener.click(); await dialog.waitFor(); await settleDialog();
     if (kind === 'industrial') {
       const focus = await closeStyle(); assert(focus.focused && !focus.focusVisible); assertIndustrial(focus);
       await closeScreenshot('focus');
@@ -760,7 +777,7 @@ try {
     await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Open focus fixture');
     assert(await opener.evaluate(element => element === document.activeElement));
     for (const key of ['Enter', 'Space']) {
-      await opener.click(); await dialog.waitFor(); await page.waitForTimeout(250);
+      await opener.click(); await dialog.waitFor(); await settleDialog();
       await page.keyboard.press('Tab');
       assert((await closeStyle()).focusVisible);
       await page.keyboard.press(key); await dialog.waitFor({ state: 'hidden' });

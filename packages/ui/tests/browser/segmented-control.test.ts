@@ -4,7 +4,7 @@ import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 
 let runtime: Awaited<ReturnType<typeof startUiRuntime>>, browser: Browser;
 beforeAll(async () => {
-  runtime = await startUiRuntime(['tests/fixtures/components/segmented/index.html']);
+  runtime = await startUiRuntime({ mode: 'component-fixture', entries: ['tests/fixtures/components/segmented/index.html'] });
   try { browser = await chromium.launch(); } catch (error) { await runtime.close(); throw error; }
 }, 120_000);
 afterAll(async () => { try { await browser?.close(); } finally { await runtime?.close(); } });

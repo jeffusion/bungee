@@ -8,7 +8,7 @@ import type { TokenStatsRange } from '../../../core/src/plugin.types';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 
 browserTest('dashboard', async () => {
-const uiRuntime = await startUiRuntime();
+const uiRuntime = await startUiRuntime({ mode: 'built-page' });
 try {
 const baseUrl = uiRuntime.origin;
 const evidence = process.env.DASHBOARD_EVIDENCE_DIR ?? '/tmp/bungee-dashboard-evidence';
@@ -270,6 +270,11 @@ async function checkLibraryModal(width: number, dismiss: 'escape' | 'close' | 'o
 try {
   await page.goto(baseUrl);
   await expect(page.getByTestId('page-dashboard')).toBeVisible();
+  const chartChunk = (await fs.promises.readdir(new URL('../../dist/assets/', import.meta.url)))
+    .find(name => /^vendor-charts-.*\.js$/.test(name));
+  if (!chartChunk) throw new Error('Current UI build has no Chart.js chunk');
+  await page.addInitScript(url => { (window as any).__chartModuleUrl = url; }, `/assets/${chartChunk}`);
+  await page.evaluate(url => { (window as any).__chartModuleUrl = url; }, `/assets/${chartChunk}`);
   if (!nativeOnly) {
     const appHeader = page.getByTestId('app-header');
     const tabs = appHeader.locator('.header-tab');
@@ -502,8 +507,9 @@ try {
     // A real canvas hover drives shared HTML tooltips on all four linked charts.
     await card('chart.requests').scrollIntoViewIfNeeded();
     const hoverTrend = (index: number | null) => page.evaluate(async index => {
-      const moduleUrl = '/src/plugin-sdk/index.ts';
-      const { ChartJS: Chart } = await import(moduleUrl);
+      const module = await import((window as any).__chartModuleUrl);
+      const Chart = Object.values(module).find((value: any) => typeof value?.getChart === 'function') as any;
+      if (!Chart) throw new Error('Built Chart.js getChart export is missing');
       const canvas = document.querySelector<HTMLCanvasElement>('[data-card-id="chart.requests"] canvas')!;
       const chart = Chart.getChart(canvas);
       const point = chart.getDatasetMeta(0).data[index ?? 0];
@@ -645,7 +651,9 @@ try {
     await expect(page.locator('[data-token-stats-bucket-trigger]')).toHaveCount(13);
     // Programmatic Chart.js activation must drive the shared HTML tooltip, also on empty buckets.
     const setChartTooltip = (index: number | null) => page.evaluate(async index => {
-      const { ChartJS: Chart } = await import('/src/' + 'plugin-sdk/index.ts');
+      const module = await import((window as any).__chartModuleUrl);
+      const Chart = Object.values(module).find((value: any) => typeof value?.getChart === 'function') as any;
+      if (!Chart) throw new Error('Built Chart.js getChart export is missing');
       const chart = Chart.getChart(document.querySelector('[data-testid="token-stats-time-chart"] canvas')!)!;
       if (typeof chart.options.plugins.tooltip.external !== 'function') throw new Error('Missing Chart.js external tooltip');
       chart.tooltip.setActiveElements(index === null ? [] : chart.data.datasets.map((_: unknown, datasetIndex: number) => ({ datasetIndex, index })), { x: 0, y: 0 });
@@ -771,7 +779,9 @@ try {
     await page.keyboard.press('Escape');
     await expect(bucketDetail).toHaveCount(0);
     await expect.poll(() => page.evaluate(async () => {
-      const { ChartJS: Chart } = await import('/src/' + 'plugin-sdk/index.ts');
+      const module = await import((window as any).__chartModuleUrl);
+      const Chart = Object.values(module).find((value: any) => typeof value?.getChart === 'function') as any;
+      if (!Chart) throw new Error('Built Chart.js getChart export is missing');
       return Chart.getChart(document.querySelector('[data-testid="token-stats-time-chart"] canvas')!)!.tooltip.getActiveElements().length;
     })).toBe(0);
     await buckets.last().evaluate(node => (node as HTMLElement).blur());
@@ -800,7 +810,9 @@ try {
         Math.max(node.scrollWidth - node.clientWidth, node.scrollHeight - node.clientHeight))).toBeLessThanOrEqual(1);
       // Page bars stay centered in date slots, capped at 40px, with unchanged colors.
       await expect.poll(() => page.evaluate(async () => {
-        const { ChartJS: Chart } = await import('/src/' + 'plugin-sdk/index.ts');
+        const module = await import((window as any).__chartModuleUrl);
+        const Chart = Object.values(module).find((value: any) => typeof value?.getChart === 'function') as any;
+        if (!Chart) throw new Error('Built Chart.js getChart export is missing');
         const plot = document.querySelector('[data-testid="token-stats-time-chart"]')!;
         const canvas = plot.querySelector('canvas')!;
         const chart = Chart.getChart(canvas)!;
@@ -829,7 +841,9 @@ try {
     await rangeSelect.click(); await page.getByRole('option', { name: '最近7天', exact: true }).click();
     await expect(buckets).toHaveCount(7);
     await expect.poll(() => page.evaluate(async () => {
-      const { ChartJS: Chart } = await import('/src/' + 'plugin-sdk/index.ts');
+      const module = await import((window as any).__chartModuleUrl);
+      const Chart = Object.values(module).find((value: any) => typeof value?.getChart === 'function') as any;
+      if (!Chart) throw new Error('Built Chart.js getChart export is missing');
       const chart = Chart.getChart(document.querySelector('[data-testid="token-stats-time-chart"] canvas')!)!;
       return chart.getDatasetMeta(0).data.every((bar: any) => Math.abs(bar.width - 40) < 0.1);
     })).toBe(true);
@@ -890,7 +904,9 @@ try {
     // Refresh without an outside pointer click, so Chart.js must clear the removed active datasets.
     await page.getByRole('button', { name: '刷新', exact: true }).evaluate(node => (node as HTMLButtonElement).click());
     await expect.poll(() => page.evaluate(async () => {
-      const { ChartJS: Chart } = await import('/src/' + 'plugin-sdk/index.ts');
+      const module = await import((window as any).__chartModuleUrl);
+      const Chart = Object.values(module).find((value: any) => typeof value?.getChart === 'function') as any;
+      if (!Chart) throw new Error('Built Chart.js getChart export is missing');
       return Chart.getChart(document.querySelector('[data-testid="token-stats-time-chart"] canvas')!)!.data.datasets.length;
     })).toBe(1);
     await expect(bucketDetail).toHaveCount(0);

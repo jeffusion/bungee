@@ -9,7 +9,7 @@ import { configurationRuntimeFixture, publicationFixture } from '../../helpers/p
 
 let runtime: Awaited<ReturnType<typeof startUiRuntime>>, browser: Browser;
 beforeAll(async () => {
-  runtime = await startUiRuntime();
+  runtime = await startUiRuntime({ mode: 'built-page' });
   try { browser = await chromium.launch(); } catch (error) { await runtime.close(); throw error; }
 }, 120_000);
 afterAll(async () => { try { await browser?.close(); } finally { await runtime?.close(); } });

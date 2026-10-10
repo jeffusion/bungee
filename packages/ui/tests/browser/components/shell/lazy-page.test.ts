@@ -5,10 +5,10 @@ import { startUiRuntime } from '../../../../../../tests/helpers/ui-runtime';
 
 let runtime: Awaited<ReturnType<typeof startUiRuntime>>, browser: Browser;
 beforeAll(async () => {
-  runtime = await startUiRuntime(['tests/fixtures/components/lazy/index.html'], [
+  runtime = await startUiRuntime({ mode: 'component-fixture', entries: ['tests/fixtures/components/lazy/index.html'], aliases: [
     { find: "$i18n", replacement: fileURLToPath(new URL("../../../fixtures/components/lazy/i18n.js", import.meta.url)) },
     { find: "$components/industrial/LoadingIndicator.svelte", replacement: fileURLToPath(new URL("../../../fixtures/components/lazy/loading.svelte", import.meta.url)) },
-  ]);
+  ] });
   try { browser = await chromium.launch(); } catch (error) { await runtime.close(); throw error; }
 }, 120_000);
 afterAll(async () => { try { await browser?.close(); } finally { await runtime?.close(); } });

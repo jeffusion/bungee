@@ -5,12 +5,12 @@ import { startUiRuntime } from '../../../../../../../tests/helpers/ui-runtime';
 
 let runtime: Awaited<ReturnType<typeof startUiRuntime>>, browser: Browser;
 beforeAll(async () => {
-  runtime = await startUiRuntime(['tests/fixtures/components/chain/index.html'], [
+  runtime = await startUiRuntime({ mode: 'component-fixture', entries: ['tests/fixtures/components/chain/index.html'], aliases: [
     { find: "$api/logs", replacement: fileURLToPath(new URL("../../../../fixtures/components/chain/api-logs.js", import.meta.url)) },
     { find: "$i18n", replacement: fileURLToPath(new URL("../../../../fixtures/components/chain/i18n.js", import.meta.url)) },
     { find: "$components/industrial", replacement: fileURLToPath(new URL("../../../../fixtures/components/chain/components-industrial.js", import.meta.url)) },
     { find: "./LogDetailContent.svelte", replacement: fileURLToPath(new URL("../../../../fixtures/components/chain/LogDetailContent.svelte", import.meta.url)) },
-  ]);
+  ] });
   try { browser = await chromium.launch(); } catch (error) { await runtime.close(); throw error; }
 }, 120_000);
 afterAll(async () => { try { await browser?.close(); } finally { await runtime?.close(); } });

@@ -9,18 +9,15 @@ const evidence = process.env.NUMBER_INPUT_EVIDENCE_DIR ?? '/tmp/bungee-number-in
 await mkdir(evidence, { recursive: true });
 const errors: string[] = [];
 const checks: string[] = [];
-const uiRuntime = await startUiRuntime(['tests/fixtures/number-input.html']);
-const server = uiRuntime.server;
+const uiRuntime = await startUiRuntime({ mode: 'component-fixture', entries: ['tests/fixtures/number-input.html'] });
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
 let success = false;
 try {
-  const address = server.httpServer!.address();
-  if (!address || typeof address === 'string') throw new Error('test server address unavailable');
   browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
-  await page.goto(`http://127.0.0.1:${address.port}/tests/fixtures/number-input.html`);
+  await page.goto(`${uiRuntime.origin}/tests/fixtures/number-input.html`);
   const input = page.getByTestId('number');
   const bound = page.getByTestId('bound-value');
   const increase = page.getByRole('button', { name: 'Increase seconds' });

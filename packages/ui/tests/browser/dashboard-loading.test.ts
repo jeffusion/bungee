@@ -6,7 +6,7 @@ import { defaultLayout, LAYOUT_KEY, type CardDefinition } from '../../src/compon
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 
 browserTest('dashboard loading', async () => {
-const uiRuntime = await startUiRuntime();
+const uiRuntime = await startUiRuntime({ mode: 'built-page' });
 try {
 // Delay real UI requests with fixtures so each intermediate layout is observable.
 const base = uiRuntime.origin;
@@ -95,14 +95,16 @@ try {
         // Initial GridStack registration, fonts and unrelated requests settle independently
         // of the held Token request. Do not sample an intermediate mount geometry.
         await expect(overview).toHaveAttribute('aria-busy', 'true');
+        await page.locator(width < 768 ? '.dashboard-mobile-card' : '.grid-stack-item').filter({ has: overview }).waitFor({ state: 'visible' });
         await settle();
         let previousGeometry = '', stableSamples = 0;
         await expect.poll(async () => {
+          await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
           const geometry = JSON.stringify(await measure());
           stableSamples = geometry === previousGeometry ? stableSamples + 1 : 0;
           previousGeometry = geometry;
           return stableSamples;
-        }, { intervals: [100], message: `${language}/${width}/${custom}: initial layout settles with Token request pending` })
+        }, { intervals: [16], message: `${language}/${width}/${custom}: initial layout settles with Token request pending` })
           .toBeGreaterThanOrEqual(3);
         for (const [index, outcome] of ['success', 'empty', 'error'].entries()) {
           response = outcome as typeof response;

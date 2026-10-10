@@ -4,8 +4,7 @@ import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 import { chromium } from 'playwright';
 
 browserTest('sandbox bridge', async () => {
-const uiRuntime = await startUiRuntime(['index.html']);
-const server = uiRuntime.server;
+const uiRuntime = await startUiRuntime({ mode: 'component-fixture', entries: ['tests/fixtures/sandbox.html'] });
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
 
 try {
@@ -55,7 +54,7 @@ try {
     return route.continue();
   });
 
-  const base = `http://127.0.0.1:${(server.httpServer!.address() as { port: number }).port}/tests/fixtures/sandbox.html`;
+  const base = `${uiRuntime.origin}/tests/fixtures/sandbox.html`;
   await page.goto(base);
   const frame = page.locator('iframe');
   await frame.waitFor();

@@ -44,6 +44,8 @@ Root scripts from `package.json`:
 |---|---|
 | `bun dev` | run core in watch mode |
 | `bun run test` | build current artifacts, then run unit, integration and browser regressions |
+| `bun run test:plan --base <ref>` | print the cumulative changed-file scope as JSON; no build or tests |
+| `bun run test:affected --base <ref>` | build if required, then run all unit tests and selected integration/browser files |
 | `bun run test:fast` | run unit tests without databases, services, child processes or browsers |
 | `bun run test:integration` | run tests with isolated local resources |
 | `bun run test:browser` | run real browser tests with owned local services |
@@ -88,12 +90,11 @@ under `/api`, plugin static assets under `/plugins`, and health under
 
 Production build chain (root `build`) includes:
 
-1. Run architecture checks
-2. Build shared types and llms
-3. Generate widget registry
-4. Build UI and bundle its assets into core
-5. Build core, storage Worker entries and external plugins
-6. Build CLI
+1. Build shared types and llms
+2. Generate widget registry
+3. Build UI and bundle its assets into core
+4. Build core, storage Worker entries and external plugins
+5. Build CLI
 
 This ensures UI and runtime artifacts are synchronized.
 
@@ -113,21 +114,53 @@ Use a descriptive kebab-case `<behavior>.test.ts`; the directory identifies its 
 
 `bun run test` builds before all three categories. Install Chromium with `bunx playwright install chromium`. Run an initial build before using category commands directly, and rebuild whenever the tested SDK or artifact changes. Bun discovers categories by path substring, with helper, fixture, manual and generated directories excluded in `bunfig.toml`; there is no separate test list.
 
-CI installs Chromium and runs the same complete entry on Linux and macOS. The build command only builds; architecture assertions run with unit tests. `bun run check:architecture` remains available for focused checks.
+The build command only builds; architecture assertions run with unit tests. `bun run check:architecture` remains available for focused checks.
+
+### Changed-file validation
+
+From the repository root, choose an explicit baseline:
+
+```bash
+bun run test:plan --base origin/main
+bun run test:affected --base origin/main
+```
+
+Local selection includes cumulative commits, staged and unstaged edits, and unignored new files. Renames and deletions consider both paths and the dependencies in both trees. Plans record the baseline commit, tested commit and content identity; a local working-tree identity is a SHA256 fingerprint, while committed CI plans use the Git tree SHA. A missing baseline or unreadable Git/configuration fails instead of producing an empty scope.
+
+All non-documentation changes run the complete unit category. Integration and browser selection takes the union of these rules:
+
+| Change | Additional scope |
+| --- | --- |
+| Explicit documentation, license, Agent-rule or skill paths | No product build or application tests when the entire change is documentation |
+| UI or plugin UI | UI integration, all UI/plugin browser files and root browser workflows |
+| Plugin server | Plugin and reverse-dependent plugin integration, core/root integration and root browser workflows |
+| Plugin manifest | Plugin-server scope plus UI scope |
+| CLI | CLI/core/root integration and root browser workflows |
+| LLMS | LLMS/core/root integration, SDK-consuming plugins and their reverse dependencies, root browser workflows |
+| Core, shared types, tools, dependencies, build configuration or CI | Full regression |
+| Test entry | Changed surviving entry, with the full unit category |
+| Module helpers/fixtures | All owner tests plus confirmed cross-module consumers |
+| Root helpers/fixtures, unknown paths or an executable module without tests | Full regression with an explanation |
+
+The rules and dependency discovery live in [test-selection.ts](../../scripts/checks/test-selection.ts); the entry point is [select-tests.ts](../../scripts/checks/select-tests.ts). Documentation exemptions are path based; fixture Markdown is input data. Additions are discovered from directories, not a test-file whitelist. When adding modules or cross-module dependencies, maintain the rules and their tests. Do not silently broaden documentation exemptions or report an affected run as full validation.
+
+`test:affected` handles its own build. Category commands still require an initial/current build and always run the whole category. Plan-only mode never builds. CI consumes one committed plan per run; execution records and native Bun timings remain outside versioned source. Execution rejects stale commit/tree identities.
 
 ### CI and releases
 
-Development branches submit PRs directly to `main`. CI runs only on pull
-requests targeting `main`, including subsequent updates to those PRs.
+Development branches submit PRs directly to `main`. CI runs on pull
+requests targeting `main`, including subsequent updates, and as the reusable full-validation workflow invoked by Release.
 The Linux and macOS test jobs must pass before a PR can merge into `main`,
 and its branch must be up to date with `main`. Windows CI is disabled; the active matrix covers Linux and macOS.
 
-A push to `main` starts Release directly, without rerunning the test matrix.
+PR planning compares the PR base SHA with the actual checked-out test commit, covering the entire PR rather than the latest push. Each Linux/macOS workspace builds once and completes all fast tests. Integration runs in a separate serial job; browser files use at most two native Bun shards, each internally serial with `--isolate`. Jobs own independent workspaces and ports; artifacts are bound to their platform and code tree, including both generated source files. No browser service or mutable context is shared across files or jobs. The final checks verify native executed-file records: missing, failed, cancelled or unexpectedly skipped work cannot pass.
+
+A push to `main` starts Release.
 Before publishing, Release verifies that the pushed commit is the final commit
 of a merged PR targeting `main`, that its latest PR CI run and both Linux/macOS
 test jobs succeeded, and that the release Git tree matches the tree recorded by
-that CI run. Comparing trees supports rebase merges even when commit SHAs
-change. A missing or expired `tested-pr` artifact blocks publication; rerun
+that CI run. The proof records scope (`none`, `affected`, or `full`), run/attempt identity and both platform results. Comparing trees supports rebase merges even when commit SHAs
+change. Only a successful two-platform full proof for the same tree can be reused. Otherwise Release calls the shared full CI workflow on the release commit before entering the release environment, obtaining publishing credentials, changing versions or uploading artifacts. Missing, expired or old-format `tested-pr` artifacts block publication; rerun
 the PR CI before retrying Release. Artifacts are retained for 14 days.
 
 Keep the required checks `test (ubuntu-latest)` and `test (macos-latest)` bound
@@ -219,7 +252,7 @@ After building and installing Chromium:
 bun test --isolate tests/browser/ui-smoke.test.ts
 ```
 
-The test starts its local UI service and mocks management APIs. It verifies rendered routes, login, page errors and screenshots; it does not establish production authentication or provider connectivity. The service and browser close on exit. Evidence uses temporary storage outside the checkout.
+The test serves the current UI build through an owned static service and mocks management APIs. Component-host tests use the existing Vite configuration with isolated caches. Both modes expose only the service origin, evidence directory and close method through [ui-runtime.ts](../../tests/helpers/ui-runtime.ts). Reuse a service and browser within one file; isolate contexts between cases. Wait for observable responses, component state or layout instead of fixed preparation delays; retain real timeout/cancellation semantics and representative screenshots. It verifies rendered routes, login, page errors and screenshots; it does not establish production authentication or provider connectivity. The service and browser close on exit. Evidence uses temporary storage outside the checkout.
 
 ### Built runtime and storage
 

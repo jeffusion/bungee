@@ -5,13 +5,13 @@ import { startUiRuntime } from '../../../../../../../tests/helpers/ui-runtime';
 
 let runtime: Awaited<ReturnType<typeof startUiRuntime>>, browser: Browser;
 beforeAll(async () => {
-  runtime = await startUiRuntime(['tests/fixtures/components/body/index.html'], [
+  runtime = await startUiRuntime({ mode: 'component-fixture', entries: ['tests/fixtures/components/body/index.html'], aliases: [
     { find: "$api/config", replacement: fileURLToPath(new URL("../../../../fixtures/components/body/api-config.js", import.meta.url)) },
     { find: "$api/logs", replacement: fileURLToPath(new URL("../../../../fixtures/components/body/api-logs.js", import.meta.url)) },
     { find: "$i18n", replacement: fileURLToPath(new URL("../../../../fixtures/components/body/i18n.js", import.meta.url)) },
     { find: "$components/industrial", replacement: fileURLToPath(new URL("../../../../fixtures/components/body/components-industrial.js", import.meta.url)) },
     { find: "./JsonBodyViewer.svelte", replacement: fileURLToPath(new URL("../../../../fixtures/components/body/JsonBodyViewer.svelte", import.meta.url)) },
-  ]);
+  ] });
   try { browser = await chromium.launch(); } catch (error) { await runtime.close(); throw error; }
 }, 120_000);
 afterAll(async () => { try { await browser?.close(); } finally { await runtime?.close(); } });

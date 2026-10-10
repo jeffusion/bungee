@@ -5,7 +5,7 @@ import { configurationRuntimeFixture, publicationFixture } from '../helpers/publ
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 
 browserTest('access control menu', async () => {
-const uiRuntime = await startUiRuntime();
+const uiRuntime = await startUiRuntime({ mode: 'built-page' });
 try {
 const base = uiRuntime.origin;
 const evidence = process.env.ACCESS_EVIDENCE_DIR ?? '/tmp/bungee-access-control-menu';

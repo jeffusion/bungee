@@ -6,7 +6,7 @@ import type { TokenStatsRange } from '../../../core/src/plugin.types';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 
 browserTest('ui adjustments', async () => {
-const uiRuntime = await startUiRuntime();
+const uiRuntime = await startUiRuntime({ mode: 'built-page' });
 try {
 const baseUrl = uiRuntime.origin;
 const manifest = await Bun.file(new URL('../../../../plugins/token-stats/manifest.json', import.meta.url)).json();

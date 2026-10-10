@@ -4,7 +4,7 @@ import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 import { resolve } from 'node:path';
 const fixture = resolve(import.meta.dir, '../fixtures/pricing-settings.html');
 let runtime: Awaited<ReturnType<typeof startUiRuntime>>, browser: Browser;
-beforeAll(async () => { runtime = await startUiRuntime([fixture]);
+beforeAll(async () => { runtime = await startUiRuntime({ mode: 'component-fixture', entries: [fixture] });
   try { browser = await chromium.launch(); } catch(error) { await runtime.close(); throw error; }
 },120_000);
 afterAll(async () => { try { await browser?.close(); } finally { await runtime?.close(); } });

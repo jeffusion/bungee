@@ -8,7 +8,7 @@ const editorFixture = resolve(import.meta.dir, '../../../../tests/fixtures/ui/ed
 let runtime: Awaited<ReturnType<typeof startUiRuntime>>;
 let browser: Browser;
 beforeAll(async () => {
-  runtime = await startUiRuntime(['index.html', editorFixture]);
+  runtime = await startUiRuntime({ mode: 'component-fixture', entries: ['index.html', editorFixture] });
   try { browser = await chromium.launch({ headless: true }); }
   catch (error) { await runtime.close(); throw error; }
 }, 120_000);

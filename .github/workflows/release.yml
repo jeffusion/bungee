@@ -10,15 +10,16 @@ concurrency:
 
 permissions:
   actions: read
-  contents: write
+  contents: read
   pull-requests: read
-  id-token: write
-  packages: write  # Required for pushing to GitHub Container Registry
 
 jobs:
-  release:
+  verify-pr:
     runs-on: ubuntu-latest
-    environment: release
+    outputs:
+      full: ${{ steps.scope.outputs.full }}
+      number: ${{ steps.verified-pr.outputs.number }}
+      head: ${{ steps.verified-pr.outputs.head }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -81,6 +82,7 @@ jobs:
               }
             }
             core.setOutput('run-id', String(run.id));
+            core.setOutput('run-attempt', String(run.run_attempt));
             core.setOutput('number', String(pr.number));
             core.setOutput('head', pr.head.sha);
             core.info(`Verified PR #${pr.number}, CI run ${run.id}`);
@@ -93,21 +95,66 @@ jobs:
           run-id: ${{ steps.verified-pr.outputs.run-id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Confirm release contents match tested PR
+      - name: Set up Bun for provenance validation
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+
+      - name: Confirm release tree and determine full validation requirement
+        id: scope
         env:
           PR_NUMBER: ${{ steps.verified-pr.outputs.number }}
           PR_HEAD_SHA: ${{ steps.verified-pr.outputs.head }}
+          CI_RUN_ID: ${{ steps.verified-pr.outputs.run-id }}
+          CI_RUN_ATTEMPT: ${{ steps.verified-pr.outputs.run-attempt }}
+        run: |
+          bun -e 'import {releaseNeedsFull} from "./scripts/checks/test-proof.ts";
+          const proof=await Bun.file(`${process.env.RUNNER_TEMP}/ci-provenance/pr.json`).json();
+          const tree=(await new Response(Bun.spawn(["git","rev-parse","HEAD^{tree}"],{stdout:"pipe"}).stdout).text()).trim();
+          const full=releaseNeedsFull(proof,{tree,head:process.env.PR_HEAD_SHA,pr:Number(process.env.PR_NUMBER),runId:process.env.CI_RUN_ID,runAttempt:Number(process.env.CI_RUN_ATTEMPT)});
+          const {appendFileSync}=await import("node:fs");
+          appendFileSync(process.env.GITHUB_OUTPUT,`full=${full}\n`);'
+
+  full-tests:
+    needs: verify-pr
+    if: needs.verify-pr.outputs.full == 'true'
+    uses: ./.github/workflows/ci.yml
+    with:
+      full: true
+      ref: ${{ github.sha }}
+      base: ${{ github.sha }}
+      head: ${{ needs.verify-pr.outputs.head }}
+      pr: ${{ fromJSON(needs.verify-pr.outputs.number) }}
+
+  release:
+    needs: [verify-pr, full-tests]
+    if: >-
+      always() && needs.verify-pr.result == 'success' &&
+      ((needs.verify-pr.outputs.full == 'true' && needs.full-tests.result == 'success') ||
+       (needs.verify-pr.outputs.full == 'false' && needs.full-tests.result == 'skipped'))
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: read
+      id-token: write
+      packages: write
+    steps:
+      - name: Checkout verified release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify release commit and establish main branch
+        env:
+          RELEASE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          EXPECTED_TREE=$(git rev-parse 'HEAD^{tree}')
-          echo "Expected provenance: tree=$EXPECTED_TREE head=$PR_HEAD_SHA pr=$PR_NUMBER"
-          cat "$RUNNER_TEMP/ci-provenance/pr.json"
-          jq -e \
-            --arg tree "$EXPECTED_TREE" \
-            --arg head "$PR_HEAD_SHA" \
-            --argjson pr "$PR_NUMBER" \
-            '.tree == $tree and .head == $head and .pr == $pr' \
-            "$RUNNER_TEMP/ci-provenance/pr.json"
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          git checkout -B main "$RELEASE_SHA"
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
