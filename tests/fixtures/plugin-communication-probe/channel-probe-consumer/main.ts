@@ -228,18 +228,24 @@ export class ChannelProbeConsumer {
   }
 
   async #probeUpload(handshake: any): Promise<void> {
+    let sent = 0;
+    let stage = 'open';
     try {
       const body = pattern(handshake.uploadSize, 21);
       const digest = digestOf(body);
       const stream = this.#services.stream.openWrite('channel-probe-provider', UPLOAD_CONTRACT, { objectId: handshake.uploadId, version: 1 }, {
         size: body.byteLength, digest, timeoutMs: 60_000,
       });
+      stage = 'write';
       for (let offset = 0; offset < body.byteLength; offset += 60 * 1024) {
-        await stream.write(body.slice(offset, Math.min(offset + 60 * 1024, body.byteLength)));
+        const chunk = body.slice(offset, Math.min(offset + 60 * 1024, body.byteLength));
+        await stream.write(chunk);
+        sent += chunk.byteLength;
       }
+      stage = 'finish';
       const receipt = await stream.finish();
       await this.#report({ phase: 'upload', ok: true, bytes: receipt.bytes, digest: receipt.digest });
-    } catch (error) { await this.#report({ phase: 'upload', ok: false, code: codeOf(error) }); }
+    } catch (error) { await this.#report({ phase: 'upload', ok: false, code: codeOf(error), stage, sent }); }
   }
 
   async #probeSnapshot(): Promise<void> {
