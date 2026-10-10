@@ -72,6 +72,8 @@ try {
   await expect(page.getByTestId('app-header').getByRole('link', { name: 'Token统计', exact: true })).toBeVisible();
   for (const width of [320, 390, 768, 1024, 1440]) {
     await page.setViewportSize({ width, height: 1080 });
+    await page.locator(`${width < 768 ? '.dashboard-mobile-card' : '.grid-stack-item'}[data-card-id="plugin:native:token-stats:token-stats-time"]`)
+      .waitFor({ state: 'visible' });
     const header = trendCard.locator('header');
     const link = header.getByRole('link', { name: '查看模型统计' });
     await expect(link).toBeVisible();
@@ -83,8 +85,9 @@ try {
         return rect.left >= bounds.left && rect.right <= bounds.right && rect.top >= bounds.top && rect.bottom <= bounds.bottom;
       });
     })).toBe(true);
-    expect(await link.evaluate(node => node.getBoundingClientRect().height
-      <= Number.parseFloat(getComputedStyle(node).lineHeight) + 1)).toBe(true);
+    await expect.poll(() => link.evaluate(node => node.getBoundingClientRect().height
+      - Number.parseFloat(getComputedStyle(node).lineHeight)),
+      { message: `The statistics link stays on one line at ${width}px` }).toBeLessThanOrEqual(1);
   }
   await trendCard.locator('header').getByRole('link', { name: '查看模型统计' }).click();
   await expect(page.getByTestId('token-stats-page-summary')).toBeVisible();
