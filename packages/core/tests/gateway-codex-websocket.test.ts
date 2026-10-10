@@ -8,7 +8,7 @@ const path=new URL('./fixtures/codex-dispatch-plugin.ts',import.meta.url).pathna
 const previous=getScopedPluginRegistry();afterEach(()=>setScopedPluginRegistry(previous));
 async function waitUntil(predicate:()=>boolean){for(let i=0;i<200;i++){if(predicate())return;await Bun.sleep(10);}throw new Error('Timeout');}
 async function setup(endpoints:any[], bindModels=true){
-  const config:any={logging:{enabled:false},routes:[{id:'e',path:'/codex',websocket:{enabled:true},path_rewrite:{'^/codex':''},plugins:[{name:'codex-router',path,options:{models:!bindModels?[]:endpoints.map((endpoint,index)=>({source:`m${index}`,provider:'p',model:endpoint.model ?? `m${index}`,target:{type:'route',id:`t${index}`,protocol:endpoint.protocol}}))}}],endpoints:[{target:endpoints[0].target}]},...endpoints.map((endpoint,index)=>({id:`t${index}`,path:`/target${index}`,path_rewrite:{[`^/target${index}`]:''},websocket:{enabled:endpoint.ws===true},endpoints:[{id:`u${index}`,target:endpoint.target}]}))]};
+  const config:any={logging:{enabled:false},routes:[{id:'e',path:'/codex',websocket:{enabled:true},path_rewrite:{'^/codex':''},plugins:[{name:'codex-router',path,options:{models:!bindModels?[]:endpoints.map((endpoint,index)=>({source:`m${index}`,provider:endpoint.provider??'p',model:endpoint.model ?? `m${index}`,target:{type:'route',id:`t${index}`,protocol:endpoint.protocol}}))}}],endpoints:[{target:endpoints[0].target}]},...endpoints.map((endpoint,index)=>({id:`t${index}`,path:`/target${index}`,path_rewrite:{[`^/target${index}`]:''},websocket:{enabled:endpoint.ws===true},endpoints:[{id:`u${index}`,target:endpoint.target}]}))]};
   const registry=new ScopedPluginRegistry(import.meta.dir);expect((await registry.initializeFromConfig(config)).failed).toBe(0);setScopedPluginRegistry(registry);
   const bridge=createWebSocketBridge({closeTimeoutMs:200});const completions=new Set<Promise<void>>();
   const server=Bun.serve({hostname:'127.0.0.1',port:0,websocket:bridge.websocket,async fetch(request,server){if(!isWebSocketUpgradeRequest(request))return new Response('no');const result=await runGatewayWebSocket({request,nativeRequest:request,server,config,bridge,servingRevision:1,retain(promise){completions.add(promise);void promise.finally(()=>completions.delete(promise));}});return result.response;}});
@@ -23,7 +23,7 @@ function sse(events:any[]){return new Response(events.map(e=>`data: ${JSON.strin
 test('captured full WS requests preserve tools, canonical continuation and actionable errors',async()=>{
   const calls:any[]=[];
   const upstream=Bun.serve({hostname:'127.0.0.1',port:0,async fetch(request){calls.push(await request.json());return sse(chat('{"title":"fixture","description":"fixture"}'));}});
-  const env=await setup([{protocol:'chat_completions',target:`http://127.0.0.1:${upstream.port}`}]);
+  const env=await setup([{protocol:'chat_completions',provider:'zai',model:'glm-5.3-flash',target:`http://127.0.0.1:${upstream.port}`}]);
   try{
     for(const [captured,count] of [[capturedBase,11],[capturedPreferences,13]] as const){
       const start=env.events.length;env.client.send(JSON.stringify({...captured,type:'response.create',model:'m0'}));
@@ -35,7 +35,7 @@ test('captured full WS requests preserve tools, canonical continuation and actio
     expect((await env.terminal(start)).at(-1).type).toBe('response.completed');expect(calls.at(-1).tools).toHaveLength(1);
     await Bun.sleep(20);start=env.events.length;
     env.client.send(JSON.stringify({type:'response.create',model:'m0',input:'x',access_programs:{cyber:'daybreak_red'}}));
-    const error=(await env.terminal(start)).at(-1);expect(error.error).toMatchObject({code:'codex_router_unsupported_access_program',param:'access_programs.cyber',message:'Selected access program cannot be represented by the target protocol'});expect(calls).toHaveLength(3);
+    const error=(await env.terminal(start)).at(-1);expect(error.error).toMatchObject({code:'llm_adapter_unsupported_access_program',param:'access_programs.cyber',message:'Protocol payload cannot be represented faithfully'});expect(calls).toHaveLength(3);
   }finally{await env.close();upstream.stop(true);}
 });
 test('real WS binding protocol selects HTTP conversion on WS-enabled targets; prewarm and history switch',async()=>{

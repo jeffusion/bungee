@@ -1,3 +1,4 @@
+import {requestServiceDeclared} from '../plugin-control/request-service-authority';
 import { PluginJournalRecovery } from './plugin-journal-recovery';
 import type { DaemonMetadataV1, Sha256Digest } from '@jeffusion/bungee-types';
 import type { Database } from 'bun:sqlite';
@@ -616,7 +617,9 @@ export async function startMasterComposition(
         if(metadata.purpose==='request'){
           const host=metadata.host as any;
           const caller=metadata.caller.subject.split('@',1)[0];
-          if(host?.kind!=='gateway-request' || metadata.target.provider!==caller || metadata.caller.scope!=='binding')throw new Error('request_caller_invalid');
+          if(host?.kind!=='gateway-request' || metadata.caller.scope!=='binding')throw new Error('request_caller_invalid');
+          const manifest=catalog.records?.().find(record=>record.name===caller)?.manifest;
+          if(!requestServiceDeclared(manifest,metadata.target))throw new Error('request_service_undeclared');
           const target=parseAdmissionTarget(host.target);
           const identity={role:'worker' as const,process_instance_id:worker.worker_instance_id,boot_nonce:worker.boot_nonce,master_generation:worker.master_generation,worker_slot:worker.worker_slot};
           if(!['active','retired'].includes(authorizeStateWorker(identity)))throw new Error('worker_not_admitted');

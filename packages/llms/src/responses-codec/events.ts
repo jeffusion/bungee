@@ -28,10 +28,19 @@ export class ResponsesEventEncoder {
   private poisoned = false;
   private sequence = 0;
   private retained = 0;
+  private lastKind?: OutputState['kind'];
+  private contentSerial = 0;
 
   constructor(readonly protocol: ResponsesProtocol, readonly model: string,
-    readonly toolNames: ResponsesToolNames = new Map(), configuredLimits?: Partial<ResponsesCodecLimits>) {
+    readonly toolNames: ResponsesToolNames = new Map(), configuredLimits?: Partial<ResponsesCodecLimits>,
+    private readonly options: { preserveContentOrder?: boolean } = {}) {
     this.budget = limits(configuredLimits);
+  }
+  private contentState(kind: 'text' | 'reasoning' | 'refusal'): OutputState {
+    if (!this.options.preserveContentOrder) return this.state(kind, kind);
+    if (this.lastKind !== kind) this.contentSerial++;
+    this.lastKind = kind;
+    return this.state(`${kind}:${this.contentSerial}`, kind);
   }
 
   private event(type: string, fields: JsonRecord = {}): JsonRecord {
@@ -161,10 +170,11 @@ export class ResponsesEventEncoder {
       if (delta.role !== undefined && delta.role !== 'assistant') fail('unsupported_response', 'Response role must be assistant');
       if (this.end && Object.values(delta).some(v => v !== undefined && v !== null && v !== '' && (!Array.isArray(v) || v.length))) fail('invalid_stream', 'Output arrived after finish_reason');
       const reasoning = delta.reasoning_content ?? delta.reasoning;
-      if (reasoning !== undefined && reasoning !== null) this.appendText(this.state('reasoning', 'reasoning'), string(reasoning, 'reasoning delta'), events);
-      if (delta.content !== undefined && delta.content !== null) this.appendText(this.state('text', 'text'), string(delta.content, 'text delta'), events);
-      if (delta.refusal !== undefined && delta.refusal !== null) this.appendText(this.state('refusal', 'refusal'), string(delta.refusal, 'refusal delta'), events);
+      if (reasoning !== undefined && reasoning !== null) this.appendText(this.contentState('reasoning'), string(reasoning, 'reasoning delta'), events);
+      if (delta.content !== undefined && delta.content !== null) this.appendText(this.contentState('text'), string(delta.content, 'text delta'), events);
+      if (delta.refusal !== undefined && delta.refusal !== null) this.appendText(this.contentState('refusal'), string(delta.refusal, 'refusal delta'), events);
       if (delta.tool_calls !== undefined) {
+        if (list(delta.tool_calls, 'tool_calls').length) this.lastKind = 'tool';
         for (const rawTool of list(delta.tool_calls, 'tool_calls')) {
           const tool = record(rawTool, 'tool call');
           if (!Number.isSafeInteger(tool.index) || (tool.index as number) < 0) fail('invalid_stream', 'Streamed tool requires a non-negative integer index');
@@ -248,6 +258,7 @@ export class ResponsesEventEncoder {
         state.original ??= restoreTool(state.name, this.toolNames);
         this.add(state, events, true);
         if (!state.added) fail('unknown_tool', `Unknown tool ${state.name}`);
+        if (strict && !state.args) { state.args = '{}'; this.emitArgs(state, events, '{}'); }
         if (strict) {
           argumentObject(state.args || '{}');
           if (state.original.custom) {

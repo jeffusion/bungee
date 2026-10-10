@@ -448,7 +448,7 @@
 - 缺少插件目录自动扫描
 
 **目标**：
-- ✅ 统一为单个 `ai-transformer` 插件
+- ✅ 统一为单个 `llm-protocol-adapter` 插件
 - ✅ 通过 options 指定转换方向
 - ✅ 实现插件目录自动扫描
 - ✅ 配置改用 name 引用（更语义化）
@@ -530,8 +530,8 @@ PLUGINS_DIR=./plugins
   "plugins": [
     "model-mapping",                       // ✅ 字符串简写（无参数）
     {
-      "name": "ai-transformer",
-      "options": { "from": "anthropic", "to": "openai" }
+      "name": "llm-protocol-adapter",
+      "options": { "sourceProtocol": "anthropic_messages", "targetProtocol": "chat_completions" }
     }
   ]
 }
@@ -547,55 +547,25 @@ PLUGINS_DIR=./plugins
 
 ---
 
-### P3-3: 统一 AI Transformer 实现 ✅
+### P3-3: LLM 协议适配器
 
-**任务清单**：
-- [x] 3.1 创建 converters 基础框架
-  - `converters/base.ts`：AIConverter 接口定义
-  - `converters/registry.ts`：转换器注册表
-  - `converters/utils.ts`：共享工具函数
-  - 时间: 1.5小时
-
-- [x] 3.2 提取现有转换逻辑
-  - 从 6 个 plugin 文件提取逻辑到 converter 类
-  - 完整保留转换逻辑（只是结构重组）
-  - 创建 6 个 converter 类：
-    * `anthropic-to-openai.ts`
-    * `openai-to-anthropic.ts`
-    * `anthropic-to-gemini.ts`
-    * `gemini-to-anthropic.ts`
-    * `openai-to-gemini.ts`
-    * `gemini-to-openai.ts`
-  - 时间: 3小时
-
-- [x] 3.3 实现统一入口插件
-  - `ai-transformer.plugin.ts`
-  - 工厂模式：根据 options.from/to 选择 converter
-  - 去除自动推断（from 和 to 都必须显式声明）
-  - 时间: 1.5小时
-
-- [x] 3.4 删除旧插件文件
-  - 删除 6 个独立的 transformer plugin 文件
-  - 时间: 15分钟
+统一协议入口位于 plugins 体系，sourceProtocol 与 targetProtocol 独立且必须显式声明。四协议矩阵、公共 conversion/history 服务和严格语义见 [适配器文档](docs/llm-protocol-adapter.md)。
 
 **目录结构**：
 ```
-packages/core/src/plugins/transformers/
-├── ai-transformer.plugin.ts           # 🆕 统一入口
-└── converters/                        # 🆕 转换器实现
-    ├── base.ts                        # 接口定义
-    ├── registry.ts                    # 注册表
-    ├── utils.ts                       # 工具函数
-    ├── anthropic-to-openai.ts
-    ├── openai-to-anthropic.ts
-    ├── anthropic-to-gemini.ts
-    ├── gemini-to-anthropic.ts
-    ├── openai-to-gemini.ts
-    └── gemini-to-openai.ts
+plugins/llm-protocol-adapter/
+├── manifest.json
+├── contract.ts                       # 其他插件唯一公共导入入口
+└── server/
+    ├── index.ts                      # worker provider 与显式转换 binding
+    ├── control.ts                    # control 描述、能力与历史服务
+    ├── service.ts                    # 有版本的能力/接口规则
+    └── history.ts                    # 有界临时规范历史
 ```
 
 **涉及文件**：
-- `packages/core/src/plugins/transformers/`（整个目录重构）
+- `plugins/llm-protocol-adapter/`
+- `packages/llms/src/protocol-session/`（共享协议会话）
 
 **配置示例**：
 ```json
@@ -605,10 +575,10 @@ packages/core/src/plugins/transformers/
       "target": "https://api.openai.com",
       "plugins": [
         {
-          "name": "ai-transformer",
+          "name": "llm-protocol-adapter",
           "options": {
-            "from": "anthropic",
-            "to": "openai"
+            "sourceProtocol": "anthropic_messages",
+            "targetProtocol": "chat_completions"
           }
         }
       ]
@@ -621,7 +591,7 @@ packages/core/src/plugins/transformers/
 - ✓ 所有 6 种转换方向正常工作
 - ✓ 流式响应转换正确
 - ✓ 非流式响应转换正确
-- ✓ 错误提示友好（缺少 from/to 参数时）
+- ✓ 错误提示友好（缺少 sourceProtocol/targetProtocol 参数时）
 - ✓ 端到端测试通过
 
 **预计工时**: 6小时
@@ -713,7 +683,7 @@ packages/core/src/plugins/transformers/
 
 **决策 1：去除自动推断**
 - 理由：生产环境中目标服务往往是中转服务（反向代理、内网地址）
-- 影响：from 和 to 都必须显式声明
+- 影响：sourceProtocol 和 targetProtocol 都必须显式声明
 
 **决策 2：name 为主键**
 - 理由：更语义化、易维护、支持未来扩展

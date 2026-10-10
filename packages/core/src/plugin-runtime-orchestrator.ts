@@ -138,7 +138,7 @@ export class PluginRuntimeOrchestrator {
       if (this.beforeBootstrap !== undefined) nextScopedRegistry.setBeforeBootstrapHook(this.beforeBootstrap);
       const runtimeResult = await nextScopedRegistry.initializeFromConfig(runtimeConfig, new PluginDependencyGraph(nextPluginRegistry.getAllPluginManifests().values()));
       const globalNames = [...nextPluginRegistry.getAllPluginManifests().values()]
-        .filter((manifest) => manifest.runtimeScope === 'global' && this.activatedPluginNames.has(manifest.name))
+        .filter((manifest) => (manifest.runtimeScope === 'global' || manifest.runtimeScope === 'global-and-scoped') && this.activatedPluginNames.has(manifest.name))
         .map((manifest) => manifest.name);
       const servingGlobalNames = new Set(nextScopedRegistry.getGlobalInstances().map((instance) => instance.handler.pluginName));
       const failedGlobalNames = globalNames.filter((name) => !servingGlobalNames.has(name));

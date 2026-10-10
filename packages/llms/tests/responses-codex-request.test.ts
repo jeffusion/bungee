@@ -22,7 +22,7 @@ for(const [name,captured,count] of [['base',base,11],['preferences',preferences,
     const messages=captured.input.filter(item=>item.type!=='additional_tools');
     expect(result.body.tools).toHaveLength(count);
     expect(result.toolNames.size).toBe(count);
-    expect(result.canonicalInput).toEqual(messages);
+    expect(result.canonicalInput).toEqual(messages.map(({internal_chat_message_metadata_passthrough: _metadata,...message})=>message));
     expect((result.body.messages as any[]).map(item=>item.role)).toEqual(messages.map(item=>item.role));
     expect(result.body.stream_options).toEqual({include_usage:true});
     expect(result.body).not.toHaveProperty('access_programs');

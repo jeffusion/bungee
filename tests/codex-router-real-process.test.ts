@@ -9,7 +9,7 @@ import {Database} from 'bun:sqlite';
 import {randomUUID} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
-import {createCodexRouterGatewayFixture, seedCodexRouterCatalog, CODEX_PROCESS_PROBE, CODEX_MODELS} from './support/codex-router-gateway-fixture';
+import {createCodexRouterGatewayFixture, seedCodexRouterCatalog, registerCodexProbeTargets, CODEX_PROCESS_PROBE, CODEX_MODELS, CODEX_CHAT_MODEL, CODEX_ANTHROPIC_MODEL} from './support/codex-router-gateway-fixture';
 import {
   cleanupGatewayFixture, quarantinePortBlock, recordOwnedWorkers, releasePortBlock, requestJson,
   reservePortBlock, safeGatewayError, startTrackedGatewayMaster, stopOwnedMaster, waitForHealth, waitUntil,
@@ -51,7 +51,7 @@ const smallHistory = history.map((item, index) => index === 1
 type Call = {pid: number; requestId: string; path: string; body: any; transport: 'http' | 'websocket'};
 type Worker = {pid: number; worker_instance_id: string; boot_nonce: string; revision: number};
 type Attempt = {request_id: string; attempt_id: string; input_tokens: number; output_tokens: number; outcome: string};
-type Socket = {client: WebSocket; events: any[]; create(body: any): Promise<any[]>; close(): Promise<void>};
+type Socket = {client: WebSocket; events: any[]; create(body: any, allowError?: boolean): Promise<any[]>; close(): Promise<void>};
 const message = (text: string) => ({type: 'message', role: 'assistant', content: [{type: 'output_text', text}]});
 function response(id: string, model: string) {return {id, object: 'response', status: 'completed', model,
   output: [message('fixture answer')], usage: {input_tokens: 4, output_tokens: 2, total_tokens: 6}};}
@@ -192,12 +192,13 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     try {master = await startTrackedGatewayMaster(startup, fixture, lease);} catch (error) {master = startup.master; throw error;}
     await waitForHealth(master, lease.base, fixture);
     management = `http://127.0.0.1:${lease.base}`; proxy = `http://127.0.0.1:${lease.block.ports[1]}`;
+    registerCodexProbeTargets(fixture,[proxy,`http://127.0.0.1:${upstream!.port}`]);
     await seedCodexRouterCatalog(fixture);
     const initial: any = (await requestJson(`${management}/api/config`, {}, fixture)).body; revision = initial.revision;
     const endpoint = (n: number) => ({id: uuid(n), position: 1, target: `http://127.0.0.1:${upstream!.port}/v1/`, weight: 100, priority: 1, is_disabled: false, plugins: []});
     const binding = (name: string, n: number, options?: any) => ({id: uuid(n), position: n, name, enabled: true, ...(options ? {options} : {})});
     aggregate = {
-      plugin_activations: ['models-dev', 'codex-router', 'key-access', 'token-metering', 'token-stats', CODEX_PROCESS_PROBE].map(plugin_name => ({plugin_name})),
+      plugin_activations: ['models-dev', 'llm-protocol-adapter', 'codex-router', 'key-access', 'token-metering', 'token-stats', CODEX_PROCESS_PROBE].map(plugin_name => ({plugin_name})),
       logical_configuration: {
         plugins: [binding(CODEX_PROCESS_PROBE, 22)],
         services: [{id: CHAT, position: 1, name: 'Chat fixture', plugins: [], endpoints: [endpoint(13)]}],
@@ -205,8 +206,8 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
           {id: ENTRY, position: 1, path: '/codex', websocket: {enabled: true}, endpoints: [endpoint(11)],
             path_rewrite: {'^/codex': ''}, plugins: [binding(CODEX_PROCESS_PROBE, 20, {priority: -1000}), binding('codex-router', 21, {models: [
               {provider: 'lab', model: CODEX_MODELS[0], target: {type: 'route', id: NATIVE, protocol: 'responses'}},
-              {provider: 'lab', model: CODEX_MODELS[1], target: {type: 'service', id: CHAT, protocol: 'chat_completions'}},
-              {provider: 'lab', model: CODEX_MODELS[2], target: {type: 'route', id: ANTHROPIC, protocol: 'anthropic_messages'}},
+              {provider: 'zai', source: CODEX_MODELS[1], model: CODEX_CHAT_MODEL, target: {type: 'service', id: CHAT, protocol: 'chat_completions'}},
+              {provider: 'anthropic', source: CODEX_MODELS[2], model: CODEX_ANTHROPIC_MODEL, target: {type: 'route', id: ANTHROPIC, protocol: 'anthropic_messages'}},
               {provider: 'lab', model: CODEX_MODELS[3], target: {type: 'route', id: NATIVE_WS, protocol: 'responses'}},
             ]})]},
           {id: NATIVE, position: 2, path: '/native-target', endpoints: [endpoint(12)], path_rewrite: {'^/native-target': ''}, plugins: []},
@@ -284,6 +285,41 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     expect((await control('/api/config/runtime')).body.publication.serving_revision).toBe(revision);
   });
 
+  test.skipIf(process.env.BUNGEE_CODEX_CLI_PROBE !== '1')('isolated installed CLI can generate through the public native model', async () => {
+    const before = calls.length;
+    const cli = await probeCodexCli({root: fixture!.root, baseUrl: `${proxy}/codex`, token, model: 'native-only'});
+    console.info(`codex_router_native_cli ${JSON.stringify({...cli, upstream: calls.slice(before).map(call => ({pid: call.pid, path: call.path, model: call.body.model}))})}`);
+    expect(cli.timedOut).toBe(false);
+    expect(cli.code).toBe(0);
+    expect(cli.stdout).toContain('fixture answer');
+    expect(calls.slice(before).some(call => call.body.model === 'native-only')).toBe(true);
+    await assertMetered(calls.slice(before), false);
+  }, 45000);
+
+  test('shared public history query returns a controlled missing response across worker/control', async () => {
+    const before = calls.length;
+    const missing = await post({model: 'org/native', previous_response_id: 'missing-public-history', input: 'next'});
+    expect(missing.status).toBe(422);
+    expect(missing.body.error).toBe('codex_router_history_missing_start_new_conversation');
+    expect(calls).toHaveLength(before);
+  });
+
+  test.skipIf(process.env.BUNGEE_CODEX_CLI_PROBE !== '1')('isolated CLI lists and explicitly selects each advertised reasoning level',async()=>{
+    for(const [model,levels,defaultEffort] of [['org/chat',['low','high','max'],'max'],['org/anthropic',['low','medium','high','max'],'high']] as const){
+      for(const effort of levels){
+        const before=calls.length;
+        const result=await probeCodexChatgptModels({root:fixture!.root,baseUrl:`${proxy}/codex`,mockUrl:`http://127.0.0.1:${upstream!.port}`,token,model,effort});
+        expect(result.reasoningModels).toEqual([{model,levels:[...levels],defaultEffort}]);
+        expect(result.notifications.some((event:any)=>event.method==='turn/completed'&&event.status==='completed')).toBe(true);
+        const outgoing=calls.slice(before);expect(outgoing).toHaveLength(1);
+        if(model==='org/chat')expect(outgoing[0]!.body).toMatchObject({model:CODEX_CHAT_MODEL,reasoning_effort:effort,thinking:{type:'enabled'}});
+        else expect(outgoing[0]!.body).toMatchObject({model:CODEX_ANTHROPIC_MODEL,output_config:{effort},thinking:{type:'adaptive'}});
+        console.info(`codex_router_cli_effort ${JSON.stringify({model,effort,levels,defaultEffort,requestId:outgoing[0]!.requestId,transport:outgoing[0]!.transport})}`);
+        await assertMetered(outgoing);
+      }
+    }
+  },90000);
+
   test('public models retain metadata; long tool history crosses real workers via canonical RPC and rejects another identity', async () => {
     const catalog = await fetch(`${proxy}/codex/models?client_version=0.160.1`, {headers: {authorization: `Bearer ${token}`}});
     expect(catalog.status).toBe(200);
@@ -312,7 +348,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     const denied = await post({model: 'org/native', previous_response_id: firstId, input: 'other key'}, otherToken);
     expect(denied.status).toBe(422); expect(JSON.stringify(denied.body)).toContain('history_missing'); expect(calls).toHaveLength(before);
     await assertMetered(calls.slice(start));
-    console.info(`codex_router_cross_worker ${JSON.stringify({masterPid: master!.child.pid, workerPids: workers.map(w => w.pid), originPid: firstPid, continuationPids: calls.slice(start + 1).map(c => c.pid), historyBytes: Buffer.byteLength(JSON.stringify(history)), canonicalService: 'codex-router.history.v1'})}`);
+    console.info(`codex_router_cross_worker ${JSON.stringify({masterPid: master!.child.pid, workerPids: workers.map(w => w.pid), originPid: firstPid, continuationPids: calls.slice(start + 1).map(c => c.pid), historyBytes: Buffer.byteLength(JSON.stringify(history)), canonicalService: 'llm-protocol-adapter.history.v1'})}`);
   }, 60000);
 
   async function openSocket(credential = token): Promise<Socket> {
@@ -324,13 +360,13 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       client.onopen = () => {clearTimeout(timeout); resolve();};
       client.onerror = () => {clearTimeout(timeout); reject(new Error('public WS open failed'));};
     });
-    const socket = {client, events, async create(body: any) {
+    const socket = {client, events, async create(body: any, allowError = false) {
       const start = events.length; client.send(JSON.stringify({type: 'response.create', ...body}));
       await waitUntil(() => events.slice(start).some(e => ['response.completed', 'response.incomplete', 'response.failed', 'error'].includes(e.type)), 'public WS generation has no terminal', 15000);
       // Terminal delivery precedes generation cleanup by one task turn.
       await Bun.sleep(25);
       const generation = events.slice(start);
-      if (generation.at(-1)?.type === 'error') throw new Error(`WS generation: ${JSON.stringify(generation)}; upstream=${JSON.stringify(calls.slice(-1).map(call => ({...call, body: {model: call.body.model}})))}; ${await master!.diagnostics?.()}`);
+      if (!allowError && generation.at(-1)?.type === 'error') throw new Error(`WS generation: ${JSON.stringify(generation)}; upstream=${JSON.stringify(calls.slice(-1).map(call => ({...call, body: {model: call.body.model}})))}; ${await master!.diagnostics?.()}`);
       return generation;
     }, async close() {
       if (client.readyState === WebSocket.CLOSED) return;
@@ -338,6 +374,37 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     }};
     sockets.add(socket); return socket;
   }
+  test('cached search declaration at tools[28] preserves HTTP/WS tool history and logs its omission', async () => {
+    const start = calls.length;
+    const declarations = [...tools, ...Array.from({length: 24}, (_, i) => ({type: 'function', name: `fixture_extra_${i}`, parameters: {type: 'object', properties: {}}})),
+      {type: 'web_search', external_web_access: false}];
+    const socket = await openSocket();
+    try {
+      for (const model of ['org/chat', 'org/anthropic']) {
+        const raw = {model, input: smallHistory, tools: declarations, tool_choice: 'auto', stream: true, store: false, include: ['reasoning.encrypted_content']};
+        const result = await fetch(`${proxy}/codex/responses`, {method: 'POST', headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'}, body: JSON.stringify(raw), signal: AbortSignal.timeout(20000)});
+        expect(result.status).toBe(200); expect(await result.text()).toContain('response.completed');
+        expect(calls.at(-1)!.body.tools).toHaveLength(28);
+        expect(JSON.stringify(calls.at(-1)!.body)).not.toContain('web_search');
+        expect(JSON.stringify(calls.at(-1)!.body.messages)).toContain('custom result');
+        const events = await socket.create(raw); expect(events.at(-1).type).toBe('response.completed');
+        expect(calls.at(-1)!.body.tools).toHaveLength(28);
+        expect(JSON.stringify(calls.at(-1)!.body.messages)).toContain('file result');
+        const before = calls.length;
+        const denied = await post({...raw, stream: false, tool_choice: {type: 'web_search'}});
+        expect(denied.status).toBe(422); expect(denied.body.param).toBe('tools[28].type'); expect(calls).toHaveLength(before);
+      }
+      const requestId = calls.at(-1)!.requestId;
+      await waitUntil(() => {
+        const db = new Database(fixture!.accessDbPath, {readonly: true});
+        try {
+          const row: any = db.query("SELECT j.value FROM access_logs, json_each(access_logs.processing_steps) AS j WHERE json_extract(j.value,'$.step')='codex_router_conversion' AND json_extract(j.value,'$.detail.requestId')=?").get(requestId);
+          return row && JSON.parse(row.value).detail.diagnostics.some((item: any) => item.param === 'tools[28]' && item.reason === 'optional_hosted_web_search_unavailable' && item.action === 'omitted');
+        } finally { db.close(); }
+      }, 'optional hosted search diagnostic was not logged', 12000);
+      await assertMetered(calls.slice(start));
+    } finally { await socket.close(); }
+  }, 60000);
   test('captured full HTTP/WS requests cross the built gateway; canonical tool history crosses workers and target protocol',async()=>{
     const start=calls.length;
     const socket=await openSocket();
@@ -384,7 +451,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       expect(warm.at(-1).type).toBe('response.completed'); expect(calls).toHaveLength(start);
       const chat = await socket.create({model: 'org/chat', previous_response_id: warm.at(-1).response.id, input: 'after warm', tools});
       expect(chat.at(-1).type).toBe('response.completed'); expect(chat.at(-1).response.model).toBe('org/chat');
-      const chatCall = calls.at(-1)!; expect(chatCall.path).toBe('/v1/chat/completions'); expect(chatCall.body.model).toBe('org/chat');
+      const chatCall = calls.at(-1)!; expect(chatCall.path).toBe('/v1/chat/completions'); expect(chatCall.body.model).toBe(CODEX_CHAT_MODEL);
       expect(chatCall.body.messages[0]).toMatchObject({role: 'developer', content: ' preserve the complete history '});
       const allChatCalls = chatCall.body.messages.flatMap((m: any) => m.tool_calls ?? []);
       expect(allChatCalls.map((t: any) => t.id)).toEqual(['plain', 'files', 'memory', 'shell']);
@@ -393,7 +460,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       expect(chatCall.body.messages.filter((m: any) => m.role === 'tool').map((m: any) => m.content)).toEqual(['ordinary result', 'file result', 'memory result', 'custom result']);
       const anth = await socket.create({model: 'org/anthropic', previous_response_id: chat.at(-1).response.id, input: 'switch', tools});
       expect(anth.at(-1).type).toBe('response.completed'); expect(anth.at(-1).response.model).toBe('org/anthropic');
-      const anthCall = calls.at(-1)!; expect(anthCall.path).toBe('/v1/messages'); expect(anthCall.body.model).toBe('org/anthropic');
+      const anthCall = calls.at(-1)!; expect(anthCall.path).toBe('/v1/messages'); expect(anthCall.body.model).toBe(CODEX_ANTHROPIC_MODEL);
       expect(anthCall.body.system).toContain(' preserve the complete history ');
       const blocks = anthCall.body.messages.flatMap((m: any) => Array.isArray(m.content) ? m.content : []);
       expect(blocks.filter((b: any) => b.type === 'tool_use').map((b: any) => b.id)).toEqual(['plain', 'files', 'memory', 'shell']);
@@ -433,7 +500,11 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         console.info(`codex_router_cli_discovery ${JSON.stringify({...discovery, modelQueries: discoveredQueries, accountQueries, upstream: discoveredActual})}`);
         expect(discovery.accountType).toBe('chatgpt'); expect(discovery.modelListError).toBeNull();
         expect(CODEX_MODELS.every(model => discovery.listedModels.includes(model))).toBe(true);
-        expect(discoveredQueries.some(query => query.clientVersion === '0.160.1')).toBe(true);
+        expect(discoveredQueries.length).toBeGreaterThan(0);
+        for (const query of discoveredQueries) {
+          expect(query.clientVersion).toMatch(/^\d+\.\d+\.\d+/);
+          expect(discovery.userAgent).toContain(`/${query.clientVersion}`);
+        }
         expect(discoveredActual.length).toBeGreaterThan(0); expect(discoveredActual.every(call => call.model === 'org/native')).toBe(true);
         expect(discovery.notifications.some((event: any) => event.method === 'turn/completed' && event.status === 'completed')).toBe(true);
         const beforeChat = calls.length;
@@ -447,7 +518,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         expect(chatDiscovery.listedModels).toContain('org/chat');
         expect(chatDiscovery.notifications.some((event: any) => event.method === 'turn/completed' && event.status === 'completed')).toBe(true);
         expect(chatActual).toHaveLength(1); expect(chatActual[0]!.path).toBe('/v1/chat/completions');
-        expect(chatActual[0]!.requestShape.model).toBe('org/chat');
+        expect(chatActual[0]!.requestShape.model).toBe(CODEX_CHAT_MODEL);
         expect(chatDiscovery.notifications.some((event: any) => event.itemType === 'agentMessage' && event.text === 'chat answer')).toBe(true);
         const beforeAnthropic = calls.length;
         const anthropicDiscovery = await probeCodexChatgptModels({root: fixture!.root, baseUrl: `${proxy}/codex`, mockUrl: `http://127.0.0.1:${upstream!.port}`, token, model: 'org/anthropic'});
@@ -461,13 +532,13 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         expect(anthropicDiscovery.listedModels).toContain('org/anthropic');
         expect(anthropicDiscovery.notifications.some((event: any) => event.method === 'turn/completed' && event.status === 'completed')).toBe(true);
         expect(anthropicActual).toHaveLength(1); expect(anthropicActual[0]!.path).toBe('/v1/messages');
-        expect(anthropicActual[0]!.requestShape.model).toBe('org/anthropic');
+        expect(anthropicActual[0]!.requestShape.model).toBe(CODEX_ANTHROPIC_MODEL);
         expect(anthropicDiscovery.notifications.some((event: any) => event.itemType === 'agentMessage' && event.text === 'anthropic answer')).toBe(true);
         for(const toolModel of ['org/chat','org/anthropic']){
         const beforeTools = calls.length;
         const toolDiscovery = await probeCodexChatgptModels({root: fixture!.root, baseUrl: `${proxy}/codex`, mockUrl: `http://127.0.0.1:${upstream!.port}`, token,
           model: toolModel, toolRoundTrip: true});
-        const cliToolRoundTrip=cliToolRoundTrips.get(toolModel)!;
+        const cliToolRoundTrip=cliToolRoundTrips.get(toolModel==='org/chat'?CODEX_CHAT_MODEL:CODEX_ANTHROPIC_MODEL)!;
         const toolCalls = calls.slice(beforeTools);
         const toolInputShapes = (await readFile(join(fixture!.root, 'cli-input-shapes.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line))
           .filter(shape => shape.stage === 'dispatch' && toolCalls.some(call => call.requestId === shape.requestId));
@@ -475,8 +546,15 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
           path: call.path, model: call.body.model})), roundTrip: cliToolRoundTrip, inputShapes: toolInputShapes})}`);
         expect(toolDiscovery.notifications.some((event: any) => event.method === 'turn/completed' && event.status === 'completed')).toBe(true);
         expect(toolDiscovery.notifications.some((event: any) => event.itemType === 'agentMessage' && event.text === (toolModel==='org/chat'?'chat answer':'anthropic answer'))).toBe(true);
+        expect(toolInputShapes).toHaveLength(2);
+        expect(toolInputShapes.every(shape => shape.toolShape.some((tool: any) => tool.type === 'web_search' && tool.externalWebAccess === false))).toBe(true);
+        expect(toolCalls.every(call => !JSON.stringify(call.body.tools).includes('web_search'))).toBe(true);
         expect(toolDiscovery.patchedContent).toBe(`${CLI_PATCH_MARKER}\n`);
         expect(toolCalls).toHaveLength(2);
+        for(const call of toolCalls){
+          if(toolModel==='org/chat')expect(call.body).toMatchObject({reasoning_effort:'max',thinking:{type:'enabled'}});
+          else expect(call.body).toMatchObject({output_config:{effort:'high'},thinking:{type:'adaptive'}});
+        }
         expect(cliToolRoundTrip.firstRequestId).toBe(toolCalls[0]!.requestId);
         expect(cliToolRoundTrip.followupRequestId).toBe(toolCalls[1]!.requestId);
         expect(cliToolRoundTrip.wires?.mcp).toBeString();
@@ -539,6 +617,70 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       expect(calls.slice(start)).toHaveLength(3);
     } finally {await socket.close();}
   }, 45000);
+
+  test('built model mapping preserves verified effort; bundled HTTP/WS refusals never poison the shared upstream', async () => {
+    const saved = structuredClone(aggregate);
+    let socket: Socket | undefined;
+    try {
+      aggregate.plugin_activations.push({plugin_name:'model-mapping'});
+      const service = aggregate.logical_configuration.services[0];
+      service.failover = {enabled:true,retry_on:['>400'],passive_health:{consecutive_failures:3},recovery:{backoff_base_ms:300000}};
+      service.plugins = [{id:uuid(31),position:1,name:'model-mapping',enabled:true,options:{modelMappings:[
+        {source:CODEX_CHAT_MODEL,target:'GLM-5.3-Flash'}, {source:'glm-5.3',target:'unverified-wire-model'},
+      ]}}];
+      aggregate.logical_configuration.routes[0].plugins.find((p:any)=>p.name==='codex-router').options.models.push({
+        provider:'zai',source:'org/unverified',model:'glm-5.3',target:{type:'service',id:CHAT,protocol:'chat_completions'},
+      });
+      await publish();
+      socket = await openSocket();
+      const before = calls.length;
+      for (let i=0;i<5;i++) {
+        const result = await post({model:'org/unverified',input:'strict rejection',reasoning:{effort:'max'}});
+        expect(result.status).toBe(422);
+        expect(result.body).toMatchObject({error:'llm_adapter_unsupported_reasoning',param:'reasoning.effort'});
+        const events = await socket.create({model:'org/unverified',input:'strict rejection',reasoning:{effort:'max'}},true);
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject({type:'error',status:422,error:{code:'llm_adapter_unsupported_reasoning',param:'reasoning.effort'}});
+        expect(calls).toHaveLength(before);
+      }
+      for (const effort of ['low','high','max']) {
+        const result = await post({model:'org/chat',input:smallHistory,tools,reasoning:{effort}});
+        expect(result.status).toBe(200);
+        expect(calls.at(-1)!.body).toMatchObject({model:'GLM-5.3-Flash',reasoning_effort:effort,thinking:{type:'enabled'}});
+        expect(JSON.stringify(calls.at(-1)!.body.messages)).toContain('custom result');
+        const events = await socket.create({model:'org/chat',input:smallHistory,tools,reasoning:{effort}});
+        expect(events.at(-1).type).toBe('response.completed');
+        expect(calls.at(-1)!.body).toMatchObject({model:'GLM-5.3-Flash',reasoning_effort:effort,thinking:{type:'enabled'}});
+      }
+      for(let i=0;i<16 && new Set(calls.slice(before).map(call=>call.pid)).size<2;i++) {
+        expect((await post({model:'org/chat',input:'second worker positive control',reasoning:{effort:'max'}})).status).toBe(200);
+      }
+      expect(new Set(calls.slice(before).map(call=>call.pid))).toEqual(new Set(workers.map(worker=>worker.pid)));
+      if(process.env.BUNGEE_CODEX_CLI_PROBE==='1') {
+        const start=calls.length;
+        const cli=await probeCodexChatgptModels({root:fixture!.root,baseUrl:`${proxy}/codex`,mockUrl:`http://127.0.0.1:${upstream!.port}`,token,
+          model:'org/chat',effort:'max',toolRoundTrip:true});
+        expect(cli.reasoningModels).toEqual([{model:'org/chat',levels:['low','high','max'],defaultEffort:'max'}]);
+        expect(cli.notifications.some((e:any)=>e.method==='turn/completed'&&e.status==='completed')).toBe(true);
+        expect(cli.patchedContent).toBe(`${CLI_PATCH_MARKER}\n`);
+        expect(cli.notifications.some((e:any)=>e.itemType==='commandExecution'&&e.exitCode===0&&e.output?.includes(CLI_EXEC_MARKER))).toBe(true);
+        expect(cli.mcpAudit.filter((e:any)=>e.event==='tools/call').map((e:any)=>({name:e.name,text:e.text}))).toEqual([{name:'echo',text:CLI_MCP_MARKER}]);
+        expect(calls.slice(start)).toHaveLength(2);
+        const roundTrip=cliToolRoundTrips.get('GLM-5.3-Flash')!;
+        expect(roundTrip.outputs?.map(output=>output.callId).sort()).toEqual(['call_fixture_exec','call_fixture_mcp','call_fixture_patch']);
+      }
+      const outgoing=calls.slice(before);
+      for(const call of outgoing)expect(call.body).toMatchObject({model:'GLM-5.3-Flash',thinking:{type:'enabled'}});
+      await assertMetered(outgoing);
+      console.info(`codex_router_wire_alias ${JSON.stringify({workerPids:workers.map(w=>w.pid),refusedGenerations:10,
+        upstreamCalls:outgoing.length,wireModel:'GLM-5.3-Flash',efforts:['low','high','max']})}`);
+    } catch (error) {
+      throw new Error(`Wire alias acceptance failed: ${String(error)}; ${await master!.diagnostics?.()}`,{cause:error});
+    } finally {
+      await socket?.close();
+      aggregate=saved;await publish();
+    }
+  },90000);
 
   test('serving-revision change isolates HTTP history and old WS worker owners drain on close', async () => {
     const socket = await openSocket(); const oldWorkers = workers.slice();

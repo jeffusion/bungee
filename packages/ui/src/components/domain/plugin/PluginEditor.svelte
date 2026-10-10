@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { pluginConfigConstraintSatisfied } from '@jeffusion/bungee-types';
   import { createEventDispatcher, onMount, tick } from 'svelte';
   import { PluginsAPI, type PluginSchema } from '$api/plugins';
   import DynamicPluginForm from './DynamicPluginForm.svelte';
@@ -103,6 +104,15 @@
 
   function handleConfigChange(event: CustomEvent) {
     pluginConfig = event.detail;
+    const plugin = availablePlugins.find(p => p.name === selectedPluginName);
+    for (const constraint of plugin?.configConstraints ?? []) {
+      const key = constraint.fields[0]!;
+      const message = constraint.message ? getPluginText(constraint.message, plugin.name, $_) : $_('plugin.invalidOptionTuple');
+      if (configErrors[key] === message) {
+        const { [key]: ignored, ...rest } = configErrors;
+        configErrors = rest;
+      }
+    }
   }
 
   function handleConfigValidate(event: CustomEvent) {
@@ -125,7 +135,7 @@
             if (missingFields.length > 0) {
               configErrors = {
                 ...configErrors,
-                [field.name]: `${field.label} is required`
+                [field.name]: $_('plugin.fieldRequired', { values: { field: getPluginText(field.label, plugin.name, $_) } })
               };
               return;
             }
@@ -134,10 +144,17 @@
         else if (!pluginConfig[field.name]) {
           configErrors = {
             ...configErrors,
-            [field.name]: `${field.label} is required`
+            [field.name]: $_('plugin.fieldRequired', { values: { field: getPluginText(field.label, plugin.name, $_) } })
           };
           return;
         }
+      }
+    }
+
+    for (const constraint of plugin?.configConstraints ?? []) {
+      if (!pluginConfigConstraintSatisfied(pluginConfig, constraint)) {
+        configErrors = { ...configErrors, [constraint.fields[0]!]: constraint.message ? getPluginText(constraint.message, plugin!.name, $_) : $_('plugin.invalidOptionTuple') };
+        return;
       }
     }
 

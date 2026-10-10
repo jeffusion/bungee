@@ -59,6 +59,15 @@ export interface MutableRequestContext extends RequestContext {
   body: any;
 }
 
+/** Immutable final attempt boundary, after all rewrites and before upstream connection. */
+export interface OutboundValidationContext extends RequestContext {
+  readonly url: string;
+  readonly model: string | null;
+  readonly body: unknown;
+  readonly attemptId: string;
+  readonly signal?: AbortSignal;
+}
+
 /**
  * 响应上下文
  */
@@ -203,6 +212,8 @@ export interface PluginScopeInfo {
  * 插件初始化上下文
  */
 export interface PluginInitContext {
+  /** Host-generated providers have no application binding; configured instances do. */
+  readonly initializationKind?: 'automatic-provider' | 'configured';
   /** Host-controlled, dependency-restricted public service facade. */
   readonly services?: PluginServices;
   readonly dispatchTargets?: readonly import('../gateway/contracts').GatewayDispatchTarget[];
@@ -287,6 +298,7 @@ export function createPluginHooks(): PluginHooks {
      * 每个插件接收上一个插件修改后的 context，返回修改后的 context
      */
     onBeforeRequest: new AsyncSeriesWaterfallHook<MutableRequestContext>('onBeforeRequest'),
+    onValidateOutbound: new AsyncSeriesWaterfallHook<OutboundValidationContext>('onValidateOutbound'),
 
     /**
      * 请求拦截
@@ -387,6 +399,7 @@ export interface PluginHooks {
   onGatewayLog: AsyncSeriesBailHook<[GatewayLogInput], GatewayLogResult>;
   onRequestInit: AsyncParallelHook<[RequestContext]>;
   onBeforeRequest: AsyncSeriesWaterfallHook<MutableRequestContext>;
+  onValidateOutbound: AsyncSeriesWaterfallHook<OutboundValidationContext>;
   onInterceptRequest: AsyncSeriesBailHook<[MutableRequestContext], InterceptResult>;
   onResponse: AsyncSeriesWaterfallHook<Response, [ResponseContext]>;
   onRawResponse: AsyncSeriesWaterfallHook<RawResponseResult, [RawResponseContext]>;

@@ -845,6 +845,7 @@
     "selectPluginPrompt": "-- Select a plugin --",
     "pluginConfiguration": "Configuration",
     "noConfigurationRequired": "This plugin requires no configuration",
+    "invalidOptionTuple": "Unsupported plugin option combination",
     "fieldRequired": "{field} is required",
     "update": "Update",
     "cancel": "Cancel"

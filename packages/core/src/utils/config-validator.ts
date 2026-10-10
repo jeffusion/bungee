@@ -35,13 +35,14 @@ export interface ValidationError {
 export function validatePluginConfig(
   config: Record<string, any>,
   schema: PluginConfigField[],
-  pluginName?: string
+  pluginName?: string,
+  options: { skipRequired?: boolean } = {},
 ): ValidationResult {
   const errors: ValidationError[] = [];
 
   for (const field of schema) {
     const value = config[field.name];
-    const fieldErrors = validateField(field, value, field.name);
+    const fieldErrors = validateField(field, value, field.name, options.skipRequired);
     errors.push(...fieldErrors);
   }
 
@@ -68,12 +69,13 @@ export function validatePluginConfig(
 function validateField(
   field: PluginConfigField,
   value: any,
-  path: string
+  path: string,
+  skipRequired = false,
 ): ValidationError[] {
   const errors: ValidationError[] = [];
 
   // 必填检查
-  if (field.required && (value === undefined || value === null || value === '')) {
+  if (!skipRequired && field.required && (value === undefined || value === null || value === '')) {
     errors.push({
       field: path,
       message: `Required field is missing`,
@@ -110,7 +112,7 @@ function validateField(
   if (field.type === 'object' && field.properties && typeof value === 'object') {
     for (const prop of field.properties) {
       const propValue = value[prop.name];
-      const propErrors = validateField(prop, propValue, `${path}.${prop.name}`);
+      const propErrors = validateField(prop, propValue, `${path}.${prop.name}`, skipRequired);
       errors.push(...propErrors);
     }
   }
@@ -118,7 +120,7 @@ function validateField(
   // 数组验证
   if (field.type === 'array' && field.items && Array.isArray(value)) {
     for (let i = 0; i < value.length; i++) {
-      const itemErrors = validateField(field.items, value[i], `${path}[${i}]`);
+      const itemErrors = validateField(field.items, value[i], `${path}[${i}]`, skipRequired);
       errors.push(...itemErrors);
     }
   }

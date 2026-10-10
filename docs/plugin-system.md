@@ -46,7 +46,7 @@ Bungee 插件系统采用**分层架构**，支持内置插件和外部插件，
 │  │  │ packages/core/src/  │    │        plugins/                     │ │   │
 │  │  │     plugins/        │    │   ┌─────────────────────────────┐   │ │   │
 │  │  │                     │    │   │ token-stats/                │   │ │   │
-│  │  │ • ai-transformer    │    │   │  ├─ manifest.json           │   │ │   │
+│  │  │ • gateway providers │    │   │  ├─ manifest.json           │   │ │   │
 │  │  │ • token-cache       │    │   │  ├─ dist/index.js (Artifact)│   │ │   │
 │  │  │ • hooks-example     │    │   │  └─ ui/TokenStatsChart.svelte│  │ │   │
 │  │  └─────────────────────┘    │   └─────────────────────────────┘   │ │   │
@@ -289,7 +289,7 @@ Bungee 严格区分了两种 UI 扩展模式，以平衡性能与灵活性。
 
 ```plaintext
 packages/core/dist/plugins/
-├── ai-transformer/
+├── llm-protocol-adapter/
 │   └── index.js              # 内置插件编译产物
 ├── token-stats/
 │   └── index.js              # 外部插件编译产物
@@ -429,11 +429,11 @@ Plugin bindings live inside the revisioned configuration aggregate. Global activ
         "position": 1,
         "target": "https://api.gemini.com",
         "plugins": [{
-          "name": "ai-transformer",
+          "name": "llm-protocol-adapter",
           "enabled": true,
           "options": {
-            "from": "anthropic",
-            "to": "gemini"
+            "sourceProtocol": "anthropic_messages",
+            "targetProtocol": "gemini_generate_content"
           }
         }]
       }]
@@ -441,7 +441,7 @@ Plugin bindings live inside the revisioned configuration aggregate. Global activ
     "routes": [],
     "plugins": []
   },
-  "plugin_activations": [{ "plugin_name": "ai-transformer" }]
+  "plugin_activations": [{ "plugin_name": "llm-protocol-adapter" }]
 }
 ```
 
@@ -458,33 +458,13 @@ Bungee includes built-in plugins for API compatibility and format conversion:
 
 | Plugin | Description |
 |--------|-------------|
-| `ai-transformer` | Convert request/response format between `openai` / `anthropic` / `gemini` by `from/to` options |
-| `openai-messages-to-chat` | Unified OpenAI compatibility adapter: downgrades `/v1/messages` and `/v1/responses` requests to upstream `/v1/chat/completions`; rewrites adapted `/v1/messages` responses to Messages-style output and adapted `/v1/responses` responses to Responses-style output (JSON + SSE) |
+| `llm-protocol-adapter` | Convert requests, JSON responses and SSE among four LLM protocols through independent sourceProtocol/targetProtocol fields; see the supported matrix |
 
-Supported directions:
-
-- `openai → anthropic`
-- `anthropic → openai`
-- `openai → gemini`
-- `gemini → openai`
-- `anthropic → gemini`
-- `gemini → anthropic`
+See the [four-protocol matrix](llm-protocol-adapter.md#配置和协议矩阵); Responses↔Gemini is unsupported and identical protocols pass through.
 
 ### Feature Support
 
-All transformer plugins support:
-
-- ✅ Request transformation (path, headers, body)
-- ✅ Response transformation (non-streaming)
-- ✅ SSE streaming transformation
-- ✅ Tool calls / Function calling
-- ✅ Multi-modal content (images)
-- ✅ Thinking tags support
-- ✅ Error handling
-
----
-
-## Writing Custom Plugins
+The adapter supports request, JSON response and SSE conversion, tools and representable content. Hard constraints that the target cannot express are rejected; matrix support is not permission to discard unknown or incompatible semantics. See [strict semantics](llm-protocol-adapter.md#严格语义和生命周期).
 
 ### Plugin Interface
 
@@ -1283,7 +1263,7 @@ See `packages/core/tests/unit/plugin-url-security.test.ts` for complete test sui
 
 Each plugin should do one thing well:
 
-✅ **Good**: `ai-transformer` - one plugin with explicit `from/to` options per route
+✅ **Good**: `llm-protocol-adapter` - one plugin with independent `sourceProtocol/targetProtocol` options per route
 ❌ **Bad**: `multi-format-converter` - tries to handle all formats
 
 ### 2. Use TypeScript Types
@@ -1409,30 +1389,28 @@ async onBeforeRequest(ctx: PluginContext): Promise<void> {
 
 ## Reference Implementation
 
-For complete examples, see the built-in transformer plugins:
+For complete examples, see the protocol adapter:
 
-- `plugins/ai-transformer/manifest.json`
-- `plugins/ai-transformer/server/index.ts`
-- `plugins/ai-transformer/server/converters/*.ts`
+- `plugins/llm-protocol-adapter/manifest.json`
+- `plugins/llm-protocol-adapter/server/index.ts`
 
 These implementations demonstrate:
 
-- Full bidirectional API format conversion
+- Protocol conversion with an explicit supported matrix
 - Streaming transformation
 - Error handling
 - Tool calling support
 - Multi-modal content handling
 
-For OpenAI Messages compatibility adapter examples, see:
+For the public service contract, see:
 
-- `plugins/openai-messages-to-chat/manifest.json`
-- `plugins/openai-messages-to-chat/server/index.ts`
+- `plugins/llm-protocol-adapter/contract.ts`
 
 ---
 
 ## Further Reading
 
-- [OpenAI Messages/Responses Compatibility Guide](./openai-messages-to-chat.md)
+- [LLM Protocol Adapter](./llm-protocol-adapter.md)
 - [Plugin Registry Implementation](../packages/core/src/plugin-registry.ts)
 - [Plugin Type Definitions](../packages/core/src/plugin.types.ts)
 - [HTTP/SSE response pipeline](../packages/core/src/worker/response/processor.ts)

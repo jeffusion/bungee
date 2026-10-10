@@ -864,6 +864,7 @@
     "selectPluginPrompt": "-- 选择插件 --",
     "pluginConfiguration": "配置",
     "noConfigurationRequired": "该插件无需配置",
+    "invalidOptionTuple": "不支持该插件配置组合",
     "fieldRequired": "{field} 为必填项",
     "update": "更新",
     "cancel": "取消"

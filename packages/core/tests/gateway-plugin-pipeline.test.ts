@@ -7,6 +7,9 @@ import { handleRequest } from '../src/worker/request/handler';
 import { bodyMetrics } from '../src/gateway/body-resources';
 import { BodyServicePlugin } from '../src/gateway/body-plugin';
 import { gzipSync } from 'node:zlib';
+import { DataAdmissionError } from '../src/data-admission/errors';
+import { runtimeState, getActiveRequestCount } from '../src/worker/state/runtime-state';
+import type { RuntimeUpstream } from '../src/worker/types';
 
 const previousRegistry = getScopedPluginRegistry();
 const originalFetch = globalThis.fetch;
@@ -93,6 +96,38 @@ describe('registered gateway pipeline',()=>{
     expect((await response.json() as any).value).toBe(1);
     for(const name of ['onGatewayBody','onGatewayRequest','onGatewayRoute','onGatewayAdmission','onGatewaySelect','onGatewayRetry','onGatewayForward','onGatewayResponseRules','onGatewayLog'] as const)
       expect(providers[name].getStats().callCount).toBeGreaterThan(0);
+  });
+  test.each([false,true])('bundled local rejection retains details and never trips upstream health (runtime tracking: %s)',async(tracked)=>{
+    const {config,hooks}=fixtures();
+    const stateKey=config.routes[0]!.path;
+    const saved=runtimeState.get(stateKey);
+    const upstream:RuntimeUpstream={target:'http://pipeline.test',upstream_id:'primary',status:'HEALTHY',consecutive_failures:0,consecutive_successes:0,recovery_attempt_count:0};
+    config.routes[0]!.endpoints![0]!.id='primary';
+    if(tracked)runtimeState.set(stateKey,{upstreams:[upstream]});else runtimeState.delete(stateKey);
+    // Separate bundles have separate class identities, but share this public error contract.
+    class BundledAdmissionError extends Error {
+      readonly name='DataAdmissionError';readonly status=422;readonly code='llm_adapter_unsupported_reasoning';
+      readonly details={message:'Selected reasoning effort cannot be honored by the actual target',param:'reasoning.effort'};
+    }
+    expect(new BundledAdmissionError()).not.toBeInstanceOf(DataAdmissionError);
+    let reject=true,fetches=0;
+    hooks.onValidateOutbound.tapPromise('bundled-rejection',async()=>{if(reject)throw new BundledAdmissionError();});
+    globalThis.fetch=Object.assign(async()=>{fetches++;return Response.json({value:1});},{preconnect(){}}) as typeof fetch;
+    try{
+      for(let i=0;i<5;i++){
+        const response=await handleRequest(new Request('http://local/gateway-test',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}),config,{logging});
+        expect(response.status).toBe(422);
+        expect(await response.json()).toEqual({error:'llm_adapter_unsupported_reasoning',...new BundledAdmissionError().details});
+        expect(fetches).toBe(0);
+        expect(upstream).toMatchObject({status:'HEALTHY',consecutive_failures:0,recovery_attempt_count:0});
+        expect(upstream.last_failure_time).toBeUndefined();
+        expect(getActiveRequestCount(stateKey,'primary')).toBe(0);
+      }
+      reject=false;
+      const response=await handleRequest(new Request('http://local/gateway-test',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}),config,{logging});
+      expect(response.status).toBe(200);expect(await response.json()).toEqual({value:1});expect(fetches).toBe(1);
+      expect(upstream).toMatchObject({status:'HEALTHY',consecutive_failures:0});
+    }finally{if(saved)runtimeState.set(stateKey,saved);else runtimeState.delete(stateKey);}
   });
   test('a request retains its provider assembly when the serving registry changes during fetch',async()=>{
     const {providers,config,hooks}=fixtures(true);

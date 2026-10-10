@@ -67,14 +67,14 @@ test('registry refuses a Codex binding without target protocol',async()=>{
 });
 
 for(const [name,captured,count] of [['base',capturedBase,11],['preferences',capturedPreferences,13]] as const)test(`captured ${name} public HTTP pipeline preserves every tool and model routing`,async()=>{
-  const config:any={routes:[{id:'e',path:'/codex',plugins:[{name:'codex-router',path,options:{models:[{source:'captured-model',provider:'p',model:'destination',target:{type:'route',id:'t',protocol:'chat_completions'}}]}}],endpoints:[{target:'http://unused'}]},
+  const config:any={routes:[{id:'e',path:'/codex',plugins:[{name:'codex-router',path,options:{models:[{source:'captured-model',provider:'zai',model:'glm-5.3-flash',target:{type:'route',id:'t',protocol:'chat_completions'}}]}}],endpoints:[{target:'http://unused'}]},
     {id:'t',path:'/target',path_rewrite:{'^/target':''},endpoints:[{target:'http://upstream.test'}]}]};
   const registry=new ScopedPluginRegistry(import.meta.dir);expect((await registry.initializeFromConfig(config)).failed).toBe(0);setScopedPluginRegistry(registry);
   const calls:any[]=[];globalThis.fetch=Object.assign(async(url:any,init:any)=>{calls.push({url:String(url),body:JSON.parse(await new Response(init.body).text())});return Response.json({choices:[{message:{role:'assistant',content:'{"title":"fixture","description":"fixture"}'},finish_reason:'stop'}]});},{preconnect(){}}) as any;
   try{
     const response=await handleRequest(new Request('http://local/codex/responses',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(captured)}),config,{logging});
     expect(response.status).toBe(200);expect((await response.json() as any).model).toBe('captured-model');
-    expect(calls).toHaveLength(1);expect(calls[0].body.tools).toHaveLength(count);expect(calls[0].body.model).toBe('destination');
+    expect(calls).toHaveLength(1);expect(calls[0].body.tools).toHaveLength(count);expect(calls[0].body.model).toBe('glm-5.3-flash');
     expect(calls[0].url).toEndWith('/chat/completions');
     expect(calls[0].body.messages.map((m:any)=>m.role)).toEqual(captured.input.filter(i=>i.type!=='additional_tools').map(i=>i.role));
     expect(calls[0].body).not.toHaveProperty('access_programs');
@@ -88,6 +88,18 @@ test('codec rejection details survive a separately bundled plugin and reach HTTP
   let calls=0;globalThis.fetch=Object.assign(async()=>{calls++;return Response.json({});},{preconnect(){}}) as any;
   try{
     const response=await handleRequest(new Request('http://local/codex/responses',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'m',input:'x',access_programs:{cyber:'daybreak_blue'}})}),config,{logging});
-    expect(response.status).toBe(422);expect(await response.json()).toEqual({error:'codex_router_unsupported_access_program',message:'Selected access program cannot be represented by the target protocol',param:'access_programs.cyber'});expect(calls).toBe(0);
+    expect(response.status).toBe(422);expect(await response.json()).toEqual({error:'llm_adapter_unsupported_access_program',message:'Protocol payload cannot be represented faithfully',param:'access_programs.cyber'});expect(calls).toBe(0);
   }finally{await registry.destroy();}
+});
+
+for(const [name,effort,mutation,expected] of [
+  ['unsupported selection','medium',undefined,'llm_adapter_unsupported_reasoning'],
+  ['last-plugin effort rewrite','high',{effort:'low'},'llm_adapter_unsupported_reasoning'],
+  ['last-plugin model mapping','high',{model:'unverified-fallback'},'llm_adapter_unsupported_reasoning'],
+  ['last-plugin protocol URL rewrite','high',{path:'/v1/messages'},'llm_adapter_target_protocol_mismatch'],
+] as const)test(`final ${name} fails with 422 before an upstream connection`,async()=>{
+  const config:any={routes:[{id:'e',path:'/codex',plugins:[{name:'codex-router',path,options:{models:[{source:'client',provider:'zai',model:'glm-5.3-flash',target:{type:'route',id:'t',protocol:'chat_completions'}}]}}],endpoints:[{target:'http://unused'}]},
+    {id:'t',path:'/target',path_rewrite:{'^/target':''},plugins:mutation?[{name:'codex-router',path,options:{models:[],outboundMutation:mutation}}]:[],endpoints:[{id:'actual',target:'http://upstream.test'}]}]};
+  const registry=new ScopedPluginRegistry(import.meta.dir);expect((await registry.initializeFromConfig(config)).failed).toBe(0);setScopedPluginRegistry(registry);let calls=0;globalThis.fetch=Object.assign(async()=>{calls++;return Response.json({});},{preconnect(){}}) as any;
+  try{const response=await handleRequest(new Request('http://local/codex/responses',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'client',input:'PRIVATE_BODY_TEXT',reasoning:{effort},metadata:{secret:'PRIVATE_SECRET'}})}),config,{logging});expect(response.status).toBe(422);const error:any=await response.json();expect(error.error).toBe(expected);expect(JSON.stringify(error)).not.toContain('PRIVATE_BODY_TEXT');expect(JSON.stringify(error)).not.toContain('PRIVATE_SECRET');expect(calls).toBe(0);}finally{await registry.destroy();}
 });

@@ -21,8 +21,8 @@ import { buildExternalPlugins, rewriteManifestForBuiltArtifact } from './build-e
 const ROOT = resolve(import.meta.dir, '..');
 const SOURCE = join(ROOT, 'plugins');
 const BUILTINS = [
-  'ai-transformer', 'anthropic-request-sanitizer', 'anthropic-tool-name-transformer',
-  'chatgpt-oauth', 'codex-router', 'deepseek-reasoning-fix', 'key-access', 'key-rate-limit', 'local-accounts', 'model-mapping', 'models-dev', 'openai-messages-to-chat',
+  'anthropic-request-sanitizer', 'anthropic-tool-name-transformer',
+  'chatgpt-oauth', 'codex-router', 'deepseek-reasoning-fix', 'key-access', 'key-rate-limit', 'llm-protocol-adapter', 'local-accounts', 'model-mapping', 'models-dev',
   'signature-repair', 'token-budget', 'token-metering', 'token-stats',
 ] as const;
 const roots: string[] = [];
@@ -92,7 +92,7 @@ afterEach(() => {
 describe('rewriteManifestForBuiltArtifact', () => {
   test('rewrites built plugin manifest main entry to bundled artifact', () => {
     const rewritten = rewriteManifestForBuiltArtifact({
-      name: 'ai-transformer',
+      name: 'llm-protocol-adapter',
       version: '2.0.0',
       schemaVersion: 3,
       artifactKind: 'runtime-plugin',
@@ -105,8 +105,8 @@ describe('rewriteManifestForBuiltArtifact', () => {
         description: 'plugin.description',
       },
       translations: {
-        en: { 'metadata.name': 'AI Transformer' },
-        'zh-CN': { 'metadata.name': 'AI 格式转换器' },
+        en: { 'metadata.name': 'LLM Protocol Adapter' },
+        'zh-CN': { 'metadata.name': 'LLM 协议适配器' },
       },
       configSchema: [],
     });
@@ -115,7 +115,7 @@ describe('rewriteManifestForBuiltArtifact', () => {
     expect(rewritten.schemaVersion).toBe(3);
     expect(rewritten.capabilities).toEqual(['hooks', 'api', 'dynamicRuntimeLoad']);
     expect(rewritten.metadata?.name).toBe('metadata.name');
-    expect(rewritten.translations?.['zh-CN']?.['metadata.name']).toBe('AI 格式转换器');
+    expect(rewritten.translations?.['zh-CN']?.['metadata.name']).toBe('LLM 协议适配器');
   });
 
   test('emits complete strict manifests that the production catalog can scan', async () => {

@@ -307,36 +307,14 @@ export const MyPlugin = definePlugin(
 | `textarea` | 多行文本 | 描述, JSON 配置 |
 | `json` | JSON 编辑器 | 复杂配置对象 |
 
-### 虚拟字段转换
+### 独立协议字段
 
-使用 `fieldTransform` 将一个 UI 字段映射到多个存储字段：
+LLM 协议适配器以两个必选 select 字段声明 sourceProtocol 和 targetProtocol，直接存储对应选项，不使用合并方向或 split 预设。manifest 的 allowed-tuples 约束同时用于 UI 保存和配置编译。
 
-```typescript
-{
-  name: 'transformation',
-  type: 'select',
-  label: 'Transformation Direction',
-  required: true,
-
-  // 字段转换规则
-  fieldTransform: {
-    type: 'split',
-    separator: '-',
-    fields: ['from', 'to']
-  },
-
-  options: [
-    { label: 'Anthropic → OpenAI', value: 'anthropic-openai' },
-    { label: 'OpenAI → Anthropic', value: 'openai-anthropic' }
-  ]
-}
-```
-
-用户选择 `anthropic-openai` 时，会自动展开为：
 ```json
 {
-  "from": "anthropic",
-  "to": "openai"
+  "sourceProtocol": "anthropic_messages",
+  "targetProtocol": "chat_completions"
 }
 ```
 
@@ -647,85 +625,17 @@ export const RequestCounterPlugin = definePlugin(
 export default RequestCounterPlugin;
 ```
 
-### 3. API 转换插件
+### 3. LLM 协议服务
 
-```typescript
-import type { Plugin, PluginBodyRequirements, PluginContext } from '../../plugin.types';
-import { definePlugin } from '../../plugin.types';
-
-interface TransformerOptions {
-  from: 'openai' | 'anthropic' | 'gemini';
-  to: 'openai' | 'anthropic' | 'gemini';
-}
-
-export const APITransformerPlugin = definePlugin(
-  class implements Plugin {
-    bodyRequirements(): PluginBodyRequirements {
-      return this.options.from !== this.options.to
-        ? { request: 'json-write', response: ['json'] } : { request: 'none' };
-    }
-    static readonly name = 'api-transformer';
-    static readonly version = '1.0.0';
-    static readonly description = 'Transform API requests between different formats';
-
-    private options: TransformerOptions;
-
-    constructor(options: TransformerOptions) {
-      this.options = options;
-    }
-
-    async onBeforeRequest(ctx: PluginContext): Promise<void> {
-      if (this.options.from === 'openai' && this.options.to === 'anthropic') {
-        // 转换 OpenAI 格式到 Anthropic 格式
-        const body = ctx.body as any;
-        ctx.body = {
-          model: this.mapModel(body.model),
-          messages: body.messages,
-          max_tokens: body.max_tokens
-        };
-      }
-    }
-
-    async onResponse(ctx: PluginContext & { response: Response }): Promise<Response> {
-      if (this.options.from === 'anthropic' && this.options.to === 'openai') {
-        // 转换 Anthropic 响应到 OpenAI 格式
-        const data = await ctx.response.json();
-        const transformed = {
-          id: data.id,
-          object: 'chat.completion',
-          choices: [{
-            message: {
-              role: 'assistant',
-              content: data.content[0].text
-            }
-          }]
-        };
-
-        return new Response(JSON.stringify(transformed), {
-          headers: ctx.response.headers
-        });
-      }
-
-      return ctx.response;
-    }
-
-    private mapModel(model: string): string {
-      // 模型映射逻辑
-      return model;
-    }
-  }
-);
-
-export default APITransformerPlugin;
-```
+消费方在 manifest 声明 llm-protocol-adapter 依赖及 conversion.v1 服务，通过宿主 services 获取对应进程的服务。仅导入 [公共 contract](../plugins/llm-protocol-adapter/contract.ts)；请求级会话和 BodyHandle hook 保持生命周期一致，不自行读取原始 Response body。完整服务与矩阵见 [LLM 协议适配器](llm-protocol-adapter.md)。
 
 ---
 
 ## 更多资源
 
 - [Plugin API 参考](../packages/core/src/plugin.types.ts)
-- [ai-transformer 插件入口](../plugins/ai-transformer/server/index.ts)
-- [ai-transformer 转换规范](./ai-provider-conversion.md)
+- [llm-protocol-adapter 插件入口](../plugins/llm-protocol-adapter/server/index.ts)
+- [LLM 协议适配器](./llm-protocol-adapter.md)
 - [测试示例](../packages/core/tests/)
 
 ---

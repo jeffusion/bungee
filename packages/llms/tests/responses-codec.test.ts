@@ -292,9 +292,10 @@ test('refusal output can be replayed as assistant history for either target prot
 test('real CLI optional encrypted-output and metadata preferences remain compatible without opaque history', () => {
   for (const protocol of protocols) {
     const raw = request({prompt_cache_key:'fixture-cache',client_metadata:{client:'codex'},include:['reasoning.encrypted_content'],
-      tools:[{type:'web_search'},...declarations],tool_choice:'auto',reasoning:{effort:'none'},store:false});
+      tools:[{type:'web_search',external_web_access:false},...declarations],tool_choice:'auto',reasoning:{effort:'none'},store:false});
     const decoded = decodeResponsesRequest(raw,protocol,{omitOptionalWebSearch:true});
     expect(decoded.body.tools).toHaveLength(3);
+    expect(decoded.diagnostics).toContainEqual({param:'tools[0]',action:'omitted',reason:'optional_hosted_web_search_unavailable'});
     expect(decoded.body).not.toHaveProperty('client_metadata');
     expect(decoded.body).not.toHaveProperty('include');
     expectCode(() => decodeResponsesRequest({...raw,tool_choice:'required'},protocol,{omitOptionalWebSearch:true}),'unsupported_tool');
@@ -309,7 +310,9 @@ test('Codex null encrypted placeholder retains plain reasoning without enabling 
   const raw=request({input,reasoning:{effort:'high'}});
   const decoded=decodeResponsesRequest(raw,'chat_completions',{reasoningHistory:true});
   expect(decoded.body.messages[1]).toMatchObject({role:'assistant',reasoning_content:'plain thought',tool_calls:[{id:'call'}]});
-  expect(decoded.body).not.toHaveProperty('reasoning_effort');expect(decoded.canonicalInput[1]).toEqual(reasoning);
+  expect(decoded.body).not.toHaveProperty('reasoning_effort');
+  const {internal_chat_message_metadata_passthrough: _metadata,...canonicalReasoning}=reasoning;
+  expect(decoded.canonicalInput[1]).toEqual(canonicalReasoning);
   for(const encrypted_content of ['sealed',{},0,''])expectCode(()=>decodeResponsesRequest({...raw,input:[{...reasoning,encrypted_content}]},'chat_completions',{reasoningHistory:true}),'unsupported_content');
   for(const content of [[{type:'reasoning_text',text:'must survive'}],{unexpected:'must survive'}]) {
     try{decodeResponsesRequest({...raw,input:[{...reasoning,content}]},'chat_completions',{reasoningHistory:true});throw new Error('expected rejection');}

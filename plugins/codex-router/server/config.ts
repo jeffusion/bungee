@@ -8,7 +8,7 @@ export interface ModelBinding {
   sourceProtocol?: 'responses';
   alias?: string;
   target: { type: 'route' | 'service'; id: string; protocol: LLMProtocol };
-  capabilityOverrides?: { contextWindow?: number; tools?: boolean; reasoning?: boolean; images?: boolean; reasoningEffort?: boolean; anthropicThinkingBudget?: number };
+  capabilityOverrides?: { contextWindow?: number; tools?: boolean; reasoning?: boolean; images?: boolean };
 }
 /** The model in the client request; model itself is the upstream destination. */
 export function bindingSource(binding: ModelBinding): string { return binding.source ?? binding.alias ?? binding.model; }
@@ -37,8 +37,8 @@ export function parseBindings(value: unknown): readonly ModelBinding[] {
     if (overrides !== undefined) {
       if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) throw new Error('codex_router_invalid_capabilities');
       for (const [key, val] of Object.entries(overrides)) {
-        if (['contextWindow','anthropicThinkingBudget'].includes(key) ? typeof val !== 'number' || !Number.isSafeInteger(val) || val < 1
-          : !['tools','reasoning','images','reasoningEffort'].includes(key) || typeof val !== 'boolean') throw new Error('codex_router_invalid_capabilities');
+        if (['contextWindow'].includes(key) ? typeof val !== 'number' || !Number.isSafeInteger(val) || val < 1
+          : !['tools','reasoning','images'].includes(key) || typeof val !== 'boolean') throw new Error('codex_router_invalid_capabilities');
       }
     }
     return Object.freeze(structuredClone(entry)) as ModelBinding;
