@@ -28,6 +28,42 @@ test('directory refresh changes new sessions while an active generation pins its
  load(2,[]);expect(s.validateAttempt({model:'glm-5.3-flash',protocol:'chat_completions',body})).toMatchObject({catalogVersion:1});
  const next=service.createSession({sourceProtocol:'responses',targetProtocol:'chat_completions',model:'glm-5.3-flash'});expect(()=>next.convertRequest({input:'x',reasoning:{effort:'low'}})).toThrow('Selected reasoning effort');
 });
+test('standalone conversion accepts only the provider-qualified verified alias',()=>{
+ const {service}=fixture();
+ const session=service.createSession({sourceProtocol:'responses',targetProtocol:'chat_completions',provider:'zai',model:'GLM-5.3-Flash',selectedEffort:'high'});
+ const body=session.convertRequest({model:'GLM-5.3-Flash',input:'hello',reasoning:{effort:'high'}}).body;
+ expect(session.validateAttempt({model:'GLM-5.3-Flash',protocol:'chat_completions',body})).toMatchObject({effort:'high'});
+ session.dispose();
+ expect(()=>service.createSession({sourceProtocol:'responses',targetProtocol:'chat_completions',model:'GLM-5.3-Flash',selectedEffort:'high'})).toThrow('Selected reasoning effort');
+});
+test('the confirmed ZAI wire alias preserves every effort and the outbound model identifier',()=>{
+ const {service,load}=fixture();
+ const profile=service.resolveCapabilities({provider:'zai',model:'GLM-5.3-Flash',targetProtocol:'chat_completions'})!;
+ expect(profile).toMatchObject({model:'glm-5.3-flash',supportedEfforts:['low','high','max'],defaultEffort:'max',catalogVersion:1});
+ for(const effort of profile.supportedEfforts){
+  const session=service.createSession({provider:'zai',sourceProtocol:'responses',targetProtocol:'chat_completions',model:'GLM-5.3-Flash'});
+  const body=session.convertRequest({model:'GLM-5.3-Flash',input:'hello',reasoning:{effort}}).body;
+  expect(body).toMatchObject({model:'GLM-5.3-Flash',reasoning_effort:effort,thinking:{type:'enabled'}});
+  expect(session.validateAttempt({model:body.model,protocol:'chat_completions',body})).toMatchObject({model:'GLM-5.3-Flash',effort,catalogVersion:1});
+  expect(()=>session.validateAttempt({model:body.model,protocol:'chat_completions',body:{...body,thinking:{type:'disabled'}}})).toThrow();
+  expect(()=>session.validateAttempt({model:body.model,protocol:'chat_completions',body:{...body,reasoning_effort:effort==='low'?'high':'low'}})).toThrow();
+  expect(()=>session.validateAttempt({model:'unverified-alias',protocol:'chat_completions',body})).toThrow();
+  session.dispose();
+ }
+ const pinned=service.createSession({sourceProtocol:'responses',targetProtocol:'chat_completions',model:'glm-5.3-flash',profile});
+ const body=pinned.convertRequest({input:'hello',reasoning:{effort:'max'}}).body;
+ load(2,[]);
+ expect(pinned.validateAttempt({model:'GLM-5.3-Flash',protocol:'chat_completions',body})).toMatchObject({effort:'max',catalogVersion:1});
+ expect(service.resolveCapabilities({provider:'zai',model:'GLM-5.3-Flash',targetProtocol:'chat_completions'})?.supportedEfforts).toEqual([]);
+ expect(service.resolveCapabilities({provider:'other',model:'GLM-5.3-Flash',targetProtocol:'chat_completions'})).toBeNull();
+ expect(service.resolveCapabilities({provider:'zai',model:'GLM-5.3-FLASH',targetProtocol:'chat_completions'})).toBeNull();
+ pinned.dispose();
+});
+test('a session without a catalog profile can validate an ordinary converted request',()=>{
+ const {service}=fixture();const session=service.createSession({sourceProtocol:'responses',targetProtocol:'chat_completions',model:'unknown-model'});
+ const body=session.convertRequest({input:'hello'}).body;
+ expect(session.validateAttempt({model:'unknown-model',protocol:'chat_completions',body})).toMatchObject({effort:null,catalogVersion:null});session.dispose();
+});
 test('ambiguous model IDs cannot infer a provider; explicit provider and declared URL resolve exactly',()=>{
  const {view}=fixture();view.apply(buildCatalogIndex({version:2,fetchedAt:2,catalog:{a:{api:'https://a.invalid/v1',models:{m:{name:'A'}}},b:{api:'https://b.invalid/v1',models:{m:{name:'B'}}}}}));
  const caps=capabilitiesServiceOf(view);expect(caps.model({model:'m'})).toBeNull();expect(caps.model({model:'m',provider:'a'})?.name).toBe('A');expect(caps.model({model:'m',url:'https://b.invalid/v1/chat/completions'})?.name).toBe('B');expect(caps.model({model:'m',url:'https://unknown.invalid/v1'})).toBeNull();

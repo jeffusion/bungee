@@ -1264,7 +1264,8 @@ async function executeHttpRequestInternal(
       try {
         result = await proxyWithRouteRetry(selectedUpstream, attemptLogger);
         attemptLogger=result.attemptLogger??attemptLogger;finalAttemptLogger=attemptLogger;
-      } catch (error) {
+      } catch (caught) {
+        const error = normalizeAdmissionError(caught) ?? caught;
         if (error instanceof DataAdmissionError || error instanceof BodyProcessingError) {
           localFailureResponse = prepareProcessingErrorResponse(error);
           if (error instanceof BodyProcessingError) {
@@ -1735,7 +1736,8 @@ async function executeHttpRequestInternal(
         settleUpstreamFailure(selectedUpstream, `Upstream returned retryable status code: ${result.response.status}`);
         continue;
 
-      } catch (error) {
+      } catch (caught) {
+        const error = normalizeAdmissionError(caught) ?? caught;
         if (error instanceof DataAdmissionError || error instanceof BodyProcessingError) {
           localFailureResponse = prepareProcessingErrorResponse(error);
           if (error instanceof BodyProcessingError) {
