@@ -291,7 +291,7 @@ export interface PluginConfig {
    * Plugin 名称（唯一标识符）
    * 这是插件的唯一标识，用于引用和管理插件
    *
-   * 示例: "ai-transformer", "token-cache"
+   * 示例: "llm-protocol-adapter", "token-cache"
    */
   name: string;
 

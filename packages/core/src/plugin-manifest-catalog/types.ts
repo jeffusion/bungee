@@ -1,3 +1,4 @@
+import type { PluginConfigConstraint, PluginRuntimeScope } from '@jeffusion/bungee-types';
 import type { PluginConfigValue, Sha256Digest } from '@jeffusion/bungee-types';
 import type {
   PluginArtifactKind,
@@ -116,7 +117,7 @@ export type StrictPluginManifest = Readonly<{
   artifactKind: PluginArtifactKind;
   main: string;
   capabilities: readonly PluginCapability[];
-  runtimeScope?: 'global' | 'scoped';
+  runtimeScope?: PluginRuntimeScope;
   uiExtensionMode: PluginUiExtensionMode;
   engines: Readonly<{ bungee: string; node?: string }>;
   ingress?: Readonly<{ entry: string }>;
@@ -143,6 +144,7 @@ export type StrictPluginManifest = Readonly<{
     icon?: string;
   }>;
   configSchema: readonly ReadonlyPluginConfigField[];
+  configConstraints?: readonly PluginConfigConstraint[];
   translations?: Readonly<Record<string, Readonly<Record<string, string>>>>;
 }>;
 

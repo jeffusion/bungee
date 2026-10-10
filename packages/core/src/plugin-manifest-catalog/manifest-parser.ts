@@ -1,3 +1,4 @@
+import { parseConfigConstraints } from './config-constraint-parser';
 import type { PluginConfigValue } from '@jeffusion/bungee-types';
 import { CORE_HOST_VERSION } from '../core-version';
 import {
@@ -40,7 +41,7 @@ import { PLUGIN_PERMISSIONS, relativeEntry } from './manifest-values';
 const TOP_FIELDS = new Set([
   'name', 'version', 'builtin', 'schemaVersion', 'artifactKind', 'main', 'capabilities', 'runtimeScope', 'uiExtensionMode', 'engines', 'control',
   'description', 'icon', 'author', 'license', 'homepage', 'repository', 'keywords', 'ui', 'permissions', 'dependencies',
-  'contributes', 'metadata', 'configSchema', 'translations', 'ingress', 'management', 'services',
+  'contributes', 'metadata', 'configSchema', 'configConstraints', 'translations', 'ingress', 'management', 'services',
 ]);
 const ENGINE_FIELDS = new Set(['bungee', 'node']);
 function serviceDeclarations(value: PluginConfigValue | undefined): StrictPluginManifest['services'] {
@@ -105,8 +106,8 @@ export function parsePluginManifestText(content: string, source = 'manifest.json
   if (root.schemaVersion !== 3) throw new PluginManifestCatalogError('schemaVersion', 'expected exactly 3');
   const parsedCapabilities = capabilities(root.capabilities);
   const runtimeScope = root.runtimeScope === undefined ? undefined
-    : literal(root.runtimeScope, ['global', 'scoped'] as const, 'runtimeScope');
-  if (runtimeScope === 'global' && !parsedCapabilities.includes('hooks') && !parsedCapabilities.includes('controlPlane')) {
+    : literal(root.runtimeScope, ['global', 'scoped', 'global-and-scoped'] as const, 'runtimeScope');
+  if ((runtimeScope === 'global' || runtimeScope === 'global-and-scoped') && !parsedCapabilities.includes('hooks') && !parsedCapabilities.includes('controlPlane')) {
     throw new PluginManifestCatalogError('runtimeScope', 'global scope requires a runtime entry capability');
   }
   const contributes = parseContributions(root.contributes, 'contributes');
@@ -223,6 +224,7 @@ export function parsePluginManifestText(content: string, source = 'manifest.json
       throw new PluginManifestCatalogError('permissions', `unsupported permission ${permission}`);
     }
   }
+  const configSchema = parseConfigFields(root.configSchema, 'configSchema');
   const parsed: StrictPluginManifest = {
     name, version: version(root.version, 'version'), schemaVersion: 3,
     artifactKind: literal(root.artifactKind, VALID_PLUGIN_ARTIFACT_KINDS, 'artifactKind'),
@@ -243,7 +245,8 @@ export function parsePluginManifestText(content: string, source = 'manifest.json
     ...optionalProperty('services', serviceDeclarations(root.services)),
     ...optionalProperty('contributes', contributes),
     ...optionalProperty('metadata', parseMetadata(root.metadata, 'metadata')),
-    configSchema: parseConfigFields(root.configSchema, 'configSchema'),
+    configSchema,
+    ...optionalProperty('configConstraints', parseConfigConstraints(root.configConstraints, configSchema)),
     ...optionalProperty('translations', parseTranslations(root.translations, 'translations')),
   };
   freezeDeep(parsed);

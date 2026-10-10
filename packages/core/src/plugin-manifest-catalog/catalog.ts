@@ -127,6 +127,7 @@ export class PluginManifestCatalog {
     return Object.freeze({
       rejectLegacyAuth: true,
       pluginSchemas: this.schemaEntries(),
+      pluginConstraints: new Map([...this.#records].map(([name, record]) => [name, record.manifest.configConstraints ?? []])),
       availablePlugins: new Set(this.#records.keys()),
       pluginCatalogHash: this.hash,
       pluginDependencies: this.dependencies,

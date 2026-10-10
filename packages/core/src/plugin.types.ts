@@ -1,3 +1,5 @@
+import type { PluginConfigConstraint, PluginRuntimeScope } from '@jeffusion/bungee-types';
+export type { PluginConfigConstraint, PluginAllowedTuplesConstraint, PluginRuntimeScope } from '@jeffusion/bungee-types';
 /**
  * Plugin 系统类型定义
  */
@@ -117,8 +119,8 @@ export interface PluginManifest {
   main?: string;
 
   capabilities?: string[];
-  /** Global plugins run once for all routes whenever activated; defaults to scoped bindings. */
-  runtimeScope?: 'global' | 'scoped';
+  /** Global providers run once whenever activated; global-and-scoped also retains application bindings. Defaults to scoped. */
+  runtimeScope?: PluginRuntimeScope;
   services?: import('./plugin-services').PluginServiceDeclarations;
   /** Optional control-plane runtime capability. */
   ingress?: { entry: string };
@@ -282,6 +284,7 @@ export interface PluginManifest {
    * 用于动态生成配置表单
    */
   configSchema?: PluginConfigField[];
+  configConstraints?: readonly PluginConfigConstraint[];
 
   /**
    * 多语言翻译
