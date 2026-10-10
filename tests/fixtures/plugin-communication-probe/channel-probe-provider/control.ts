@@ -139,6 +139,7 @@ export function createControl(context: any) {
     uploadBytes: 0,
     uploadReadback: '',
     uploadAborted: 0,
+    uploadAborts: [] as Array<{ reason: string; received: number }>,
     uploadFailReceived: 0,
     uploadFailFinished: 0,
     uploadFailAborted: 0,
@@ -215,6 +216,7 @@ export function createControl(context: any) {
         uploadBytes: state.uploadBytes,
         uploadReadback: state.uploadReadback,
         uploadAborted: state.uploadAborted,
+        uploadAborts: state.uploadAborts,
         uploadFailReceived: state.uploadFailReceived,
         uploadFailFinished: state.uploadFailFinished,
         uploadFailAborted: state.uploadFailAborted,
@@ -319,7 +321,10 @@ export function createControl(context: any) {
               state.uploadDigest = `${actual}|${joined.byteLength}`;
               state.uploadReadback = digestOf(uploadBody);
             },
-            abort: () => { state.uploadAborted += 1; },
+            abort: (reason: string) => {
+              state.uploadAborted += 1;
+              state.uploadAborts.push({ reason, received });
+            },
           };
         },
       });

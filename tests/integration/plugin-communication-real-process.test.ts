@@ -69,6 +69,7 @@ type ChannelState = {
   uploadBytes: number;
   uploadReadback: string;
   uploadAborted: number;
+  uploadAborts: Array<{ reason: string; received: number }>;
   uploadFailReceived: number;
   uploadFailFinished: number;
   uploadFailAborted: number;
@@ -234,6 +235,7 @@ describe('plugin communication channels real-process integration (control provid
       expect(state.uploadReadback).toBe(state.uploadDigest.split('|')[0]);
       expect(uploads.map((report) => report.digest).every((digest) => digest === state.uploadDigest.split('|')[0])).toBe(true);
       expect(state.uploadFrames).toBeGreaterThan(1);
+      expect(state.uploadAborts).toEqual([]);
 
       // ---- injected mid-transfer sink failure: the sink REALLY received bytes,
       // then failed; finish never ran and the consumer never saw a false commit.
