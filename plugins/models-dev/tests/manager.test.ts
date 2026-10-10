@@ -3,8 +3,11 @@ import { Database } from 'bun:sqlite';
 import type { PluginStorage } from '../../../packages/core/src/plugin.types';
 import { HostSnapshotStore } from '../../../packages/core/src/plugin-services/snapshot-store';
 import { PluginCommunicationStore } from '../../../packages/core/src/plugin-services/persistence';
-import { ModelsDevCatalogManager } from '../server/control';
-import { CatalogView, reconcileCatalogView } from '../server/local';
+import { ModelsDevCatalogManager, createControl } from '../server/control';
+import { CatalogView, capabilitiesServiceOf, reconcileCatalogView } from '../server/local';
+import { ModelsDevPlugin } from '../server/index';
+import { MODELS_DEV_CAPABILITIES_SERVICE_ID, type ModelsDevCapabilitiesService } from '../contract';
+import type { ControlHostContext, PluginChannelSnapshotRead, PluginInitContext } from '@jeffusion/bungee-core/plugin';
 
 const smallCatalog = { openai: { id: 'openai', name: 'OpenAI', models: {
   'gpt-4o': { id: 'gpt-4o', name: 'GPT-4o', cost: { input: 1, output: 2 } },
@@ -135,5 +138,78 @@ describe('models-dev authoritative snapshot', () => {
     expect(view.status()).toMatchObject({ state: 'stale', version: 3, modelCount: 1 });
     expect(reconcileCatalogView(null, view)).toBe('failed');
     expect(view.status().version).toBe(3);
+  });
+  test('controls and version change only when the same full catalog commits', async () => {
+    const catalog = structuredClone(smallCatalog);
+    Object.assign(catalog.openai.models['gpt-4o'], { reasoning: true, reasoning_options: [{ type: 'toggle' }] });
+    const { instance, store, injection } = manager(new MemoryStorage(), okFetch(catalog));
+    const service = capabilitiesServiceOf(instance.view);
+    try {
+      await instance.start(); await instance.refresh();
+      expect(service.model({ provider: 'openai', model: 'gpt-4o' })).toMatchObject({
+        catalogVersion: 1, reasoningOptions: [{ type: 'toggle' }], reasoningOptionsStatus: 'known',
+      });
+      Object.assign(catalog.openai.models['gpt-4o'], { name: 'Updated', reasoning_options: [{ type: 'effort', values: ['high'] }] });
+      injection.failPublish = true; await instance.refresh();
+      expect(service.model({ provider: 'openai', model: 'gpt-4o' })).toMatchObject({
+        name: 'GPT-4o', catalogVersion: 1, reasoningOptions: [{ type: 'toggle' }],
+      });
+      expect(store.current()!.descriptor.version).toBe(1);
+      injection.failPublish = false; await instance.refresh();
+      expect(service.model({ provider: 'openai', model: 'gpt-4o' })).toMatchObject({
+        name: 'Updated', catalogVersion: 2, reasoningOptions: [{ type: 'effort', values: ['high'] }],
+      });
+      expect(store.current()!.descriptor.version).toBe(2);
+    } finally { await instance.stop(); }
+  });
+  test('real control and worker publish the same capability contract with no request-time fetch', async () => {
+    const store = snapshotStore();
+    const catalog = structuredClone(smallCatalog);
+    Object.assign(catalog.openai.models['gpt-4o'], { reasoning: true, reasoning_options: [
+      { type: 'effort', values: [null, 'default', 'high'] }, { type: 'toggle' }, { type: 'budget_tokens', min: -1, max: 4096 },
+    ] });
+    store.publish(1, { version: 1, fetchedAt: 50, catalog });
+    const controlServices = new Map<string, unknown>(), workerServices = new Map<string, unknown>();
+    let fetchCount = 0, current: PluginChannelSnapshotRead | null = null;
+    let applied: (snapshot: PluginChannelSnapshotRead | null) => void = () => {};
+    let subscriberStopped = false, timerStopped = false;
+    const control = createControl({ storage: new MemoryStorage(), signal: new AbortController().signal,
+      services: { publish: (id: string, _version: number, value: unknown) => controlServices.set(id, value),
+        snapshot: { store: () => store, provide: () => {} },
+      },
+    } as unknown as ControlHostContext, {
+      fetch: (async () => { fetchCount++; throw new Error('fixture forbids network'); }) as typeof fetch,
+      schedule: () => 0 as unknown as ReturnType<typeof setTimeout>, cancel: () => {},
+    });
+    const worker = new ModelsDevPlugin();
+    try {
+      await control.start!();
+      await worker.init!({ logger: { info() {}, warn() {} }, services: {
+        publish: (id: string, _version: number, value: unknown) => workerServices.set(id, value), onDispose: () => {},
+        snapshot: { consume: () => ({
+          current: () => current,
+          onApplied: (listener: typeof applied) => { applied = listener; return () => { subscriberStopped = true; }; },
+          sync: async () => {
+            const source = store.current()!;
+            current = { descriptor: source.descriptor, bytes: await source.read(0, source.descriptor.size) };
+            applied(current);
+          },
+          status: () => ({ status: 'ready', error: null }),
+          start: () => () => { timerStopped = true; },
+        }) },
+      } } as unknown as PluginInitContext);
+      const controlService = controlServices.get(MODELS_DEV_CAPABILITIES_SERVICE_ID) as ModelsDevCapabilitiesService;
+      const workerService = workerServices.get(MODELS_DEV_CAPABILITIES_SERVICE_ID) as ModelsDevCapabilitiesService;
+      for (let read = 0; read < 3; read++) {
+        const input = { provider: 'openai', model: 'gpt-4o' };
+        expect(workerService.model(input)).toEqual(controlService.model(input));
+        expect(workerService.model(input)).toMatchObject({ catalogVersion: 1, reasoningOptionsStatus: 'known',
+          reasoningOptions: [{ type: 'effort', values: [null, 'default', 'high'] }, { type: 'toggle' },
+            { type: 'budget_tokens', min: -1, max: 4096 }],
+        });
+      }
+      expect(fetchCount).toBe(0);
+    } finally { await worker.onDestroy!(); await control.dispose!(); }
+    expect(subscriberStopped).toBe(true); expect(timerStopped).toBe(true);
   });
 });
