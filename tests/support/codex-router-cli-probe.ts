@@ -95,7 +95,8 @@ export async function probeCodexChatgptModels(input: {root: string; baseUrl: str
   assertCodexProbeTargets(input.root,[input.baseUrl,input.mockUrl]);
   const executable = Bun.which('codex');
   if (!executable) throw new Error('BUNGEE_CODEX_CLI_PROBE requires a local codex executable');
-  const home = join(input.root, input.toolRoundTrip ? `cli-chatgpt-tool-${input.model.replaceAll('/','-')}` : input.model === 'org/chat' ? 'cli-chatgpt-chat-home'
+  // A repeated tool probe must not reuse an earlier MCP PID, audit, or patched file.
+  const home = join(input.root, input.toolRoundTrip ? `cli-chatgpt-tool-${input.model.replaceAll('/','-')}-${randomUUID()}` : input.model === 'org/chat' ? 'cli-chatgpt-chat-home'
     : input.model === 'org/anthropic' ? 'cli-chatgpt-anthropic-home' : 'cli-chatgpt-home'); await mkdir(home, {recursive: true});
   const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
   const claims = {email: 'fixture@example.invalid', exp: Math.floor(Date.now() / 1000) + 86400,

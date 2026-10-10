@@ -1,8 +1,12 @@
 import { createProtocolSession, describeProtocolConversion, ResponsesCodecError, type ProtocolSessionContext } from '@jeffusion/bungee-llms/plugin-api';
 import type { ModelsDevCapabilitiesService } from '../../models-dev/contract';
 import type { CapabilityContext, ConversionService, EffectiveCapabilities, AdapterSession } from '../contract';
-export const REASONING_RULES_VERSION = '2026-10-10.2';
+export const REASONING_RULES_VERSION = '2026-10-10.3';
 const concrete = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+/** Verified deployment alias; capability data still comes from the catalog model. */
+function catalogModel(provider: string | undefined, model: string): string {
+    return provider === 'zai' && model === 'GLM-5.3-Flash' ? 'glm-5.3-flash' : model;
+}
 /** Interface restrictions/defaults, not a second model capability catalog.
  * Sources: docs.z.ai/api-reference/llm/chat-completion and
  * platform.claude.com/docs/en/build-with-claude/effort (2026-10-10).
@@ -19,6 +23,7 @@ function rule(provider: string, model: string, protocol: string) {
     return null;
 }
 export function resolveCapabilities(catalog: ModelsDevCapabilitiesService, context: CapabilityContext): EffectiveCapabilities | null {
+    context = { ...context, model: catalogModel(context.provider, context.model) };
     const info = catalog.model(context);
     if (!info)
         return null;
@@ -48,7 +53,7 @@ export function conversionService(catalog: ModelsDevCapabilitiesService, worker:
         createSession(context) {
             if (!worker)
                 throw new Error('llm_adapter_conversion_requires_worker');
-            const info = context.profile ?? catalog.model({ provider: context.provider, model: context.model });
+            const info = context.profile ?? catalog.model({ provider: context.provider, model: catalogModel(context.provider, context.model) });
             const profile = context.profile ? structuredClone(context.profile) : info ? resolveCapabilities(catalog, { provider: info.provider, model: context.model, targetProtocol: context.targetProtocol }) : undefined;
             let selected = context.selectedEffort;
             const passthrough = context.sourceProtocol === context.targetProtocol;
@@ -85,7 +90,7 @@ export function conversionService(catalog: ModelsDevCapabilitiesService, worker:
                         if (!valid)
                             throw new ResponsesCodecError('target_protocol_mismatch', 'Actual target URL does not implement the session protocol', 'url');
                     }
-                    const actual = profile?.model === model ? profile : profile ? resolveCapabilities(catalog, { provider: profile.provider, model, targetProtocol: protocol }) : null;
+                    const actual = profile && profile.model === catalogModel(profile.provider, model) ? profile : profile ? resolveCapabilities(catalog, { provider: profile.provider, model, targetProtocol: protocol }) : null;
                     if (selected !== undefined) {
                         if (passthrough && model === context.model && wireEffort(body, protocol) === selected)
                             return { model, effort: selected, catalogVersion: profile?.catalogVersion ?? null, rulesVersion: REASONING_RULES_VERSION };

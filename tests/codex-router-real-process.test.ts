@@ -51,7 +51,7 @@ const smallHistory = history.map((item, index) => index === 1
 type Call = {pid: number; requestId: string; path: string; body: any; transport: 'http' | 'websocket'};
 type Worker = {pid: number; worker_instance_id: string; boot_nonce: string; revision: number};
 type Attempt = {request_id: string; attempt_id: string; input_tokens: number; output_tokens: number; outcome: string};
-type Socket = {client: WebSocket; events: any[]; create(body: any): Promise<any[]>; close(): Promise<void>};
+type Socket = {client: WebSocket; events: any[]; create(body: any, allowError?: boolean): Promise<any[]>; close(): Promise<void>};
 const message = (text: string) => ({type: 'message', role: 'assistant', content: [{type: 'output_text', text}]});
 function response(id: string, model: string) {return {id, object: 'response', status: 'completed', model,
   output: [message('fixture answer')], usage: {input_tokens: 4, output_tokens: 2, total_tokens: 6}};}
@@ -360,13 +360,13 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       client.onopen = () => {clearTimeout(timeout); resolve();};
       client.onerror = () => {clearTimeout(timeout); reject(new Error('public WS open failed'));};
     });
-    const socket = {client, events, async create(body: any) {
+    const socket = {client, events, async create(body: any, allowError = false) {
       const start = events.length; client.send(JSON.stringify({type: 'response.create', ...body}));
       await waitUntil(() => events.slice(start).some(e => ['response.completed', 'response.incomplete', 'response.failed', 'error'].includes(e.type)), 'public WS generation has no terminal', 15000);
       // Terminal delivery precedes generation cleanup by one task turn.
       await Bun.sleep(25);
       const generation = events.slice(start);
-      if (generation.at(-1)?.type === 'error') throw new Error(`WS generation: ${JSON.stringify(generation)}; upstream=${JSON.stringify(calls.slice(-1).map(call => ({...call, body: {model: call.body.model}})))}; ${await master!.diagnostics?.()}`);
+      if (!allowError && generation.at(-1)?.type === 'error') throw new Error(`WS generation: ${JSON.stringify(generation)}; upstream=${JSON.stringify(calls.slice(-1).map(call => ({...call, body: {model: call.body.model}})))}; ${await master!.diagnostics?.()}`);
       return generation;
     }, async close() {
       if (client.readyState === WebSocket.CLOSED) return;
@@ -617,6 +617,70 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       expect(calls.slice(start)).toHaveLength(3);
     } finally {await socket.close();}
   }, 45000);
+
+  test('built model mapping preserves verified effort; bundled HTTP/WS refusals never poison the shared upstream', async () => {
+    const saved = structuredClone(aggregate);
+    let socket: Socket | undefined;
+    try {
+      aggregate.plugin_activations.push({plugin_name:'model-mapping'});
+      const service = aggregate.logical_configuration.services[0];
+      service.failover = {enabled:true,retry_on:['>400'],passive_health:{consecutive_failures:3},recovery:{backoff_base_ms:300000}};
+      service.plugins = [{id:uuid(31),position:1,name:'model-mapping',enabled:true,options:{modelMappings:[
+        {source:CODEX_CHAT_MODEL,target:'GLM-5.3-Flash'}, {source:'glm-5.3',target:'unverified-wire-model'},
+      ]}}];
+      aggregate.logical_configuration.routes[0].plugins.find((p:any)=>p.name==='codex-router').options.models.push({
+        provider:'zai',source:'org/unverified',model:'glm-5.3',target:{type:'service',id:CHAT,protocol:'chat_completions'},
+      });
+      await publish();
+      socket = await openSocket();
+      const before = calls.length;
+      for (let i=0;i<5;i++) {
+        const result = await post({model:'org/unverified',input:'strict rejection',reasoning:{effort:'max'}});
+        expect(result.status).toBe(422);
+        expect(result.body).toMatchObject({error:'llm_adapter_unsupported_reasoning',param:'reasoning.effort'});
+        const events = await socket.create({model:'org/unverified',input:'strict rejection',reasoning:{effort:'max'}},true);
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject({type:'error',status:422,error:{code:'llm_adapter_unsupported_reasoning',param:'reasoning.effort'}});
+        expect(calls).toHaveLength(before);
+      }
+      for (const effort of ['low','high','max']) {
+        const result = await post({model:'org/chat',input:smallHistory,tools,reasoning:{effort}});
+        expect(result.status).toBe(200);
+        expect(calls.at(-1)!.body).toMatchObject({model:'GLM-5.3-Flash',reasoning_effort:effort,thinking:{type:'enabled'}});
+        expect(JSON.stringify(calls.at(-1)!.body.messages)).toContain('custom result');
+        const events = await socket.create({model:'org/chat',input:smallHistory,tools,reasoning:{effort}});
+        expect(events.at(-1).type).toBe('response.completed');
+        expect(calls.at(-1)!.body).toMatchObject({model:'GLM-5.3-Flash',reasoning_effort:effort,thinking:{type:'enabled'}});
+      }
+      for(let i=0;i<16 && new Set(calls.slice(before).map(call=>call.pid)).size<2;i++) {
+        expect((await post({model:'org/chat',input:'second worker positive control',reasoning:{effort:'max'}})).status).toBe(200);
+      }
+      expect(new Set(calls.slice(before).map(call=>call.pid))).toEqual(new Set(workers.map(worker=>worker.pid)));
+      if(process.env.BUNGEE_CODEX_CLI_PROBE==='1') {
+        const start=calls.length;
+        const cli=await probeCodexChatgptModels({root:fixture!.root,baseUrl:`${proxy}/codex`,mockUrl:`http://127.0.0.1:${upstream!.port}`,token,
+          model:'org/chat',effort:'max',toolRoundTrip:true});
+        expect(cli.reasoningModels).toEqual([{model:'org/chat',levels:['low','high','max'],defaultEffort:'max'}]);
+        expect(cli.notifications.some((e:any)=>e.method==='turn/completed'&&e.status==='completed')).toBe(true);
+        expect(cli.patchedContent).toBe(`${CLI_PATCH_MARKER}\n`);
+        expect(cli.notifications.some((e:any)=>e.itemType==='commandExecution'&&e.exitCode===0&&e.output?.includes(CLI_EXEC_MARKER))).toBe(true);
+        expect(cli.mcpAudit.filter((e:any)=>e.event==='tools/call').map((e:any)=>({name:e.name,text:e.text}))).toEqual([{name:'echo',text:CLI_MCP_MARKER}]);
+        expect(calls.slice(start)).toHaveLength(2);
+        const roundTrip=cliToolRoundTrips.get('GLM-5.3-Flash')!;
+        expect(roundTrip.outputs?.map(output=>output.callId).sort()).toEqual(['call_fixture_exec','call_fixture_mcp','call_fixture_patch']);
+      }
+      const outgoing=calls.slice(before);
+      for(const call of outgoing)expect(call.body).toMatchObject({model:'GLM-5.3-Flash',thinking:{type:'enabled'}});
+      await assertMetered(outgoing);
+      console.info(`codex_router_wire_alias ${JSON.stringify({workerPids:workers.map(w=>w.pid),refusedGenerations:10,
+        upstreamCalls:outgoing.length,wireModel:'GLM-5.3-Flash',efforts:['low','high','max']})}`);
+    } catch (error) {
+      throw new Error(`Wire alias acceptance failed: ${String(error)}; ${await master!.diagnostics?.()}`,{cause:error});
+    } finally {
+      await socket?.close();
+      aggregate=saved;await publish();
+    }
+  },90000);
 
   test('serving-revision change isolates HTTP history and old WS worker owners drain on close', async () => {
     const socket = await openSocket(); const oldWorkers = workers.slice();

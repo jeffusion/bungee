@@ -67,11 +67,15 @@ Responses→Chat/Anthropic 的已知 `web_search`、`web_search_preview` 声明�
 | `invalid`、reasoningOptions=null | 字段存在但非法 | 空，保持非法来源状态 |
 | `known` 且有效 effort 列表 | 使用具体字符串档位 | 与接口规则求交集；有依据的 default 必须属于交集 |
 
-`null` 和 `default` 是目录控制值，不是具体强度。未知模型、没有接口规则、交集为空、规则默认值不在交集或 reasoning 被限制时，都返回空 supportedEfforts 和 null defaultEffort。目录 capability 与 catalogVersion 来自同一完整快照；adapter 返回独立 rulesVersion，当前实现为 `2026-10-10.2`。
+`null` 和 `default` 是目录控制值，不是具体强度。未知模型、没有接口规则、交集为空、规则默认值不在交集或 reasoning 被限制时，都返回空 supportedEfforts 和 null defaultEffort。目录 capability 与 catalogVersion 来自同一完整快照；adapter 返回独立 rulesVersion，当前实现为 `2026-10-10.3`。
 
 GLM-5.3 与 GLM-5.3-FLASH 在 Z.ai Chat Completions 接口支持 `low/high/max`，默认 `max`；thinking 只能开启，不能沿用 GLM-5.2 对 medium/xhigh 等值的映射。这是接口规则，并不能替代实际 models.dev 档位数据，最终仍取交集。[Z.ai 官方 Chat Completion 文档](https://docs.z.ai/api-reference/llm/chat-completion)（核对日期 2026-10-10）。
 
+已确认的公司网关 wire 标识 `GLM-5.3-Flash` 对应 `zai/glm-5.3-flash`，并支持相同的 `low/high/max` 参数。适配器仅在提供商为 `zai` 时使用这一明确别名读取目录能力，出站 `model` 保留公司网关标识；这不是大小写模糊匹配，也不会为未知别名创造能力。活动生成仍使用固定的目录和规则版本。
+
 有明确目标 profile 的请求必须核验 selectedEffort。真正出站 attempt 再核验实际 model、协议、目录版本、规则版本及 wire effort；后续模型映射、重试/failover 改变目标不能无声丢失已选强度。Anthropic 的有依据 effort 映射与 adaptive thinking 由规则管理，不从档位臆造 thinking.budget_tokens。
+
+本地 `DataAdmissionError` 在每次 attempt 的故障分类前按公共错误契约归一化，保留安全的状态、原因和字段位置。插件独立打包导致构造器身份不同，也不得将本地协议拒绝累计为上游故障或触发熔断。
 
 ## 验证边界
 

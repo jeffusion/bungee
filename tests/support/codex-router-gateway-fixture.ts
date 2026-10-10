@@ -35,7 +35,7 @@ export async function createCodexRouterGatewayFixture(): Promise<GatewayFixture>
   try {
     const pluginsPath = join(root, 'data', 'plugins');
     for (const path of [pluginsPath, join(root, 'logs'), join(root, '.bungee', 'run')]) await mkdir(path, {recursive: true});
-    for (const name of ['codex-router', 'llm-protocol-adapter', 'models-dev', 'key-access', 'token-metering', 'token-stats']) {
+    for (const name of ['codex-router', 'llm-protocol-adapter', 'models-dev', 'model-mapping', 'key-access', 'token-metering', 'token-stats']) {
       await cp(resolve(import.meta.dir, '../../packages/core/dist/plugins', name), join(pluginsPath, name), {recursive: true, errorOnExist: true});
     }
     const probePath = join(pluginsPath, CODEX_PROCESS_PROBE);
@@ -69,7 +69,7 @@ export async function seedCodexRouterCatalog(fixture: GatewayFixture): Promise<v
       store.publish(1, {version: 1, fetchedAt: Date.now(), catalog: {lab: {id: 'lab', name: 'Local protocol fixture', models:
         Object.fromEntries(CODEX_MODELS.map(id => [id, {id, name: id, limit: {context: 200000, output: 4096}, tool_call: true,
           reasoning: id===CODEX_MODELS[1], modalities: {input: ['text'], output: ['text']}, cost: {input: 1, output: 2}}]))},
-        zai: {models: {[CODEX_CHAT_MODEL]: {name: 'Flash', reasoning: true, reasoning_options: [{type: 'effort', values: ['low','high','max']}], tool_call: true, limit: {context: 200000, output: 4096}, modalities: {input: ['text'], output: ['text']}}}},
+        zai: {models: Object.fromEntries([CODEX_CHAT_MODEL,'glm-5.3'].map(model=>[model,{name: 'GLM fixture', reasoning: true, reasoning_options: [{type: 'effort', values: ['low','high','max']}], tool_call: true, limit: {context: 200000, output: 4096}, modalities: {input: ['text'], output: ['text']}}]))},
         anthropic: {models: {[CODEX_ANTHROPIC_MODEL]: {name: 'Sonnet', reasoning: true, reasoning_options: [{type: 'effort', values: ['low','medium','high','max']}], tool_call: true, limit: {context: 200000, output: 4096}, modalities: {input: ['text'], output: ['text']}}}},
       }});
     } finally {accessDb.close(); configDb.close();}
