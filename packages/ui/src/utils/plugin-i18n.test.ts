@@ -3,9 +3,9 @@ import { getPluginText } from './plugin-i18n';
 
 const translate = (key: string, options?: { default?: string }) => {
   const messages: Record<string, string> = {
-    'plugins.ai-transformer.metadata.name': 'AI Transformer',
-    'plugins.ai-transformer.plugin.description': 'Unified AI format transformer',
-    'plugins.ai-transformer.transformation.label': 'Transformation Direction',
+    'plugins.llm-protocol-adapter.metadata.name': 'LLM Protocol Adapter',
+    'plugins.llm-protocol-adapter.plugin.description': 'Convert LLM protocols',
+    'plugins.llm-protocol-adapter.sourceProtocol.label': 'Source protocol',
   };
 
   return messages[key] ?? options?.default ?? key;
@@ -13,15 +13,15 @@ const translate = (key: string, options?: { default?: string }) => {
 
 describe('getPluginText', () => {
   test('resolves relative plugin translation keys', () => {
-    expect(getPluginText('metadata.name', 'ai-transformer', translate)).toBe('AI Transformer');
-    expect(getPluginText('transformation.label', 'ai-transformer', translate)).toBe('Transformation Direction');
+    expect(getPluginText('metadata.name', 'llm-protocol-adapter', translate)).toBe('LLM Protocol Adapter');
+    expect(getPluginText('sourceProtocol.label', 'llm-protocol-adapter', translate)).toBe('Source protocol');
   });
 
   test('resolves fully namespaced plugin translation keys without double-prefixing', () => {
-    expect(getPluginText('plugins.ai-transformer.plugin.description', 'ai-transformer', translate)).toBe('Unified AI format transformer');
+    expect(getPluginText('plugins.llm-protocol-adapter.plugin.description', 'llm-protocol-adapter', translate)).toBe('Convert LLM protocols');
   });
 
   test('returns plain text unchanged', () => {
-    expect(getPluginText('AI Transformer', 'ai-transformer', translate)).toBe('AI Transformer');
+    expect(getPluginText('LLM Protocol Adapter', 'llm-protocol-adapter', translate)).toBe('LLM Protocol Adapter');
   });
 });

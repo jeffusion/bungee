@@ -1,6 +1,6 @@
 import ts from 'typescript';
 import { readdir, readFile } from 'node:fs/promises';
-import { resolve, relative, dirname } from 'node:path';
+import { resolve, relative, dirname, isAbsolute } from 'node:path';
 
 export interface ArchitectureFinding { file: string; line: number; rule: string }
 const core = 'packages/core/src/';
@@ -127,7 +127,13 @@ export function checkArchitectureSource(file:string, source:string, root=process
   function visit(node:ts.Node):void {
     for(const specifier of modules(node)) {
       if(pluginSource) {
-        const resolved=specifier.startsWith('.')?relative(root,resolve(root,dirname(file),specifier)).replaceAll('\\','/'):specifier;
+        const resolved=specifier.startsWith('.')||isAbsolute(specifier)?relative(root,resolve(root,dirname(file),specifier)).replaceAll('\\','/'):specifier;
+        const pluginPath = resolved.startsWith('@plugins/') ? relative(root, resolve(root, 'plugins', resolved.slice('@plugins/'.length))).replaceAll('\\', '/') : resolved;
+        const target = /^plugins\/([^/]+)\/(.+)$/.exec(pluginPath);
+        const owner = file.split('/')[1];
+        if (target && target[1] !== owner && !/^contract(?:\.[cm]?[jt]s)?$/.test(target[2]!)) {
+          add(node, 'plugin-public-contract');
+        }
         if((specifier==='@jeffusion/bungee-core'||specifier.startsWith('@jeffusion/bungee-core/')||resolved.startsWith('packages/core/'))&&specifier!=='@jeffusion/bungee-core/plugin')add(node,'plugin-public-entry');
       }
       if(http&&!centralized.has(file)&&!management&&!auxiliary.has(file)&&(specifier==='node:zlib'||specifier==='zlib'||specifier.includes('body-decoder')))add(node,'central-body-decoder');

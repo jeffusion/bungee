@@ -31,7 +31,7 @@ export async function fetchPluginTranslations(): Promise<Record<string, any>> {
  * await loadPluginTranslations();
  *
  * // 之后可以在组件中使用翻译
- * $_(plugins.ai-transformer.transformation.label')
+ * $_(plugins.llm-protocol-adapter.sourceProtocol.label')
  * ```
  */
 export async function loadPluginTranslations(isCurrent: () => boolean = () => true): Promise<boolean> {

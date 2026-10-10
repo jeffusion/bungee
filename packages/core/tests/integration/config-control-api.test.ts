@@ -369,7 +369,7 @@ describe('configuration control with an explicit management provider', () => {
     await waitForNoActivePublication(repository);
 
     // When
-    const plugin = await api.handle(authorized('/api/plugins/ai-transformer/enable', {
+    const plugin = await api.handle(authorized('/api/plugins/llm-protocol-adapter/enable', {
       method: 'POST',
     }));
     await waitForNoActivePublication(repository);
@@ -387,13 +387,13 @@ describe('configuration control with an explicit management provider', () => {
     expect(plugin?.status).toBe(202);
     expect(upstream?.status).toBe(202);
     expect(repository.getSnapshot()).toMatchObject({ revision: 4 });
-    expect(repository.getSnapshot().aggregate.plugin_activations).toEqual([{ plugin_name: 'ai-transformer' }]);
+    expect(repository.getSnapshot().aggregate.plugin_activations).toEqual([{ plugin_name: 'llm-protocol-adapter' }]);
     expect(repository.getSnapshot().aggregate.logical_configuration.services[0]?.endpoints[0]?.is_disabled).toBe(true);
     await publicationTasks.stop();
   });
 
   for (const mutation of [
-    { name: 'plugin activation', path: '/api/plugins/ai-transformer/enable', method: 'POST', body: undefined },
+    { name: 'plugin activation', path: '/api/plugins/llm-protocol-adapter/enable', method: 'POST', body: undefined },
     { name: 'upstream toggle', path: '/api/upstreams/b0000000-0000-4000-8000-000000000002/enabled',
       method: 'PUT', body: JSON.stringify({ enabled: false }) },
   ] as const) {
@@ -989,19 +989,19 @@ describe('configuration control with an explicit management provider', () => {
     expect(setup?.status).toBe(202);
     await waitForNoActivePublication(repository);
 
-    const enable = await api.handle(authorized('/api/plugins/ai-transformer/enable', { method: 'POST' }));
+    const enable = await api.handle(authorized('/api/plugins/llm-protocol-adapter/enable', { method: 'POST' }));
     expect(enable?.status).toBe(202);
     const enabledOperation = await json(enable as Response);
     expect(enabledOperation).toMatchObject({ revision: 3 });
-    expect(repository.getSnapshot().aggregate.plugin_activations).toEqual([{ plugin_name: 'ai-transformer' }]);
+    expect(repository.getSnapshot().aggregate.plugin_activations).toEqual([{ plugin_name: 'llm-protocol-adapter' }]);
 
     await waitForNoActivePublication(repository);
 
-    const reEnable = await api.handle(authorized('/api/plugins/ai-transformer/enable', { method: 'POST' }));
+    const reEnable = await api.handle(authorized('/api/plugins/llm-protocol-adapter/enable', { method: 'POST' }));
     expect(reEnable?.status).toBe(200);
     expect((await reEnable!.json() as Record<string, unknown>).unchanged).toBe(true);
 
-    const disable = await api.handle(authorized('/api/plugins/ai-transformer/disable', { method: 'POST' }));
+    const disable = await api.handle(authorized('/api/plugins/llm-protocol-adapter/disable', { method: 'POST' }));
     expect(disable?.status).toBe(202);
     expect(await json(disable as Response)).toMatchObject({ revision: 4 });
 
@@ -1030,10 +1030,10 @@ describe('configuration control with an explicit management provider', () => {
     await waitForNoActivePublication(repository);
     setPublicationMode('deferred');
 
-    const enable = await api.handle(authorized('/api/plugins/ai-transformer/enable', { method: 'POST' }));
+    const enable = await api.handle(authorized('/api/plugins/llm-protocol-adapter/enable', { method: 'POST' }));
     expect(enable?.status).toBe(202);
     const enabledOperation = await json(enable as Response);
-    const repeated = await api.handle(authorized('/api/plugins/ai-transformer/enable', { method: 'POST' }));
+    const repeated = await api.handle(authorized('/api/plugins/llm-protocol-adapter/enable', { method: 'POST' }));
     expect(repeated?.status).toBe(202);
     expect(await json(repeated as Response)).toEqual(enabledOperation);
     await publicationTasks.stop();

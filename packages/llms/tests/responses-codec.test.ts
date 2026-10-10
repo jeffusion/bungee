@@ -309,7 +309,9 @@ test('Codex null encrypted placeholder retains plain reasoning without enabling 
   const raw=request({input,reasoning:{effort:'high'}});
   const decoded=decodeResponsesRequest(raw,'chat_completions',{reasoningHistory:true});
   expect(decoded.body.messages[1]).toMatchObject({role:'assistant',reasoning_content:'plain thought',tool_calls:[{id:'call'}]});
-  expect(decoded.body).not.toHaveProperty('reasoning_effort');expect(decoded.canonicalInput[1]).toEqual(reasoning);
+  expect(decoded.body).not.toHaveProperty('reasoning_effort');
+  const {internal_chat_message_metadata_passthrough: _metadata,...canonicalReasoning}=reasoning;
+  expect(decoded.canonicalInput[1]).toEqual(canonicalReasoning);
   for(const encrypted_content of ['sealed',{},0,''])expectCode(()=>decodeResponsesRequest({...raw,input:[{...reasoning,encrypted_content}]},'chat_completions',{reasoningHistory:true}),'unsupported_content');
   for(const content of [[{type:'reasoning_text',text:'must survive'}],{unexpected:'must survive'}]) {
     try{decodeResponsesRequest({...raw,input:[{...reasoning,content}]},'chat_completions',{reasoningHistory:true});throw new Error('expected rejection');}

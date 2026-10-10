@@ -1,12 +1,13 @@
 import {expect,test} from 'bun:test';
+import {conversionService} from '../../llm-protocol-adapter/server/service';
 import {CodexRouterPlugin} from '../server/index';
-import {HistoryCache,HistoryTransport} from '../server/history';
+import {HistoryCache,HistoryTransport} from '../../llm-protocol-adapter/server/history';
 import {createPluginHooks} from '../../../packages/core/src/hooks';
 const cache=new HistoryCache();const transport=new HistoryTransport(cache);
 const caps={status:()=>({version:1}),model:()=>({provider:'p',model:'m',name:'m',contextWindow:32000,outputLimit:4096,toolCall:true,reasoning:false,inputModalities:['text']})};
 async function router(protocol:string,alias='m',principal:any={domain:'data',keyId:'k',credentialVersion:1}){
   const binding={provider:'p',model:'m',alias,target:{type:'route',id:protocol,protocol}};
-  const handler=new CodexRouterPlugin({models:[binding]});await handler.init( {scope:{type:'route',routeId:'/codex'},services:{consume:()=>caps,rpc:{consume:()=>({get:async(input:any)=>transport.get(input),put:async(input:any)=>transport.put(input)})}}} as any);
+  const handler=new CodexRouterPlugin({models:[binding]});await handler.init( {scope:{type:'route',routeId:'/codex'},services:{consume:(provider:string)=>provider==='llm-protocol-adapter'?conversionService(caps as any,true):caps,rpc:{consume:()=>({get:async(input:any)=>transport.get(input),put:async(input:any)=>transport.put(input)})}}} as any);
   const hooks=createPluginHooks();handler.register(hooks);
   const dispatch=(body:any)=>hooks.onDispatchRequest.promise({context:{method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},body,requestId:crypto.randomUUID(),clientIP:'local'},targets:[{type:'route',id:protocol}],signal:new AbortController().signal,principal,servingRevision:1});
   return {dispatch};
@@ -30,22 +31,22 @@ test('bounded cache isolates scopes, evicts, expires, clones and clears',()=>{
 });
 
 test('large history uses canonical bounded chunks without any durable storage',async()=>{
-  const {historyClient}=await import('../server/history-rpc');const transport=new HistoryTransport();const calls:number[]=[];
+  const {historyClient}=await import('../../llm-protocol-adapter/contract');const transport=new HistoryTransport();const calls:number[]=[];
   const client=historyClient({get:async(input:any)=>transport.get(input),put:async(input:any)=>{calls.push(Buffer.byteLength(JSON.stringify(input)));return transport.put(input);}});
   const value={items:[{text:'中文🙂'.repeat(50000)}]};await client.put({scope:'key',id:'r',value},{operationId:crypto.randomUUID()});expect(calls.length).toBeGreaterThan(10);expect(Math.max(...calls)).toBeLessThan(65536);expect(await client.get({scope:'key',id:'r'})).toEqual(value);transport.clear();expect(await client.get({scope:'key',id:'r'})).toBeNull();
 });
 
 test('history contract runs through the canonical RPC host',async()=>{
-  const {PluginServiceHost}=await import('../../../packages/core/src/plugin-services');const {historyRpc,historyClient}=await import('../server/history-rpc');
+  const {PluginServiceHost}=await import('../../../packages/core/src/plugin-services');const {historyRpc,historyClient}=await import('../../llm-protocol-adapter/contract');
   const host=new PluginServiceHost('control',{identity:(plugin,scope)=>({endpoint:`history:${plugin}:${scope}`,instance:'unit',generation:1,catalog:'unit',subject:plugin}),resolvePlacement:()=>null,resolveCallee:()=>null,resolveJournal:()=>null});
-  host.setDeclarations(new Map([['codex-router',{provides:[{id:historyRpc.id,version:1,kind:'rpc',process:'control'}]}],['history-test',{consumes:[{plugin:'codex-router',id:historyRpc.id,version:1,kind:'rpc',process:'control'}]}]]) as any);
-  const context=host.createContext('codex-router');const transport=new HistoryTransport();context.rpc!.publish(historyRpc,{get:input=>transport.get(input),put:input=>transport.put(input)});host.markReady('codex-router');
-  const consumer=host.createContext('history-test','global',{'codex-router':'^1.0.0'});host.markReady('history-test');const client=historyClient(consumer.rpc!.consume('codex-router',historyRpc));try{await client.put({scope:'k',id:'r',value:{items:['hello']}},{operationId:crypto.randomUUID()});expect(await client.get({scope:'k',id:'r'})).toEqual({items:['hello']});expect(await client.get({scope:'other',id:'r'})).toBeNull();}finally{await host.dispose('history-test');await host.dispose('codex-router');await host.rpc!.dispose();}
+  host.setDeclarations(new Map([['llm-protocol-adapter',{provides:[{id:historyRpc.id,version:1,kind:'rpc',process:'control'}]}],['history-test',{consumes:[{plugin:'llm-protocol-adapter',id:historyRpc.id,version:1,kind:'rpc',process:'control'}]}]]) as any);
+  const context=host.createContext('llm-protocol-adapter');const transport=new HistoryTransport();context.rpc!.publish(historyRpc,{get:input=>transport.get(input),put:input=>transport.put(input)});host.markReady('llm-protocol-adapter');
+  const consumer=host.createContext('history-test','global',{'llm-protocol-adapter':'^1.0.0'});host.markReady('history-test');const client=historyClient(consumer.rpc!.consume('llm-protocol-adapter',historyRpc));try{await client.put({scope:'k',id:'r',value:{items:['hello']}},{operationId:crypto.randomUUID()});expect(await client.get({scope:'k',id:'r'})).toEqual({items:['hello']});expect(await client.get({scope:'other',id:'r'})).toBeNull();}finally{await host.dispose('history-test');await host.dispose('llm-protocol-adapter');await host.rpc!.dispose();}
 });
 
 test('cross-model namespace tool continuation re-encodes the cached logical history',async()=>{
   cache.clear();const models=[{provider:'p',model:'chat',target:{type:'route',id:'chat',protocol:'chat_completions'}},{provider:'p',model:'anthropic',target:{type:'route',id:'anthropic',protocol:'anthropic_messages'}}];
-  const create=async()=>{const plugin=new CodexRouterPlugin({models});await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:()=>caps,rpc:{consume:()=>({get:async(input:any)=>transport.get(input),put:async(input:any)=>transport.put(input)})}}} as any);const hooks=createPluginHooks();plugin.register(hooks);return hooks;};
+  const create=async()=>{const plugin=new CodexRouterPlugin({models});await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:(provider:string)=>provider==='llm-protocol-adapter'?conversionService(caps as any,true):caps,rpc:{consume:()=>({get:async(input:any)=>transport.get(input),put:async(input:any)=>transport.put(input)})}}} as any);const hooks=createPluginHooks();plugin.register(hooks);return hooks;};
   const targets:any=[{type:'route',id:'chat'},{type:'route',id:'anthropic'}];const principal={domain:'data',keyId:'cross',credentialVersion:1};
   const context=(body:any)=>({method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},body,requestId:crypto.randomUUID(),clientIP:'local'});
   const tools=[{type:'namespace',name:'mcp',tools:[{type:'function',name:'lookup',parameters:{type:'object',properties:{}}}]}];const one=context({model:'chat',input:'lookup',tools});
@@ -58,7 +59,7 @@ test('cross-model namespace tool continuation re-encodes the cached logical hist
 
 test('opaque native references pin provider/model and actual upstream',async()=>{
   cache.clear();const models=[{provider:'a',model:'one',target:{type:'route',id:'native',protocol:'responses'}},{provider:'b',model:'two',target:{type:'route',id:'native',protocol:'responses'}}];
-  const plugin=new CodexRouterPlugin({models});await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:()=>caps,rpc:{consume:()=>({get:async(input:any)=>transport.get(input),put:async(input:any)=>transport.put(input)})}}} as any);
+  const plugin=new CodexRouterPlugin({models});await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:(provider:string)=>provider==='llm-protocol-adapter'?conversionService(caps as any,true):caps,rpc:{consume:()=>({get:async(input:any)=>transport.get(input),put:async(input:any)=>transport.put(input)})}}} as any);
   const hooks=createPluginHooks();plugin.register(hooks);
   const run=(body:any)=>hooks.onDispatchRequest.promise({context:{method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},body,requestId:crypto.randomUUID(),clientIP:'local'},targets:[{type:'route',id:'native'}],signal:new AbortController().signal,principal:{domain:'data',keyId:'opaque',credentialVersion:1},servingRevision:9});
   const decision=await run({model:'one',input:'hello'});const resultHooks=createPluginHooks();decision!.adapter!.register(resultHooks);
@@ -67,17 +68,11 @@ test('opaque native references pin provider/model and actual upstream',async()=>
   await expect(run({model:'two',previous_response_id:'opaque-id',input:'next'})).rejects.toThrow('unrestorable_history');
   await expect(run({model:'one',input:[{type:'reasoning',encrypted_content:'private'}]})).rejects.toThrow('unrestorable_history');
 });
-test('Anthropic thinking overrides cannot enable a capability without restorable history',async()=>{
-  const plugin=new CodexRouterPlugin({models:[{provider:'p',model:'m',target:{type:'route',id:'a',protocol:'anthropic_messages'},capabilityOverrides:{anthropicThinkingBudget:1024}}]});await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:()=>({...caps,model:()=>({...caps.model(),reasoning:true})}),rpc:{consume:()=>({get:async()=>null,put:async()=>null})}}} as any);
-  const hooks=createPluginHooks();plugin.register(hooks);
-  const context:any={method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},body:{model:'m',input:'hello',reasoning:{effort:'high'}},requestId:crypto.randomUUID(),clientIP:'local'};
-  await hooks.onDispatchRequest.promise({context,targets:[{type:'route',id:'a'}],signal:new AbortController().signal});
-  expect(context.body).not.toHaveProperty('thinking');
-});
+test('removed Anthropic budget override fails binding admission',()=>{expect(()=>new CodexRouterPlugin({models:[{provider:'p',model:'m',target:{type:'route',id:'a',protocol:'anthropic_messages'},capabilityOverrides:{anthropicThinkingBudget:1024}}]})).toThrow('invalid_capabilities');});
 
 test('converted shared history removes carriers and next request can change its declarations',async()=>{
   cache.clear();const models=[{source:'client',provider:'p',model:'m',target:{type:'route',id:'t',protocol:'chat_completions'}}];
-  const plugin=new CodexRouterPlugin({models});await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:()=>caps,rpc:{consume:()=>({get:async(input:any)=>transport.get(input),put:async(input:any)=>transport.put(input)})}}} as any);
+  const plugin=new CodexRouterPlugin({models});await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:(provider:string)=>provider==='llm-protocol-adapter'?conversionService(caps as any,true):caps,rpc:{consume:()=>({get:async(input:any)=>transport.get(input),put:async(input:any)=>transport.put(input)})}}} as any);
   const hooks=createPluginHooks();plugin.register(hooks);
   const makeContext=(body:any)=>({method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},body,requestId:crypto.randomUUID(),clientIP:'local'});
   const dispatch=(context:any)=>hooks.onDispatchRequest.promise({context,targets:[{type:'route',id:'t'}],signal:new AbortController().signal,principal:{domain:'data',keyId:'carriers',credentialVersion:1},servingRevision:1});
@@ -95,7 +90,7 @@ test('converted shared history removes carriers and next request can change its 
 
 test('additional tools cannot bypass target tool capability limits',async()=>{
   const plugin=new CodexRouterPlugin({models:[{source:'client',provider:'p',model:'m',capabilityOverrides:{tools:false},target:{type:'route',id:'t',protocol:'chat_completions'}}]});
-  await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:()=>caps,rpc:{consume:()=>({get:async()=>null,put:async()=>null})}}} as any);
+  await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:(provider:string)=>provider==='llm-protocol-adapter'?conversionService(caps as any,true):caps,rpc:{consume:()=>({get:async()=>null,put:async()=>null})}}} as any);
   const hooks=createPluginHooks();plugin.register(hooks);
   const context:any={method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},requestId:'capability',clientIP:'local',body:{model:'client',input:[{type:'additional_tools',tools:[{type:'function',name:'f',parameters:{type:'object'}}]}]}};
   await expect(hooks.onDispatchRequest.promise({context,targets:[{type:'route',id:'t'}],signal:new AbortController().signal})).rejects.toThrow('codex_router_tools_unsupported');
@@ -103,9 +98,9 @@ test('additional tools cannot bypass target tool capability limits',async()=>{
 
 test('reasoning-capable Chat route restores nullable plain reasoning independently of effort override',async()=>{
   const plugin=new CodexRouterPlugin({models:[{source:'client',provider:'p',model:'m',target:{type:'route',id:'t',protocol:'chat_completions'}}]});
-  await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:()=>({...caps,model:()=>({...caps.model(),reasoning:true})}),rpc:{consume:()=>({get:async()=>null,put:async()=>null})}}} as any);
+  await plugin.init({scope:{type:'route',routeId:'/codex'},services:{consume:(provider:string)=>provider==='llm-protocol-adapter'?conversionService({...caps,model:()=>({...caps.model(),reasoning:true})} as any,true):caps,rpc:{consume:()=>({get:async()=>null,put:async()=>null})}}} as any);
   const hooks=createPluginHooks();plugin.register(hooks);
-  const context:any={method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},requestId:'plain-reasoning',clientIP:'local',body:{model:'client',reasoning:{effort:'high'},input:[{role:'user',content:'hello'},{type:'reasoning',summary:[{type:'summary_text',text:'plain'}],content:null,encrypted_content:null},{role:'assistant',content:'answer'}]}};
+  const context:any={method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},requestId:'plain-reasoning',clientIP:'local',body:{model:'client',input:[{role:'user',content:'hello'},{type:'reasoning',summary:[{type:'summary_text',text:'plain'}],content:null,encrypted_content:null},{role:'assistant',content:'answer'}]}};
   await hooks.onDispatchRequest.promise({context,targets:[{type:'route',id:'t'}],signal:new AbortController().signal});
   expect(context.body.messages[1]).toMatchObject({reasoning_content:'plain',content:'answer'});expect(context.body).not.toHaveProperty('reasoning_effort');
 });

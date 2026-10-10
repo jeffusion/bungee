@@ -11,20 +11,20 @@ async function compileOptions() {
 }
 
 describe('catalog-backed plugin option validation', () => {
-  test('accepts expanded ai-transformer fields and rejects the virtual field or an invalid pair', async () => {
+  test('accepts explicit adapter protocol fields and rejects missing or unsupported pairs', async () => {
     const options = await compileOptions();
     const valid = parseNormalizeCompile({ plugins: [{
-      id: BINDING_ID, name: 'ai-transformer', options: { from: 'anthropic', to: 'openai' },
+      id: BINDING_ID, name: 'llm-protocol-adapter', options: { sourceProtocol: 'anthropic_messages', targetProtocol: 'chat_completions' },
     }] }, options);
     expect(valid.ok).toBe(true);
 
     for (const pluginOptions of [
-      { transformation: 'anthropic-openai' },
-      { from: 'anthropic', to: 'anthropic' },
-      { from: 'anthropic' },
+      { sourceProtocol: 'responses', targetProtocol: 'gemini_generate_content' },
+      { sourceProtocol: 'gemini_generate_content', targetProtocol: 'responses' },
+      { sourceProtocol: 'anthropic_messages' },
     ]) {
       expect(parseNormalizeCompile({ plugins: [{
-        id: BINDING_ID, name: 'ai-transformer', options: pluginOptions,
+        id: BINDING_ID, name: 'llm-protocol-adapter', options: pluginOptions,
       }] }, options).ok).toBe(false);
     }
   });

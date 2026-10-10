@@ -11,8 +11,7 @@ import Sanitizer from '../../plugins/anthropic-request-sanitizer/server';
 import Mapping from '../../plugins/model-mapping/server';
 import ToolNames from '../../plugins/anthropic-tool-name-transformer/server';
 import OAuth from '../../plugins/chatgpt-oauth/server';
-import Transformer from '../../plugins/ai-transformer/server';
-import Messages from '../../plugins/openai-messages-to-chat/server';
+import Adapter from '../../plugins/llm-protocol-adapter/server';
 import Signature from '../../plugins/signature-repair/server';
 import { BodySource } from '../../packages/core/src/gateway/body-service';
 import { RequestRetryAction } from '@jeffusion/bungee-core/plugin';
@@ -44,17 +43,18 @@ describe('SDK 3 plugin body demands', () => {
     expect(new Mapping().bodyRequirements(context()).request).toBe('none');
     expect(new Signature({ enabled: false }).bodyRequirements(context())).toEqual({ request: 'none' });
     expect(new ToolNames({ transformNames: false, fixSerializedArrays: false }).bodyRequirements(context())).toEqual({ request: 'none', response: [] });
-    const transformer = new Transformer(); const hooks = createPluginHooks(); transformer.register(hooks);
+    const transformer = new Adapter(); const hooks = createPluginHooks(); transformer.register(hooks);
     const ctx = { ...streamContext, method: 'GET', url: new URL('https://example.test/models'), headers: {}, body: undefined };
     expect(await hooks.onBeforeRequest.promise(ctx)).toBe(ctx);
   });
-  test('protocol converters only demand matching request paths', () => {
-    const ai = new Transformer({ from: 'anthropic', to: 'openai' });
+  test('protocol converters only demand matching request paths', async () => {
+    const ai = new Adapter({ sourceProtocol: 'anthropic_messages', targetProtocol: 'chat_completions' });
+    await ai.init({scope:{type:'route',routeId:'fixture'},initializationKind:'configured',services:{consume:()=>({model:()=>null}),onDispose(){}}} as any);
     expect(ai.bodyRequirements(context('/v1/models', 'GET')).request).toBe('none');
     expect(ai.bodyRequirements(context('/upload')).request).toBe('none');
     expect(ai.bodyRequirements(context())).toEqual({ request: 'json-write', response: ['json', 'sse-json'] });
-    expect(new Messages().bodyRequirements(context('/v1/models', 'GET')).request).toBe('none');
-    expect(new Messages().bodyRequirements(context('/v1/responses')).request).toBe('json-write');
+    expect(new Adapter().bodyRequirements(context('/v1/models', 'GET')).request).toBe('none');
+    expect(new Adapter().bodyRequirements(context('/v1/responses')).request).toBe('none');
     const oauth = new OAuth();
     expect(oauth.bodyRequirements(context('/v1/models', 'GET')).request).toBe('none');
     expect(oauth.bodyRequirements(context('/backend-api/codex/responses')).request).toBe('json-write');

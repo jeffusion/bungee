@@ -12,14 +12,30 @@ import {makeCanonicalTempDir} from './canonical-temp';
 import type {GatewayFixture} from './token-stats-gateway';
 
 export const CODEX_PROCESS_PROBE = 'codex-router-process-probe';
+export const CODEX_CHAT_MODEL = 'glm-5.3-flash';
+export const CODEX_ANTHROPIC_MODEL = 'claude-sonnet-4-6';
 export const CODEX_MODELS = ['org/native', 'org/chat', 'org/anthropic', 'org/native-ws'];
+
+// Only this process's freshly created fixtures may launch a Codex probe.
+const probeTargets = new Map<string, Set<string>>();
+export function registerCodexProbeTargets(fixture: GatewayFixture, urls: readonly string[]): void {
+  const targets=probeTargets.get(fixture.root);if(!targets)throw new Error('unowned Codex fixture');
+  for(const value of urls){const url=new URL(value);
+    if(url.protocol!=='http:'||url.hostname!=='127.0.0.1'||!url.port||url.username||url.password)throw new Error('Codex fixture requires an explicit loopback port');
+    targets.add(url.origin);
+  }
+}
+export function assertCodexProbeTargets(root: string, urls: readonly string[]=[]): void {
+  const targets=probeTargets.get(root);if(!targets)throw new Error('unowned Codex fixture');
+  if(urls.some(value=>!targets.has(new URL(value).origin)))throw new Error('unregistered Codex fixture target');
+}
 
 export async function createCodexRouterGatewayFixture(): Promise<GatewayFixture> {
   const root = makeCanonicalTempDir('codex-router-gateway', {daemonSafe: true});
   try {
     const pluginsPath = join(root, 'data', 'plugins');
     for (const path of [pluginsPath, join(root, 'logs'), join(root, '.bungee', 'run')]) await mkdir(path, {recursive: true});
-    for (const name of ['codex-router', 'models-dev', 'key-access', 'token-metering', 'token-stats']) {
+    for (const name of ['codex-router', 'llm-protocol-adapter', 'models-dev', 'key-access', 'token-metering', 'token-stats']) {
       await cp(resolve(import.meta.dir, '../../packages/core/dist/plugins', name), join(pluginsPath, name), {recursive: true, errorOnExist: true});
     }
     const probePath = join(pluginsPath, CODEX_PROCESS_PROBE);
@@ -36,6 +52,7 @@ export async function createCodexRouterGatewayFixture(): Promise<GatewayFixture>
     const configDbPath = join(root, 'data', 'bungee.db');
     ConfigRepository.open(configDbPath).close();
     const accessDbPath = join(root, 'logs', 'access.db');
+    probeTargets.set(root,new Set());
     return {root, configDbPath, accessDbPath, pluginsPath, pluginSecretsKey: randomBytes(32).toString('base64')};
   } catch (error) {await rm(root, {recursive: true, force: true}); throw error;}
 }
@@ -51,6 +68,9 @@ export async function seedCodexRouterCatalog(fixture: GatewayFixture): Promise<v
         {owner: 'models-dev', id: 'models-dev.catalog.v1', schemaVersion: 1, maxVersions: 3});
       store.publish(1, {version: 1, fetchedAt: Date.now(), catalog: {lab: {id: 'lab', name: 'Local protocol fixture', models:
         Object.fromEntries(CODEX_MODELS.map(id => [id, {id, name: id, limit: {context: 200000, output: 4096}, tool_call: true,
-          reasoning: id===CODEX_MODELS[1], modalities: {input: ['text'], output: ['text']}, cost: {input: 1, output: 2}}]))}}});
+          reasoning: id===CODEX_MODELS[1], modalities: {input: ['text'], output: ['text']}, cost: {input: 1, output: 2}}]))},
+        zai: {models: {[CODEX_CHAT_MODEL]: {name: 'Flash', reasoning: true, reasoning_options: [{type: 'effort', values: ['low','high','max']}], tool_call: true, limit: {context: 200000, output: 4096}, modalities: {input: ['text'], output: ['text']}}}},
+        anthropic: {models: {[CODEX_ANTHROPIC_MODEL]: {name: 'Sonnet', reasoning: true, reasoning_options: [{type: 'effort', values: ['low','medium','high','max']}], tool_call: true, limit: {context: 200000, output: 4096}, modalities: {input: ['text'], output: ['text']}}}},
+      }});
     } finally {accessDb.close(); configDb.close();}
 }

@@ -32,12 +32,12 @@ async function diagnose() {
     });
   }
 
-  // 检查 ai-transformer 是否存在
-  if (schemas['ai-transformer']) {
-    console.log('\n✅ ai-transformer 插件已找到！');
-    console.log(JSON.stringify(schemas['ai-transformer'], null, 2));
+  // 检查 llm-protocol-adapter 是否存在
+  if (schemas['llm-protocol-adapter']) {
+    console.log('\n✅ llm-protocol-adapter 插件已找到！');
+    console.log(JSON.stringify(schemas['llm-protocol-adapter'], null, 2));
   } else {
-    console.log('\n❌ ai-transformer 插件未找到！');
+    console.log('\n❌ llm-protocol-adapter 插件未找到！');
   }
 }
 

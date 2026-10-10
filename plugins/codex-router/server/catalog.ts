@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
-import type { ModelsDevCapabilitiesService } from '../../models-dev/contract';
+import type { ConversionService } from '../../llm-protocol-adapter/contract';
 import { bindingSource, type ModelBinding } from './config';
 import template from './model-template-0.160.1.json';
 
-export function mergeCatalog(native: unknown, bindings: readonly ModelBinding[], catalog: ModelsDevCapabilitiesService): unknown {
+export function mergeCatalog(native: unknown, bindings: readonly ModelBinding[], catalog: ConversionService): unknown {
   if (!native || typeof native !== 'object' || Array.isArray(native)) throw new Error('codex_router_invalid_catalog');
   const body = native as Record<string, any>;
   // Generic OpenAI consumers retain their original shape. Codex requires richer models.
@@ -21,7 +21,7 @@ export function mergeCatalog(native: unknown, bindings: readonly ModelBinding[],
     bound.add(id);
     const replace = ids.has(id);
     ids.add(id);
-    const info = catalog.model(binding);
+    const info = catalog.resolveCapabilities({provider:binding.provider,model:binding.model,targetProtocol:binding.target.protocol,restrictions:binding.capabilityOverrides});
     if (!info || info.contextWindow === null || !info.inputModalities.includes('text')) {
       if (replace) unavailable.add(id);
       continue;
@@ -38,8 +38,8 @@ export function mergeCatalog(native: unknown, bindings: readonly ModelBinding[],
     const model = {...template, slug:id, display_name:info.name, description:`${info.name} (${binding.provider})`,
       context_window:context, max_context_window:context, auto_compact_token_limit:Math.floor(context * 0.85),
       input_modalities: ['text', ...(info.inputModalities.includes('image') && overrides?.images !== false ? ['image'] : [])],
-      supported_reasoning_levels: reasoning ? ['low','medium','high'].map(effort => ({effort,description:effort})) : [],
-      default_reasoning_level:reasoning ? 'medium' : 'none', support_verbosity:false,
+      supported_reasoning_levels: info.supportedEfforts.map(effort => ({effort,description:effort})),
+      supports_reasoning_effort_updates:info.supportedEfforts.length>0, default_reasoning_level:info.defaultEffort ?? 'none', support_verbosity:false,
     };
     if (replace) replacements.set(id, model); else added.push(model);
   }

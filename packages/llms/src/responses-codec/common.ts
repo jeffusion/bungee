@@ -19,6 +19,10 @@ export interface ResponsesCodecCapabilities {
   reasoningEffort?: boolean;
   /** Plain reasoning history support is independent of effort parameter mapping. */
   reasoningHistory?: boolean;
+  anthropicStrictTools?: boolean;
+  /** Include original names in alias descriptions so model-facing identity is retained. */
+  preserveToolIdentityDescription?: boolean;
+  preserveRefusalContent?: boolean;
   /** Codex declares optional hosted search even when the selected model has no search backend. */
   omitOptionalWebSearch?: boolean;
   /** Explicit provider-approved thinking budget; do not guess budgets from effort labels. */
@@ -132,11 +136,11 @@ export function normalizeUsage(raw: unknown, protocol: ResponsesProtocol, prior:
   const cached = chat ? (details ? record(details, 'prompt_tokens_details').cached_tokens : undefined) : usage.cache_read_input_tokens;
   // Anthropic input_tokens excludes both cache classes; Responses input_tokens includes them.
   const cacheRead = tokens(cached ?? (prior.input_tokens_details as JsonRecord | undefined)?.cached_tokens, 'cached_tokens');
-  const cacheWrite = chat ? 0 : tokens(usage.cache_creation_input_tokens, 'cache_creation_input_tokens');
+  const cacheWrite = chat ? 0 : tokens(usage.cache_creation_input_tokens ?? (prior.input_tokens_details as JsonRecord | undefined)?.cache_creation_tokens, 'cache_creation_input_tokens');
   const totalInput = chat ? input : (usage.input_tokens === undefined ? input : input + cacheRead + cacheWrite);
   const reasoning = chat && usage.completion_tokens_details ? record(usage.completion_tokens_details, 'completion_tokens_details').reasoning_tokens : undefined;
   return { input_tokens: totalInput, output_tokens: output, total_tokens: totalInput + output,
-    input_tokens_details: { cached_tokens: cacheRead },
+    input_tokens_details: { cached_tokens: cacheRead, ...(cacheWrite ? { cache_creation_tokens: cacheWrite } : {}) },
     output_tokens_details: { reasoning_tokens: tokens(reasoning ?? (prior.output_tokens_details as JsonRecord | undefined)?.reasoning_tokens, 'reasoning_tokens') } };
 }
 export function toolItem(id: string, name: string, args: string, names: ResponsesToolNames, status = 'completed'): JsonRecord {

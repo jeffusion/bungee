@@ -49,7 +49,7 @@ function deepClone<T>(value: T): T {
  *   + anthropic_to_openai_with_reasoning_content
  *
  * 场景：Anthropic→OpenAI 转换后，assistant 消息中 thinking 内容
- * 被 ai-transformer 放入了 content（<thinking>标签或 thinking 类型块），
+ * 被 llm-protocol-adapter 放入了 content（<thinking>标签或 thinking 类型块），
  * 但 DeepSeek 等模型要求有 tool_calls 时 thinking 必须放在
  * message.reasoning_content 字段，否则上游会报错。
  */
@@ -153,8 +153,8 @@ export const DeepSeekReasoningFixPlugin = definePlugin(
     }
 
   register(hooks: PluginHooks): void {
-      // 在 ai-transformer 转换后修补
-      // stage=20 确保在 ai-transformer (stage=0) 之后执行
+      // 在 llm-protocol-adapter 转换后修补
+      // stage=20 确保在 llm-protocol-adapter (stage=0) 之后执行
       hooks.onBeforeRequest.tap(
         { name: 'deepseek-reasoning-fix', stage: 20 },
         (ctx: MutableRequestContext) => {
