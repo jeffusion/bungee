@@ -173,7 +173,6 @@
               <BCheckbox label={t('toolsOff')} bind:checked={() => binding.capabilityOverrides?.tools === false, checked => limit(index, 'tools', checked ? false : undefined)} />
               <BCheckbox label={t('imagesOff')} bind:checked={() => binding.capabilityOverrides?.images === false, checked => limit(index, 'images', checked ? false : undefined)} />
               <BCheckbox label={t('reasoningOff')} bind:checked={() => binding.capabilityOverrides?.reasoning === false, checked => limit(index, 'reasoning', checked ? false : undefined)} />
-              <BCheckbox label={t('reasoningEffort')} bind:checked={() => binding.capabilityOverrides?.reasoningEffort === true, checked => limit(index, 'reasoningEffort', checked ? true : undefined)} />
             </div>
           </div>
         </details>

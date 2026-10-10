@@ -1,0 +1,210 @@
+{
+  "name": "llm-protocol-adapter",
+  "version": "1.0.0",
+  "builtin": true,
+  "schemaVersion": 3,
+  "artifactKind": "runtime-plugin",
+  "runtimeScope": "global-and-scoped",
+  "main": "server/index.ts",
+  "control": {
+    "entry": "server/control.ts",
+    "rpc": []
+  },
+  "capabilities": [
+    "hooks",
+    "dynamicRuntimeLoad",
+    "controlPlane"
+  ],
+  "uiExtensionMode": "none",
+  "engines": {
+    "bungee": "^5.0.0"
+  },
+  "metadata": {
+    "name": "metadata.name",
+    "description": "plugin.description",
+    "icon": "transform"
+  },
+  "dependencies": {
+    "models-dev": "^1.0.0"
+  },
+  "services": {
+    "provides": [
+      {
+        "id": "llm-protocol-adapter.conversion.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "local"
+      },
+      {
+        "id": "llm-protocol-adapter.conversion.v1",
+        "version": 1,
+        "process": "worker",
+        "kind": "local"
+      },
+      {
+        "id": "llm-protocol-adapter.history.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "rpc"
+      }
+    ],
+    "consumes": [
+      {
+        "plugin": "models-dev",
+        "id": "models-dev.capabilities.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "local"
+      },
+      {
+        "plugin": "models-dev",
+        "id": "models-dev.capabilities.v1",
+        "version": 1,
+        "process": "worker",
+        "kind": "local"
+      }
+    ]
+  },
+  "configSchema": [
+    {
+      "name": "sourceProtocol",
+      "type": "select",
+      "label": "sourceProtocol.label",
+      "required": true,
+      "options": [
+        {
+          "value": "responses",
+          "label": "responses.label"
+        },
+        {
+          "value": "chat_completions",
+          "label": "chat_completions.label"
+        },
+        {
+          "value": "anthropic_messages",
+          "label": "anthropic_messages.label"
+        },
+        {
+          "value": "gemini_generate_content",
+          "label": "gemini_generate_content.label"
+        }
+      ]
+    },
+    {
+      "name": "targetProtocol",
+      "type": "select",
+      "label": "targetProtocol.label",
+      "required": true,
+      "options": [
+        {
+          "value": "responses",
+          "label": "responses.label"
+        },
+        {
+          "value": "chat_completions",
+          "label": "chat_completions.label"
+        },
+        {
+          "value": "anthropic_messages",
+          "label": "anthropic_messages.label"
+        },
+        {
+          "value": "gemini_generate_content",
+          "label": "gemini_generate_content.label"
+        }
+      ]
+    }
+  ],
+  "configConstraints": [
+    {
+      "type": "allowed-tuples",
+      "fields": [
+        "sourceProtocol",
+        "targetProtocol"
+      ],
+      "tuples": [
+        [
+          "responses",
+          "responses"
+        ],
+        [
+          "responses",
+          "chat_completions"
+        ],
+        [
+          "responses",
+          "anthropic_messages"
+        ],
+        [
+          "chat_completions",
+          "responses"
+        ],
+        [
+          "chat_completions",
+          "chat_completions"
+        ],
+        [
+          "chat_completions",
+          "anthropic_messages"
+        ],
+        [
+          "chat_completions",
+          "gemini_generate_content"
+        ],
+        [
+          "anthropic_messages",
+          "responses"
+        ],
+        [
+          "anthropic_messages",
+          "chat_completions"
+        ],
+        [
+          "anthropic_messages",
+          "anthropic_messages"
+        ],
+        [
+          "anthropic_messages",
+          "gemini_generate_content"
+        ],
+        [
+          "gemini_generate_content",
+          "chat_completions"
+        ],
+        [
+          "gemini_generate_content",
+          "anthropic_messages"
+        ],
+        [
+          "gemini_generate_content",
+          "gemini_generate_content"
+        ]
+      ],
+      "message": "protocolPair.invalid"
+    }
+  ],
+  "translations": {
+    "zh-CN": {
+      "metadata.name": "LLM 协议适配器",
+      "plugin.description": "转换 LLM 请求、响应与流式协议",
+      "sourceProtocol.label": "源协议",
+      "targetProtocol.label": "目标协议",
+      "protocolPair.invalid": "不支持该协议组合",
+      "responses.label": "Responses",
+      "chat_completions.label": "Chat Completions",
+      "anthropic_messages.label": "Anthropic Messages",
+      "gemini_generate_content.label": "Gemini GenerateContent"
+    },
+    "en": {
+      "metadata.name": "LLM Protocol Adapter",
+      "plugin.description": "Convert LLM requests, responses and stream events",
+      "sourceProtocol.label": "Source protocol",
+      "targetProtocol.label": "Target protocol",
+      "protocolPair.invalid": "Unsupported protocol pair",
+      "responses.label": "Responses",
+      "chat_completions.label": "Chat Completions",
+      "anthropic_messages.label": "Anthropic Messages",
+      "gemini_generate_content.label": "Gemini GenerateContent"
+    }
+  }
+}

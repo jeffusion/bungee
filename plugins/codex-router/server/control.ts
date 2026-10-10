@@ -1,14 +1,8 @@
-import {HistoryTransport} from './history';
-import {historyRpc} from './history-rpc';
 import type { ControlHostContext, PluginControl, ControlPlugin } from '@jeffusion/bungee-core/plugin';
 import { MODELS_DEV_CATALOG_SERVICE_ID, MODELS_DEV_CATALOG_CONTRACT_VERSION, MODELS_DEV_CAPABILITIES_SERVICE_ID, MODELS_DEV_CAPABILITIES_CONTRACT_VERSION, type ModelsDevCatalogService, type ModelsDevCapabilitiesService } from '../../models-dev/contract';
 export function createControl(host: ControlHostContext): PluginControl {
-  const history=new HistoryTransport();
-  const timer=setInterval(()=>history.sweep(),30_000);timer.unref?.();
-  host.signal.addEventListener('abort',()=>{clearInterval(timer);history.clear();},{once:true});
-  host.services!.rpc!.publish(historyRpc,{get:input=>history.get(input),put:input=>history.put(input)});
   return {
-    rpc:[], start() {}, async dispose() {clearInterval(timer);history.clear();},
+    rpc:[], start() {}, async dispose() {},
     api:[{path:'/catalog', methods:['GET'], handler:'getCatalog', invoke:async ({request}) => {
       if (host.signal.aborted) return Response.json({error:'inactive'},{status:503});
       const params = new URL(request.url).searchParams;

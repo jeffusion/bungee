@@ -60,7 +60,7 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     toolNames.set(wire, { name, namespace, custom }); byOriginal.set(key, wire);
     return wire;
   };
-  const expandTool = (rawTool: unknown, namespace?: string, path = 'tools'): void => {
+  const expandTool = (rawTool: unknown, namespace?: string, path = 'tools', namespaceDescription?: string): void => {
     if (++examinedTools > budget.maxItems) fail('resource_limit', 'Too many tool declarations');
     const tool = record(rawTool, 'tool');
     if (namespace === undefined && capabilities.omitOptionalWebSearch && ['web_search','web_search_preview'].includes(String(tool.type))
@@ -71,9 +71,10 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     if (tool.type === 'namespace') {
       if (namespace !== undefined) fail('unsupported_tool', 'Nested tool namespaces are not supported');
       const name = string(tool.name, 'namespace name', true);
+      const description = tool.description === undefined ? undefined : string(tool.description, 'namespace description');
       for (const [index, child] of list(tool.tools, 'namespace tools').entries()) {
         const childPath = `${path}.tools[${index}]`;
-        atParam(childPath, () => expandTool(child, name, childPath));
+        atParam(childPath, () => expandTool(child, name, childPath, description));
       }
       return;
     }
@@ -82,13 +83,13 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     const name = string(tool.name, 'tool name', true);
     const custom = tool.type === 'custom';
     if (tool.strict !== undefined && typeof tool.strict !== 'boolean') fail('invalid_payload', 'Tool strict must be boolean');
-    if (protocol === 'anthropic_messages' && tool.strict === true) fail('unsupported_tool', 'Anthropic strict tool enforcement requires an explicit provider capability');
+    if (protocol === 'anthropic_messages' && tool.strict === true && !capabilities.anthropicStrictTools) fail('unsupported_tool', 'Anthropic strict tool enforcement requires an explicit provider capability');
     if (custom && tool.format !== undefined) {
       const format = record(tool.format, 'custom format');
       if (format.type !== 'text' && format.type !== 'grammar') fail('unsupported_tool', 'Unknown custom tool format');
     }
     const key = identity(name, namespace);
-    const signature = definitionKey(tool);
+    const signature = definitionKey({ ...tool, ...(namespaceDescription !== undefined ? { namespaceDescription } : {}) });
     if (definitions.has(key)) {
       if (definitions.get(key) !== signature) fail('tool_name_collision', 'Conflicting definitions for the same tool identity');
       return;
@@ -98,12 +99,14 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     const parameters = custom
       ? { type: 'object', properties: { input: { type: 'string' } }, required: ['input'], additionalProperties: false }
       : record(tool.parameters ?? { type: 'object', properties: {} }, 'tool parameters');
-    const description = tool.description === undefined ? undefined : string(tool.description, 'tool description');
+    const declaredDescription = tool.description === undefined ? undefined : string(tool.description, 'tool description');
+    const identityHint = capabilities.preserveToolIdentityDescription ? `Original tool identity: ${JSON.stringify({ name, ...(namespace ? { namespace } : {}) })}` : undefined;
+    const description = [identityHint, namespaceDescription, declaredDescription].filter(value => value !== undefined).join('\n') || undefined;
     const customHint = custom ? `Pass the complete original custom tool input verbatim in the input string.${tool.format ? ` Original input format: ${JSON.stringify(tool.format)}` : ''}` : undefined;
     if (protocol === 'chat_completions') {
       tools.push({ type: 'function', function: { name: wire, parameters, ...(description || customHint ? { description: [description, customHint].filter(Boolean).join('\n') } : {}), ...(tool.strict !== undefined ? { strict: tool.strict } : {}) } });
     } else {
-      tools.push({ name: wire, input_schema: parameters, ...(description || customHint ? { description: [description, customHint].filter(Boolean).join('\n') } : {}) });
+      tools.push({ name: wire, input_schema: parameters, ...(description || customHint ? { description: [description, customHint].filter(Boolean).join('\n') } : {}), ...(tool.strict !== undefined && capabilities.anthropicStrictTools ? {strict:tool.strict} : {}) });
     }
   };
   if (body.tools !== undefined) atParam('tools', () => {
@@ -113,7 +116,15 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
   // are declarations, not messages. Use this codec's existing reversible name authority.
   for (const [index, rawItem] of input.entries()) atParam(`input[${index}]`, () => {
     const item = record(rawItem, 'input item');
-    if (item.type !== 'additional_tools') { canonicalInput.push(item); return; }
+    if (item.type !== 'additional_tools') {
+      if(item.internal_chat_message_metadata_passthrough!==undefined) {
+        record(item.internal_chat_message_metadata_passthrough,'message metadata');
+        const {internal_chat_message_metadata_passthrough: _metadata,...message}=item;
+        canonicalInput.push(message);
+        diagnostics.push({param:`input[${index}].internal_chat_message_metadata_passthrough`,action:'omitted',reason:'source_message_metadata'});
+      } else canonicalInput.push(item);
+      return;
+    }
     if (item.content !== undefined) fail('invalid_payload', 'A tool declaration carrier cannot also contain message content', `input[${index}].content`);
     for (const [toolIndex, tool] of list(item.tools, 'additional tools').entries()) {
       const toolPath = `input[${index}].tools[${toolIndex}]`;
@@ -135,7 +146,10 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     for (const rawPart of parts) {
       const part = record(rawPart, 'content part');
       if (part.type === 'input_text' || part.type === 'output_text' || part.type === 'text') string(part.text, 'content text');
-      else if (part.type === 'refusal' && role === 'assistant') string(part.refusal,'refusal');
+      else if (part.type === 'refusal' && role === 'assistant') {
+        string(part.refusal,'refusal');
+        if (capabilities.preserveRefusalContent && protocol !== 'chat_completions') fail('unsupported_content','Target protocol cannot preserve refusal history authority');
+      }
       else if (part.type === 'input_image' && role === 'user') {
         if (protocol !== 'chat_completions') fail('unsupported_content', 'Anthropic image conversion requires provider-specific URL/data support');
         string(part.image_url, 'image_url', true);
@@ -148,6 +162,7 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i] as JsonRecord;
       if (part.type === 'input_image' && part.detail !== undefined) (normalized[i].image_url as JsonRecord).detail = part.detail;
+      if (part.type === 'refusal' && capabilities.preserveRefusalContent) normalized[i] = {type:'refusal',refusal:part.refusal};
     }
     return normalized;
   };

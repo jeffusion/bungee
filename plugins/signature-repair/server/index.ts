@@ -204,7 +204,7 @@ export const SignatureRepairPlugin = definePlugin(
     }
 
   register(hooks: PluginHooks): void {
-      // Stage 10: run after ai-transformer (stage 0) so the body is already in upstream format
+      // Stage 10: run after llm-protocol-adapter (stage 0) so the body is already in upstream format
       hooks.onBeforeRequest.tap(
         { name: 'signature-repair', stage: 10 },
         ctx => {

@@ -1,3 +1,4 @@
+import type { PluginConfigConstraint, PluginRuntimeScope } from '@jeffusion/bungee-types';
 import { api, requestPluginControl, type ApiRequestOptions } from './client';
 import { inspectTerminal, waitForConfigurationOperation, type ConfigurationOperationState } from './config';
 
@@ -65,7 +66,7 @@ export interface PluginMetadata {
 
 export interface Plugin {
   name: string;
-  runtimeScope?: 'global' | 'scoped';
+  runtimeScope?: PluginRuntimeScope;
   version?: string;
   description?: string;
   enabled: boolean;
@@ -80,11 +81,12 @@ export interface Plugin {
 
 export interface PluginSchema {
   name: string;
-  runtimeScope?: 'global' | 'scoped';
+  runtimeScope?: PluginRuntimeScope;
   version?: string;
   description?: string;
   metadata?: PluginMetadata;
   configSchema: any[];
+  configConstraints?: readonly PluginConfigConstraint[];
 }
 
 export interface PluginModelCatalogResponse {
