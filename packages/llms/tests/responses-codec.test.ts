@@ -292,9 +292,10 @@ test('refusal output can be replayed as assistant history for either target prot
 test('real CLI optional encrypted-output and metadata preferences remain compatible without opaque history', () => {
   for (const protocol of protocols) {
     const raw = request({prompt_cache_key:'fixture-cache',client_metadata:{client:'codex'},include:['reasoning.encrypted_content'],
-      tools:[{type:'web_search'},...declarations],tool_choice:'auto',reasoning:{effort:'none'},store:false});
+      tools:[{type:'web_search',external_web_access:false},...declarations],tool_choice:'auto',reasoning:{effort:'none'},store:false});
     const decoded = decodeResponsesRequest(raw,protocol,{omitOptionalWebSearch:true});
     expect(decoded.body.tools).toHaveLength(3);
+    expect(decoded.diagnostics).toContainEqual({param:'tools[0]',action:'omitted',reason:'optional_hosted_web_search_unavailable'});
     expect(decoded.body).not.toHaveProperty('client_metadata');
     expect(decoded.body).not.toHaveProperty('include');
     expectCode(() => decodeResponsesRequest({...raw,tool_choice:'required'},protocol,{omitOptionalWebSearch:true}),'unsupported_tool');

@@ -52,6 +52,8 @@ Codex Router 负责模型目录替换、绑定选择、dispatch 和 HTTP/WS 传�
 
 转换不会把不可表示的硬约束悄悄删除。工具定义及调用/返回身份、结构化输出、输入顺序、明确历史和终止状态必须保持语义；未知字段/类型、未解析引用、加密历史、compaction、目标不可表达的格式或角色约束、多个候选不能无损转换时返回具体 param 的错误。生成偏好只有经过校验且有明确省略规则时才可省略，并记录 mapped/omitted 原因；非法值不能当作“未知”继续生成。
 
+Responses→Chat/Anthropic 的已知 `web_search`、`web_search_preview` 声明在 `tool_choice` 缺省、`auto` 或 `none` 时属于明确允许的降级：先校验字段、类型及资源限额，再省略整个搜索声明，记录 `optional_hosted_web_search_unavailable` 和字段位置。不把 OpenAI 缓存搜索改成目标的实时搜索，也不伪造搜索调用或引用。强制搜索及 `required` 继续拒绝；未知搜索参数、非法值、搜索执行历史继续严格报错。普通 function/namespace/custom 工具保持原转换规则，同协议 Responses 保留搜索声明透传。
+
 会话按请求隔离，响应结束、失败、取消及 plugin dispose 都释放。终止状态、工具参数片段和 usage 由状态机统一管理，不能仅看到任一文本片段便宣告 completed。诊断通过宿主既有请求步骤记录，保留逻辑 requestId、字段路径和原因码，不回显正文、工具参数或凭据。
 
 ## 推理能力来源和规则版本
@@ -65,7 +67,7 @@ Codex Router 负责模型目录替换、绑定选择、dispatch 和 HTTP/WS 传�
 | `invalid`、reasoningOptions=null | 字段存在但非法 | 空，保持非法来源状态 |
 | `known` 且有效 effort 列表 | 使用具体字符串档位 | 与接口规则求交集；有依据的 default 必须属于交集 |
 
-`null` 和 `default` 是目录控制值，不是具体强度。未知模型、没有接口规则、交集为空、规则默认值不在交集或 reasoning 被限制时，都返回空 supportedEfforts 和 null defaultEffort。目录 capability 与 catalogVersion 来自同一完整快照；adapter 返回独立 rulesVersion，当前实现为 `2026-10-10.1`。
+`null` 和 `default` 是目录控制值，不是具体强度。未知模型、没有接口规则、交集为空、规则默认值不在交集或 reasoning 被限制时，都返回空 supportedEfforts 和 null defaultEffort。目录 capability 与 catalogVersion 来自同一完整快照；adapter 返回独立 rulesVersion，当前实现为 `2026-10-10.2`。
 
 GLM-5.3 与 GLM-5.3-FLASH 在 Z.ai Chat Completions 接口支持 `low/high/max`，默认 `max`；thinking 只能开启，不能沿用 GLM-5.2 对 medium/xhigh 等值的映射。这是接口规则，并不能替代实际 models.dev 档位数据，最终仍取交集。[Z.ai 官方 Chat Completion 文档](https://docs.z.ai/api-reference/llm/chat-completion)（核对日期 2026-10-10）。
 

@@ -2,6 +2,7 @@ import { OpenAIProtocolConversion } from '../providers/openai/protocol-conversio
 import { argumentObject, atParam, bounded, fail, limits, list, record, serialized, string,
   type JsonRecord, type ResponsesCodecCapabilities, type ResponsesConversionDiagnostic, type ResponsesProtocol, type ResponsesToolName, type ResponsesToolNames } from './common';
 import { applyResponsesPreferences } from './request-preferences';
+import { validateWebSearch } from './web-search';
 
 const contentNormalizer = new OpenAIProtocolConversion({ trimWhitespace: false });
 
@@ -63,8 +64,15 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
   const expandTool = (rawTool: unknown, namespace?: string, path = 'tools', namespaceDescription?: string): void => {
     if (++examinedTools > budget.maxItems) fail('resource_limit', 'Too many tool declarations');
     const tool = record(rawTool, 'tool');
-    if (namespace === undefined && capabilities.omitOptionalWebSearch && ['web_search','web_search_preview'].includes(String(tool.type))
-      && (body.tool_choice === undefined || body.tool_choice === 'auto' || body.tool_choice === 'none')) return;
+    if (namespace === undefined && (tool.type === 'web_search' || tool.type === 'web_search_preview')) {
+      serialized(tool, budget.maxArgumentBytes, 'tool definition');
+      validateWebSearch(tool, path);
+      if (capabilities.omitOptionalWebSearch && (body.tool_choice === undefined || body.tool_choice === 'auto' || body.tool_choice === 'none')) {
+        diagnostics.push({ param: path, action: 'omitted', reason: 'optional_hosted_web_search_unavailable' });
+        return;
+      }
+      fail('unsupported_tool', 'Hosted web search cannot be executed by the target protocol', `${path}.type`);
+    }
     const allowed = tool.type === 'namespace' ? ['type','name','description','tools']
       : tool.type === 'custom' ? ['type','name','description','format'] : ['type','name','description','parameters','strict'];
     for (const key of Object.keys(tool)) if (!allowed.includes(key)) fail('unsupported_tool', 'Unsupported tool definition field', `${path}.${key}`);
@@ -224,7 +232,9 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
   });
   if (pendingReasoning) fail('unsupported_reasoning', 'Orphan reasoning history cannot be represented');
   const result: JsonRecord = { model, messages: chat };
-  for (const key of ['stream', 'temperature', 'top_p', 'parallel_tool_calls', 'metadata']) if (body[key] !== undefined) result[key] = body[key];
+  const omittedAllTools = !tools.length && diagnostics.some(item => item.reason === 'optional_hosted_web_search_unavailable');
+  for (const key of ['stream', 'temperature', 'top_p', 'parallel_tool_calls', 'metadata'])
+    if (body[key] !== undefined && !(omittedAllTools && key === 'parallel_tool_calls')) result[key] = body[key];
   if (protocol === 'chat_completions' && body.stream === true) result.stream_options = { include_usage: true };
   const maxTokens = body.max_output_tokens ?? capabilities.maxOutputTokens;
   if (maxTokens !== undefined) {
@@ -232,7 +242,7 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     result[protocol === 'chat_completions' ? 'max_completion_tokens' : 'max_tokens'] = maxTokens;
   }
   if (tools.length) result.tools = tools;
-  if (body.tool_choice !== undefined) {
+  if (body.tool_choice !== undefined && !omittedAllTools) {
     const choice = body.tool_choice;
     if (typeof choice === 'string') {
       if (!['auto', 'none', 'required'].includes(choice)) fail('unsupported_tool_choice', `Unsupported tool choice ${choice}`);
@@ -292,7 +302,7 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     result.messages = messages;
     if (system.length) result.system = system.join('\n');
     if (maxTokens === undefined) fail('missing_capability', 'Anthropic requires max_output_tokens or capabilities.maxOutputTokens');
-    if (body.parallel_tool_calls !== undefined) {
+    if (body.parallel_tool_calls !== undefined && !omittedAllTools) {
       result.tool_choice = { ...record(result.tool_choice ?? { type: 'auto' }, 'tool_choice'), disable_parallel_tool_use: body.parallel_tool_calls === false };
       delete result.parallel_tool_calls;
     }

@@ -112,7 +112,7 @@ export async function probeCodexChatgptModels(input: {root: string; baseUrl: str
     const scriptPath = join(home, 'echo-mcp.mjs'); await writeFile(scriptPath, echoMcpScript);
     mcpConfig = `\n[mcp_servers.codex_fixture]\ncommand = ${JSON.stringify(process.execPath)}\nargs = ${JSON.stringify([scriptPath, mcpAuditPath, `--bungee-process-identity=${mcpInstanceId}`])}\nstartup_timeout_sec = 5\ntool_timeout_sec = 5\n`;
   }
-  await writeFile(join(home, 'config.toml'), `model_provider = "openai"\nweb_search = "disabled"\nopenai_base_url = ${JSON.stringify(input.baseUrl)}\nchatgpt_base_url = ${JSON.stringify(`${input.mockUrl}/backend-api`)}\ncli_auth_credentials_store = "file"\n[analytics]\nenabled = false\n${mcpConfig}`);
+  await writeFile(join(home, 'config.toml'), `model_provider = "openai"\nopenai_base_url = ${JSON.stringify(input.baseUrl)}\nchatgpt_base_url = ${JSON.stringify(`${input.mockUrl}/backend-api`)}\ncli_auth_credentials_store = "file"\n[analytics]\nenabled = false\n${mcpConfig}`);
   const child = spawn(executable, ['app-server', '--stdio'], {cwd: home, env: isolatedEnv(home), stdio: ['pipe', 'pipe', 'pipe']});
   let buffer = '', stderr = '', exitCode: number | null = null, exited = false;
   const messages: any[] = [], waiters = new Map<number, {resolve(value: any): void; reject(error: Error): void}>();
@@ -160,7 +160,7 @@ export async function probeCodexChatgptModels(input: {root: string; baseUrl: str
     const deadline = Date.now() + 15000;
     while (!messages.some(message => message.method === 'turn/completed') && Date.now() < deadline && !exited) await Bun.sleep(25);
     if (!messages.some(message => message.method === 'turn/completed')) throw new Error('app-server model dispatch did not complete');
-    report = {pid: child.pid, accountType: account.result?.account?.type, accountError: account.error ?? null,
+    report = {pid: child.pid, userAgent: initialize.result?.userAgent ?? null, accountType: account.result?.account?.type, accountError: account.error ?? null,
       listedModels, reasoningModels: (catalog.result?.data ?? []).filter((model: any) => model.model === input.model)
         .map((model: any) => ({model:model.model,levels:model.supportedReasoningEfforts?.map((entry: any)=>entry.reasoningEffort),defaultEffort:model.defaultReasoningEffort})),
       modelListError: catalog.error ?? null, selectedModel: input.model, selectedEffort: input.effort ?? null,

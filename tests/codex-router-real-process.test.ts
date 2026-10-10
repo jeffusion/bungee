@@ -374,6 +374,37 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     }};
     sockets.add(socket); return socket;
   }
+  test('cached search declaration at tools[28] preserves HTTP/WS tool history and logs its omission', async () => {
+    const start = calls.length;
+    const declarations = [...tools, ...Array.from({length: 24}, (_, i) => ({type: 'function', name: `fixture_extra_${i}`, parameters: {type: 'object', properties: {}}})),
+      {type: 'web_search', external_web_access: false}];
+    const socket = await openSocket();
+    try {
+      for (const model of ['org/chat', 'org/anthropic']) {
+        const raw = {model, input: smallHistory, tools: declarations, tool_choice: 'auto', stream: true, store: false, include: ['reasoning.encrypted_content']};
+        const result = await fetch(`${proxy}/codex/responses`, {method: 'POST', headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'}, body: JSON.stringify(raw), signal: AbortSignal.timeout(20000)});
+        expect(result.status).toBe(200); expect(await result.text()).toContain('response.completed');
+        expect(calls.at(-1)!.body.tools).toHaveLength(28);
+        expect(JSON.stringify(calls.at(-1)!.body)).not.toContain('web_search');
+        expect(JSON.stringify(calls.at(-1)!.body.messages)).toContain('custom result');
+        const events = await socket.create(raw); expect(events.at(-1).type).toBe('response.completed');
+        expect(calls.at(-1)!.body.tools).toHaveLength(28);
+        expect(JSON.stringify(calls.at(-1)!.body.messages)).toContain('file result');
+        const before = calls.length;
+        const denied = await post({...raw, stream: false, tool_choice: {type: 'web_search'}});
+        expect(denied.status).toBe(422); expect(denied.body.param).toBe('tools[28].type'); expect(calls).toHaveLength(before);
+      }
+      const requestId = calls.at(-1)!.requestId;
+      await waitUntil(() => {
+        const db = new Database(fixture!.accessDbPath, {readonly: true});
+        try {
+          const row: any = db.query("SELECT j.value FROM access_logs, json_each(access_logs.processing_steps) AS j WHERE json_extract(j.value,'$.step')='codex_router_conversion' AND json_extract(j.value,'$.detail.requestId')=?").get(requestId);
+          return row && JSON.parse(row.value).detail.diagnostics.some((item: any) => item.param === 'tools[28]' && item.reason === 'optional_hosted_web_search_unavailable' && item.action === 'omitted');
+        } finally { db.close(); }
+      }, 'optional hosted search diagnostic was not logged', 12000);
+      await assertMetered(calls.slice(start));
+    } finally { await socket.close(); }
+  }, 60000);
   test('captured full HTTP/WS requests cross the built gateway; canonical tool history crosses workers and target protocol',async()=>{
     const start=calls.length;
     const socket=await openSocket();
@@ -469,7 +500,11 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         console.info(`codex_router_cli_discovery ${JSON.stringify({...discovery, modelQueries: discoveredQueries, accountQueries, upstream: discoveredActual})}`);
         expect(discovery.accountType).toBe('chatgpt'); expect(discovery.modelListError).toBeNull();
         expect(CODEX_MODELS.every(model => discovery.listedModels.includes(model))).toBe(true);
-        expect(discoveredQueries.some(query => query.clientVersion === '0.160.1')).toBe(true);
+        expect(discoveredQueries.length).toBeGreaterThan(0);
+        for (const query of discoveredQueries) {
+          expect(query.clientVersion).toMatch(/^\d+\.\d+\.\d+/);
+          expect(discovery.userAgent).toContain(`/${query.clientVersion}`);
+        }
         expect(discoveredActual.length).toBeGreaterThan(0); expect(discoveredActual.every(call => call.model === 'org/native')).toBe(true);
         expect(discovery.notifications.some((event: any) => event.method === 'turn/completed' && event.status === 'completed')).toBe(true);
         const beforeChat = calls.length;
@@ -511,6 +546,9 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
           path: call.path, model: call.body.model})), roundTrip: cliToolRoundTrip, inputShapes: toolInputShapes})}`);
         expect(toolDiscovery.notifications.some((event: any) => event.method === 'turn/completed' && event.status === 'completed')).toBe(true);
         expect(toolDiscovery.notifications.some((event: any) => event.itemType === 'agentMessage' && event.text === (toolModel==='org/chat'?'chat answer':'anthropic answer'))).toBe(true);
+        expect(toolInputShapes).toHaveLength(2);
+        expect(toolInputShapes.every(shape => shape.toolShape.some((tool: any) => tool.type === 'web_search' && tool.externalWebAccess === false))).toBe(true);
+        expect(toolCalls.every(call => !JSON.stringify(call.body.tools).includes('web_search'))).toBe(true);
         expect(toolDiscovery.patchedContent).toBe(`${CLI_PATCH_MARKER}\n`);
         expect(toolCalls).toHaveLength(2);
         for(const call of toolCalls){
