@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtemp, mkdir, rename, rm, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rename, rm, writeFile, readFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { createPlan, git, main, testCommand, workingSnapshot } from '../../../checks/select-tests';
@@ -61,6 +61,17 @@ describe('Git test planning and execution contract', () => {
     const child=Bun.spawn([process.execPath,join(import.meta.dir,'../../../checks/select-tests.ts'),'--base','missing'],{cwd:root,stdout:'pipe',stderr:'pipe'});
     const [stdout,stderr,status]=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]); expect(status).toBe(1); expect(stdout).toBe(''); expect(stderr).toContain('failed');
     await expect(main(['--base',base,'--output',join(root,'plan.json')],root)).rejects.toThrow('outside');
+    const aliases=await mkdtemp(join(tmpdir(),'bungee-plan-alias-')); roots.push(aliases);
+    await symlink(root,join(aliases,'repository'),'dir');
+    await expect(main(['--base',base,'--output',join(aliases,'repository','plan.json')],root)).rejects.toThrow('outside');
+    const external=join(aliases,'external.json'); await writeFile(external,'keep');
+    await symlink(external,join(root,'linked-output.json'),'file');
+    await expect(main(['--base',base,'--output',join(root,'linked-output.json')],root)).rejects.toThrow('outside');
+    expect(await readFile(external,'utf8')).toBe('keep');
+    await symlink(join(root,'not-created.json'),join(aliases,'dangling.json'),'file');
+    await expect(main(['--base',base,'--output',join(aliases,'dangling.json')],root)).rejects.toThrow('outside');
+    await symlink(aliases,join(root,'external-directory'),'dir');
+    await expect(main(['--base',base,'--output',join(aliases,'repository','external-directory','new.json')],root)).rejects.toThrow('outside');
     await expect(main(['--base',base,'--shard','1/2'],root)).rejects.toThrow('require --plan');
   });
   test('committed plan consumes actual HEAD and rejects subsequent dirty changes', async () => {
