@@ -6,8 +6,7 @@ import { chromium } from 'playwright';
 
 browserTest('oauth route', async () => {
 const manifest = JSON.parse(await readFile(new URL('../../../../plugins/chatgpt-oauth/manifest.json', import.meta.url), 'utf8'));
-const uiRuntime = await startUiRuntime(['tests/fixtures/oauth.html']);
-const server = uiRuntime.server;
+const uiRuntime = await startUiRuntime({ mode: 'component-fixture', entries: ['tests/fixtures/oauth.html'] });
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
 try {
   browser = await chromium.launch({ headless: true });
@@ -75,8 +74,7 @@ try {
     errors.push(`Unmocked ${req.method()} ${url.pathname}`);
     return respond({ error: 'unexpected_request' }, 500);
   });
-  const port = server.httpServer!.address(); assert(port && typeof port !== 'string');
-  const base = `http://127.0.0.1:${port.port}/tests/fixtures/oauth.html?routeFlow=1#/accounts`;
+  const base = `${uiRuntime.origin}/tests/fixtures/oauth.html?routeFlow=1#/accounts`;
   const account = (name: string) => page.locator('.account-card').filter({ hasText: name });
   const serviceDialog = page.getByRole('dialog', { name: 'Use with service', exact: true });
   const routeDialog = page.getByRole('dialog', { name: 'Use with route', exact: true });

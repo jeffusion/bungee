@@ -6,13 +6,11 @@ import { LAYOUT_KEY } from '../../src/components/dashboard/layout';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
 
 browserTest('dashboard carousel', async () => {
-const uiRuntime = await startUiRuntime(['tests/fixtures/quota.html']);
-const server = uiRuntime.server;
+const uiRuntime = await startUiRuntime({ mode: 'component-fixture', entries: ['tests/fixtures/quota.html'] });
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
 try {
   browser = await chromium.launch({ headless: true });
-    const address = server.httpServer!.address(); assert(address && typeof address !== 'string');
-  const origin = `http://127.0.0.1:${address.port}`;
+  const origin = uiRuntime.origin;
   const ids = ['health.services', 'health.routes', 'chart.upstreams', 'chart.status'];
   const rowIds = ['service-overview-row', 'route-overview-row', 'upstream-distribution-row', 'upstream-status-row'];
   const config = configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null, retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 }));

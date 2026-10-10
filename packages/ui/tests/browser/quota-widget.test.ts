@@ -7,8 +7,7 @@ import { configurationRuntimeFixture, publicationFixture } from '../helpers/publ
 
 browserTest('quota widget', async () => {
 const manifest = await Bun.file(new URL('../../../../plugins/chatgpt-oauth/manifest.json', import.meta.url)).json();
-const uiRuntime = await startUiRuntime(['tests/fixtures/quota.html']);
-const server = uiRuntime.server;
+const uiRuntime = await startUiRuntime({ mode: 'component-fixture', entries: ['tests/fixtures/quota.html'] });
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
 try {
   browser = await chromium.launch({ headless: true });
@@ -99,8 +98,7 @@ try {
     if (url.pathname.startsWith('/api/stats/upstream-')) return respond({ data: [] });
     unexpected.push(url.pathname); console.error('Unexpected fixture API:', url.pathname); return route.abort();
   });
-  const address = server.httpServer!.address(); assert(address && typeof address !== 'string');
-  const base = `http://127.0.0.1:${address.port}/tests/fixtures/quota.html`;
+  const base = `${uiRuntime.origin}/tests/fixtures/quota.html`;
   const widget = page.getByTestId('chatgpt-quota-widget');
   const panel = page.locator('article').filter({ has: widget });
   const refresh = () => panel.locator('header').getByRole('button');

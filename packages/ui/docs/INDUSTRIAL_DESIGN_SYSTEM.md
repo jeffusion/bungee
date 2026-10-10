@@ -886,8 +886,10 @@ Before declaring any UI change "done":
 The project uses automated checks to enforce the industrial design system and prevent regressions.
 
 1. **Import and translation boundaries**: `bun test --isolate packages/ui/tests/unit/ui-boundaries.test.ts` checks actual imports and reactive translation syntax. Comment text and historical migration quotas do not define architectural boundaries.
-2. **Playwright regressions**: `bun run test:browser` includes smoke, route editor, scrolling and dashboard native widget checks. Tests start their own local services; both Linux and macOS CI install Chromium and execute the complete `bun run test` entry. Build current artifacts before running a category directly. See the [development testing guide](../../../docs/guides/development.md#6-testing-strategy).
+2. **Playwright regressions**: `bun run test:browser` includes smoke, route editor, scrolling and dashboard native widget checks. Tests start their own local services; CI selects browser files by module on Linux/macOS; UI and plugin UI changes select the entire UI/plugin browser scope and root workflows. Full regression remains required before release. Build current artifacts before running a category directly. See the [development testing guide](../../../docs/guides/development.md#6-testing-strategy).
 3. **Style isolation**: `bun test --isolate packages/ui/tests/unit/style-scope.test.ts` enforces the frozen global-style baseline. Global styles require the documented narrow reviewed exception in §3.4.7; reorganizing tests must not broaden it.
+
+Built-page tests serve the current `dist` through the owned static runtime; component hosts use the existing Vite configuration with private caches. A file owns its service and browser, with a fresh context per test; do not share mutable runtimes across files. Wait for request completion, rendered state or stable layout rather than fixed preparation delays. Keep representative success screenshots and necessary state/layout evidence; collect additional screenshots for diagnosis. Cleanup failures must fail the check.
 
 Keep component tests under `tests/browser/`, pure logic under `tests/unit/`, and loaded hosts under `tests/fixtures/`. Test behavior through normal module imports or real rendering; never extract component source and execute it. Evidence belongs outside versioned source.
 

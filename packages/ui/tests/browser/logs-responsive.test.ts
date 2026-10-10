@@ -4,7 +4,7 @@ import { configurationRuntimeFixture, publicationFixture } from '../helpers/publ
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 
 browserTest('logs responsive', async () => {
-const uiRuntime = await startUiRuntime();
+const uiRuntime = await startUiRuntime({ mode: 'built-page' });
 try {
 const baseUrl = uiRuntime.origin;
 const browser = await chromium.launch({ headless: true });

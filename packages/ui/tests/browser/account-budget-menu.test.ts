@@ -5,7 +5,7 @@ import { configurationRuntimeFixture, publicationFixture } from '../helpers/publ
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 
 browserTest('account budget menu', async () => {
-const uiRuntime = await startUiRuntime();
+const uiRuntime = await startUiRuntime({ mode: 'built-page' });
 try {
 // Render the real UI with simulated API responses; never change a live account or budget.
 const base = uiRuntime.origin;

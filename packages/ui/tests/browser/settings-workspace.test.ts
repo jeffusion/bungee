@@ -7,7 +7,7 @@ import { configurationRuntimeFixture, publicationFixture } from '../helpers/publ
 
 let runtime: Awaited<ReturnType<typeof startUiRuntime>>, browser: Browser;
 beforeAll(async () => {
-  runtime = await startUiRuntime();
+  runtime = await startUiRuntime({ mode: 'built-page' });
   try { browser = await chromium.launch(); } catch (error) { await runtime.close(); throw error; }
 }, 120_000);
 afterAll(async () => { try { await browser?.close(); } finally { await runtime?.close(); } });
@@ -21,7 +21,7 @@ function operation(id: string, state: 'converged' | 'committed' | 'degraded' = '
     target_worker_count:2,drain_recovery_generation:0,last_drain_recovery_previous_generation:null,created_at:1,updated_at:1,
     state, result_status:state === 'converged' ? 200 : null,error_code:null,error_detail:null } as ConfigurationOperationState['operation'], workers:[] };
 }
-async function withSettings(run: (page: Page, model: ReturnType<typeof createModel>) => Promise<void>, width=1440, language='en') {
+async function withSettings(run: (page: Page, model: ReturnType<typeof createModel>) => Promise<void>, width=1440, language='en', route='config') {
   const context = await browser.newContext({viewport:{width,height:900}}), page=await context.newPage();
   const errors: string[] = []; page.on('pageerror', error=>errors.push(error.message));
   await page.addInitScript(language=>localStorage.setItem('locale',language),language);
@@ -59,9 +59,11 @@ async function withSettings(run: (page: Page, model: ReturnType<typeof createMod
     errors.push(`Unexpected API ${method} ${path}`);return json({error:'unexpected_request'},500);
   });
   try {
-    await page.goto(`${runtime.origin}/#/config`);
-    await expect(page.getByTestId('logging-max-size')).toHaveValue('50');
-    await expect(page.getByRole('combobox',{name:/^(Log Level|日志级别)$/})).toBeEnabled();
+    await page.goto(`${runtime.origin}/#/${route}`);
+    if (route === 'config') {
+      await expect(page.getByTestId('logging-max-size')).toHaveValue('50');
+      await expect(page.getByRole('combobox',{name:/^(Log Level|日志级别)$/})).toBeEnabled();
+    } else await expect(page.getByTestId('logs-maintenance')).toBeVisible();
     await run(page,model);expect(errors).toEqual([]);
   } finally { model.releaseValidation?.(); await context.close(); }
 }
@@ -217,14 +219,14 @@ test('dirty settings navigation can be cancelled or confirmed without an implici
 
 test('log cleanup requires confirmation and distinguishes execution, status refresh failure and rejection',async()=>{
   for(const outcome of ['success','refresh-failure','rejected'] as const) await withSettings(async(page,model)=>{
-    await page.goto(`${runtime.origin}/#/logs`);await page.getByTestId('logs-maintenance').locator('summary').click();
+    await page.getByTestId('logs-maintenance').locator('summary').click();
     const start=page.getByTestId('cleanup-start');await expect(start).toBeEnabled();await start.click();
     await page.getByTestId('confirmation-cancel').click();expect(model.cleanupWrites).toBe(0);await expect(start).toBeFocused();
     model.cleanupRefreshFailure=outcome === 'refresh-failure';model.cleanupStatus=outcome === 'rejected'?403:0;
     await start.click();await page.getByTestId('confirmation-accept').click();
     await expect(page.getByTestId('cleanup-outcome')).toContainText(outcome === 'success'?/executed/i:outcome === 'refresh-failure'?/refresh.*fail/i:/reject/i);
     if(outcome !== 'rejected') await expect(start).toBeDisabled();expect(model.cleanupWrites).toBe(1);
-  });
+  },1440,'en','logs');
 },60_000);
 
 test('a missing unacknowledged operation reloads only after both snapshot and serving reads succeed',async()=>{

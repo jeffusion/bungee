@@ -7,7 +7,7 @@ import { configurationRuntimeFixture, publicationFixture } from '../helpers/publ
 
 // Real Chromium, explicitly mocked management responses: render/interaction evidence, not Core E2E.
 test('stopped publication can be retried once and follows recovery until serving is confirmed', async () => {
-const uiRuntime = await startUiRuntime();
+const uiRuntime = await startUiRuntime({ mode: 'built-page' });
 const base = uiRuntime.origin, evidence = uiRuntime.evidence;
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
 const errors: string[] = [];

@@ -3,63 +3,280 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  workflow_call:
+    inputs:
+      full:
+        type: boolean
+        default: true
+      ref:
+        type: string
+        required: true
+      base:
+        type: string
+        required: true
+      head:
+        type: string
+        required: true
+      pr:
+        type: number
+        required: true
+
+permissions:
+  contents: read
 
 jobs:
-  test:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      integration: ${{ steps.plan.outputs.integration }}
+      browser: ${{ steps.plan.outputs.browser }}
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+      - run: bun install --frozen-lockfile
+      - name: Select the cumulative test scope
+        id: plan
+        env:
+          BASE: ${{ inputs.base || github.event.pull_request.base.sha }}
+          HEAD: ${{ inputs.head || github.event.pull_request.head.sha }}
+          FULL: ${{ inputs.full || false }}
+        run: |
+          set -euo pipefail
+          args=(--base "$BASE" --committed --head "$HEAD" --output "$RUNNER_TEMP/plan.json")
+          if [ "$FULL" = true ]; then args+=(--full); fi
+          bun scripts/checks/select-tests.ts "${args[@]}"
+          jq -r '"mode=" + .mode, "integration=" + (.files.integration | length | tostring), "browser=" + (.files.browser | length | tostring), "shards=" + (if (.files.browser | length) > 1 then "[1,2]" else "[1]" end)' "$RUNNER_TEMP/plan.json" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-plan
+          path: ${{ runner.temp }}/plan.json
+          if-no-files-found: error
+          retention-days: 14
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.mode != 'none'
     runs-on: ${{ matrix.os }}
-    # Windows 测试暂停；恢复 Windows 矩阵时一并恢复以下配置。
-    # continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          # - windows-latest
-
+        os: [ubuntu-latest, macos-latest]
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: oven-sh/setup-bun@v2
         with:
           bun-version: '1.4.2'
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: test-plan
+          path: ${{ runner.temp }}/plan
+      - name: Build platform artifacts once
+        run: |
+          set -euo pipefail
+          time bun run build
+          tar -czf "$RUNNER_TEMP/build.tgz" packages/{types,llms,ui,core,cli}/dist packages/core/src/ui/assets.ts packages/ui/src/components/native-widgets/generated.ts
+          jq '{commit: .testCommit, tree: .tree}' "$RUNNER_TEMP/plan/plan.json" > "$RUNNER_TEMP/build.json"
+      - name: Complete fast regression
+        run: bun scripts/checks/select-tests.ts --plan "$RUNNER_TEMP/plan/plan.json" --phase unit --record "$RUNNER_TEMP/unit.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/build.tgz
+            ${{ runner.temp }}/build.json
+          if-no-files-found: error
+          retention-days: 2
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: execution-${{ matrix.os }}-unit
+          path: ${{ runner.temp }}/unit.json*
+          if-no-files-found: error
+          retention-days: 14
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
+  integration:
+    needs: [plan, build]
+    if: needs.plan.outputs.integration != '0' && needs.build.result == 'success'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: test-plan
+          path: ${{ runner.temp }}/plan
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-${{ matrix.os }}
+          path: ${{ runner.temp }}/build
+      - name: Restore artifacts for this platform and tree
+        run: |
+          set -euo pipefail
+          jq -e --slurpfile plan "$RUNNER_TEMP/plan/plan.json" '.commit == $plan[0].testCommit and .tree == $plan[0].tree' "$RUNNER_TEMP/build/build.json"
+          tar -xzf "$RUNNER_TEMP/build/build.tgz"
+      - name: Selected integration regression
+        run: bun scripts/checks/select-tests.ts --plan "$RUNNER_TEMP/plan/plan.json" --phase integration --record "$RUNNER_TEMP/integration.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: execution-${{ matrix.os }}-integration
+          path: ${{ runner.temp }}/integration.json*
+          if-no-files-found: error
+          retention-days: 14
 
-      - name: Install Playwright browsers and Linux dependencies
+  browser:
+    needs: [plan, build]
+    if: needs.plan.outputs.browser != '0' && needs.build.result == 'success'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: test-plan
+          path: ${{ runner.temp }}/plan
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-${{ matrix.os }}
+          path: ${{ runner.temp }}/build
+      - name: Restore artifacts for this platform and tree
+        run: |
+          set -euo pipefail
+          jq -e --slurpfile plan "$RUNNER_TEMP/plan/plan.json" '.commit == $plan[0].testCommit and .tree == $plan[0].tree' "$RUNNER_TEMP/build/build.json"
+          tar -xzf "$RUNNER_TEMP/build/build.tgz"
+      - name: Install Chromium and Linux dependencies
         if: matrix.os == 'ubuntu-latest'
         run: bun ./node_modules/playwright/cli.js install --with-deps chromium
-
-      - name: Install Playwright browsers
+      - name: Install Chromium
         if: matrix.os != 'ubuntu-latest'
         run: bun ./node_modules/playwright/cli.js install chromium
-
-      - name: Run tests
-        run: bun run test
-
-      - name: Record tested PR contents
-        if: matrix.os == 'ubuntu-latest'
+      - name: Selected browser regression with native sharding
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SHARD: ${{ matrix.shard }}
+          COUNT: ${{ needs.plan.outputs.browser }}
         run: |
-          mkdir -p "$RUNNER_TEMP/ci-provenance"
-          jq -n \
-            --arg tree "$(git rev-parse 'HEAD^{tree}')" \
-            --arg head "$PR_HEAD_SHA" \
-            --argjson pr "$PR_NUMBER" \
-            '{tree: $tree, head: $head, pr: $pr}' \
-            > "$RUNNER_TEMP/ci-provenance/pr.json"
+          count=1
+          if [ "$COUNT" -gt 1 ]; then count=2; fi
+          bun scripts/checks/select-tests.ts --plan "$RUNNER_TEMP/plan/plan.json" --phase browser --shard "$SHARD/$count" --record "$RUNNER_TEMP/browser-$SHARD.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: execution-${{ matrix.os }}-browser-${{ matrix.shard }}
+          path: ${{ runner.temp }}/browser-${{ matrix.shard }}.json*
+          if-no-files-found: error
+          retention-days: 14
 
-      - name: Upload tested PR contents
-        if: matrix.os == 'ubuntu-latest'
-        uses: actions/upload-artifact@v4
+  test:
+    needs: [plan, build, integration, browser]
+    if: always()
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Require all planned jobs to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          jq -e '.plan.result == "success" and (if .plan.outputs.mode == "none" then .build.result == "skipped" else .build.result == "success" end) and (if .plan.outputs.integration == "0" then .integration.result == "skipped" else .integration.result == "success" end) and (if .plan.outputs.browser == "0" then .browser.result == "skipped" else .browser.result == "success" end)' <<< "$NEEDS"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+      - uses: actions/download-artifact@v4
+        with:
+          name: test-plan
+          path: ${{ runner.temp }}/plan
+      - uses: actions/download-artifact@v4
+        if: needs.plan.outputs.mode != 'none'
+        with:
+          pattern: execution-${{ matrix.os }}-*
+          path: ${{ runner.temp }}/execution
+          merge-multiple: true
+      - name: Verify executed-file coverage and platform evidence
+        env:
+          PLATFORM: ${{ matrix.os }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/execution"
+          bun -e 'import {verifyRecords} from "./scripts/checks/test-proof.ts";
+          const plan=await Bun.file(`${process.env.RUNNER_TEMP}/plan/plan.json`).json();
+          const paths=Array.from(new Bun.Glob("*.json").scanSync({cwd:`${process.env.RUNNER_TEMP}/execution`,onlyFiles:true})).filter(p=>!p.endsWith(".timings.json"));
+          const records=await Promise.all(paths.map(p=>Bun.file(`${process.env.RUNNER_TEMP}/execution/${p}`).json()));
+          const proof=verifyRecords(plan,records,process.env.PLATFORM);
+          await Bun.write(`${process.env.RUNNER_TEMP}/${process.env.PLATFORM}.json`,JSON.stringify(proof));'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: platform-${{ matrix.os }}
+          path: ${{ runner.temp }}/${{ matrix.os }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+  proof:
+    needs: [plan, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+      - uses: actions/download-artifact@v4
+        with:
+          name: test-plan
+          path: ${{ runner.temp }}/plan
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: platform-*
+          path: ${{ runner.temp }}/platform
+          merge-multiple: true
+      - name: Record strict PR validation provenance
+        env:
+          PR_NUMBER: ${{ inputs.pr || github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ inputs.head || github.event.pull_request.head.sha }}
+        run: |
+          bun -e 'import {createProof} from "./scripts/checks/test-proof.ts";
+          const dir=process.env.RUNNER_TEMP;
+          const plan=await Bun.file(`${dir}/plan/plan.json`).json();
+          const results=await Promise.all(["ubuntu-latest","macos-latest"].map(os=>Bun.file(`${dir}/platform/${os}.json`).json()));
+          const proof=createProof(plan,results,{head:process.env.PR_HEAD_SHA,pr:Number(process.env.PR_NUMBER),runId:process.env.GITHUB_RUN_ID,runAttempt:Number(process.env.GITHUB_RUN_ATTEMPT)});
+          await Bun.write(`${dir}/pr.json`,JSON.stringify(proof,null,2));'
+      - uses: actions/upload-artifact@v4
         with:
           name: tested-pr
-          path: ${{ runner.temp }}/ci-provenance/pr.json
+          path: ${{ runner.temp }}/pr.json
           if-no-files-found: error
-          overwrite: true
           retention-days: 14

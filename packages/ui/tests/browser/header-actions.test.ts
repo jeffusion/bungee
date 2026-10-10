@@ -5,7 +5,7 @@ import { configurationRuntimeFixture, publicationFixture } from '../helpers/publ
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 
 browserTest('header actions', async () => {
-const uiRuntime = await startUiRuntime();
+const uiRuntime = await startUiRuntime({ mode: 'built-page' });
 try {
 // UI interaction checks with simulated auth/config responses; no live credentials.
 const base = uiRuntime.origin;
@@ -111,12 +111,7 @@ try {
           await languages.evaluate(node => (node as HTMLElement).blur());
           await page.mouse.move(0, 100);
           await header.screenshot({ path: `${evidence}/${mode}-${language}-${width}.png` });
-          if (width === 1440) {
-            const bounds = (await header.boundingBox())!;
-            const start = (await system.boundingBox())!.x;
-            await page.screenshot({ path: `${evidence}/${mode}-${language}-desktop-tools.png`,
-              clip: { x: start, y: bounds.y, width: bounds.width - start, height: bounds.height } });
-          }
+
         }
       }
       // Touch devices do not apply hover styles. Check the mouse affordance separately.

@@ -5,13 +5,11 @@ import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
 
 browserTest('carousel', async () => {
-const uiRuntime = await startUiRuntime(['index.html']);
-const server = uiRuntime.server;
+const uiRuntime = await startUiRuntime({ mode: 'component-fixture', entries: ['tests/fixtures/carousel.html'] });
+let builtRuntime: Awaited<ReturnType<typeof startUiRuntime>> | undefined;
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
 try {
-    const address = server.httpServer!.address();
-  assert(address && typeof address !== 'string');
-  const origin = `http://127.0.0.1:${address.port}`;
+  let origin = uiRuntime.origin;
   browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
   const errors: string[] = [];
@@ -193,6 +191,8 @@ try {
 
   // Exercise the actual routed showcase plus two existing application pages.
   await page.clock.resume();
+  builtRuntime = await startUiRuntime({ mode: 'built-page' });
+  origin = builtRuntime.origin;
   for (const [hash, testId] of [['/design', 'page-design'], ['/', 'page-dashboard'], ['/services', 'page-services']]) {
     await page.goto(`${origin}/#${hash}`);
     await page.getByTestId(testId).waitFor();
@@ -228,6 +228,6 @@ try {
   assert.deepEqual(errors, [], 'browser must have no runtime, console, or request errors');
   console.log('PASS: autoplay, pause/resume, keyboard, controls, persistence, dynamic data, reduced motion, timer cleanup, responsive showcase and 3 application pages');
 } finally {
-  try { await browser?.close(); } finally { await uiRuntime.close(); }
+  try { await browser?.close(); } finally { try { await builtRuntime?.close(); } finally { await uiRuntime.close(); } }
 }
 }, 240_000);

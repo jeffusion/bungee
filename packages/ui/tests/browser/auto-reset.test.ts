@@ -7,17 +7,14 @@ import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 browserTest('auto reset', async () => {
 // Tailwind's content paths are relative to the UI package, including plugin UI.
 const manifest = JSON.parse(await readFile(new URL('../../../../plugins/chatgpt-oauth/manifest.json', import.meta.url), 'utf8'));
-const uiRuntime = await startUiRuntime(['tests/fixtures/oauth.html']);
-const server = uiRuntime.server;
+const uiRuntime = await startUiRuntime({ mode: 'component-fixture', entries: ['tests/fixtures/oauth.html'] });
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
 try {
     browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1100, height: 850 } });
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
-  const address = server.httpServer!.address();
-  assert(address && typeof address !== 'string');
-  const fixtureOrigin = `http://127.0.0.1:${address.port}`;
+  const fixtureOrigin = uiRuntime.origin;
   let enabled = false;
   let pending = false;
   let usageUnavailable = false;

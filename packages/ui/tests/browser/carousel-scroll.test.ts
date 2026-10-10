@@ -5,14 +5,12 @@ import { chromium } from 'playwright';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 
 browserTest('carousel scroll', async () => {
-const uiRuntime = await startUiRuntime(['tests/fixtures/carousel.ts', 'tests/fixtures/oauth.ts']);
-const { server, evidence } = uiRuntime;
+const uiRuntime = await startUiRuntime({ mode: 'component-fixture', entries: ['tests/fixtures/carousel.ts', 'tests/fixtures/oauth.ts'] });
+const { evidence } = uiRuntime;
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
 try {
   browser = await chromium.launch({ headless: true });
-  const address = server.httpServer!.address();
-  assert(address && typeof address !== 'string');
-  const origin = `http://127.0.0.1:${address.port}`;
+  const origin = uiRuntime.origin;
   const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
   const errors: string[] = [];
   const observe = (target: typeof page) => {

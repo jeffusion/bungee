@@ -5,7 +5,7 @@ import { LAYOUT_KEY } from '../../src/components/dashboard/layout';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 
 browserTest('dashboard outcomes', async () => {
-const uiRuntime = await startUiRuntime();
+const uiRuntime = await startUiRuntime({ mode: 'built-page' });
 try {
 // Exercise the production bundle as well as dev builds; no Vite-only module imports.
 const baseUrl = uiRuntime.origin;

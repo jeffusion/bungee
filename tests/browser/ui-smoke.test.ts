@@ -7,7 +7,7 @@ import * as path from 'path';
 import { configurationRuntimeFixture, publicationFixture } from '../../packages/ui/tests/helpers/publication';
 
 browserTest('ui smoke', async () => {
-const uiRuntime = await startUiRuntime();
+const uiRuntime = await startUiRuntime({ mode: 'built-page' });
 let smokeBrowser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
 try {
 const WORKSPACE_ROOT = path.resolve(import.meta.dir, '../..');

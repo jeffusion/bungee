@@ -30,7 +30,9 @@
     "release:binaries": "bun scripts/release/upload-binaries.ts",
     "test:fast": "bun test --isolate 'tests/unit/'",
     "test:integration": "bun test --isolate 'tests/integration/'",
-    "test:browser": "bun test --isolate 'tests/browser/'"
+    "test:browser": "bun test --isolate 'tests/browser/'",
+    "test:plan": "bun scripts/checks/select-tests.ts",
+    "test:affected": "bun scripts/checks/select-tests.ts --run"
   },
   "devDependencies": {
     "@commitlint/config-conventional": "^20.0.0",
