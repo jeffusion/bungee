@@ -142,10 +142,10 @@ try {
 
       result.coldNavigationStyle = await navigationStyle(page, 'route-nav-match');
       assert.ok((await page.locator('[data-testid="builder-nav"] kbd').allTextContents()).includes('1-8'));
-      await page.keyboard.press('Control+8');
+      await page.keyboard.press('ControlOrMeta+8');
       await page.locator('[data-testid="section-review"]').waitFor({ state: 'visible' });
       assert.equal(await page.locator('button[data-testid="route-nav-review"]').getAttribute('aria-current'), 'page');
-      await page.keyboard.press('Control+1');
+      await page.keyboard.press('ControlOrMeta+1');
       await page.locator('[data-testid="section-match"]').waitFor({ state: 'visible' });
       await page.waitForFunction(() => getComputedStyle(document.querySelector('button[data-testid="route-nav-match"]')!).color === 'rgb(251, 146, 60)');
       result.styleIsolation = await page.evaluate(() => {
@@ -165,7 +165,7 @@ try {
         await page.locator('button[data-testid="service-nav-identity"]').waitFor({ state: 'visible' });
         assertNavigationStyle(await navigationStyle(page, 'service-nav-identity'));
         assert.ok((await page.locator('[data-testid="service-builder-nav"] kbd').allTextContents()).includes('1-7'));
-        await page.keyboard.press('Control+7');
+        await page.keyboard.press('ControlOrMeta+7');
         await page.locator('[data-testid="service-review-summary"]').waitFor({ state: 'visible' });
         assert.equal(await page.locator('button[data-testid="service-nav-review"]').getAttribute('aria-current'), 'page');
         await page.evaluate(path => { window.location.hash = path; }, path);
