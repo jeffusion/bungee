@@ -1,5 +1,5 @@
 import type { Plugin, PluginTranslations, PluginMetadata } from './plugin.types';
-import type { PluginConfig } from '@jeffusion/bungee-types';
+import type { PluginConfig, PluginConfigConstraint, PluginRuntimeScope } from '@jeffusion/bungee-types';
 import { logger } from './logger';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -771,6 +771,8 @@ export class PluginRegistry {
    */
   getAllPluginSchemas(): Record<string, {
     name: string;
+    runtimeScope?: PluginRuntimeScope;
+    configConstraints?: readonly PluginConfigConstraint[];
     version: string;
     description: string;
     metadata: any;
@@ -808,6 +810,8 @@ export class PluginRegistry {
               icon: metadataIcon,
               contributes: manifest.metadata?.contributes || manifest.contributes,
             },
+            runtimeScope: manifest.runtimeScope,
+            configConstraints: manifest.configConstraints ?? [],
             configSchema: manifest.configSchema || PluginConstructor?.configSchema || []
           };
         } else if (factoryInfo) {
@@ -876,7 +880,7 @@ export class PluginRegistry {
    * {
    *   "en": {
    *     "plugins": {
-   *       "ai-transformer": {
+   *       "llm-protocol-adapter": {
    *         "transformation.label": "Transformation Direction",
    *         "options.anthropic_openai.label": "Anthropic → OpenAI"
    *       }
@@ -884,7 +888,7 @@ export class PluginRegistry {
    *   },
    *   "zh-CN": {
    *     "plugins": {
-   *       "ai-transformer": {
+   *       "llm-protocol-adapter": {
    *         "transformation.label": "转换方向",
    *         "options.anthropic_openai.label": "Anthropic → OpenAI"
    *       }

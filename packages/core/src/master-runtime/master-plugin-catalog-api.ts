@@ -103,6 +103,7 @@ function schemaResponse(record: PluginManifestRecord): object {
       ? `plugins.${record.name}.${manifest.description}` : manifest.description,
     metadata: metadata(record),
     configSchema: prefixTranslationKeys(record.configSchema, record.name),
+    configConstraints: manifest.configConstraints ?? [],
   };
 }
 

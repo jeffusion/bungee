@@ -3,6 +3,12 @@ import type { AppConfig, PluginConfig } from '@jeffusion/bungee-types';
 import type { PluginRegistry } from './plugin-registry';
 import { resolveEffectiveRouteEndpoints } from './utils/endpoint-resolver';
 
+// Host-only identity: persisted configuration cannot opt out of validation.
+const automaticProviders = new WeakSet<PluginConfig>();
+export function isAutomaticGlobalProvider(config: PluginConfig): boolean {
+  return automaticProviders.has(config);
+}
+
 export function createRuntimeEligibleConfig(
   config: AppConfig,
   registry: PluginRegistry,
@@ -11,8 +17,9 @@ export function createRuntimeEligibleConfig(
   const dependencies = new PluginDependencyGraph(registry.getAllPluginManifests().values());
   dependencies.assertClosed(activatedPluginNames);
   const globalManifests = [...registry.getAllPluginManifests().values()]
-    .filter((manifest) => manifest.runtimeScope === 'global');
-  const globalNames = new Set(globalManifests.map((manifest) => manifest.name));
+    .filter((manifest) => manifest.runtimeScope === 'global' || manifest.runtimeScope === 'global-and-scoped');
+  const globalNames = new Set(globalManifests.filter(manifest => manifest.runtimeScope === 'global').map(manifest => manifest.name));
+  const providerNames = new Set(globalManifests.map(manifest => manifest.name));
   const isRuntimeEligible = (pluginConfig: PluginConfig | string): boolean => {
     const normalized = typeof pluginConfig === 'string'
       ? { name: pluginConfig, enabled: true }
@@ -31,13 +38,16 @@ export function createRuntimeEligibleConfig(
     .sort((left, right) => dependencyOrder.get(left.name)! - dependencyOrder.get(right.name)!)
     .map((manifest) => {
       const declared = (config.plugins || []).find((binding) =>
-        (typeof binding === 'string' ? binding : binding.name) === manifest.name);
-      return {
+        (typeof binding === 'string' ? binding : binding.name) === manifest.name
+        && (manifest.runtimeScope !== 'global-and-scoped' || isRuntimeEligible(binding)));
+      const provider: PluginConfig = {
         ...(typeof declared === 'object' ? declared : {}),
         name: manifest.name,
         path: manifest.mainPath,
         enabled: true,
       };
+      if (declared === undefined && manifest.runtimeScope === 'global-and-scoped') automaticProviders.add(provider);
+      return provider;
     });
 
   const services = (config.services || []).map((service) => ({
@@ -51,7 +61,7 @@ export function createRuntimeEligibleConfig(
 
   return {
     ...config,
-    plugins: [...(config.plugins || []).filter(scopedEligible), ...globalPlugins],
+    plugins: [...(config.plugins || []).filter(binding => !providerNames.has(typeof binding === 'string' ? binding : binding.name) && isRuntimeEligible(binding)), ...globalPlugins],
     services,
     routes: (config.routes || []).map((route) => ({
       ...route,

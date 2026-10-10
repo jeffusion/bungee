@@ -1,3 +1,5 @@
+import { parseConfigConstraints } from './plugin-manifest-catalog/config-constraint-parser';
+import { parseConfigFields } from './plugin-manifest-catalog/config-field-parser';
 import * as fs from 'fs';
 import * as path from 'path';
 import { CORE_HOST_VERSION } from './core-version';
@@ -100,6 +102,7 @@ export async function loadPluginArtifactManifest(
     });
   }
   try {
+    if (manifest.configConstraints !== undefined) parseConfigConstraints(manifest.configConstraints as unknown as PluginConfigValue, parseConfigFields(manifest.configSchema as unknown as PluginConfigValue, 'configSchema'));
     if (manifest.control !== undefined) parseControl(manifest.control as PluginConfigValue, 'control');
     if (manifest.contributes !== undefined) parseContributions(manifest.contributes as PluginConfigValue, 'contributes');
   } catch (error) {
@@ -134,10 +137,10 @@ export async function loadPluginArtifactManifest(
       options.hostCapabilities ?? SUPPORTED_PLUGIN_CAPABILITIES,
     );
     uiExtensionMode = validateUiExtensionMode(manifest.uiExtensionMode);
-    if (manifest.runtimeScope !== undefined && manifest.runtimeScope !== 'global' && manifest.runtimeScope !== 'scoped') {
+    if (manifest.runtimeScope !== undefined && manifest.runtimeScope !== 'global' && manifest.runtimeScope !== 'scoped' && manifest.runtimeScope !== 'global-and-scoped') {
       throw new Error('invalid manifest runtimeScope');
     }
-    if (manifest.runtimeScope === 'global' && !capabilities.includes('hooks') && !capabilities.includes('controlPlane')) {
+    if ((manifest.runtimeScope === 'global' || manifest.runtimeScope === 'global-and-scoped') && !capabilities.includes('hooks') && !capabilities.includes('controlPlane')) {
       throw new Error('global runtimeScope requires a runtime entry capability');
     }
     bungeeRange = validateBungeeEngineRange(manifest.engines?.bungee);

@@ -1,3 +1,4 @@
+import { pluginConfigConstraintSatisfied } from '@jeffusion/bungee-types';
 import { validateGatewayTargets } from './gateway-target-validation';
 import type {
   LogicalConfigurationV2, PluginBindingV2, RouteV2, ServiceV2, UpstreamManagedByV2, UpstreamV2,
@@ -289,6 +290,26 @@ export function parseNormalizeCompile(
     plugins,
   };
   validateGatewayTargets(value, catalog, context);
+  if (options?.pluginConstraints) {
+    const validate = (bindings: readonly PluginBindingV2[], path: string): void => {
+      bindings.forEach((binding, index) => {
+        for (const constraint of options.pluginConstraints!.get(binding.name) ?? []) {
+          if (!pluginConfigConstraintSatisfied(binding.options ?? {}, constraint)) {
+            context.add('invalid_plugin_option', `${path}[${index}].options`, constraint.message ?? 'Plugin option tuple is not allowed');
+          }
+        }
+      });
+    };
+    validate(plugins, 'plugins');
+    services.forEach((service, index) => {
+      validate(service.plugins, `services[${index}].plugins`);
+      service.endpoints.forEach((endpoint, i) => validate(endpoint.plugins, `services[${index}].endpoints[${i}].plugins`));
+    });
+    value.routes.forEach((route, index) => {
+      validate(route.plugins, `routes[${index}].plugins`);
+      if ('endpoints' in route) route.endpoints?.forEach((endpoint, i) => validate(endpoint.plugins, `routes[${index}].endpoints[${i}].plugins`));
+    });
+  }
   if (options?.globalPlugins) {
     const validateScopedBindings = (bindings: readonly PluginBindingV2[], path: string): void => {
       bindings.forEach((binding, index) => {
