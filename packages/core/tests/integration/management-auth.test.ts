@@ -21,8 +21,9 @@ async function fixture() {
   storage:{create:()=>({}) as any},durableState:name=>state.forNamespace(name)});
  let aggregate:ConfigurationAggregateV2={logical_configuration:{services:[],routes:[],plugins:[]},plugin_activations:[]};
  const auth=new ManagementAuthentication(host,()=>aggregate,new Set(['local-accounts']));
+ await auth.initialize();
  const snapshot=()=>({aggregate,revision:1,content_hash:'sha256:'+'0'.repeat(64)}) as any;
- const api=createConfigControlApi({repository:{getSnapshot:snapshot,getActivePublication:()=>null,getOperationState:()=>null,commit:()=>{throw Error('unexpected');}},
+ const api=createConfigControlApi({repository:{getSnapshot:snapshot,getActivePublication:async()=>null,getOperationState:async()=>null,commit:()=>{throw Error('unexpected');}},
   admission:{snapshot:()=>[]},workerCount:1,clock:{now:Date.now},resolveAuthToken:()=>null,
   parseAggregate:value=>({ok:true,value:value as ConfigurationAggregateV2}),publicationTasks:{enqueue(){}},isMutationReady:()=>true,
   managementAuth:auth,
@@ -164,9 +165,11 @@ describe('personal management authentication',()=>{
   const f=await fixture();await f.enable();
   const selection=f.state.forNamespace('core-management-auth');
   const first=new ManagementAuthentication(f.host,f.active,new Set(['local-accounts']),undefined,selection);
+  await first.initialize();
   expect(first.selected()).toBe('local-accounts');
   await f.host.deactivate('local-accounts');
   const restarted=new ManagementAuthentication(f.host,f.active,new Set(),undefined,selection);
+  await restarted.initialize();
   expect(restarted.selected()).toBe('local-accounts');
   await expect(restarted.authenticate(f.request('/api/config'))).rejects.toThrow('management_provider_unavailable');
   f.disable();
@@ -175,21 +178,21 @@ describe('personal management authentication',()=>{
  test('disabling requires current live identity and returns directly to anonymous; re-enable verifies stored administrator',async()=>{
   const f=await fixture();const staleAnonymous=f.request('/disable');await f.auth.authenticate(staleAnonymous);
   await f.enable();const before=f.active();const after={...before,plugin_activations:[]};
-  expect(validateManagementTransition(staleAnonymous,before,after,f.auth,f.host)?.status).toBe(401);
-  expect(validateManagementTransition(f.request('/disable'),before,after,f.auth,f.host)?.status).toBe(401);
+  expect((await validateManagementTransition(staleAnonymous,before,after,f.auth,f.host))?.status).toBe(401);
+  expect((await validateManagementTransition(f.request('/disable'),before,after,f.auth,f.host))?.status).toBe(401);
   const token=await f.sign(),req=f.request('/disable',token);await f.auth.authenticate(req);
-  expect(validateManagementTransition(req,before,after,f.auth,f.host)).toBeNull();
-  f.host.get('local-accounts')!.control.management!.revokeSessions();
-  expect(validateManagementTransition(req,before,after,f.auth,f.host)?.status).toBe(401);
+  expect(await validateManagementTransition(req,before,after,f.auth,f.host)).toBeNull();
+  await f.host.get('local-accounts')!.control.management!.revokeSessions();
+  expect((await validateManagementTransition(req,before,after,f.auth,f.host))?.status).toBe(401);
   f.disable();expect((await f.api.handle(f.request('/api/config')))!.status).toBe(200);
-  await f.host.deactivate('local-accounts');const restarted=await f.host.activate('local-accounts');expect(restarted.control.management!.hasIdentity()).toBe(true);
+  await f.host.deactivate('local-accounts');const restarted=await f.host.activate('local-accounts');expect(await restarted.control.management!.hasIdentity()).toBe(true);
   await expect(restarted.control.management!.bootstrap({username:'replacement',password:PASSWORD,passwordConfirmation:PASSWORD})).rejects.toThrow('invalid_credentials');
   await f.enable();expect((await f.api.handle(f.request('/api/config')))!.status).toBe(401);expect(await f.sign()).toBeString();
  });
  test('cannot publish management activation until configured identity exists',async()=>{
   const f=await fixture();const before=f.active(),after={...before,plugin_activations:[{plugin_name:'local-accounts'}]};
-  expect(validateManagementTransition(f.request('/enable'),before,after,f.auth,f.host)?.status).toBe(422);
-  await f.host.activate('local-accounts');expect(validateManagementTransition(f.request('/enable'),before,after,f.auth,f.host)?.status).toBe(422);
-  await f.enable();expect(validateManagementTransition(f.request('/enable'),before,after,f.auth,f.host)).toBeNull();
+  expect((await validateManagementTransition(f.request('/enable'),before,after,f.auth,f.host))?.status).toBe(422);
+  await f.host.activate('local-accounts');expect((await validateManagementTransition(f.request('/enable'),before,after,f.auth,f.host))?.status).toBe(422);
+  await f.enable();expect(await validateManagementTransition(f.request('/enable'),before,after,f.auth,f.host)).toBeNull();
  });
 });

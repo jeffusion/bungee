@@ -2,7 +2,7 @@
  * Anthropic to OpenAI Integration Tests
  *
  * Tests the complete request-response flow for anthropic-to-openai transformer
- * Based on specification in docs/ai-provider-conversion.md Section 3.1.1 (Anthropic → OpenAI)
+ * Based on specification in docs/reference/ai-protocol-conversion.md Section 3.1.1 (Anthropic → OpenAI)
  */
 
 import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';

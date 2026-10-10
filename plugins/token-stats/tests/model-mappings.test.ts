@@ -1,9 +1,7 @@
+import { initializeTokenStatsTestDatabase } from '../../../packages/core/tests/helpers/token-stats-database';
 import { afterEach, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { SQLitePluginStorage } from '../../../packages/core/src/plugin-storage';
-import { migration as storageMigration } from '../../../packages/core/src/migrations/versions/002_add_plugin_storage';
-import { migration as statsMigration } from '../../../packages/core/src/migrations/versions/005_token_stats_metering';
-import { migration as keyMigration } from '../../../packages/core/src/migrations/versions/007_token_stats_key';
 import type { ControlHostContext } from '../../../packages/core/src/plugin-control/contracts';
 import { PluginServiceHost } from '../../../packages/core/src/plugin-services';
 import { withTokenStatsMetering } from '../server/storage';
@@ -37,7 +35,7 @@ afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup();
 
 function fixture() {
   const db = new Database(':memory:');
-  storageMigration.up(db); statsMigration.up(db); keyMigration.up(db);
+  initializeTokenStatsTestDatabase(db);
   const storage = withTokenStatsMetering(new SQLitePluginStorage(db, 'token-stats'));
   const host = new PluginServiceHost();
   const provider = host.createContext('models-dev');

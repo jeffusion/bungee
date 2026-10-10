@@ -9,30 +9,30 @@ import type {
 } from '../config-publication/coordinator-types';
 import { classifyRecoveryError, classifyStartupOutcome } from '../config-publication/recovery-disposition';
 import { isPublicationCancelled, type PublicationCancellationSignal } from '../config-publication/publication-runner';
-import type { MasterProcessCoordinator } from './composition';
+import type { MasterRuntimeCoordinator } from './runtime-contracts';
 import type { PublicationTaskLifecycle, RecoveryTaskResult } from './publication-task-manager';
 
 const BACKOFF_MS = [250, 500, 1_000, 2_000, 4_000, 8_000] as const;
 
 type RecoveryRepository = {
   getSnapshot(): RepositorySnapshot;
-  getCurrentRecovery(): ConfigurationRecovery | null;
+  getCurrentRecovery(): Promise<ConfigurationRecovery | null>;
   createManualRecovery(
     recoveryId: string, sourceMutationId: string, expectedRevision: number, now: number,
-  ): ConfigurationRecovery;
-  claimRecoveryAttempt(recoveryId: string, previousAttemptCount: number, now: number): ConfigurationRecovery;
+  ): Promise<ConfigurationRecovery>;
+  claimRecoveryAttempt(recoveryId: string, previousAttemptCount: number, now: number): Promise<ConfigurationRecovery>;
   scheduleRecoveryRetry(
     recoveryId: string, attemptCount: number, nextRetryAt: number, now: number,
-  ): ConfigurationRecovery;
+  ): Promise<ConfigurationRecovery>;
   succeedRecovery(
     recoveryId: string, attemptCount: number, reasonCode: ConfigurationRecoveryReasonCode,
     reasonDetail: string | null, now: number,
-  ): ConfigurationRecovery;
+  ): Promise<ConfigurationRecovery>;
   stopRecovery(
     recoveryId: string, attemptCount: number, reasonCode: ConfigurationRecoveryReasonCode,
     reasonDetail: string | null, now: number,
-  ): ConfigurationRecovery;
-  requeueRecovery(recoveryId: string, attemptCount: number, now: number): ConfigurationRecovery;
+  ): Promise<ConfigurationRecovery>;
+  requeueRecovery(recoveryId: string, attemptCount: number, now: number): Promise<ConfigurationRecovery>;
 };
 
 type RecoveryTimer = { cancel(): void };
@@ -44,7 +44,7 @@ export type ConfigurationRecoveryScheduler = {
 export type ConfigurationRecoveryRunnerOptions = {
   readonly repository: RecoveryRepository;
   readonly publicationTasks: PublicationTaskLifecycle;
-  readonly coordinator: Pick<MasterProcessCoordinator, 'startCurrent'>;
+  readonly coordinator: Pick<MasterRuntimeCoordinator, 'startCurrent'>;
   readonly admission: { snapshot(): readonly ServingConfigWorker[] };
   readonly workerCount: number;
   readonly pluginCatalogHash: Sha256Digest;
@@ -112,7 +112,7 @@ export class ConfigurationRecoveryRunner {
     recoveryId: string, sourceMutationId: string, expectedRevision: number,
   ): Promise<ConfigurationRecovery> {
     if (this.stopped) throw new Error('configuration recovery runner is stopped');
-    const recovery = this.options.repository.createManualRecovery(
+    const recovery = await this.options.repository.createManualRecovery(
       recoveryId, sourceMutationId, expectedRevision, this.options.now(),
     );
     this.wake();
@@ -150,22 +150,21 @@ export class ConfigurationRecoveryRunner {
 
   private async run(generation: number, signal: PublicationCancellationSignal): Promise<RecoveryTaskResult> {
     if (this.stopped || generation !== this.generation) return { kind: 'complete' };
-    if (typeof this.options.repository.getCurrentRecovery !== 'function') return { kind: 'complete' };
-    let recovery = this.options.repository.getCurrentRecovery();
+    let recovery = await this.options.repository.getCurrentRecovery();
     if (recovery === null || recovery.state === 'succeeded' || recovery.state === 'stopped') return { kind: 'complete' };
     const current = this.options.repository.getSnapshot();
     if (recovery.target_revision !== current.revision) {
-      this.options.repository.stopRecovery(recovery.recovery_id, recovery.attempt_count,
+      await this.options.repository.stopRecovery(recovery.recovery_id, recovery.attempt_count,
         'revision_superseded', 'recovery target revision was superseded', this.options.now());
       return { kind: 'complete' };
     }
     if (recovery.state === 'running') {
       if (recovery.attempt_count >= recovery.max_attempts) {
-        this.options.repository.stopRecovery(recovery.recovery_id, recovery.attempt_count,
+        await this.options.repository.stopRecovery(recovery.recovery_id, recovery.attempt_count,
           'retry_exhausted', 'recovery attempt limit reached', this.options.now());
         return { kind: 'complete' };
       }
-      recovery = this.options.repository.requeueRecovery(recovery.recovery_id, recovery.attempt_count, this.options.now());
+      recovery = await this.options.repository.requeueRecovery(recovery.recovery_id, recovery.attempt_count, this.options.now());
     }
     if (recovery.next_retry_at !== null && recovery.next_retry_at > this.options.now()) {
       this.arm(recovery);
@@ -174,22 +173,22 @@ export class ConfigurationRecoveryRunner {
     const preClaimAdmission = this.options.admission.snapshot();
     if (identityMatches(preClaimAdmission, current, this.options.pluginCatalogHash, this.options.workerCount)) {
       const reason = recovery.attempt_count === 0 ? 'already_serving' : 'target_serving';
-      this.options.repository.succeedRecovery(recovery.recovery_id, recovery.attempt_count,
+      await this.options.repository.succeedRecovery(recovery.recovery_id, recovery.attempt_count,
         reason, 'target admission already serves the recovery revision', this.options.now());
       return { kind: 'complete' };
     }
-    const claimed = this.options.repository.claimRecoveryAttempt(
+    const claimed = await this.options.repository.claimRecoveryAttempt(
       recovery.recovery_id, recovery.attempt_count, this.options.now(),
     );
     const snapshot = this.options.repository.getSnapshot();
     if (snapshot.revision !== claimed.target_revision) {
-      this.options.repository.stopRecovery(claimed.recovery_id, claimed.attempt_count,
+      await this.options.repository.stopRecovery(claimed.recovery_id, claimed.attempt_count,
         'revision_superseded', 'recovery target revision was superseded', this.options.now());
       return { kind: 'complete' };
     }
     const oldWorkers = this.options.admission.snapshot();
     if (identityMatches(oldWorkers, snapshot, this.options.pluginCatalogHash, this.options.workerCount)) {
-      this.options.repository.succeedRecovery(claimed.recovery_id, claimed.attempt_count,
+      await this.options.repository.succeedRecovery(claimed.recovery_id, claimed.attempt_count,
         'target_serving', 'target admission already serves the recovery revision', this.options.now());
       return { kind: 'complete' };
     }
@@ -203,10 +202,10 @@ export class ConfigurationRecoveryRunner {
       }
       if (!this.isCurrent(generation)) {
         if (classification.kind === 'success') {
-          this.options.repository.succeedRecovery(claimed.recovery_id, claimed.attempt_count,
+          await this.options.repository.succeedRecovery(claimed.recovery_id, claimed.attempt_count,
             classification.reason, 'target revision is serving', this.options.now());
         } else if (classification.kind === 'deterministic') {
-          this.options.repository.stopRecovery(claimed.recovery_id, claimed.attempt_count,
+          await this.options.repository.stopRecovery(claimed.recovery_id, claimed.attempt_count,
             classification.reason, detail(outcome), this.options.now());
         } else if (this.stopped) {
           return this.requeueOrExhaust(claimed, 'recovery cancelled during shutdown');
@@ -215,11 +214,11 @@ export class ConfigurationRecoveryRunner {
       }
       switch (classification.kind) {
         case 'success':
-          this.options.repository.succeedRecovery(claimed.recovery_id, claimed.attempt_count,
+          await this.options.repository.succeedRecovery(claimed.recovery_id, claimed.attempt_count,
             classification.reason, 'target revision is serving', this.options.now());
           return { kind: 'complete' };
         case 'deterministic':
-          this.options.repository.stopRecovery(claimed.recovery_id, claimed.attempt_count,
+          await this.options.repository.stopRecovery(claimed.recovery_id, claimed.attempt_count,
             classification.reason, detail(outcome), this.options.now());
           return { kind: 'complete' };
         case 'retryable':
@@ -253,7 +252,7 @@ export class ConfigurationRecoveryRunner {
       return await this.run(generation, signal);
     } catch (error) {
       try {
-        const active = this.options.repository.getCurrentRecovery();
+        const active = await this.options.repository.getCurrentRecovery();
         if (active !== null && active.state === 'running' && active.attempt_count > 0) {
           return this.stopFatal(active, 'safety_outcome_unknown', 'recovery runner failed with an unknown outcome', error);
         }
@@ -265,9 +264,9 @@ export class ConfigurationRecoveryRunner {
     }
   }
 
-  private retryOrExhaust(recovery: ConfigurationRecovery, reason: string): RecoveryTaskResult {
+  private async retryOrExhaust(recovery: ConfigurationRecovery, reason: string): Promise<RecoveryTaskResult> {
     if (recovery.attempt_count >= recovery.max_attempts) {
-      this.options.repository.stopRecovery(recovery.recovery_id, recovery.attempt_count,
+      await this.options.repository.stopRecovery(recovery.recovery_id, recovery.attempt_count,
         'retry_exhausted', reason, this.options.now());
       return { kind: 'complete' };
     }
@@ -276,27 +275,27 @@ export class ConfigurationRecoveryRunner {
     if (now > Number.MAX_SAFE_INTEGER - delay) {
       return this.stopFatal(recovery, 'safety_outcome_unknown', 'recovery retry timestamp would overflow', new Error('recovery retry timestamp would overflow'));
     }
-    const scheduled = this.options.repository.scheduleRecoveryRetry(
+    const scheduled = await this.options.repository.scheduleRecoveryRetry(
       recovery.recovery_id, recovery.attempt_count, now + delay, now,
     );
     this.arm(scheduled);
     return { kind: 'complete' };
   }
 
-  private requeueOrExhaust(recovery: ConfigurationRecovery, reason: string): RecoveryTaskResult {
+  private async requeueOrExhaust(recovery: ConfigurationRecovery, reason: string): Promise<RecoveryTaskResult> {
     if (recovery.attempt_count >= recovery.max_attempts) {
-      this.options.repository.stopRecovery(recovery.recovery_id, recovery.attempt_count,
+      await this.options.repository.stopRecovery(recovery.recovery_id, recovery.attempt_count,
         'retry_exhausted', reason, this.options.now());
       return { kind: 'complete' };
     }
-    this.options.repository.requeueRecovery(recovery.recovery_id, recovery.attempt_count, this.options.now());
+    await this.options.repository.requeueRecovery(recovery.recovery_id, recovery.attempt_count, this.options.now());
     return { kind: 'complete' };
   }
 
-  private stopFatal(
+  private async stopFatal(
     recovery: ConfigurationRecovery, code: 'safety_outcome_unknown', reason: string, error: unknown,
-  ): RecoveryTaskResult {
-    this.options.repository.stopRecovery(recovery.recovery_id, recovery.attempt_count, code, reason, this.options.now());
+  ): Promise<RecoveryTaskResult> {
+    await this.options.repository.stopRecovery(recovery.recovery_id, recovery.attempt_count, code, reason, this.options.now());
     return { kind: 'fatal', error: error instanceof Error ? error : new Error(reason) };
   }
 

@@ -1,13 +1,17 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
+import { PluginStateClient } from '../../src/plugin-state/client';
+import { runtimePluginState } from '../helpers/runtime-plugin-state';
+import { createSignedWorkerRpcClient, PLUGIN_STORAGE_RPC_PATH } from '../../src/data-admission/rpc';
 import { PLUGIN_DURABLE_STATE_SCHEMA_SQL } from '../../src/plugin-durable-state';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PluginManifestCatalog } from '../../src/plugin-manifest-catalog';
-import { startMasterComposition, type MasterProcessDependencies } from '../../src/master-runtime/composition';
+import { startMasterComposition, type MasterProcessDependencies, type MasterProcessCoordinator } from '../../src/master-runtime/composition';
 import { serializeErrorChain } from '../../src/master-runtime/error-chain';
+import { createAsyncMasterStats, migrateAccessDatabaseAsync } from '../../src/master-runtime/observability-client';
 import type { ConfigurationRecovery, RepositorySnapshot } from '../../src/config-storage';
 import type { ConfigPublicationWorkerProcess, ServingConfigWorker, WorkerAdmissionController } from '../../src/config-publication';
 import type { ConfigMasterMessage, ConfigProcessIdentity } from '../../src/config-publication/types';
@@ -128,33 +132,35 @@ test('composition retains ACKed serving/draining snapshots and installs the peer
     let coordinator: { startCurrent: (value: unknown, existing?: readonly ServingConfigWorker[]) => Promise<unknown>; publish: (active: unknown, old: readonly ServingConfigWorker[]) => Promise<unknown> } | undefined;
     let composedCoordinator: { startCurrent(value: unknown): Promise<unknown>; publish(active: unknown, old: readonly ServingConfigWorker[]): Promise<unknown> } | undefined;
     let initialServing: readonly ServingConfigWorker[] = [];
+    let stoppedPhysicalWorker = false;
     let adoptionAttempts = 0;
     const repository = {
       getSnapshot: () => current,
-      appendServingSnapshot: () => { publicationOrder.push('append'); },
-      getServingSnapshot: () => null,
-      getActivePublication: () => null,
-      getOperationState: (mutationId: string) => mutationCommits.includes(mutationId)
+      appendServingSnapshot: async () => { publicationOrder.push('append'); },
+      getServingSnapshot: async () => null,
+      getActivePublication: async () => null,
+      getOperationState: async (mutationId: string) => mutationCommits.includes(mutationId)
         ? { operation: { mutation_id: mutationId, state: 'converged', committed_revision: current.revision }, workers: [] } : null,
-      getCurrentOperationState: () => null,
-      getDatabase: () => configDatabase,
+      getCurrentOperationState: async () => null,
+    getCurrentRecovery: async () => null,
+
       beginPublication: () => null,
       beginWorkerAttempt: () => null,
       beginDrainingRecovery: () => null,
       recordWorkerResult: () => null,
       markDraining: () => null,
       finalizePublication: () => null,
-      commit: (command: { mutation_id: string }) => {
+      commit: async (command: { mutation_id: string }) => {
         mutationCommits.push(command.mutation_id);
         // Keep the fixture snapshot stable while proving the write reached commit.
         return { kind: 'duplicate', operation: { mutation_id: command.mutation_id, committed_revision: current.revision } };
       },
-      claimControllerWithCapability: (_capability: unknown, controllerId: string) => {
+      claimControllerWithCapability: async (_capability: unknown, controllerId: string) => {
         authority = { controller_epoch: 1, controller_id: controllerId };
         return { instance_id: '11111111-1111-4111-8111-111111111111', controller_epoch: 1,
           current_controller_id: controllerId, updated_at: Date.now() };
       },
-      close: () => undefined,
+      close: async () => undefined,
     };
     const notify = (listeners: Set<() => void>): void => { for (const listener of [...listeners]) listener(); };
     const workerStatus = (worker: ServingConfigWorker) => {
@@ -178,6 +184,14 @@ test('composition retains ACKed serving/draining snapshots and installs the peer
     };
     const strictFactory = {
       committed,
+      lookupPhysicalSession(input: any) {
+        const candidate = [...owned].find(value => value.identity.worker_instance_id === input.worker_instance_id);
+        if (!candidate || candidate.identity.master_generation !== input.master_generation
+          || candidate.slot !== input.worker_slot || (candidate as any).boot_nonce !== input.boot_nonce) return null;
+        const saved = candidate === first.process ? snapshot(6, false, 'serving-6') : current;
+        return {process: candidate, status: {...workerStatus(evidence(candidate,saved,catalog.hash)),
+          phase: stoppedPhysicalWorker ? 'stopped' : 'serving'}, configurationTarget: saved};
+      },
       lookupExactControlSession(identity: any) {
         const process = [...this.committed].find((candidate) => candidate.identity.worker_instance_id === identity.worker_instance_id);
         controlLookupOrder.push(process === undefined ? 'before-markCommitted' : 'after-markCommitted');
@@ -219,14 +233,15 @@ test('composition retains ACKed serving/draining snapshots and installs the peer
       context: { cwd: root, moduleDirectory: root, executable: process.execPath, entry: join(root, 'worker.ts'), pid: process.pid, accessLogDbPath: join(root, 'access.db') },
       clock: { now: () => Date.now() },
       createMasterStats: () => ({
-        getDatabase: () => accessDatabase,
+
         matches: () => false,
         handle: async () => new Response(null, { status: 404 }),
         close: async () => { accessDatabase?.close(true); },
       }),
       readOptions: () => ({ configDbPath: join(root, 'config.db'), configDbLockPath: join(root, 'config.lock'), workerCount: 1, host: '127.0.0.1', port: 0, startupApplyTimeoutMs: 100, drainTimeoutMs: 100, shutdownTimeoutMs: 100 }),
       acquireInstanceLock: async () => ({ release: async () => undefined }), migrateAccessDatabase: async () => undefined,
-      createPluginPathResolver: () => ({}), buildPluginCatalog: async () => catalog, openRepository: () => repository,
+      createPluginPathResolver: () => ({}), buildPluginCatalog: async () => catalog, openRepository: async () => repository,
+      openPluginState: async (path: string, options: import('../../src/plugin-state/client').PluginStateOpenOptions) => PluginStateClient.open(path, { ...options, initialize: true }),
       createAdmission: () => ({ prepare: () => { publicationOrder.push('local-prepare'); return { commit: () => { publicationOrder.push('local-commit'); } }; }, adoptCommitted: () => undefined, snapshot: () => [], acquire: () => ({ worker: null, release: () => undefined }), clear: () => undefined }),
       resolveWorkerLaunch: () => ({ source: 'source', executable: process.execPath, args: [] }),
       createWorkerFactory: (options: SupervisedConfigWorkerFactoryOptions) => {
@@ -326,8 +341,12 @@ test('composition retains ACKed serving/draining snapshots and installs the peer
       workers: [{ ...first.process.identity, boot_nonce: first.process.boot_nonce, private_port: 41_234 }],
     };
     const handle = await startMasterComposition(dependencies);
-    expect(configDatabase!.prepare('SELECT key FROM secret_store_objects WHERE key = ?').get('db-marker')).toBeTruthy();
-    expect(accessDatabase!.prepare('SELECT value FROM plugin_storage WHERE key = ?').get('db-marker')).toEqual({ value: '"access-db"' });
+    const stateDatabase = new Database(join(root, 'plugin-state.db'), { readonly: true });
+    expect(stateDatabase.query('SELECT key FROM secret_store_objects WHERE key = ?').get('db-marker')).toBeTruthy();
+    expect(stateDatabase.query('SELECT value FROM plugin_storage WHERE key = ?').get('db-marker')).toEqual({ value: '"access-db"' });
+    stateDatabase.close();
+    expect(configDatabase!.query('SELECT COUNT(*) AS count FROM secret_store_objects').get()).toEqual({count: 0});
+    expect(accessDatabase!.query('SELECT COUNT(*) AS count FROM plugin_storage').get()).toEqual({count: 0});
     expect(configDatabase!.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'plugin_storage'").get()).toEqual({ count: 0 });
     expect(managementOptions.internalPluginPeer).toBeDefined();
     expect(adoptionAttempts).toBe(1);
@@ -336,6 +355,24 @@ test('composition retains ACKed serving/draining snapshots and installs the peer
     expect(publicationOrder.indexOf('append')).toBeLessThan(publicationOrder.indexOf('local-prepare'));
     expect(publicationOrder.indexOf('local-prepare')).toBeLessThan(publicationOrder.indexOf('ingress-prepare'));
     expect(publicationOrder.indexOf('ingress-prepare')).toBeLessThan(publicationOrder.indexOf('ingress-commit'));
+    const storageRpc = (bootNonce = first.process.boot_nonce, workerId = first.process.identity.worker_instance_id) => createSignedWorkerRpcClient({
+      transportSecret: Buffer.alloc(32,8).toString('base64url'),
+      worker: {role:'worker',master_generation:MASTER_GENERATION,process_instance_id:workerId,boot_nonce:bootNonce,worker_slot:0},
+      expectedServer: {role:'ingress',process_instance_id:MASTER_GENERATION,boot_nonce:MASTER_GENERATION},
+      url: `http://localhost${PLUGIN_STORAGE_RPC_PATH}`, retry:false,
+      fetch: async (input, init) => managementOptions.controlApi.handle(new Request(input as string,init)),
+    });
+    await storageRpc()('storage',{namespace:'fake-control',operation:'set',args:['bridge-marker',17]});
+    expect(await storageRpc()('storage',{namespace:'fake-control',operation:'get',args:['bridge-marker']})).toBe(17);
+    const deniedNamespace = await storageRpc()('storage',{namespace:'undeclared',operation:'set',args:['bridge-marker',99]}).catch(error=>error);
+    expect(deniedNamespace).toMatchObject({status:400});
+    const wrongBoot = await storageRpc(crypto.randomUUID())('storage',{namespace:'fake-control',operation:'get',args:['bridge-marker']}).catch(error=>error);
+    expect(wrongBoot).toMatchObject({status:403});
+    const foreignWorker = await storageRpc(first.process.boot_nonce,crypto.randomUUID())('storage',{namespace:'fake-control',operation:'get',args:['bridge-marker']}).catch(error=>error);
+    expect(foreignWorker).toMatchObject({status:403});
+    stoppedPhysicalWorker = true;
+    const stoppedWorker = await storageRpc()('storage',{namespace:'fake-control',operation:'get',args:['bridge-marker']}).catch(error=>error);
+    expect(stoppedWorker).toMatchObject({status:403}); stoppedPhysicalWorker = false;
     const runtimeResponse = await publicManagementOptions.controlApi.handle(new Request('http://localhost/api/runtime/upstreams'));
     expect(await runtimeResponse.json()).toMatchObject({ availability: 'complete', upstreams: [{
       state_key: 'composition-state', upstream_id: 'composition-upstream', active_request_count: 1,
@@ -405,11 +442,11 @@ test('malformed plugin secret keys fail the composition boundary instead of beco
   process.env.BUNGEE_PLUGIN_SECRETS_KEY = 'not-canonical-base64';
   const events: string[] = [];
   const repository = {
-    getSnapshot: () => { throw new Error('unreachable'); }, getActivePublication: () => null,
-    getOperationState: () => null, getCurrentOperationState: () => null, commit: () => null, beginPublication: () => null,
+    getSnapshot: () => { throw new Error('unreachable'); }, getActivePublication: async () => null,
+    getOperationState: () => null, getCurrentOperationState: async () => null, commit: () => null, beginPublication: () => null,
     beginWorkerAttempt: () => null, beginDrainingRecovery: () => null, recordWorkerResult: () => null,
     markDraining: () => null, finalizePublication: () => null,
-    close: () => { events.push('repository.close'); },
+    close: async () => { events.push('repository.close'); },
   };
   try {
     const dependencies = {
@@ -419,7 +456,7 @@ test('malformed plugin secret keys fail the composition boundary instead of beco
       acquireInstanceLock: async (path: string) => ({ release: async () => { events.push(`release:${path}`); } }),
       migrateAccessDatabase: async () => { events.push('migration'); }, createPluginPathResolver: () => ({}),
       buildPluginCatalog: async () => ({ hash: HASH, toCompileOptions: () => ({ pluginSchemas: new Map(), availablePlugins: new Set(), pluginCatalogHash: HASH }) }),
-      openRepository: () => { events.push('repository'); return repository; },
+      openRepository: async () => { events.push('repository'); return repository; },
     } as unknown as MasterProcessDependencies;
     await expect(startMasterComposition(dependencies)).rejects.toThrow('BUNGEE_PLUGIN_SECRETS_KEY');
     expect(events).toEqual(['migration', 'repository', 'repository.close', 'release:/tmp/access.db.lock', 'release:/tmp/config.lock']);
@@ -440,6 +477,103 @@ test('serializes a bounded error chain as a useful structured object without sec
   expect(JSON.stringify(serialized)).not.toContain('token-secret');
   expect(JSON.stringify(serialized)).not.toContain('key-secret');
   expect(JSON.stringify(serialized)).not.toContain('aggregate-secret');
+});
+
+test.each(['stopped', 'publication-failure'] as const)('selected generic authentication and its dependency remain ready during %s', async mode => {
+  const root = await mkdtemp(join(tmpdir(),'bungee-management-isolated-'));
+  const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+  process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32,1).toString('base64');
+  let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
+  const provider = 'fixture-identity', dependency = 'fixture-identity-state', broken = 'fixture-broken';
+  const order: string[] = [];
+  (globalThis as any).__isolatedManagementOrder = order;
+  const stores = new Map<string, any>();
+  (globalThis as any).__isolatedManagementStores = stores;
+  try {
+    for (const name of [provider,dependency,broken]) {
+      const directory = join(root,name); await mkdir(directory);
+      await writeFile(join(directory,'manifest.json'),JSON.stringify({name,version:'1.0.0',schemaVersion:3,artifactKind:'runtime-plugin',main:'main.ts',
+        control:{entry:'control.ts',rpc:[]},capabilities:['hooks','controlPlane','dynamicRuntimeLoad'],uiExtensionMode:'none',engines:{bungee:'^5.0.0'},configSchema:[],
+        ...(name===provider ? {management:{},dependencies:{[dependency]:'^1.0.0'}} : {})}));
+      await writeFile(join(directory,'main.ts'),'export default {};');
+      const management = name===provider ? `management:{authenticate:async()=>({id:'fixture',provider:${JSON.stringify(provider)},capabilities:['config.read']}),authorize:async()=>true,hasIdentity:async()=>true,login:async()=>Response.json({signedIn:true}),logout:async()=>Response.json({}),bootstrap:async()=>{},revokeSessions:async()=>{}},` : '';
+      const observer = name===provider ? 'export function createObservationAdapter(observation){return { count:()=>observation.withDatabase(db=>db.query("SELECT 1 AS value").get().value) };}'
+        : name===broken ? 'export function createObservationAdapter(){throw new Error("unrelated_observation_failure");}' : '';
+      await writeFile(join(directory,'control.ts'),`${observer}export function createControl(context){globalThis.__isolatedManagementOrder.push(${JSON.stringify(name)});globalThis.__isolatedManagementStores.set(${JSON.stringify(name)},context.storage);${name===broken ? "throw new Error('unrelated_failure');" : `return {api:[],rpc:[],${management}start(){},dispose(){}};`}}`);
+    }
+    const catalog = await PluginManifestCatalog.build({scanDirectories:[root]});
+    let current = {revision:1,content_hash:HASH,aggregate:{logical_configuration:{services:[],routes:[],plugins:[]},plugin_activations:[provider,dependency,broken].map(plugin_name=>({plugin_name}))}} as unknown as RepositorySnapshot;
+    const recovery = {recovery_id:'60000000-0000-4000-8000-000000000001',state:'stopped',target_revision:1,attempt_count:1,max_attempts:6,next_retry_at:null,final_reason_code:'fatal_source_failure'};
+    let activePublication: any = null;
+    let controlFailures = 0;
+    const repository = {getSnapshot:()=>current,getServingSnapshot:async()=>null,appendServingSnapshot:async()=>{},getActivePublication:async()=>activePublication,
+      finalizePublication:async()=>{controlFailures++;return {state:'degraded',error_code:'control_readiness_failed'};},
+      getCurrentOperationState:async()=>null,getCurrentRecovery:async()=>mode==='stopped' ? recovery : null,getRecovery:async()=>recovery,close:async()=>{}};
+    let admissionCache: Map<string, RepositorySnapshot> | undefined;
+    const initial = current;
+    const originalSet = Map.prototype.set;
+    const cacheObserver = spyOn(Map.prototype, 'set').mockImplementation(function(this: Map<unknown, unknown>, key, value) {
+      if (value === initial && key === `${initial.revision}:${initial.content_hash}:${catalog.hash}`) admissionCache = this as Map<string, RepositorySnapshot>;
+      return originalSet.call(this, key, value);
+    });
+    let composedCoordinator: MasterProcessCoordinator | undefined;
+    let managementOptions: any; let spawnCalls=0, publishCalls=0;
+    const dependencies = {
+      context:{cwd:root,moduleDirectory:root,executable:process.execPath,entry:join(root,'main.ts'),pid:process.pid,accessLogDbPath:join(root,'access.db')},clock:{now:Date.now},
+      readOptions:()=>({configDbPath:join(root,'config.db'),configDbLockPath:join(root,'config.lock'),workerCount:1,host:'127.0.0.1',port:0,managementHost:'127.0.0.1',managementPort:0,masterControlPort:3011,startupApplyTimeoutMs:100,drainTimeoutMs:100,shutdownTimeoutMs:100}),
+      acquireInstanceLock:async()=>({release:async()=>{}}),migrateAccessDatabase:migrateAccessDatabaseAsync,createMasterStats:createAsyncMasterStats,createPluginPathResolver:()=>({}),buildPluginCatalog:async()=>catalog,
+      openRepository:async()=>repository,openPluginState:async(path:string,options:import('../../src/plugin-state/client').PluginStateOpenOptions)=>PluginStateClient.open(path,{...options,initialize:true}),resolveAuthToken:()=>undefined,
+      createAdmission:()=>({snapshot:()=>[],acquire:()=>({worker:null,release:()=>{}}),clear(){},prepare:async()=>({commit:async()=>{},abort:async()=>{}})}),
+      resolveWorkerLaunch:()=>({source:'source',executable:process.execPath,args:[]}),createMasterGeneration:()=>MASTER_GENERATION,
+      createWorkerFactory:()=>({pids:()=>[],snapshot:()=>[],owns:()=>false,spawn:()=>{spawnCalls++;throw new Error('unexpected_worker_spawn');},subscribeExit:()=>()=>{},subscribeUnavailable:()=>()=>{},disconnectAll(){},markCommitted(){},setRateLimitSession(){},shutdownAll:async()=>[]}),
+      createCoordinator:()=>({recoverAndPublish:async()=>null,startCurrent:async()=>{publishCalls++;throw new Error('unexpected_publication');},publish:async()=>{throw new Error('unexpected_publication');}}),
+      createManagementListener:(options:any)=>{if(options.profile==='management')managementOptions=options;return{port:3011,start(){},ready(){},stop:async()=>{}};},
+      createRuntime:(options:any)=>{composedCoordinator=options.coordinator;return new MasterRuntime(options);},installSignalHandlers:(runtime:any)=>({shutdown:()=>runtime.shutdown(),remove(){}}),
+    } as unknown as MasterProcessDependencies;
+    try { handle = await startMasterComposition(dependencies); } finally { cacheObserver.mockRestore(); }
+    expect(order.slice(0,2)).toEqual([dependency,provider]);
+    expect(order.includes(broken)).toBe(mode==='publication-failure');
+    expect(managementOptions.health()).toMatchObject({live:true,management:true,data:false,degraded:true});
+    const config = await managementOptions.controlApi.handle(new Request('http://localhost/api/config'));
+    expect(config.status).toBe(200);expect(spawnCalls).toBe(0);expect(publishCalls).toBe(0);
+    if (mode === 'publication-failure') {
+      expect(admissionCache).toBeDefined();
+      for (let revision = 2; revision <= 33; revision++) {
+        current = { ...current, revision };
+        const outcome = await composedCoordinator!.startCurrent(current);
+        expect(outcome).toMatchObject({ kind: 'startup_degraded', error_code: 'control_readiness_failed' });
+        activePublication = { snapshot: current, operation: { mutation_id: crypto.randomUUID() } };
+        expect(await composedCoordinator!.publish(activePublication, [])).toMatchObject({ kind: 'degraded', error_code: 'control_readiness_failed' });
+        expect(await composedCoordinator!.recoverAndPublish()).toMatchObject({ kind: 'degraded', error_code: 'control_readiness_failed' });
+        activePublication = null;
+        expect(admissionCache!.size).toBe(1);
+        expect([...admissionCache!.values()].map(value => value.revision)).toEqual([revision]);
+        expect(managementOptions.health().management).toBe(true);
+      }
+      expect(publishCalls).toBe(0);
+      expect(controlFailures).toBe(64);
+    }
+    expect(stores.get(dependency).metering).toBeUndefined();
+    const observation = stores.get(provider).metering;
+    expect(await observation.count()).toBe(1);
+    await handle.shutdown();handle=undefined;
+    expect(()=>observation.count()).toThrow('observation_capability_revoked');
+  } finally {
+    await handle?.shutdown();delete (globalThis as any).__isolatedManagementOrder;
+    delete (globalThis as any).__isolatedManagementStores;
+    if(previousSecret===undefined)delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;else process.env.BUNGEE_PLUGIN_SECRETS_KEY=previousSecret;
+    await rm(root,{recursive:true,force:true});
+  }
+});
+
+test('storage commands never automatically resend after an unknown acknowledgement', async () => {
+  let sends = 0;
+  const rpc = createSignedWorkerRpcClient({transportSecret:Buffer.alloc(32,8).toString('base64url'),
+    worker:{role:'worker',master_generation:MASTER_GENERATION,process_instance_id:identity(0).worker_instance_id,boot_nonce:MASTER_GENERATION,worker_slot:0},
+    expectedServer:{role:'ingress',process_instance_id:MASTER_GENERATION,boot_nonce:MASTER_GENERATION},url:`http://localhost${PLUGIN_STORAGE_RPC_PATH}`,retry:false,
+    fetch:async()=>{sends++;throw new Error('acknowledgement_lost');}});
+  const failure = await rpc('storage',{namespace:'fixture',operation:'increment',args:['counter',1]}).catch(error=>error);
+  expect(String(failure)).toContain('acknowledgement_lost');expect(sends).toBe(1);
 });
 
 function useCompositionRecoveryScheduler() {
@@ -483,6 +617,7 @@ test('does not create an in-memory retry loop without a durable recovery row', a
   const recoverySignalAbortedAtEntry: boolean[] = [];
   let capturedGateSignal!: AbortSignal;
   let runtimeFailure = 0;
+  let runtimeStateVersion = 0;
   const admission = {
     prepare: async (workers: readonly ServingConfigWorker[]) => ({
       commit: async () => { activeAdmission = { workers, revision: current.revision, content_hash: current.content_hash, plugin_catalog_hash: HASH, master_generation: MASTER_GENERATION, admission_sequence: 1 }; },
@@ -496,11 +631,12 @@ test('does not create an in-memory retry loop without a durable recovery row', a
   };
   const repository = {
     getSnapshot: () => current,
-    getActivePublication: () => null,
-    appendServingSnapshot: () => undefined,
-    getServingSnapshot: () => null,
+    getActivePublication: async () => null,
+    appendServingSnapshot: async () => undefined,
+    getServingSnapshot: async () => null,
     getOperationState: () => null,
-    getCurrentOperationState: () => null,
+    getCurrentOperationState: async () => null,
+    getCurrentRecovery: async () => null,
     beginPublication: () => null,
     beginWorkerAttempt: () => null,
     beginDrainingRecovery: () => null,
@@ -508,8 +644,8 @@ test('does not create an in-memory retry loop without a durable recovery row', a
     markDraining: () => null,
     finalizePublication: () => null,
     commit: () => null,
-    close: () => undefined,
-    claimControllerWithCapability: () => ({ instance_id: '11111111-1111-4111-8111-111111111111', controller_epoch: 1, current_controller_id: '00000000-0000-4000-8000-000000000001', updated_at: 1 }),
+    close: async () => undefined,
+    claimControllerWithCapability: async () => ({ instance_id: '11111111-1111-4111-8111-111111111111', controller_epoch: 1, current_controller_id: '00000000-0000-4000-8000-000000000001', updated_at: 1 }),
   };
   const workerFactory = {
     spawn: () => first.process,
@@ -536,7 +672,8 @@ test('does not create an in-memory retry loop without a durable recovery row', a
     createPluginPathResolver: () => ({}),
     buildPluginCatalog: async () => ({ hash: HASH, toCompileOptions: () => ({ pluginSchemas: new Map(), availablePlugins: new Set(), pluginCatalogHash: HASH }) }),
     resolveAuthToken: () => undefined,
-    openRepository: () => repository,
+    openRepository: async () => repository,
+    openPluginState: async () => runtimePluginState(),
     createAdmission: () => admission,
     resolveWorkerLaunch: () => ({ source: 'source', executable: process.execPath, args: [] }),
     createWorkerFactory: () => workerFactory,
@@ -567,7 +704,11 @@ test('does not create an in-memory retry loop without a durable recovery row', a
       } }),
       connect: async () => undefined, stop: async () => undefined,
       disconnect: async () => undefined, shutdownDataPlane: async () => undefined,
+      queryRuntimeState: async () => ({version:runtimeStateVersion}),
+      publishRuntimeState: async (state: {version:number}) => { runtimeStateVersion=state.version; },
       trustedActiveAdmission: () => null, hasTrustedActiveAdmission: () => false,
+      trustedActiveAdmissionIfFresh: () => null,
+      trustedAdmissionRegistryIfFresh: () => ({active:null,prepared:null,retired:[]}),
       isMutationReady: () => true, subscribeEligibilityChange: () => () => undefined,
       prepare: async () => ({ commit: async () => undefined, abort: async () => undefined }),
       status: async () => ({ state: 'attached', registry: { active: null, prepared: null, retired: [] } }),
@@ -665,14 +806,15 @@ test.each(['scheduled', 'running', 'stopped'] as const)(
       };
       const repository = {
         getSnapshot: () => targetSnapshot,
-        getServingSnapshot: (key: { revision: number; content_hash: string; plugin_catalog_hash: string }) =>
+        getServingSnapshot: async (key: { revision: number; content_hash: string; plugin_catalog_hash: string }) =>
           key.revision === oldSnapshot.revision && key.content_hash === oldSnapshot.content_hash
             && key.plugin_catalog_hash === catalog.hash ? oldSnapshot : null,
-        appendServingSnapshot: () => undefined,
-        getActivePublication: () => null,
+        appendServingSnapshot: async () => undefined,
+        getActivePublication: async () => null,
         getOperationState: () => null,
-        getCurrentOperationState: () => null,
-        getCurrentRecovery: () => currentRecovery,
+        getCurrentOperationState: async () => null,
+        getCurrentRecovery: async () => currentRecovery,
+        getRecovery: async () => currentRecovery,
         createManualRecovery: () => currentRecovery,
         claimRecoveryAttempt: (recoveryId: string, previousAttemptCount: number, now: number) => {
           recoveryClaims += 1;
@@ -697,9 +839,9 @@ test.each(['scheduled', 'running', 'stopped'] as const)(
         markDraining: () => null,
         finalizePublication: () => null,
         commit: () => null,
-        close: () => undefined,
-        getDatabase: () => database,
-        claimControllerWithCapability: (_capability: unknown, controllerId: string, updatedAt: number) => {
+        close: async () => undefined,
+
+        claimControllerWithCapability: async (_capability: unknown, controllerId: string, updatedAt: number) => {
           startupClaims += 1;
           auditAtStartupClaim.push(...readAudit());
           return { instance_id: '62000000-0000-4000-8000-000000000001', controller_epoch: 1,
@@ -761,7 +903,7 @@ test.each(['scheduled', 'running', 'stopped'] as const)(
         clock: { now: () => clockNow },
         readOptions: () => ({ configDbPath: join(root!, 'config.db'), configDbLockPath: join(root!, 'config.lock'), workerCount: 1, host: '127.0.0.1', port: 0, managementHost: '127.0.0.1', managementPort: 0, masterControlPort: 3011, ingressControlPort: 3010, ingressInstanceLockPath: join(root!, 'ingress.lock'), startupApplyTimeoutMs: 100, drainTimeoutMs: 100, shutdownTimeoutMs: 100 }),
         createMasterStats: () => ({
-          getDatabase: () => database!,
+
           matches: () => false,
           handle: async () => new Response(null, { status: 404 }),
           close: async () => undefined,
@@ -770,7 +912,8 @@ test.each(['scheduled', 'running', 'stopped'] as const)(
         migrateAccessDatabase: async () => undefined,
         createPluginPathResolver: () => ({}),
         buildPluginCatalog: async () => catalog,
-        openRepository: () => repository,
+        openRepository: async () => repository,
+        openPluginState: async (path: string, options: import('../../src/plugin-state/client').PluginStateOpenOptions) => PluginStateClient.open(path, { ...options, initialize: true }),
         createAdmission: () => admission,
         resolveWorkerLaunch: () => ({ source: 'source' as const, executable: process.execPath, args: [] }),
         createWorkerFactory: () => workerFactory,

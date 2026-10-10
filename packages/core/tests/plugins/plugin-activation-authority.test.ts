@@ -88,7 +88,7 @@ describe('revisioned plugin activation authority', () => {
       };
       const activatedPluginNames = activated ? [pluginName] : [];
       try {
-        const result = await initializePluginRuntime(config, { basePath: root, db, activatedPluginNames });
+        const result = await initializePluginRuntime(config, { basePath: root, activatedPluginNames });
         const shouldServe = activated && bindingEnabled;
         const runtime = runtimePlugin();
         const hooks = getPluginRuntimeOrchestrator()?.getScopedRegistry()?.getPrecompiledHooks('/eligibility').routePhase;

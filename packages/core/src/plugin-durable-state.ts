@@ -1,33 +1,30 @@
 import type { Database } from 'bun:sqlite';
-import { createHash } from 'node:crypto';
 
-/** Configuration migration owns this DDL; constructors never modify schema. */
+/** Plugin state initialization owns this DDL; constructors never modify schema. */
 export const PLUGIN_DURABLE_STATE_SCHEMA_SQL = `
-CREATE TABLE plugin_durable_records (
+CREATE TABLE IF NOT EXISTS plugin_durable_records (
   namespace TEXT NOT NULL, key TEXT NOT NULL, version INTEGER NOT NULL CHECK(version > 0),
   value_json TEXT NOT NULL, PRIMARY KEY(namespace, key)
-) STRICT;
-CREATE TABLE plugin_durable_commands (
-  namespace TEXT NOT NULL, command_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
-  result_json TEXT NOT NULL, PRIMARY KEY(namespace, command_id)
 ) STRICT;
 `;
 export type DurableJson = null | boolean | number | string | DurableJson[] | { [key: string]: DurableJson };
 export interface DurableRecord { readonly key: string; readonly version: number; readonly value: DurableJson }
 export interface DurableMutation { key: string; expectedVersion: number; value: DurableJson }
-export interface DurableCommand { commandId: string; mutations: readonly DurableMutation[] }
-/**
- * Host-only execution options. `extend` runs inside the SAME immediate
- * transaction, after the record mutations and the command row: it is the
- * outbox seam that commits a communication record atomically with the business
- * state. A throw from `extend` rolls back the whole command, and an idempotent
- * replay never runs it again (the first committed run already wrote its rows).
- */
-export interface DurableCommandOptions { readonly extend?: () => void }
+/** Pure data outbox request; callbacks and command identifiers are never accepted. */
+export interface DurableTransactionOptions {
+  readonly outbox: { readonly topic: string; readonly major: number;
+    readonly maxEvents: number; readonly payload: Uint8Array };
+}
 export interface PluginDurableState {
+  get(key: string): Promise<DurableRecord | null>;
+  list(): Promise<readonly DurableRecord[]>;
+  transact(mutations: readonly DurableMutation[], options?: DurableTransactionOptions): Promise<readonly DurableRecord[]>;
+}
+/** Synchronous leaf, usable only by storage workers and offline tooling. */
+export interface StorageDurableState {
   get(key: string): DurableRecord | null;
   list(): readonly DurableRecord[];
-  execute(command: DurableCommand, options?: DurableCommandOptions): readonly DurableRecord[];
+  transact(mutations: readonly DurableMutation[], extend?: () => void): readonly DurableRecord[];
 }
 export class DurableStateConflictError extends Error {
   readonly code = 'durable_state_conflict';
@@ -71,6 +68,8 @@ function encode(value: unknown): string {
   if (Buffer.byteLength(json) > MAX_BYTES) throw new Error('Durable state size limit exceeded');
   return json;
 }
+/** Validate data before IPC structured cloning can erase prototypes or evaluate getters. */
+export function validateDurableJson(value: unknown): void { encode(value); }
 type Row = { key: string; version: number; value_json: string };
 function record(row: Row): DurableRecord {
   return Object.freeze({ key: row.key, version: row.version, value: JSON.parse(row.value_json) as DurableJson });
@@ -78,7 +77,7 @@ function record(row: Row): DurableRecord {
 
 /** Host-only factory. Inject only the returned namespace capability into trusted plugins.
  * Consumers validate their own record schema. expectedVersion=0 requires absence.
- * Null values are retained records, so versions and historical command IDs never reset.
+ * Null values are retained records, so versions never reset.
  */
 export class PluginDurableStateStore {
   constructor(private readonly db: Database) {}
@@ -89,7 +88,16 @@ export class PluginDurableStateStore {
    * `PluginServices` and never handed to a plugin.
    */
   get database(): Database { return this.db; }
+  /** Async SDK shape for offline tools and leaf fixtures; production uses PluginStateClient. */
   forNamespace(namespace: string): PluginDurableState {
+    const leaf = this.forStorageNamespace(namespace);
+    return Object.freeze({get: async (key: string) => leaf.get(key), list: async () => leaf.list(),
+      transact: async (mutations: readonly DurableMutation[], options?: DurableTransactionOptions) => {
+        if (options !== undefined) throw new Error('Outbox requires the storage worker');
+        return leaf.transact(mutations);
+      }});
+  }
+  forStorageNamespace(namespace: string): StorageDurableState {
     identifier(namespace);
     const db = this.db;
     const get = (key: string): DurableRecord | null => {
@@ -100,12 +108,10 @@ export class PluginDurableStateStore {
     return Object.freeze({
       get,
       list: () => Object.freeze(db.query<Row, [string]>('SELECT key,version,value_json FROM plugin_durable_records WHERE namespace = ? ORDER BY key').all(namespace).map(record)),
-      execute: (command: DurableCommand, options?: DurableCommandOptions): readonly DurableRecord[] => {
-        identifier(command.commandId);
-        if (!Array.isArray(command.mutations) || command.mutations.length === 0 || command.mutations.length > 256) throw new Error('Invalid durable state command');
-        if (options !== undefined && options !== null && typeof options.extend !== 'undefined' && typeof options.extend !== 'function') throw new Error('Invalid durable state options');
+      transact: (input: readonly DurableMutation[], extend?: () => void): readonly DurableRecord[] => {
+        if (!Array.isArray(input) || input.length === 0 || input.length > 256) throw new Error('Invalid durable state command');
         const keys = new Set<string>();
-        const mutations = command.mutations.map(mutation => {
+        const mutations = input.map(mutation => {
           identifier(mutation.key);
           if (keys.has(mutation.key) || !Number.isSafeInteger(mutation.expectedVersion) || mutation.expectedVersion < 0 || mutation.expectedVersion >= Number.MAX_SAFE_INTEGER) throw new Error('Invalid durable state mutation');
           keys.add(mutation.key);
@@ -113,13 +119,7 @@ export class PluginDurableStateStore {
         });
         const commandJson = JSON.stringify(mutations);
         if (Buffer.byteLength(commandJson) > MAX_BYTES) throw new Error('Durable state command size limit exceeded');
-        const fingerprint = createHash('sha256').update(commandJson).digest('hex');
         return db.transaction(() => {
-          const prior = db.query<{ fingerprint: string; result_json: string }, [string, string]>('SELECT fingerprint,result_json FROM plugin_durable_commands WHERE namespace = ? AND command_id = ?').get(namespace, command.commandId);
-          if (prior) {
-            if (prior.fingerprint !== fingerprint) throw new Error('Durable state command ID already used');
-            return Object.freeze((JSON.parse(prior.result_json) as DurableRecord[]).map(item => Object.freeze(item)));
-          }
           const results: DurableRecord[] = [];
           for (const mutation of mutations) {
             const current = get(mutation.key);
@@ -129,9 +129,7 @@ export class PluginDurableStateStore {
               ON CONFLICT(namespace,key) DO UPDATE SET version=excluded.version,value_json=excluded.value_json`).run(namespace, mutation.key, version, mutation.json);
             results.push(record({ key: mutation.key, version, value_json: mutation.json }));
           }
-          db.query('INSERT INTO plugin_durable_commands(namespace,command_id,fingerprint,result_json) VALUES (?,?,?,?)').run(namespace, command.commandId, fingerprint, JSON.stringify(results));
-          // Outbox seam: same transaction, same connection, first execution only.
-          options?.extend?.();
+          extend?.();
           return Object.freeze(results);
         }).immediate();
       },

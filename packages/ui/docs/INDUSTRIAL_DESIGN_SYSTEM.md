@@ -174,7 +174,6 @@ import HealthSummary from '$components/domain/service/HealthSummary.svelte';
 import RelationshipLink from '$components/domain/route/RelationshipLink.svelte';
 import ConfirmDialog from '$components/domain/config/ConfirmDialog.svelte';
 ```
-```
 
 For every component the **prop signature, default behaviour, and
 required parent context** are documented inline in the `.svelte` file's
@@ -429,8 +428,8 @@ Bungee UI uses a strict multi-layer architecture for component organization. Thi
 
 #### 3.4.1 The Multi-Layer Architecture
 
-1. **Primitive Layer (`components/ui/`)**: This is the industrial-styled shadcn-svelte5 primitive library. It is built on top of Bits UI v2 and Tailwind CSS. These components are domain-neutral. They must not contain Bungee domain terms like Route, Service, Upstream, Plugin, or ModelMapping. Every component here is customized immediately to match the carbon and nexus industrial style.
-2. **Semantic & Wrapper Layer (`components/industrial/`)**: This layer contains wrapped, encapsulated B* semantic components. These components are product-specific and can contain Bungee domain logic. All new wrapped components here use the `B*` prefix.
+1. **Primitive Layer (`components/ui/`)**: This is the industrial-styled shadcn-svelte5 primitive library. It uses the Bits UI version pinned by this package and Tailwind CSS. These components are domain-neutral. They must not contain Bungee domain terms like Route, Service, Upstream, Plugin, or ModelMapping. Every component here is customized immediately to match the carbon and nexus industrial style.
+2. **Semantic & Wrapper Layer (`components/industrial/`)**: This layer contains wrapped, encapsulated B* semantic components. These components are product-specific and encapsulate product semantics; business data and API logic belong to domain components. All new wrapped components here use the `B*` prefix.
 3. **Business Layer (`components/domain/`)**: This layer contains business-specific components organized by domain: `route`, `service`, `plugin`, `log`, `config`, and `model-mapping`.
 4. **Shell Layer (`components/shell/`)**: This layer contains layout and shell components like the top bar, navigation, and HUD.
 5. **Charts Layer (`components/charts/`)**: This layer contains chart components like LineChart and MetricBar.
@@ -866,8 +865,7 @@ Before declaring any UI change "done":
 2. **Render in a real browser.** HTTP 200 from `curl` is *not enough*;
    JS errors and i18n races don't show up in HTTP status.
 3. **Use Playwright headless to take a screenshot** of the affected
-   page(s). The probe pattern lives in `/tmp/probe-bungee.mjs` from
-   prior sessions; the gist is:
+   page(s). Use the maintained smoke or package-local browser tests; for a focused check:
    ```js
    const page = await ctx.newPage();
    page.on('pageerror', (e) => errors.push(e.message));
@@ -888,7 +886,7 @@ Before declaring any UI change "done":
 The project uses automated checks to enforce the industrial design system and prevent regressions.
 
 1. **Static Migration Guards**: Run `bun test packages/ui/src/migration-guards.test.ts` to verify that forbidden layers, legacy classes, and unguarded i18n calls are absent. This suite runs automatically on every pull request.
-2. **Playwright Smoke Tests**: Run `bun run test:ui:smoke` to execute browser-based smoke tests. This step is opt-in during CI and is controlled by the environment variable `CI_UI_SMOKE=1`. Set this variable to run the full browser verification suite.
+2. **Playwright Smoke Tests**: Run `bun run test:ui:smoke` to execute browser-based smoke tests. The Linux pull-request CI job starts Vite and runs this check with `--strict-testids` directly. Local commands and output settings are documented in the [development guide](../../../docs/guides/development.md#ui-smoke).
 3. **Style Isolation Guard**: Run `bun test packages/ui/src/style-scope.test.ts`. CI runs it through `bun test`; global styles cannot be added or changed without the documented, reviewed exception described in §3.4.7.
 
 ---
@@ -923,18 +921,10 @@ The project uses automated checks to enforce the industrial design system and pr
 
 ---
 
-## 11. Reference screenshots
+## 11. Reference and integer inputs
 
-The reference visuals that anchor this system are kept under
-`/home/smbshare/` on the maintainer's machine (not committed to the
-repo — they're inspiration, not artefacts). The two anchors:
+The maintained visual reference is `/#/design`, implemented by `src/routes/DesignSystem.svelte`. Repository screenshots illustrate the product; personal inspiration files and session memory are not project dependencies.
 
-- **20:04:20 reference** — original "NEXUS_OS" industrial console
-  inspiration (orange stripe headers, panel tags, KPI strip).
-- **22:57:47 reference** — close-up showing the corner-bracket detail
-  and hover treatment.
+Use `ui/number-input` for bounded integer fields. It accepts ASCII digits only, rejects invalid paste as a whole, and publishes undefined when cleared. Required validation prevents empty submission. Editing may temporarily exceed min/max; blur or Enter clamps and removes leading zeros. Buttons and arrow keys step by one, respect bounds/disabled/readonly, and never submit a form. Preserve text selection, external-value synchronization and spinbutton accessibility. The server still validates integers and ranges.
 
-The implementation in this repo **adapts** that language to Bungee's
-information architecture and terminology; it does **not** copy the
-NEXUS_OS scenario, names, or layout. See `feedback_ui_refactor_scope`
-memory.
+The component check is `NUMBER_INPUT_EVIDENCE_DIR=/tmp/bungee-number-input bun packages/ui/tests/number-input-playwright.ts`; domain ranges belong to the [models-dev contract](../../../plugins/models-dev/README.md).

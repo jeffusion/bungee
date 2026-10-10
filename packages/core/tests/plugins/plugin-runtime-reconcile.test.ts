@@ -118,7 +118,7 @@ describe('plugin runtime reconcile orchestrator', () => {
     mkdirSync(pluginDir, { recursive: true });
     writeRuntimePluginModule(pluginPath, 'runtime-reconcile-plugin', 'v1');
 
-    const orchestrator = new PluginRuntimeOrchestrator(root, undefined, ['runtime-reconcile-plugin']);
+    const orchestrator = new PluginRuntimeOrchestrator(root, ['runtime-reconcile-plugin']);
 
     try {
       const firstApply = await orchestrator.applyConfig(createConfig(pluginPath));
@@ -192,7 +192,7 @@ describe('plugin runtime reconcile orchestrator', () => {
     const pluginPath = join(root, 'runtime-reconcile', 'index.ts');
     writeRuntimePluginModule(pluginPath, 'runtime-reconcile-plugin', 'logical-name', 'ManifestContractPlugin');
 
-    const orchestrator = new PluginRuntimeOrchestrator(root, undefined, ['runtime-reconcile-plugin']);
+    const orchestrator = new PluginRuntimeOrchestrator(root, ['runtime-reconcile-plugin']);
 
     try {
       const result = await orchestrator.applyConfig(createConfig(pluginPath));
@@ -217,7 +217,7 @@ describe('plugin runtime reconcile orchestrator', () => {
     const pluginPath = writeManifestRuntimePlugin(root, pluginName, marker);
     delete (globalThis as Record<string, unknown>)[marker];
 
-    const disabledOrchestrator = new PluginRuntimeOrchestrator(root, undefined, [pluginName]);
+    const disabledOrchestrator = new PluginRuntimeOrchestrator(root, [pluginName]);
     try {
       const disabled = await disabledOrchestrator.applyConfig({
         plugins: [{ name: pluginName, path: pluginPath, enabled: false }],
@@ -231,7 +231,7 @@ describe('plugin runtime reconcile orchestrator', () => {
       await disabledOrchestrator.destroy();
     }
 
-    const activeOrchestrator = new PluginRuntimeOrchestrator(root, undefined, [pluginName]);
+    const activeOrchestrator = new PluginRuntimeOrchestrator(root, [pluginName]);
     try {
       const active = await activeOrchestrator.applyConfig({
         plugins: [{ name: pluginName, path: pluginPath, enabled: true }],
@@ -253,7 +253,7 @@ describe('plugin runtime reconcile orchestrator', () => {
     writeRuntimePluginModule(goodPluginPath, 'runtime-reconcile-plugin', 'v1');
     writeInvalidReplacementModule(badPluginPath, 'runtime-reconcile-plugin');
 
-    const orchestrator = new PluginRuntimeOrchestrator(root, undefined, ['runtime-reconcile-plugin']);
+    const orchestrator = new PluginRuntimeOrchestrator(root, ['runtime-reconcile-plugin']);
 
     try {
       const firstApply = await orchestrator.applyConfig(createConfig(goodPluginPath));

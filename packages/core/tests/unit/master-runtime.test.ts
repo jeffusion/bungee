@@ -88,7 +88,7 @@ function fixture(input: Scenario = {}) {
     expectedPluginCatalogHash: CATALOG_HASH,
     repository: {
       getSnapshot() { calls.push('repository.snapshot'); return SNAPSHOT; },
-      close() { fail('repository.close'); },
+      async close() { fail('repository.close'); },
     },
     coordinator: {
       async recoverAndPublish() { calls.push('coordinator.recover'); return input.recovery?.(serving) ?? null; },
@@ -197,10 +197,8 @@ describe('MasterRuntime startup', () => {
     await runtime.shutdown();
   });
 
-  test('fails closed for nonterminal, fatal, and incomplete recovery outcomes', async () => {
+  test('fails closed for fatal and incomplete recovery outcomes', async () => {
     const recoveries: readonly Scenario['recovery'][] = [
-      () => ({ kind: 'outcome_unknown', fatal: false, code: 'recovery_replacements_failed',
-        error: new Error('retry'), serving: [], pending: [] }),
       () => ({ kind: 'outcome_unknown', fatal: true, code: 'repository_failure',
         error: new Error('fatal'), serving: [], pending: [] }),
       (serving) => recovered(serving.slice(0, 1)),
@@ -239,7 +237,7 @@ describe('MasterRuntime startup', () => {
   test('keeps the management plane alive when current startup is retryable', async () => {
     const { calls, runtime } = fixture({ startup: () => ({ kind: 'startup_failed', failures: [], serving: [] }), admitted: () => [] });
     await runtime.start();
-    expect(calls).toEqual(['coordinator.recover', 'repository.snapshot', 'coordinator.current:4', 'admission.snapshot', 'listener.start']);
+    expect(calls).toEqual(['coordinator.recover', 'repository.snapshot', 'coordinator.current:4', 'admission.snapshot', 'admission.snapshot', 'listener.start']);
     await runtime.shutdown();
   });
 });
@@ -284,7 +282,7 @@ describe('MasterRuntime shutdown', () => {
     if (!(error instanceof AggregateError)) throw new Error('expected aggregate shutdown failure');
     expect(error.errors.map(String)).toEqual([
       'Error: listener.stop failed', 'Error: admission.clear failed', 'Error: ancillary.close failed',
-      'Error: repository.close failed', 'MasterRuntimeError: management listener did not stop; instance lock retained',
+      'Error: repository.close failed', 'MasterRuntimeError: configuration storage did not close; instance lock retained',
     ]);
     expect(calls).toEqual(CLEANUP.slice(0, -1));
   });
@@ -341,7 +339,7 @@ test('cancels startup recovery synchronously before the coordinator gate opens',
   const runtime = new MasterRuntime({
     workerCount: 1,
     expectedPluginCatalogHash: CATALOG_HASH,
-    repository: { getSnapshot() { return SNAPSHOT; }, close() { events.push('repository.close'); } },
+    repository: { getSnapshot() { return SNAPSHOT; }, async close() { events.push('repository.close'); } },
     coordinator: {
       async recoverAndPublish() { return null; },
       async startCurrent() {
@@ -384,4 +382,21 @@ test('cancels startup recovery synchronously before the coordinator gate opens',
   expect(events).not.toContain('pool.shutdown');
   expect(events).toContain('ingress.close');
   expect(events).toContain('lock.release');
+});
+
+
+test('retains usable admitted workers while replacement startup fails', async () => {
+  const {runtime,calls} = fixture({startup:()=>({kind:'startup_failed',failures:[],serving:[]})});
+  await runtime.start();
+  expect(runtime.workerPids).toEqual([7000,7001]);
+  expect(calls).toContain('listener.start');
+  expect(calls).not.toContain('pool.shutdown');
+  await runtime.shutdown();
+});
+test('nonfatal unknown data recovery keeps management available and preserves existing workers', async () => {
+  const {runtime,calls} = fixture({recovery:()=>({kind:'outcome_unknown',fatal:false,code:'recovery_replacements_failed',error:new Error('retry'),serving:[],pending:[]})});
+  await runtime.start();
+  expect(runtime.workerPids).toEqual([7000,7001]);
+  expect(calls).toContain('listener.start');
+  await runtime.shutdown();
 });

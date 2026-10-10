@@ -23,11 +23,11 @@ function fixture() {
   const repository: any = {
     getSnapshot: () => ({ revision: 1, content_hash: HASH,
       aggregate: { logical_configuration: { auth: { enabled: true, tokens: [TOKEN] } }, plugin_activations: [] } }),
-    getActivePublication: () => null,
-    getOperationState: () => ({ operation: { state: 'degraded', error_code: 'replacement_convergence_failed', committed_revision: 1 }, workers: [] }),
-    getCurrentOperationState: () => ({ operation: { state: 'degraded', error_code: 'replacement_convergence_failed', committed_revision: 1 }, workers: [] }),
-    getCurrentRecovery: () => recovery,
-    getRecovery: (id: string) => recoveries.get(id) ?? null,
+    getActivePublication: async () => null,
+    getOperationState: async () => ({ operation: { state: 'degraded', error_code: 'replacement_convergence_failed', committed_revision: 1 }, workers: [] }),
+    getCurrentOperationState: async () => ({ operation: { state: 'degraded', error_code: 'replacement_convergence_failed', committed_revision: 1 }, workers: [] }),
+    getCurrentRecovery: async () => recovery,
+    getRecovery: async (id: string) => recoveries.get(id) ?? null,
   };
   const credential = createManagementAuthFixture(() => repository.getSnapshot().aggregate);
   credentials.push(credential); TOKEN = credential.current.token;

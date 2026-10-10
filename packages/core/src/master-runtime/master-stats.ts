@@ -10,7 +10,7 @@ import { initializeAccessDatabaseConnection } from '../access-database';
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' } as const;
 
-const DATABASE_STATS_PATHS = new Set([
+export const DATABASE_STATS_PATHS = new Set([
   '/api/stats',
   '/api/stats/history',
   '/api/stats/history/v2',
@@ -21,7 +21,7 @@ const DATABASE_STATS_PATHS = new Set([
   '/api/stats/upstream-status-codes',
 ]);
 
-const LOG_PATHS = new Set([
+export const LOG_PATHS = new Set([
   '/api/logs', '/api/logs/stream', '/api/logs/export', '/api/logs/stats',
   '/api/logs/stats/timeseries', '/api/logs/cleanup', '/api/logs/cleanup/config',
 ]);
@@ -29,9 +29,13 @@ const LOG_PATHS = new Set([
 export interface MasterStatsApi {
   matches(path: string): boolean;
   handle(request: Request): Promise<Response>;
-  /** Shared master DB handle for staged plugin-storage wiring. */
-  getDatabase(): Database;
+  /** SQLite leaf/fixture capability; the production IPC facade never exposes it. */
+  observationStorage?(): import('../plugin.types').PluginObservationStorage;
+  registerObservationAdapter?(namespace: string, modulePath: string): Promise<void>;
+  observationAdapter?(namespace: string): Readonly<Record<string, (...args: any[]) => Promise<any>>> | undefined;
+  observe?(namespace: string, operation: string, args: readonly unknown[]): Promise<unknown>;
   activeRequests?(): number;
+  healthy?(): boolean;
   configureLogging?(logging?: MasterLoggingConfig): void;
   startCleanup?(): void;
   close(): Promise<void>;
@@ -72,14 +76,14 @@ export class MasterStatsInitializationError extends AggregateError {
 }
 
 export function hasUnreleasedMasterStatsResource(error: unknown): boolean {
-  return error instanceof MasterStatsInitializationError && error.resourceUnreleased;
+  return error instanceof MasterStatsInitializationError || (typeof error === 'object' && error !== null && 'resourceUnreleased' in error && error.resourceUnreleased === true);
 }
 
 function notFound(): Response {
   return Response.json({ error: 'not_found' }, { status: 404, headers: JSON_HEADERS });
 }
 
-/** Master-owned access-log query, body/header storage and cleanup resources. */
+/** Access-log query, body/header storage and cleanup leaf, owned by the observation Worker. */
 export function createMasterStats(path: string, openDatabase?: MasterStatsDatabaseFactory): MasterStatsApi;
 export function createMasterStats(options: MasterStatsOptions): MasterStatsApi;
 export function createMasterStats(
@@ -209,7 +213,7 @@ export function createMasterStats(
   };
 
   return Object.freeze({
-    getDatabase(): Database { return database!; },
+    observationStorage() { return Object.freeze({withDatabase: <T>(operation: (database: Database) => T): T => operation(database!)}); },
     activeRequests(): number { return activeRequests; },
     configureLogging(logging?: MasterLoggingConfig): void {
       const retentionDays = logging?.body?.retention_days ?? 30;

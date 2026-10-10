@@ -72,7 +72,9 @@ describe('request body limits and error records', () => {
       expect(JSON.parse(row.processing_steps).at(-1).step).toBe('request_body_rejected');
       // Error responses are saved even when the independent log size limit is smaller.
       expect(await bodyStorage.load(row.resp_body_id)).toEqual(responseBody);
-      expect((await headerStorage.load(row.resp_header_id))['content-type']).toStartWith('application/json');
+      const responseHeaders = await headerStorage.load(row.resp_header_id);
+      expect(responseHeaders).not.toBeNull();
+      expect(responseHeaders!['content-type']).toStartWith('application/json');
     }
   }, 15_000);
 

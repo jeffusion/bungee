@@ -3,7 +3,7 @@ import { builtinModules } from 'node:module';
 import { basename, dirname, extname, resolve } from 'node:path';
 import * as ts from 'typescript';
 import { resolveMetafileInputPath } from '../plugin-manifest-catalog/manifest-filesystem';
-import { hashRuntimeIdentity } from '../plugin-manifest-catalog/runtime-identity';
+import { externalRuntimeDependencyIdentity, hashRuntimeIdentity, pluginRuntimeBuildSource } from '../plugin-manifest-catalog/runtime-identity';
 import type { PluginManifestRecord } from '../plugin-manifest-catalog/types';
 import type { ControlPlugin } from './contracts';
 
@@ -64,15 +64,42 @@ function rejectUnlockedDynamicLoads(content: Uint8Array, path: string): void {
   const source = new TextDecoder().decode(content);
   const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, scriptKindFor(path));
   const aliases = new Set<string>(['require']);
+  const unwrap = (expression: ts.Expression): ts.Expression => {
+    while (ts.isParenthesizedExpression(expression) || ts.isAsExpression(expression)
+      || ts.isTypeAssertionExpression(expression) || ts.isNonNullExpression(expression)
+      || ts.isSatisfiesExpression(expression)) expression = expression.expression;
+    return expression;
+  };
+  const isRequireProperty = (expression: ts.Expression): boolean => {
+    const value = unwrap(expression);
+    return ts.isPropertyAccessExpression(value) && value.name.text === 'require'
+      || ts.isElementAccessExpression(value) && isStaticSpecifier(value.argumentExpression)
+        && (value.argumentExpression as ts.StringLiteral).text === 'require';
+  };
+  const isRequireReference = (expression: ts.Expression): boolean => {
+    const value = unwrap(expression);
+    return ts.isIdentifier(value) && aliases.has(value.text) || isRequireProperty(value);
+  };
   let changed = true;
   while (changed) {
     changed = false;
     const collect = (node: ts.Node): void => {
+      if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) && node.initializer !== undefined) {
+        for (const binding of node.name.elements) {
+          const property = binding.propertyName ?? binding.name;
+          if ((ts.isIdentifier(property) || ts.isStringLiteral(property)) && property.text === 'require'
+            && ts.isIdentifier(binding.name) && !aliases.has(binding.name.text)) {
+            aliases.add(binding.name.text); changed = true;
+          }
+        }
+      }
       if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
-        const initializer = node.initializer;
-        const alias = ts.isIdentifier(initializer) && aliases.has(initializer.text)
-          || ts.isPropertyAccessExpression(initializer) && initializer.name.text === 'require';
+        const alias = isRequireReference(node.initializer);
         if (alias && !aliases.has(node.name.text)) { aliases.add(node.name.text); changed = true; }
+      }
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+        && ts.isIdentifier(node.left) && isRequireReference(node.right) && !aliases.has(node.left.text)) {
+        aliases.add(node.left.text); changed = true;
       }
       ts.forEachChild(node, collect);
     };
@@ -81,13 +108,22 @@ function rejectUnlockedDynamicLoads(content: Uint8Array, path: string): void {
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
       const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
-      const isDirectRequire = ts.isIdentifier(node.expression) && node.expression.text === 'require';
-      const isRequireAlias = ts.isIdentifier(node.expression)
-        && aliases.has(node.expression.text)
-        && node.expression.text !== 'require';
-      const isRequireProperty = ts.isPropertyAccessExpression(node.expression)
-        && node.expression.name.text === 'require';
-      if (isRequireAlias || isRequireProperty || (isDynamicImport || isDirectRequire) && !isStaticSpecifier(node.arguments[0])) {
+      const callee = unwrap(node.expression);
+      const requireMethod = ts.isPropertyAccessExpression(callee) ? callee.name.text
+        : ts.isElementAccessExpression(callee) && isStaticSpecifier(callee.argumentExpression)
+          ? (callee.argumentExpression as ts.StringLiteral).text : null;
+      if ((ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee))
+        && isRequireReference(callee.expression)
+        && (requireMethod === null || ['call', 'apply', 'bind'].includes(requireMethod))) {
+        throw new Error(`control artifact has an unlocked dynamic load in ${path}`);
+      }
+      const isDirectRequire = ts.isIdentifier(callee) && callee.text === 'require';
+      const isAliasedRequire = isRequireReference(callee) && !isDirectRequire;
+      const specifier = node.arguments[0];
+      // Bun's generated import.meta.require alias is invisible to its metafile.
+      // Only literal builtins may bypass the bundler's dependency capture.
+      if ((isDynamicImport || isDirectRequire || isAliasedRequire) && !isStaticSpecifier(specifier)
+        || isAliasedRequire && !isBuiltin((specifier as ts.StringLiteral).text)) {
         throw new Error(`control artifact has an unlocked dynamic load in ${path}`);
       }
     }
@@ -117,13 +153,13 @@ function runtimeHash(
   for (const [input, metadata] of Object.entries(inputs).sort(([left], [right]) => left.localeCompare(right))) {
     for (const imported of metadata.imports) {
       const specifier = imported.original ?? imported.path;
-      if (imported.kind === 'dynamic-import' && !isBuiltin(specifier)) {
+      if (imported.kind === 'dynamic-import' && !isBuiltin(imported.path)) {
         throw new Error(`control artifact has an unlocked dynamic import: ${specifier}`);
       }
-      if (imported.external && !isBuiltin(specifier) && (!allowRelativeExternal || !specifier.startsWith('.'))) {
+      if (imported.external && !isBuiltin(imported.path) && (!allowRelativeExternal || !specifier.startsWith('.'))) {
         throw new Error(`control artifact has an unlocked external import: ${specifier}`);
       }
-      if (imported.external) externalDependencies.add(specifier);
+      if (imported.external) externalDependencies.add(externalRuntimeDependencyIdentity(imported));
     }
     const absolute = resolveCapturedInput(input, absWorkingDirectory, bytes);
     const content = bytes.get(absolute);
@@ -159,9 +195,10 @@ export async function loadImmutableControlArtifact(record: PluginManifestRecord)
           setup(builder: { onLoad(options: { filter: RegExp }, callback: (args: { path: string }) => Promise<unknown>): void }) {
             builder.onLoad({ filter: /.*/ }, async ({ path }) => {
               const content = await readFile(path);
-              if (enforceControlPolicy) rejectUnlockedDynamicLoads(content, path);
+              const buildSource = pluginRuntimeBuildSource(path);
+              if (enforceControlPolicy) rejectUnlockedDynamicLoads(buildSource === undefined ? content : new TextEncoder().encode(buildSource), path);
               snapshots.set(resolveMetafileInputPath(path, absWorkingDirectory), content);
-              return { contents: content, loader: loaderFor(path) };
+              return { contents: buildSource ?? content, loader: loaderFor(path) };
             });
           },
         }],
@@ -172,7 +209,7 @@ export async function loadImmutableControlArtifact(record: PluginManifestRecord)
         for (const [input, metadata] of Object.entries(result.metafile.inputs)) {
           for (const imported of metadata.imports) {
             const specifier = imported.original ?? imported.path;
-            if (!imported.external || isBuiltin(specifier) || !specifier.startsWith('.')) continue;
+            if (!imported.external || isBuiltin(imported.path) || !specifier.startsWith('.')) continue;
             const inputPath = resolveCapturedInput(input, absWorkingDirectory, snapshots);
             const candidate = await resolveDependencyFile(resolveMetafileInputPath(specifier, dirname(inputPath)));
             if (candidate === undefined) throw new Error(`control artifact external import cannot be resolved: ${specifier}`);

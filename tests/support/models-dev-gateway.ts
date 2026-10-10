@@ -1,3 +1,4 @@
+import {initializePluginStateFixture} from './plugin-state-fixture';
 /**
  * Isolated real-process gateway fixture for the models-dev catalog chain.
  *
@@ -122,6 +123,7 @@ export async function createModelsDevGatewayFixture(): Promise<GatewayFixture> {
     await writeFile(join(root, 'config.json'), '{invalid json', 'utf8');
     const repository = ConfigRepository.open(join(root, 'data', 'bungee.db'));
     repository.close();
+    await initializePluginStateFixture(join(root, 'data', 'bungee.db'));
     return {
       root,
       configDbPath: join(root, 'data', 'bungee.db'),
@@ -238,7 +240,8 @@ export async function waitForHealth(master: OwnedMaster, port: number, fixture: 
       }
       try {
         const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(500) });
-        return response.status === 200 && await response.text() === '{"status":"ok"}';
+        const health = await response.json() as {live?: boolean; management?: boolean};
+      return response.status === 200 && health.live === true && health.management === true;
       } catch { return false; }
     }, 'management health did not become ready', SETUP_TIMEOUT_MS);
     await waitUntil(async () => {

@@ -15,7 +15,6 @@
 import { logger } from '../../logger';
 import { PluginRegistry } from '../../plugin-registry';
 import type { AppConfig } from '@jeffusion/bungee-types';
-import type { Database } from 'bun:sqlite';
 import {
   PluginRuntimeOrchestrator,
   type PluginRuntimeOrchestratorApplyResult,
@@ -69,7 +68,6 @@ export async function initializePluginRuntime(
   config: AppConfig,
   options: {
     basePath?: string;
-    db?: Database;
     activatedPluginNames?: readonly string[];
     /** Canonical worker service host shared with the host RPC adapter. */
     services?: PluginServiceHost;
@@ -81,7 +79,6 @@ export async function initializePluginRuntime(
 
   pluginRuntimeOrchestrator = new PluginRuntimeOrchestrator(
     options.basePath ?? process.cwd(),
-    options.db,
     options.activatedPluginNames ?? [],
     options.services,
     options.beforeBootstrap,

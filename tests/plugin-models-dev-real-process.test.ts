@@ -1,3 +1,4 @@
+import {pluginStateFixturePath} from './support/plugin-state-fixture';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { Database } from 'bun:sqlite';
@@ -157,7 +158,7 @@ describe('models-dev catalog real-process integration (explicit chain activation
       // Persist models-dev settings (no auto download) through a separate connection,
       // exactly as the control owner would. No alias yet: the first attempt must be
       // metered best-effort with an UNKNOWN price.
-      const db = new Database(currentFixture.accessDbPath);
+      const db = new Database(pluginStateFixturePath(currentFixture.configDbPath));
       try {
         const settings = new SQLitePluginStorage(db, 'models-dev');
         await settings.set(MODELS_DEV_SETTINGS_KEY, { autoRefresh: false, intervalHours: 24, timeoutSeconds: 30 });
@@ -201,6 +202,8 @@ describe('models-dev catalog real-process integration (explicit chain activation
 
       // Proxy still serves and meters best-effort; price is unknown, never 0.
       await postChat(proxy, currentFixture, 'fixture-client-model');
+      await waitUntil(async () => (await getStats(management, currentFixture)).upstreamAttempts >= 1,
+        'the observation worker did not commit the first metered attempt', 10_000);
       const emptyStats = await getStats(management, currentFixture);
       expect(emptyStats).toMatchObject({ upstreamAttempts: 1, totalInputTokens: 17 });
       expect(emptyStats.estimatedCostUsd).toBeNull();
@@ -249,6 +252,8 @@ describe('models-dev catalog real-process integration (explicit chain activation
       // An unaliased model on an unprovable localhost URL stays unknown and never adds
       // a guessed or zero cost.
       await postChat(proxy, currentFixture, 'glm-5.3');
+      await waitUntil(async () => (await getStats(management, currentFixture)).upstreamAttempts >= pricedStats.upstreamAttempts + 1,
+        'the observation worker did not commit the unknown-price attempt', 10_000);
       const afterUnknown = await getStats(management, currentFixture);
       expect(afterUnknown.upstreamAttempts).toBeGreaterThanOrEqual(pricedStats.upstreamAttempts + 1);
       expect(afterUnknown.estimatedCostUsd).toBeCloseTo(pricedStats.estimatedCostUsd!, 12);
@@ -388,12 +393,21 @@ async function getClientModels(management: string, fixture: GatewayFixture, sear
 }
 
 async function postChat(proxy: string, fixture: GatewayFixture, model: string): Promise<void> {
+  const attempts = (): number => {
+    const database = new Database(fixture.accessDbPath, { readonly: true });
+    try { return database.query<{count:number}, []>('SELECT COUNT(*) AS count FROM token_stats_attempts').get()!.count; }
+    finally { database.close(); }
+  };
+  const before = attempts();
   const result = await requestJson(`${proxy}/v1/chat/completions`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ model, messages: [{ role: 'user', content: 'chain fixture request' }] }),
   }, fixture);
   if (result.response.status !== 200) throw new Error(`gateway POST returned ${result.response.status}: ${scrub(result.text, fixture)}`);
   expect(result.body).toMatchObject({ usage: { prompt_tokens: 17, completion_tokens: 7 } });
+  // Response completion and observer persistence are independent. All later
+  // aggregate assertions must begin after this real attempt has been committed.
+  await waitUntil(async () => attempts() >= before + 1, 'the observation worker did not persist the proxied attempt', 10_000);
 }
 
 /** Real proxy traffic every second until the alias is priced by a reconciled worker. */

@@ -6,7 +6,7 @@
 
 GET/PUT `/keys/:keyId`；PUT body 是策略本身或 null。可信 management subject 必须在 API context 内。Host 先按 capability 授权，再调用插件。
 
-- key-access：`{services: string[]|null, routes: string[]|null, models: string[]|null}`。非空数组，同维度 OR，跨维度 AND；model 最终值精确匹配。
+- key-access：`{services: string[]|null, routes: string[]|null, models: string[]|null}`。非空数组，同维度 OR，跨维度 AND；model 匹配最终值，区分大小写并支持 `*` 通配符，无通配符时精确匹配。
 - key-rate-limit：`{rps: positiveFiniteNumber, burst: positiveSafeInteger}`。
 - token-budget：`{mode: "daily"|"weekly"|"monthly"|"cumulative", unit?: "tokens"|"usd", limit: number}`。未提供 unit 保持旧 Token 策略原值；Token 额度为正安全整数，USD 额度用美元输入，最多六位小数且必须为正，转换为安全整数 nanoUSD（1 USD = 1,000,000,000 nanoUSD）。
 

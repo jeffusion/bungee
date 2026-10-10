@@ -2,8 +2,11 @@
 
 ## Start
 
+Set a stable, privately stored `BUNGEE_PLUGIN_SECRETS_KEY`, then initialize storage and start:
+
 ```bash
 docker compose build
+docker compose run --rm --no-deps bungee bun packages/core/dist/main.js --initialize-config /usr/app/data/bungee.db
 docker compose up -d
 docker compose ps
 docker compose logs -f bungee
@@ -23,10 +26,10 @@ for LAN access. If authentication is disabled, the management surface is anonymo
 The container health check queries the internal management listener. To run the same check without publishing management port `8089` to the host:
 
 ```bash
-docker compose exec bungee sh -c 'wget -qO- "http://127.0.0.1:${BUNGEE_MANAGEMENT_PORT:-8089}/health"'
+docker compose exec bungee sh -c 'wget -qO- "http://127.0.0.1:${BUNGEE_MANAGEMENT_PORT:-8089}/health/management"'
 ```
 
-Authentication is controlled by the stored global configuration. When authentication is disabled, management access is anonymous. When authentication is enabled, management requests require a configured token.
+Management is anonymous unless a ManagementProvider is selected. The local-accounts plugin supplies administrator Cookie/Bearer sessions; proxy API Keys are a separate plugin capability. A failed selected provider does not restore anonymous access.
 
 ## Persistence
 
@@ -34,10 +37,10 @@ The supplied compose file persists exactly two volumes:
 
 | Volume | Container path | Contents |
 |---|---|---|
-| `data` | `/usr/app/data` | `bungee.db` configuration revisions |
+| `data` | `/usr/app/data` | `bungee.db` configuration and `plugin-state.db` plugin state/secrets |
 | `logs` | `/usr/app/logs` | `access.db` telemetry |
 
-No JSON/YAML configuration file is mounted or read. `bungee.db` and `access.db` are separate databases; runtime lock files are separate from both and must not be deleted while Bungee is running. Stop the service before copying the databases for a consistent backup.
+No JSON/YAML configuration file is mounted or read. Configuration, plugin state and telemetry are separate databases; runtime lock files are separate from them and must not be deleted while Bungee is running. Stop the entire instance before backing up data/logs and their SQLite side files; preserve the stable encryption key as well.
 
 ## Environment
 
@@ -54,7 +57,7 @@ No JSON/YAML configuration file is mounted or read. `bungee.db` and `access.db` 
 | `BUNGEE_CONFIG_DB_PATH` | `/usr/app/data/bungee.db` | Absolute configuration DB path |
 | `BUNGEE_ACCESS_DB_PATH` | `/usr/app/logs/access.db` | Absolute telemetry DB path |
 
-Standalone Docker deployments must inject `BUNGEE_PLUGIN_SECRETS_KEY` and keep it stable. This key is separate from authentication, which is stored in `logical_configuration.auth`. Never publish the private master control listener.
+Standalone Docker deployments must inject `BUNGEE_PLUGIN_SECRETS_KEY` and keep it stable. This key is separate from administrator authentication and proxy API Keys. Never publish the private master control listener.
 
 ## Operations
 
@@ -64,4 +67,4 @@ docker compose restart bungee
 docker compose down
 ```
 
-Configuration is managed through the Dashboard or versioned API snapshots. See [Configuration](docs/configuration.md) and [Deployment](docs/deployment.md).
+Configuration is managed through the Dashboard or versioned API snapshots. See [Configuration](./docs/reference/configuration.md) and [Deployment](./docs/guides/deployment.md).

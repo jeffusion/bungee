@@ -199,7 +199,8 @@ export class MasterRuntime {
           && recovered.serving.length === 0) return await this.startCurrent();
         throw new MasterRuntimeError('startup_incomplete', 'recovery did not produce a complete serving set', recovered);
       case 'outcome_unknown':
-        throw new MasterRuntimeError('startup_incomplete', `recovery outcome does not permit startup (${recovered.code})`, recovered);
+        if (recovered.fatal) throw new MasterRuntimeError('startup_incomplete', `fatal recovery outcome (${recovered.code})`, recovered);
+        return this.retainedServing();
       default: {
         const unhandled: never = recovered;
         throw new MasterRuntimeError('startup_incomplete', 'unhandled recovery outcome', unhandled);
@@ -216,14 +217,20 @@ export class MasterRuntime {
     if ((outcome.kind === 'startup_ready' || outcome.kind === 'startup_degraded')
       && outcome.serving.length === this.options.workerCount) {
       if (outcome.kind === 'startup_degraded' && outcome.error_code !== 'old_worker_drain_failed') {
-        return { serving: [], recoveryOnly: true };
+        return this.retainedServing();
       }
       return { serving: outcome.serving, recoveryOnly: false };
     }
     if (outcome.kind === 'startup_failed'
       || (outcome.kind === 'startup_degraded' && (outcome.error_code === 'control_readiness_failed'
-        || outcome.error_code === 'admission_outcome_unknown'))) return { serving: [], recoveryOnly: true };
+        || outcome.error_code === 'admission_outcome_unknown'))) return this.retainedServing();
     throw new MasterRuntimeError('startup_incomplete', 'current snapshot did not produce a complete serving set', outcome);
+  }
+
+  private retainedServing(): ServingResolution {
+    const serving = this.options.admission.snapshot();
+    return serving.length === this.options.workerCount && admissionIsPoolOwned(serving, this.options.workerPool)
+      ? {serving,recoveryOnly:false} : {serving:[],recoveryOnly:true};
   }
 
   private async finishShutdown(reason?: MasterRuntimeError): Promise<void> {

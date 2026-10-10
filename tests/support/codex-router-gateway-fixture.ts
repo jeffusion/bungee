@@ -1,3 +1,4 @@
+import {initializePluginStateFixture, pluginStateFixturePath} from './plugin-state-fixture';
 /** Actual daemon/worker plugins; only the external catalog data is a fixed fixture. */
 import {Database} from 'bun:sqlite';
 import {cp, mkdir, rm, writeFile} from 'node:fs/promises';
@@ -35,6 +36,7 @@ export async function createCodexRouterGatewayFixture(): Promise<GatewayFixture>
     await writeFile(join(root, 'config.json'), '{invalid json');
     const configDbPath = join(root, 'data', 'bungee.db');
     ConfigRepository.open(configDbPath).close();
+    await initializePluginStateFixture(configDbPath);
     const accessDbPath = join(root, 'logs', 'access.db');
     return {root, configDbPath, accessDbPath, pluginsPath, pluginSecretsKey: randomBytes(32).toString('base64')};
   } catch (error) {await rm(root, {recursive: true, force: true}); throw error;}
@@ -42,15 +44,14 @@ export async function createCodexRouterGatewayFixture(): Promise<GatewayFixture>
 
 /** Seed after master creates observation tables, before activating any catalog consumer. */
 export async function seedCodexRouterCatalog(fixture: GatewayFixture): Promise<void> {
-    const accessDb = new Database(fixture.accessDbPath);
-    const configDb = new Database(fixture.configDbPath);
+    const configDb = new Database(pluginStateFixturePath(fixture.configDbPath));
     try {
-      await new SQLitePluginStorage(accessDb, 'models-dev').set(MODELS_DEV_SETTINGS_KEY,
+      await new SQLitePluginStorage(configDb, 'models-dev').set(MODELS_DEV_SETTINGS_KEY,
         {autoRefresh: false, intervalHours: 24, timeoutSeconds: 15});
-      const store = new HostSnapshotStore(new PluginCommunicationStore(configDb, undefined, {setup: false}).forNamespace('models-dev'),
+      const store = new HostSnapshotStore(new PluginCommunicationStore(configDb, undefined, {setup: false}).forNamespace('channel.models-dev'),
         {owner: 'models-dev', id: 'models-dev.catalog.v1', schemaVersion: 1, maxVersions: 3});
       store.publish(1, {version: 1, fetchedAt: Date.now(), catalog: {lab: {id: 'lab', name: 'Local protocol fixture', models:
         Object.fromEntries(CODEX_MODELS.map(id => [id, {id, name: id, limit: {context: 200000, output: 4096}, tool_call: true,
           reasoning: id===CODEX_MODELS[1], modalities: {input: ['text'], output: ['text']}, cost: {input: 1, output: 2}}]))}}});
-    } finally {accessDb.close(); configDb.close();}
+    } finally {configDb.close();}
 }

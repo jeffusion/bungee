@@ -139,6 +139,7 @@ export function createControl(context: any) {
       }, {
         crashCommand: { external: { reconcile: () => ({ status: 'unknown' }) } },
         allocate: {
+          atomicReadSet: () => ({keys: ['rpc-probe-allocate']}),
           atomic: (_reader: any, execution: any) => {
             state.plannerRuns += 1;
             const value = ++state.counter;

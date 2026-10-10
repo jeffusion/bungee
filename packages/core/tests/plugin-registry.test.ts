@@ -5,6 +5,7 @@ import type { PluginConfig } from '@jeffusion/bungee-types';
 import * as fs from 'fs';
 import * as path from 'path';
 import { Database } from 'bun:sqlite';
+import { createDatabasePluginStorageFactory } from './helpers/plugin-storage-backend';
 
 // 创建测试用的临时 plugin 文件
 const TEST_PLUGINS_DIR = path.join(import.meta.dir, 'temp-plugins');
@@ -99,7 +100,7 @@ describe('PluginRegistry', () => {
     `);
 
     // 初始化 PluginContextManager
-    initializePluginContextManager(testDb);
+    initializePluginContextManager(createDatabasePluginStorageFactory(testDb));
 
     // 创建临时测试目录
     if (!fs.existsSync(TEST_PLUGINS_DIR)) {

@@ -2,8 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ConfigRepository } from '../../../packages/core/src/config-storage';
-import { createSecretStore } from '../../../packages/core/src/plugin-control/secret-store';
+import { PluginStateClient } from '../../../packages/core/src/plugin-state/client';
 import type { SecretStore, SecretValue } from '../../../packages/core/src/plugin-control/contracts';
 import { AccountStore } from '../server/accounts';
 import { CODEX_REDIRECT_URI } from '../server/oauth';
@@ -35,16 +34,15 @@ const token = (overrides: Partial<CodexTokenSet> = {}): CodexTokenSet => ({
 });
 
 const roots: string[] = [];
-const repositories: ConfigRepository[] = [];
+const clients: PluginStateClient[] = [];
 const material = { keyId: 'accounts-test-key', key: new Uint8Array(32).fill(7) };
 
-function sqliteStore(): SecretStore {
+async function sqliteStore(): Promise<SecretStore> {
   const root = mkdtempSync(join(tmpdir(), 'chatgpt-control-'));
   roots.push(root);
-  const repository = ConfigRepository.open(join(root, 'bungee.db'));
-  repositories.push(repository);
-  const db = (repository as unknown as { db: import('bun:sqlite').Database }).db;
-  return createSecretStore(db, 'chatgpt-oauth', material);
+  const client = await PluginStateClient.open(join(root,'plugin-state.db'),{material,initialize:true});
+  clients.push(client);
+  return client.secretStores.create('chatgpt-oauth');
 }
 
 class DelayedStore implements SecretStore {
@@ -62,8 +60,8 @@ class DelayedStore implements SecretStore {
   delete(key: string, version: number): Promise<void> { return this.inner.delete(key, version); }
 }
 
-afterEach(() => {
-  for (const repository of repositories.splice(0)) repository.close();
+afterEach(async () => {
+  for (const client of clients.splice(0)) await client.close();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -161,7 +159,7 @@ describe('ChatGPT account aggregate', () => {
   });
 
   test('commit cancellation before the SQLite CAS write prevents persistence', async () => {
-    const store = sqliteStore();
+    const store = await sqliteStore();
     let release!: () => void;
     let entered!: () => void;
     const before = new Promise<void>((resolve) => { release = resolve; });
@@ -183,7 +181,7 @@ describe('ChatGPT account aggregate', () => {
   });
 
   test('a real SQLite CAS may delay its acknowledgement without a false cancel', async () => {
-    const store = sqliteStore();
+    const store = await sqliteStore();
     let releaseAck!: () => void;
     let committed!: () => void;
     const ack = new Promise<void>((resolve) => { releaseAck = resolve; });

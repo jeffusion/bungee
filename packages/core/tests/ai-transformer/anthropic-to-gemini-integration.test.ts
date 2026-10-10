@@ -2,7 +2,7 @@
  * Anthropic to Gemini Integration Tests
  *
  * Tests the complete request-response flow for anthropic-to-gemini transformer
- * Based on specification in docs/ai-provider-conversion.md Section 3.1.2 (Anthropic → Gemini)
+ * Based on specification in docs/reference/ai-protocol-conversion.md Section 3.1.2 (Anthropic → Gemini)
  */
 
 import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';

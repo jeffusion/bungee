@@ -8,14 +8,9 @@ export const MAX_PRICE_MODEL_MAPPINGS = 100;
 
 /** SQLite KV get() is best-effort and hides failures; pricing aliases need strict reads. */
 export async function readPriceModelMappings(storage: PluginStorage): Promise<PriceModelMapping[]> {
-  if (!storage.observation) return parsePriceModelMappings(await storage.get(PRICE_MODEL_MAPPINGS_KEY) ?? []);
-  return storage.observation.withDatabase(db => {
-    const row = db.query<{ value: string; ttl: number | null }, [string, string]>(
-      'SELECT value, ttl FROM plugin_storage WHERE plugin_name = ? AND key = ?',
-    ).get('token-stats', PRICE_MODEL_MAPPINGS_KEY);
-    if (!row || (row.ttl !== null && row.ttl < Math.floor(Date.now() / 1000))) return [];
-    return parsePriceModelMappings(JSON.parse(row.value));
-  });
+  if (!storage.readStrict) throw new Error('token-stats strict storage capability is required');
+  const result = await storage.readStrict(PRICE_MODEL_MAPPINGS_KEY);
+  return parsePriceModelMappings(result.found ? result.value : []);
 }
 
 export function isUnchangedPriceModelMapping(mapping: PriceModelMapping, existing: readonly PriceModelMapping[]): boolean {

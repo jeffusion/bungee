@@ -18,4 +18,4 @@ export { defineRpcService } from '../plugin-services';
 export { RequestRetryAction } from './retry-action';
 export { TOKEN_METERING_SERVICE_ID, TOKEN_METERING_CONTRACT_VERSION, TOKEN_PRICING_SERVICE_ID, TOKEN_PRICING_CONTRACT_VERSION } from '../plugin-services';
 export { TOKEN_STATS_RANGES, TOKEN_STATS_RETENTION_MS, tokenStatsWindow } from '../token-stats-window';
-export type { DurableMutation, DurableRecord, DurableCommand, DurableCommandOptions } from '../plugin-durable-state';
+export type { DurableMutation, DurableRecord, DurableTransactionOptions } from '../plugin-durable-state';

@@ -3,7 +3,7 @@ import { builtinModules } from 'node:module';
 import { dirname, isAbsolute, posix, relative, resolve, sep, win32 } from 'node:path';
 import { parsePluginManifestText } from './manifest-parser';
 import { PluginManifestCatalogError, freezeDeep } from './parse-utils';
-import { hashRuntimeIdentity } from './runtime-identity';
+import { externalRuntimeDependencyIdentity, hashRuntimeIdentity, pluginRuntimeBuildSource } from './runtime-identity';
 import type { PluginManifestRecord, PluginManifestRecordBase } from './types';
 import type { StrictPluginManifest } from './types';
 
@@ -115,7 +115,11 @@ async function runtimeDependencyHash(
       plugins: [{
         name: 'bungee-runtime-identity-capture',
         setup(builder: { onLoad(options: { filter: RegExp }, callback: (args: { path: string }) => Promise<unknown>): void }) {
-          builder.onLoad({ filter: /.*/ }, async ({ path }) => { loaded.set(path, await readFile(path)); });
+          builder.onLoad({ filter: /.*/ }, async ({ path }) => {
+            loaded.set(path, await readFile(path));
+            const contents = pluginRuntimeBuildSource(path);
+            return contents === undefined ? undefined : { contents, loader: 'ts' };
+          });
         },
       }],
     });
@@ -126,7 +130,7 @@ async function runtimeDependencyHash(
     for (const [input, metadata] of Object.entries(result.metafile.inputs)) {
       for (const imported of metadata.imports) {
         const specifier = imported.original ?? imported.path;
-        if (!imported.external || /^(?:node|bun):/.test(specifier) || builtinModules.includes(specifier)) continue;
+        if (!imported.external || /^(?:node|bun):/.test(imported.path) || builtinModules.includes(imported.path)) continue;
         if (!specifier.startsWith('.')) {
           throw new PluginManifestCatalogError(input, `external dependency must be bundled: ${specifier}`);
         }
@@ -152,12 +156,12 @@ async function runtimeDependencyHash(
   for (const [input, metadata] of inputs) {
     for (const imported of metadata.imports) {
       const specifier = imported.original ?? imported.path;
-      if (imported.external && !/^(?:node|bun):/.test(specifier)
-        && !builtinModules.includes(specifier)
+      if (imported.external && !/^(?:node|bun):/.test(imported.path)
+        && !builtinModules.includes(imported.path)
         && !specifier.startsWith('.')) {
         throw new PluginManifestCatalogError(input, `external dependency must be bundled: ${specifier}`);
       }
-      if (imported.external) externalDependencies.add(specifier);
+      if (imported.external) externalDependencies.add(externalRuntimeDependencyIdentity(imported));
     }
     const absolute = resolveInput(input);
     capturedInputs.push({ path: absolute, bytes: loaded.get(absolute) ?? await readFile(absolute) });

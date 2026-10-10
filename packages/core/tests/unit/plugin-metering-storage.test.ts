@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createPluginStorageCapability, SQLitePluginStorage } from '../../src/plugin-storage';
-import { migrations } from '../../src/migrations';
+import { initializeTokenStatsTestDatabase } from '../helpers/token-stats-database';
 import type { TokenStatsAttempt } from '../../src/plugin.types';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 import { tokenStatsWindow } from '../../src/token-stats-window';
@@ -26,7 +26,7 @@ function createStorage(mode: 'memory' | 'file' = 'memory'):
     : new Database(':memory:');
   db.run('PRAGMA foreign_keys = ON');
   db.transaction(() => {
-    for (const migration of migrations) migration.up(db);
+    initializeTokenStatsTestDatabase(db);
   })();
   databases.push({ db, directory });
   return { db, storage: withTokenStatsMetering(new SQLitePluginStorage(db, 'token-stats')), ...(directory ? { directory } : {}) };
@@ -86,36 +86,11 @@ describe('token-stats dashboard storage', () => {
     }
   }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
-  test('migration clears only exact token-stats v2 keys and creates no ledger/aggregate tables', () => {
-    const db = new Database(':memory:');
-    let transactionActive = false;
-    try {
-      db.run('BEGIN TRANSACTION'); transactionActive = true;
-      for (const migration of migrations) {
-        if (migration.version === '005') {
-          const insert = db.query('INSERT INTO plugin_storage (plugin_name, key, value, updated_at) VALUES (?, ?, ?, 0)');
-          insert.run('token-stats', 'token-stats:v2:old', '{}');
-          insert.run('token-stats', 'token-stats:v3:keep', '{}');
-          insert.run('token-stats', 'other:keep', '{}');
-          insert.run('another-plugin', 'token-stats:v2:keep', '{}');
-        }
-        migration.up(db);
-      }
-      db.run('COMMIT'); transactionActive = false;
-      expect(db.query('SELECT plugin_name, key FROM plugin_storage ORDER BY plugin_name, key').all()).toEqual([
-        { plugin_name: 'another-plugin', key: 'token-stats:v2:keep' },
-        { plugin_name: 'token-stats', key: 'other:keep' },
-        { plugin_name: 'token-stats', key: 'token-stats:v3:keep' },
-      ]);
-      const tables = db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name);
-      expect(tables).toContain('token_stats_attempts');
-      expect(tables).not.toContain('token_stats_settlements');
-      expect(tables).not.toContain('token_stats_contributions');
-      expect(tables).not.toContain('token_stats_minute_aggregates');
-    } catch (error) {
-      if (transactionActive) db.run('ROLLBACK');
-      throw error;
-    } finally { db.close(); }
+  test('current baseline creates attempt storage without obsolete aggregate tables', () => {
+    const {db}=createStorage();
+    const tables=db.query<{name:string},[]>("SELECT name FROM sqlite_schema WHERE type='table'").all().map(r=>r.name);
+    expect(tables).toContain('token_stats_attempts');
+    for(const name of ['token_stats_settlements','token_stats_contributions','token_stats_minute_aggregates'])expect(tables).not.toContain(name);
   });
 
   test('stores valid usage zero and represents missing observations as null/unknown', async () => {

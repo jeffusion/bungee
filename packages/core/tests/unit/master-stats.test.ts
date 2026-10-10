@@ -57,8 +57,8 @@ test('uses the runtime-selected journal and synchronous modes for master stats',
   setup.close(true);
 
   const stats = createMasterStats(databasePath);
-  expect(stats.getDatabase().query<{ readonly journal_mode: string }, []>('PRAGMA journal_mode').get()?.journal_mode).toBe(journalMode);
-  expect(stats.getDatabase().query<{ readonly synchronous: number }, []>('PRAGMA synchronous').get()?.synchronous).toBe(journalMode === 'wal' ? 1 : 2);
+  expect(stats.observationStorage!().withDatabase(db=>db.query<{ readonly journal_mode: string }, []>('PRAGMA journal_mode').get()?.journal_mode)).toBe(journalMode);
+  expect(stats.observationStorage!().withDatabase(db=>db.query<{ readonly synchronous: number }, []>('PRAGMA synchronous').get()?.synchronous)).toBe(journalMode === 'wal' ? 1 : 2);
   await stats.close();
 }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 

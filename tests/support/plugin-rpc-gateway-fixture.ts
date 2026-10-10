@@ -1,3 +1,4 @@
+import {initializePluginStateFixture} from './plugin-state-fixture';
 /**
  * Isolated fixture for the real-process plugin RPC gateway acceptance test.
  *
@@ -52,6 +53,7 @@ export async function createRpcGatewayFixture(): Promise<GatewayFixture> {
     await writeFile(join(root, 'config.json'), '{invalid json', 'utf8');
     const repository = ConfigRepository.open(join(root, 'data', 'bungee.db'));
     repository.close();
+    await initializePluginStateFixture(join(root, 'data', 'bungee.db'));
     return {
       root,
       configDbPath: join(root, 'data', 'bungee.db'),

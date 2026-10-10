@@ -244,32 +244,32 @@ class FaultRepository implements ConfigPublicationRepository {
   constructor(private readonly repository: ConfigRepository, private readonly events: string[] = []) {}
 
   getSnapshot(): ReturnType<ConfigRepository['getSnapshot']> { return this.repository.getSnapshot(); }
-  getActivePublication(): ReturnType<ConfigRepository['getActivePublication']> {
+  async getActivePublication(): Promise<ReturnType<ConfigRepository['getActivePublication']>> {
     return this.repository.getActivePublication();
   }
-  beginPublication(...parameters: Parameters<ConfigRepository['beginPublication']>): ReturnType<ConfigRepository['beginPublication']> {
+  async beginPublication(...parameters: Parameters<ConfigRepository['beginPublication']>): Promise<ReturnType<ConfigRepository['beginPublication']>> {
     return this.repository.beginPublication(...parameters);
   }
-  beginWorkerAttempt(...parameters: Parameters<ConfigRepository['beginWorkerAttempt']>): ReturnType<ConfigRepository['beginWorkerAttempt']> {
+  async beginWorkerAttempt(...parameters: Parameters<ConfigRepository['beginWorkerAttempt']>): Promise<ReturnType<ConfigRepository['beginWorkerAttempt']>> {
     this.beginAttemptCalls += 1;
     if (this.beginAttemptFailureAt === this.beginAttemptCalls) throw Object.assign(new Error('injected attempt failure'), { code: 'repository_failure' });
     return this.repository.beginWorkerAttempt(...parameters);
   }
-  beginDrainingRecovery(...parameters: Parameters<ConfigRepository['beginDrainingRecovery']>): ReturnType<ConfigRepository['beginDrainingRecovery']> {
+  async beginDrainingRecovery(...parameters: Parameters<ConfigRepository['beginDrainingRecovery']>): Promise<ReturnType<ConfigRepository['beginDrainingRecovery']>> {
     this.drainingRecoveryCalls += 1;
     return this.repository.beginDrainingRecovery(...parameters);
   }
-  recordWorkerResult(...parameters: Parameters<ConfigRepository['recordWorkerResult']>): ReturnType<ConfigRepository['recordWorkerResult']> {
+  async recordWorkerResult(...parameters: Parameters<ConfigRepository['recordWorkerResult']>): Promise<ReturnType<ConfigRepository['recordWorkerResult']>> {
     this.recordCalls += 1;
     if (this.recordFailureAt === this.recordCalls) throw Object.assign(new Error('injected record failure'), { code: 'repository_failure' });
     return this.repository.recordWorkerResult(...parameters);
   }
-  markDraining(...parameters: Parameters<ConfigRepository['markDraining']>): ReturnType<ConfigRepository['markDraining']> {
+  async markDraining(...parameters: Parameters<ConfigRepository['markDraining']>): Promise<ReturnType<ConfigRepository['markDraining']>> {
     this.events.push('markDraining');
     if (this.markDrainingError !== null) throw this.markDrainingError;
     return this.repository.markDraining(...parameters);
   }
-  finalizePublication(...parameters: Parameters<ConfigRepository['finalizePublication']>): ReturnType<ConfigRepository['finalizePublication']> {
+  async finalizePublication(...parameters: Parameters<ConfigRepository['finalizePublication']>): Promise<ReturnType<ConfigRepository['finalizePublication']>> {
     if (this.finalizeError !== null) throw this.finalizeError;
     return this.repository.finalizePublication(...parameters);
   }
@@ -351,10 +351,12 @@ const PROCESS_OPTIONS = {
 };
 
 class MasterConfigPublicationCoordinator extends BaseMasterConfigPublicationCoordinator {
-  constructor(options: Omit<MasterConfigPublicationCoordinatorOptions, 'pluginCatalogHash' | 'admission'> & {
+  constructor(options: Omit<MasterConfigPublicationCoordinatorOptions, 'pluginCatalogHash' | 'admission' | 'repository'> & {
+    readonly repository: ConfigRepository | ConfigPublicationRepository;
     readonly admission?: WorkerAdmissionController;
   }) {
-    super({ admission: options.admission ?? new FakeAdmissionController(), ...PROCESS_OPTIONS, ...options });
+    super({ admission: options.admission ?? new FakeAdmissionController(), ...PROCESS_OPTIONS, ...options,
+      repository: options.repository instanceof ConfigRepository ? new FaultRepository(options.repository) : options.repository });
   }
 }
 

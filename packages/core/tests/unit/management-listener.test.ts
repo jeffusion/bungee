@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { createManagementListener, handleManagementRequest, mergeManagementRequestSignals } from '../../src/management-listener';
 import { closeForNormalShutdown } from '../../src/master-runtime/runtime-cleanup';
 import type { MasterRuntimeOptions } from '../../src/master-runtime/runtime-contracts';
+import { PLUGIN_STORAGE_RPC_PATH } from '../../src/data-admission/rpc';
 
 function request(path: string): Request {
   return new Request(`http://management.test${path}`);
@@ -44,10 +45,11 @@ describe('management listener routing', () => {
     let controlCalls = 0;
     const response = await handleManagementRequest(request('/health'), {
       profile: 'management',
+      health: () => ({live:true,management:true,data:false,degraded:true}),
       controlApi: { async handle() { controlCalls += 1; return null; } },
     });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ status: 'ok' });
+    expect(await response.json()).toEqual({ status: 'degraded',live:true,management:true,data:false,degraded:true });
     expect(controlCalls).toBe(0);
   });
 
@@ -110,6 +112,19 @@ describe('management listener routing', () => {
     expect((await handleManagementRequest(request('/__bungee/internal/plugin-control/v1'), options)).status).toBe(404);
     expect((await handleManagementRequest(request('/api/config'), options)).status).toBe(404);
     expect((await handleManagementRequest(request('/health'), options)).status).toBe(404);
+  });
+
+  test('master control dispatches only the exact signed storage path', async () => {
+    const calls: string[] = [];
+    const options = {profile:'master-control' as const,controlApi:{async handle(value:Request){calls.push(new URL(value.url).pathname);return new Response('storage');}}};
+    const accepted = await handleManagementRequest(request(PLUGIN_STORAGE_RPC_PATH),options);
+    expect(await accepted.text()).toBe('storage');
+    for (const path of [PLUGIN_STORAGE_RPC_PATH+'/',PLUGIN_STORAGE_RPC_PATH+'/other','/__bungee/internal/plugin-storage/%76%31','/__bungee/internal/plugin-control/v1','/api/config','/health']) {
+      expect((await handleManagementRequest(request(path),options)).status).toBe(404);
+    }
+    expect(calls).toEqual([PLUGIN_STORAGE_RPC_PATH]);
+    expect((await handleManagementRequest(request(PLUGIN_STORAGE_RPC_PATH),{...options,profile:'management'})).status).toBe(404);
+    expect(calls).toEqual([PLUGIN_STORAGE_RPC_PATH]);
   });
 });
 

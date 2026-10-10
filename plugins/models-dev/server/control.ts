@@ -41,8 +41,8 @@ export interface ModelsDevCatalogManagerOptions {
 }
 
 interface CatalogPublisher {
-  publish(version: number, bytes: Uint8Array): void;
-  current(): SnapshotSource | null;
+  publish(version: number, bytes: Uint8Array): Promise<unknown>;
+  current(): Promise<SnapshotSource | null>;
 }
 
 interface ManagerStatus {
@@ -141,14 +141,14 @@ export class ModelsDevCatalogManager {
       this.status.lastError = 'storage';
     }
     try {
-      let source = this.publisher.current();
+      let source = await this.publisher.current();
       // A legacy KV is read ONLY before the first valid snapshot, never as a corruption fallback.
       if (source === null) {
         const legacy = await readCatalogRecord(this.storage);
         if (legacy !== null) {
           buildCatalogIndex(legacy);
-          this.publisher.publish(legacy.version, new TextEncoder().encode(JSON.stringify(legacy)));
-          source = this.publisher.current();
+          await this.publisher.publish(legacy.version, new TextEncoder().encode(JSON.stringify(legacy)));
+          source = await this.publisher.current();
         }
       }
       const record = source === null ? null : await readCatalogSnapshot(source);
@@ -190,7 +190,9 @@ export class ModelsDevCatalogManager {
       ]);
       if (this.stopped) return;
       phase = 'invalid_catalog';
-      const version = (this.publisher.current()?.descriptor.version ?? 0) + 1;
+      const prior = await this.publisher.current();
+      const version = (prior?.descriptor.version ?? 0) + 1;
+      await prior?.release?.();
       if (!Number.isSafeInteger(version)) throw new Error('catalog_version_overflow');
       const fetchedAt = Math.max(this.now(), (this.status.lastSuccessAt ?? -1) + 1);
       const record = { version, fetchedAt, catalog };
@@ -199,7 +201,7 @@ export class ModelsDevCatalogManager {
       const index = buildCatalogIndex(record);
       // The single atomic visibility point includes metadata and catalog bytes.
       phase = 'snapshot';
-      this.publisher.publish(version, new TextEncoder().encode(JSON.stringify(record)));
+      await this.publisher.publish(version, new TextEncoder().encode(JSON.stringify(record)));
       if (this.stopped) return;
       this.view.apply(index, 'ready', null);
       this.status.lastSuccessAt = fetchedAt;
@@ -275,7 +277,7 @@ class ModelsDevControl implements PluginControl {
   readonly rpc = [] as const;
   private disposed = false;
   private readonly manager: ModelsDevCatalogManager;
-  private readonly store: { publish(version: number, body: unknown | Uint8Array): unknown; current(): SnapshotSource | null; version(version: number): SnapshotSource | null };
+  private readonly store: { publish(version: number, body: unknown | Uint8Array): Promise<unknown>; current(): Promise<SnapshotSource | null>; version(version: number): Promise<SnapshotSource | null> };
   private readonly abortListener: () => void;
 
   constructor(private readonly host: ControlHostContext, options?: ModelsDevCatalogManagerOptions) {
@@ -290,7 +292,7 @@ class ModelsDevControl implements PluginControl {
     if (store === null) throw new Error('models-dev requires a durable host snapshot store capability');
     this.store = store;
     this.manager = new ModelsDevCatalogManager(host.storage.uncached?.() ?? host.storage, {
-      publish: (version, bytes) => { store.publish(version, bytes); }, current: () => store.current(),
+      publish: (version, bytes) => store.publish(version, bytes), current: () => store.current(),
     }, options);
     this.abortListener = () => { void this.dispose(); };
     if (host.signal.aborted) this.disposed = true;

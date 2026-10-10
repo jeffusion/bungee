@@ -67,7 +67,7 @@ test('the last mandatory consumer cancels the physical reader once and waits for
   const result=work.catch(error=>error).finally(()=>{settled=true;});
   await tick();expect(snapshotBodyResources().retainedBytes).toBeGreaterThan(before.retainedBytes);controller.abort('consumer deadline');await tick();
   expect(cancelled).toBe(1);expect(settled).toBe(false);
-  unlock();expect((await result).code).toBe('body_consumer_cancelled');
+  unlock();expect(await result).toMatchObject({code:'body_consumer_cancelled'});
   await expect(source.completion).rejects.toMatchObject({code:'body_consumer_cancelled'});
   await tick();expect(input.locked).toBe(false);source.dispose();
   expect(snapshotBodyResources().retainedBytes).toBe(before.retainedBytes);
@@ -80,7 +80,7 @@ test('one mandatory or optional JSON cancellation leaves the other mandatory rea
     const source=new BodySource(input,1024);const handle=controlledBodyHandle(source,input,source.handle());const controller=new AbortController();
     const leaving=handle.json({id:'leaving',mandatory,signal:controller.signal}).catch(error=>error);
     const staying=handle.json({id:'staying',mandatory:true});
-    await tick();controller.abort();expect((await leaving).code).toBe('body_consumer_cancelled');expect(cancelled).toBe(0);
+    await tick();controller.abort();expect(await leaving).toMatchObject({code:'body_consumer_cancelled'});expect(cancelled).toBe(0);
     wire.enqueue(encode('{"usage":7}'));wire.close();expect(await staying).toEqual({usage:7});expect(cancelled).toBe(0);source.dispose();
   }
 });

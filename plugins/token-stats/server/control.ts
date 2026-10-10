@@ -16,6 +16,7 @@ import {
   type GroupByDimension,
 } from './repository';
 import { TOKEN_STATS_RANGES } from '@jeffusion/bungee-core/plugin';
+import { SQLiteTokenStatsMetering } from './storage';
 import { parsePriceModelMappings, isUnchangedPriceModelMapping, type PriceModelOption } from './model-mappings';
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
@@ -275,3 +276,11 @@ export function createControl(context: ControlHostContext): PluginControl {
 }
 
 export default { createControl } satisfies ControlPlugin;
+
+
+/** Trusted catalog adapter. Host invokes this export only inside its access-storage Worker. */
+export function createObservationAdapter(observation: import('@jeffusion/bungee-core/plugin').PluginObservationStorage) {
+  const leaf = new SQLiteTokenStatsMetering(observation);
+  return Object.freeze({recordAttempt: leaf.recordAttempt.bind(leaf), queryWindowSnapshot: leaf.queryWindowSnapshot.bind(leaf),
+    listClientModels: leaf.listClientModels.bind(leaf)});
+}

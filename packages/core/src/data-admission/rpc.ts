@@ -4,6 +4,7 @@ import { createRateLimitCredential, deriveRateLimitDomainKey, signRateLimitDebit
 import type { AdmissionTarget } from '../plugin-extensions';
 import { DataAdmissionError, type AdmissionGrant, type DataAdmissionHost } from './host';
 
+export const PLUGIN_STORAGE_RPC_PATH = '/__bungee/internal/plugin-storage/v1';
 export const DATA_ADMISSION_RPC_PATH = '/__bungee/internal/data-admission/v1';
 const MAX_BYTES = 262_144;
 const digest = (value: unknown) => `rlb-v1:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
@@ -42,7 +43,7 @@ export interface WorkerStateRpcCall { readonly plugin: string; readonly method: 
 export function createSignedWorkerRpcServer(options: {
   transportSecret: string;
   identity: RateLimitIngressIdentity;
-  authorizeWorker(worker: RateLimitWorkerIdentity): string;
+  authorizeWorker(worker: RateLimitWorkerIdentity, operation?: string): string;
   handle(operation: string, payload: unknown, worker: RateLimitWorkerIdentity): Promise<unknown> | unknown;
 }) {
   const credential = createRateLimitCredential(options.transportSecret, options.identity);
@@ -59,7 +60,7 @@ export function createSignedWorkerRpcServer(options: {
       const envelope = object(wire); exact(envelope,['proof','payload']);
       const proof = verifyRateLimitDebitRequest(envelope.proof, credential);
       if (proof.deadline_at < Date.now() || proof.deadline_at > Date.now() + 15000) throw new Error('RPC deadline invalid');
-      if (!['active','retired'].includes(options.authorizeWorker(proof.worker))) throw new DataAdmissionError(403,'worker_not_admitted');
+      if (!['active','retired'].includes(options.authorizeWorker(proof.worker, proof.body.policy_id))) throw new DataAdmissionError(403,'worker_not_admitted');
       if (proof.body.bucket_id !== digest(envelope.payload)) throw new Error('RPC payload signature mismatch');
       const fingerprint = JSON.stringify([proof.worker,proof.body.policy_id,envelope.payload]);
       for (const [id, decision] of decisions) if (decision.expires <= Date.now()) decisions.delete(id);
@@ -71,7 +72,8 @@ export function createSignedWorkerRpcServer(options: {
       const pending = previous?.pending ?? Promise.resolve().then(() => options.handle(proof.body.policy_id, envelope.payload, proof.worker)).finally(() => { pendingOperations--; });
       if (!previous) decisions.set(proof.debit_id,{fingerprint,pending,expires:proof.deadline_at});
       const result = await pending;
-      const body = { requestId: proof.request_id, worker: proof.worker, server: options.identity, result };
+      const body = { requestId: proof.request_id, worker: proof.worker, server: options.identity,
+        result: result === undefined ? null : result };
       return Response.json({body,mac:mac(key,body)});
     } catch (error) {
       return Response.json({ error: error instanceof DataAdmissionError ? error.code : 'invalid_worker_rpc' }, {status: error instanceof DataAdmissionError ? error.status : 400,
@@ -94,6 +96,7 @@ export function createDataAdmissionRpcServer(options: { host: DataAdmissionHost;
 }
 export function createSignedWorkerRpcClient(options: {
   transportSecret: string; worker: RateLimitWorkerIdentity; expectedServer: RateLimitIngressIdentity; url: string;
+  retry?: boolean;
   fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 }) {
   const credential = createRateLimitCredential(options.transportSecret, options.worker);
@@ -104,7 +107,7 @@ export function createSignedWorkerRpcClient(options: {
       body:{bucket_id:digest(payload),policy_id:operation,revision:1,rps:1,burst:1}},credential);
     const wire=JSON.stringify({proof,payload}); if(Buffer.byteLength(wire)>MAX_BYTES) throw new Error('RPC payload too large');
     // Retry the exact operation identity after an uncertain ACK; server returns its original decision.
-    for(let attempt=0;attempt<2;attempt++) {
+    for(let attempt=0;attempt<(options.retry === false ? 1 : 2);attempt++) {
       try {
         const response=await (options.fetch ?? fetch)(options.url,{method:'POST',headers:{'content-type':'application/json'},body:wire,
           signal:signal ? AbortSignal.any([signal,AbortSignal.timeout(1000)]) : AbortSignal.timeout(1000)});
@@ -117,7 +120,7 @@ export function createSignedWorkerRpcClient(options: {
           || Object.entries(options.worker).some(([name,value]) => object(body.worker)[name] !== value)
           || Object.entries(options.expectedServer).some(([name,value]) => object(body.server)[name] !== value)) throw new Error('RPC response identity mismatch');
         return body.result;
-      } catch(error) { if(error instanceof DataAdmissionError || signal?.aborted || attempt===1) throw error; }
+      } catch(error) { if(error instanceof DataAdmissionError || signal?.aborted || attempt===(options.retry === false ? 0 : 1)) throw error; }
     }
   };
 }

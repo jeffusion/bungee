@@ -3,7 +3,7 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { generateWidgetRegistry } from '../../../../../scripts/generate-widget-registry';
+import { generateWidgetRegistry } from '../../../../../scripts/build/generate-widget-registry';
 import { normalizeText } from '../../../../../tests/support/portable-text';
 
 test('real repository generation retains dashboard and settings components with their owners', async () => {

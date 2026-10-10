@@ -6,29 +6,9 @@
  */
 
 import type { PluginInitContext, PluginStorage } from './plugin.types';
-import { createPluginStorageCapability } from './plugin-storage';
+import type { PluginStorageFactory } from './plugin-control/host';
 import { logger as globalLogger } from './logger';
-import type { Database } from 'bun:sqlite';
 import * as path from 'path';
-import type { LRUCacheOptions } from './plugin-storage-cache';
-
-/**
- * Storage缓存配置
- */
-export interface StorageCacheConfig {
-  enabled: boolean;
-  maxSize?: number;
-  writeDelay?: number;
-  writeBatchSize?: number;
-}
-
-// 默认缓存配置
-const DEFAULT_CACHE_CONFIG: StorageCacheConfig = {
-  enabled: true,
-  maxSize: 1000,
-  writeDelay: 1000,
-  writeBatchSize: 10,
-};
 
 /**
  * 扩展的Plugin初始化上下文
@@ -111,35 +91,10 @@ export class PluginContextManager {
   private contexts: Map<string, ExtendedPluginInitContext> = new Map();
   private revocations = new Map<string, () => void>();
 
-  /**
-   * 数据库实例
-   */
-  private db: Database;
+  private constructor(private readonly storageFactory?:PluginStorageFactory) {}
 
-  /**
-   * Storage缓存配置
-   */
-  private cacheConfig: StorageCacheConfig;
-
-  private constructor(db: Database, cacheConfig?: Partial<StorageCacheConfig>) {
-    this.db = db;
-    this.cacheConfig = { ...DEFAULT_CACHE_CONFIG, ...cacheConfig };
-    globalLogger.info(
-      { cacheConfig: this.cacheConfig },
-      'PluginContextManager cache configuration'
-    );
-  }
-
-  /**
-   * 获取单例实例
-   */
-  static getInstance(
-    db: Database,
-    cacheConfig?: Partial<StorageCacheConfig>
-  ): PluginContextManager {
-    if (!PluginContextManager.instance) {
-      PluginContextManager.instance = new PluginContextManager(db, cacheConfig);
-    }
+  static getInstance(storageFactory?:PluginStorageFactory):PluginContextManager {
+    if (!PluginContextManager.instance) PluginContextManager.instance=new PluginContextManager(storageFactory);
     return PluginContextManager.instance;
   }
 
@@ -161,21 +116,9 @@ export class PluginContextManager {
       return this.contexts.get(pluginName)!;
     }
 
-    // 创建新的context
-    // 根据配置决定是否启用缓存
-    const cacheOptions: LRUCacheOptions | undefined = this.cacheConfig.enabled
-      ? {
-          maxSize: this.cacheConfig.maxSize!,
-          writeDelay: this.cacheConfig.writeDelay,
-          writeBatchSize: this.cacheConfig.writeBatchSize,
-        }
-      : undefined;
-
-    const { storage, revoke } = createPluginStorageCapability(
-      this.db,
-      pluginName,
-      cacheOptions
-    );
+    if (!this.storageFactory) throw new Error('plugin_state_storage_capability_unavailable');
+    const storage=this.storageFactory.create(pluginName);
+    const revoke=()=>this.storageFactory!.revoke(storage);
     const pluginLogger = globalLogger.child({ plugin: pluginName });
     const extensionPath = path.dirname(pluginPath);
 
@@ -193,7 +136,7 @@ export class PluginContextManager {
     this.revocations.set(pluginName, revoke);
 
     globalLogger.debug(
-      { pluginName, extensionPath, cacheEnabled: cacheOptions !== undefined },
+      { pluginName, extensionPath, storage: 'async-ipc' },
       'Created plugin context'
     );
 
@@ -284,8 +227,8 @@ export class PluginContextManager {
  */
 let globalContextManager: PluginContextManager | null = null;
 
-export function initializePluginContextManager(db: Database): void {
-  globalContextManager = PluginContextManager.getInstance(db);
+export function initializePluginContextManager(storageFactory?:PluginStorageFactory): void {
+  globalContextManager = PluginContextManager.getInstance(storageFactory);
   globalLogger.info('Plugin context manager initialized');
 }
 

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { SQLitePluginStorage } from '../packages/core/src/plugin-storage';
 import { withTokenStatsMetering } from '../plugins/token-stats/server/storage';
-import { migrations } from '../packages/core/src/migrations';
+import { initializeTokenStatsTestDatabase } from '../packages/core/tests/helpers/token-stats-database';
 import type { TokenStatsAttempt } from '../packages/core/src/plugin.types';
 
 const TIMEOUT_MS = 20_000;
@@ -86,7 +86,7 @@ async function initializeDatabase(databasePath: string): Promise<void> {
     db.run('PRAGMA journal_mode = WAL');
     db.run('PRAGMA busy_timeout = 5000');
     db.transaction(() => {
-      for (const migration of migrations) migration.up(db);
+      initializeTokenStatsTestDatabase(db);
     })();
   } finally { db.close(); }
 }

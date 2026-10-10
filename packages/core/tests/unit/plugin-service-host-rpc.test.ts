@@ -1123,3 +1123,63 @@ describe('application-owned command transaction', () => {
     expect((await rejection(independent.record.reconcile('own-ledger',null))).code).toBe('capability_unavailable');
   });
 });
+
+describe('Host RPC production storage outcome and cleanup separation',()=>{
+  test('real Worker commit with lost ACK remains unknown through Host RPC cleanup and replay does not replan',async()=>{
+    const {mkdtempSync,rmSync}=await import('node:fs');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+    const {PluginStateClient}=await import('../../src/plugin-state/client');
+    const {createPluginPeerJournalResolver}=await import('../../src/plugin-services/peer-journal');
+    const dir=mkdtempSync(join(tmpdir(),'host-rpc-production-crash-')),file=join(dir,'lost-ack.db');
+    const resourceFailures:string[]=[];const cleanupFailures:{operationId:string;code:string}[]=[];const cleanup=gate();
+    let storage=await PluginStateClient.open(file,{initialize:true,workerUrl:new URL('../fixtures/plugin-state-fault-worker.ts',import.meta.url),
+      onWorkerFailure:error=>{resourceFailures.push(error.code);}});
+    let resolver=createPluginPeerJournalResolver({client:storage});
+    let plans=0,business=0;
+    const configure=()=>{
+      const adapter=new HostRpcAdapter({process:'worker',resolvePlacement:()=>null,resolveCallee:()=>null,resolveJournal:resolver.resolve,
+        onJournalCleanupFailure:failure=>{cleanupFailures.push(failure);cleanup.open();}});
+      const provider=owner(adapter,'provider',PROVIDES),consumer=owner(adapter,'consumer',CONSUMES);
+      publisher(provider,fullHandlers({add:()=>{business++;return {count:999};}}),{add:{atomicReadSet:()=>({keys:['count']}),atomic:(reader:any)=>{
+        plans++;const old=reader.get('count');const count=(old?.value?.count??0)+1;
+        return {mutations:[{key:'count',expectedVersion:old?.version??0,value:{count}}],result:{count}};
+      }}});
+      markReady(provider);markReady(consumer);return {adapter,client:consumers(consumer)};
+    };
+    let configured=configure();
+    try{
+      const error=await rejection(configured.client.add({amount:1},{operationId:'host-original-lost-ack'}));
+      expect(error).toMatchObject({code:'unknown',operationId:'host-original-lost-ack'});
+      await cleanup.promise;
+      expect(cleanupFailures).toEqual([{code:'worker_failed',operationId:'host-original-lost-ack'}]);
+      expect(resourceFailures).toEqual(['worker_failed']);expect([plans,business]).toEqual([1,0]);
+      await configured.adapter.dispose();await resolver.close();await storage.close().catch(()=>undefined);
+      storage=await PluginStateClient.open(file);resolver=createPluginPeerJournalResolver({client:storage});configured=configure();
+      expect(await configured.client.add.queryResult('host-original-lost-ack')).toEqual({count:1});
+      expect(await configured.client.add({amount:1},{operationId:'host-original-lost-ack'})).toEqual({count:1});
+      expect([plans,business]).toEqual([1,0]);
+      expect((await storage.durableState('provider').get('count'))?.version).toBe(1);
+    }finally{await configured.adapter.dispose();await resolver.close();await storage.close().catch(()=>undefined);rmSync(dir,{recursive:true,force:true});}
+  });
+  test('an acknowledged command returns before silent cleanup expires, and resource failure is reported separately',async()=>{
+    const {mkdtempSync,rmSync}=await import('node:fs');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+    const {PluginStateClient}=await import('../../src/plugin-state/client');
+    const {createPluginPeerJournalResolver}=await import('../../src/plugin-services/peer-journal');
+    const dir=mkdtempSync(join(tmpdir(),'host-rpc-cleanup-timeout-')),file=join(dir,'silent-release.db');
+    const resourceFailures:string[]=[];const cleanupFailures:{operationId:string;code:string}[]=[];const cleanup=gate();
+    const storage=await PluginStateClient.open(file,{initialize:true,requestTimeoutMs:400,
+      workerUrl:new URL('../fixtures/plugin-state-fault-worker.ts',import.meta.url),onWorkerFailure:error=>{resourceFailures.push(error.code);}});
+    const resolver=createPluginPeerJournalResolver({client:storage});
+    const adapter=new HostRpcAdapter({process:'worker',limits:{hardDeadlineMs:150},resolvePlacement:()=>null,resolveCallee:()=>null,
+      resolveJournal:resolver.resolve,onJournalCleanupFailure:failure=>{cleanupFailures.push(failure);cleanup.open();throw Error('reporter must not overwrite');}});
+    const provider=owner(adapter,'provider',PROVIDES),consumer=owner(adapter,'consumer',CONSUMES);
+    publisher(provider,fullHandlers(),{add:{atomicReadSet:()=>({keys:[]}),atomic:()=>({mutations:[],result:{count:7}})}});
+    markReady(provider);markReady(consumer);
+    try{
+      expect(await consumers(consumer).add({amount:1},{operationId:'acknowledged-before-cleanup'})).toEqual({count:7});
+      expect(cleanupFailures).toEqual([]);await cleanup.promise;
+      expect(cleanupFailures).toEqual([{code:'request_timeout',operationId:'acknowledged-before-cleanup'}]);
+      expect(resourceFailures).toEqual(['request_timeout']);
+      await expect(storage.close()).rejects.toMatchObject({code:'request_timeout'});
+    }finally{await adapter.dispose();await resolver.close();await storage.close().catch(()=>undefined);rmSync(dir,{recursive:true,force:true});}
+  });
+});

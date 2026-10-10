@@ -40,7 +40,7 @@ It combines hot configuration reloads, multi-process execution, plugin-based req
 ### Why Bungee?
 
 - **Developer-native**: Configure and extend gateway behavior in TypeScript-friendly workflows.
-- **Production-ready**: Multi-worker architecture, structured logging, health checks, and failover support.
+- **Operational controls**: Multi-worker architecture, structured logging, health checks, and failover support.
 - **Extensible by design**: Plugin system for hooks, APIs, dashboard widgets, and AI provider format conversion.
 
 ---
@@ -49,7 +49,7 @@ It combines hot configuration reloads, multi-process execution, plugin-based req
 
 | Area | Highlights |
 |---|---|
-| **Runtime & Performance** | Bun runtime, multi-worker architecture, zero-downtime reload |
+| **Runtime & Performance** | Bun runtime, multi-worker architecture, rolling configuration publication |
 | **Traffic Control** | Route/upstream layering, load balancing, failover, health checks |
 | **Transformation** | Expression engine, request/response mutation, streaming transform support |
 | **Operations** | Web dashboard, CLI daemon management, structured logging, Docker support |
@@ -151,7 +151,7 @@ Bungee ships with a built-in **industrial dark dashboard** — a single control 
 ![Bungee configuration center — system settings, auth, logging, cleanup, and runtime operations](docs/showcase/bungee-07-config.png)
 
 - System settings: port, worker count, log level, body size limit.
-- Management listening, body logging, max body size and retention days; anonymous management and public routes by default, with optional single-administrator authentication and Key access control described in the [authentication guide](docs/authentication.md).
+- Management listening, body logging, max body size and retention days; anonymous management and public routes by default, with optional single-administrator authentication and Key access control described in the [authentication guide](./docs/guides/authentication.md).
 - Manual log cleanup and revisioned configuration editing from one panel.
 
 </details>
@@ -188,20 +188,20 @@ Documentation index: [docs/README.md](docs/README.md)
 
 ### Start Here
 
-- [Authentication And Access Control](docs/authentication.md)
-- [Configuration Guide](docs/configuration.md)
-- [Core Capabilities](docs/core-capabilities.md)
-- [Architecture](docs/architecture.md)
-- [Web Dashboard](docs/dashboard.md)
-- [CLI Reference](docs/cli.md)
-- [Deployment (Docker)](docs/deployment.md)
-- [Development Guide](docs/development.md)
+- [Authentication And Access Control](./docs/guides/authentication.md)
+- [Configuration Guide](./docs/reference/configuration.md)
+- [Core Capabilities](./docs/architecture/core-capabilities.md)
+- [Architecture](./docs/architecture/runtime.md)
+- [Web Dashboard](./docs/guides/dashboard.md)
+- [CLI Reference](./docs/reference/cli.md)
+- [Deployment (Docker)](./docs/guides/deployment.md)
+- [Development Guide](./docs/guides/development.md)
 
 ### Advanced Topics
 
-- [Plugin System](docs/plugin-system.md)
-- [Plugin Development](docs/plugin-development.md)
-- [AI Provider Conversion](docs/ai-provider-conversion.md)
+- [Plugin System](./docs/reference/plugin-api.md)
+- [Plugin Development](./docs/guides/plugin-development.md)
+- [AI Provider Conversion](./docs/reference/ai-protocol-conversion.md)
 
 ---
 
@@ -222,34 +222,38 @@ npx bungee status
 
 ### Configuration model
 
-CLI installations persist runtime configuration in `~/.bungee/data/bungee.db` and
-access logs in `~/.bungee/logs/access.db`. `start` does not read a JSON config file.
+CLI installations persist configuration in `~/.bungee/data/bungee.db`, plugin state
+and secrets in `~/.bungee/data/plugin-state.db`, and access logs in `~/.bungee/logs/access.db`. `start` does not read a JSON config file.
 
 Bungee uses a revisioned configuration aggregate:
 
 - Reusable backend pools live under `services[].endpoints`
-- Routes usually reference a service with `service`
+- Persisted routes reference a service UUID with `service_id`
 - Config fields use snake_case, such as `body_parser_limit`, `path_rewrite`, and `retry_on`
 - **Route** owns: path matching and request processing (transformer, headers, body, `timeouts.request_ms`, rate_limit, cors)
-- **Service** owns: endpoints, `load_balancing`, `health_check`, `failover`, `timeouts` (`connect_ms`/`send_ms`/`read_ms`)
+- **Service** owns: endpoints, `load_balancing`, `health_check` and `failover`
 - Configuration changes are CAS commits that produce a new revision and asynchronous publication operation
-- Migrations use versioned `bungee export --file snapshot.json` / `bungee import --file snapshot.json` snapshots; legacy files are not loaded at runtime
+- Configuration import/export uses sealed `bungee export --file snapshot.json` / `bungee import --file snapshot.json` snapshots; database upgrades append migrations separately
 
 Management is anonymous and routes are public by default. Enable **管理认证** (`local-accounts`) to establish or verify one administrator, and **访问控制** (`key-access`) to manage Keys and explicitly protect routes. Route and Service editors do not contain authentication fields. Key permissions and route protection are separate; revoking the last Key keeps protected routes protected.
 
-See [Configuration Guide](docs/configuration.md) for the current schema and the [authentication guide](docs/authentication.md) for optional protection.
+See [Configuration Guide](./docs/reference/configuration.md) for the current schema and the [authentication guide](./docs/guides/authentication.md) for optional protection.
 
 ### Option 2: Docker
 
+Set a stable private `BUNGEE_PLUGIN_SECRETS_KEY`, then follow the [Docker initialization steps](docs/guides/deployment.md#docker-compose).
+
 ```bash
-docker-compose up -d
+docker compose run --rm --no-deps bungee bun packages/core/dist/main.js --initialize-config /usr/app/data/bungee.db
+docker compose up -d
 ```
 
 ### Option 3: Development Mode
 
 ```bash
-bun install
-bun dev
+bun install --frozen-lockfile
+bun packages/core/src/main.ts --initialize-config /tmp/bungee-dev/data/bungee.db
+BUNGEE_CONFIG_DB_PATH=/tmp/bungee-dev/data/bungee.db BUNGEE_ACCESS_DB_PATH=/tmp/bungee-dev/logs/access.db bun run dev
 ```
 
 Dashboard URL (default): `http://localhost:8089/`
@@ -267,11 +271,11 @@ from the management listener at `http://localhost:8089/`; its API is under
 - [x] Streaming Support
 - [x] API Transformers
 - [x] Plugin System
-- [x] WebSocket Proxying — opt-in per route, with Responses Token metering ([design and validation boundaries](docs/websocket-proxy-design.md))
+- [x] WebSocket Proxying — opt-in per route, with Responses Token metering ([design and validation boundaries](./docs/architecture/websocket.md))
 - [ ] gRPC Proxying
 - [ ] Automatic TLS/SSL
 - [ ] Prometheus Metrics
-- [ ] Rate Limiting
+- [x] Route rate limiting and optional Key rate limits
 
 Have an idea? [Open an issue](https://github.com/jeffusion/bungee/issues/new/choose).
 

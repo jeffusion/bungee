@@ -16,7 +16,14 @@ describe('production master contract', () => {
     ]) {
       expect(source).not.toContain(legacy);
     }
-    expect(source).toContain('new MigrationManager(path).migrate()');
+    expect(source).toContain('migrateAccessDatabaseAsync(path, resolveObservabilityWorkerUrl(import.meta.url))');
+    expect(source).toContain('createAsyncMasterStats(path');
+    expect(source).toContain('AsyncConfigRepository.open(path');
+    expect(source).not.toContain('new MigrationManager');
+    expect(source).not.toContain('new Database');
+    expect(source).not.toContain("'bun:sqlite'");
+    const observationLeaf = await Bun.file(new URL('../../src/master-runtime/observability-worker.ts',import.meta.url)).text();
+    expect(observationLeaf).toContain('new MigrationManager(args[0]).migrate()');
   });
 
   test('keeps main as the sole awaited role dispatcher', async () => {

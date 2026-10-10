@@ -1,3 +1,4 @@
+import {pluginStateFixturePath} from './support/plugin-state-fixture';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { Database } from 'bun:sqlite';
@@ -178,18 +179,17 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
       // catalog plugin is the only worker source; no token-stats private cache exists.
       let catalogVersion = 0;
       const writePrices = async (multiplier: number) => {
-        const accessDb = new Database(currentFixture.accessDbPath);
-        const configDb = new Database(currentFixture.configDbPath);
+        const configDb = new Database(pluginStateFixturePath(currentFixture.configDbPath));
         try {
-          await new SQLitePluginStorage(accessDb, 'models-dev').set(MODELS_DEV_SETTINGS_KEY,
+          await new SQLitePluginStorage(configDb, 'models-dev').set(MODELS_DEV_SETTINGS_KEY,
             { autoRefresh: false, intervalHours: 24, timeoutSeconds: 15 });
-          const store = new HostSnapshotStore(new PluginCommunicationStore(configDb, undefined, { setup: false }).forNamespace('models-dev'),
+          const store = new HostSnapshotStore(new PluginCommunicationStore(configDb, undefined, { setup: false }).forNamespace('channel.models-dev'),
             { owner: 'models-dev', id: 'models-dev.catalog.v1', schemaVersion: 1, maxVersions: 3 });
           const version = ++catalogVersion;
           store.publish(version, { version, fetchedAt: Date.now(), catalog: { openai: { id: 'openai', api: `http://127.0.0.1:${upstreamPort}`, models: {
             'gpt-4o-mini': { id: 'gpt-4o-mini', cost: { input: multiplier, output: 2 * multiplier, cache_read: 0.1 * multiplier } },
           } } } });
-        } finally { accessDb.close(); configDb.close(); }
+        } finally { configDb.close(); }
       };
       await writePrices(1);
 

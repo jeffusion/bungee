@@ -1,3 +1,4 @@
+import { initializeTokenStatsTestDatabase } from '../helpers/token-stats-database';
 import { withTokenStatsMetering } from '../../../../plugins/token-stats/server/storage';
 type StatsTestStorage = ReturnType<typeof withTokenStatsMetering<SQLitePluginStorage>>;
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
@@ -9,9 +10,6 @@ import type { AppConfig } from '@jeffusion/bungee-types';
 import type { AttemptObservationEvent, PluginLogger } from '../../src/hooks';
 import type { PluginStorage } from '../../src/plugin.types';
 import { SQLitePluginStorage } from '../../src/plugin-storage';
-import { migration as pluginStorageMigration } from '../../src/migrations/versions/002_add_plugin_storage';
-import { migration as tokenStatsKeyMigration } from '../../src/migrations/versions/007_token_stats_key';
-import { migration as tokenStatsMeteringMigration } from '../../src/migrations/versions/005_token_stats_metering';
 import { ScopedPluginRegistry, setScopedPluginRegistry } from '../../src/scoped-plugin-registry';
 import { initializeRuntimeState } from '../../src/worker/state/runtime-state';
 import { handleRequest } from '../../src/worker/request/handler';
@@ -49,9 +47,7 @@ function createStorage(): { db: Database; storage: StatsTestStorage; directory: 
   const directory = fs.mkdtempSync(path.join(tmpdir(), 'token-stats-integration-'));
   const db = new Database(path.join(directory, 'access.db'), { create: true, readwrite: true, strict: true });
   db.run('PRAGMA foreign_keys = ON');
-  pluginStorageMigration.up(db);
-  tokenStatsMeteringMigration.up(db);
-  tokenStatsKeyMigration.up(db);
+  initializeTokenStatsTestDatabase(db);
   databases.push({ db, directory });
   return { db, storage: withTokenStatsMetering(new SQLitePluginStorage(db, 'token-stats')), directory };
 }

@@ -71,8 +71,8 @@ describe('explicit route WebSocket configuration', () => {
 
   test('SQLite policy storage, sealed export, preview and re-import preserve the enabled state', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'bungee-websocket-config-'));
-    const source = ConfigRepository.open(join(directory, 'source.db'), { workerCount: 1 });
-    const target = ConfigRepository.open(join(directory, 'target.db'), { workerCount: 1 });
+    const source = ConfigRepository.open(join(directory, 'source.db'));
+    const target = ConfigRepository.open(join(directory, 'target.db'));
     const api = (repository: ConfigRepository) => createConfigControlApi({
       workerCount: 1, repository, parseAggregate: parseNormalizeCompileAggregate,
       managementAuth: { authenticate: async () => ({}), recheck: async () => true, identity: () => ({}), authorized: () => true, validateWrite: () => {}, selected: () => null },

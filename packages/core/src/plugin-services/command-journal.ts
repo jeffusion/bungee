@@ -850,12 +850,29 @@ export class CommandJournal implements RpcCommandExecutor<unknown> {
     return recovered;
   }
 
+  /** Storage IPC preflight; does not mutate or advance the recovery cursor. */
+  pendingRecoveryRequests(limit = DEFAULT_COLLECT_LIMIT): readonly CommandRecoveryRequest[] {
+    const cap = Math.min(positiveInteger(limit, DEFAULT_COLLECT_LIMIT), MAX_COLLECT_LIMIT);
+    const rows = this.#db.query<{key:string},[string,string,number]>(
+      "SELECT key FROM plugin_communication_records WHERE namespace=? AND key>? AND key LIKE 'j.%' ORDER BY key LIMIT ?",
+    ).all(this.#comm.namespace, this.#recoveryCursor, cap);
+    const requests: CommandRecoveryRequest[] = [];
+    for (const row of rows) {
+      const entry = this.#readEntry(row.key, null);
+      if (!entry || entry.state !== 'pending') continue;
+      requests.push(Object.freeze({key:row.key,operationId:entry.operationId,
+        caller:{subject:entry.caller.subject,scope:entry.caller.scope ?? undefined},fingerprint:entry.fingerprint,
+        source:entry.source,owner:sourceOwner(entry.source),epoch:entry.source.generation}));
+    }
+    return Object.freeze(requests);
+  }
+
   /** Host scan progress; capability-free maintenance keeps this facade between batches. */
   recoveryScanComplete(): boolean { return this.#authorizeRecovery === undefined || this.#recoveryScanComplete; }
 
   /** Reopens only the persisted policy binding; it never retains execution capabilities. */
-  static forMaintenance(options: Pick<CommandJournalOptions, 'db' | 'namespace' | 'authorizeRecovery' | 'now'>): CommandJournal {
-    const store = new PluginCommunicationStore(options.db, undefined, { setup: false }).forNamespace(options.namespace);
+  static forMaintenance(options: Pick<CommandJournalOptions, 'db' | 'namespace' | 'authorizeRecovery' | 'now' | 'limits'>): CommandJournal {
+    const store = new PluginCommunicationStore(options.db, options.limits, { setup: false }).forNamespace(options.namespace);
     const record = store.get(POLICY_MARKER_KEY);
     if (record === null) throw new CommandJournalError('storage_failure');
     const binding = parseBinding(DECODER.decode(record.payload));
@@ -1422,8 +1439,9 @@ export class CommandJournal implements RpcCommandExecutor<unknown> {
           metas = db.query<DurableMetaRow, [string, number]>(
             `SELECT key, version, length(CAST(value_json AS BLOB)) AS bytes
              FROM plugin_durable_records WHERE namespace = ? ORDER BY key LIMIT ?`,
-          ).all(namespace, remaining);
+          ).all(namespace, remaining + 1);
         } catch { throw new CommandJournalError('storage_failure', null); }
+        if (metas.length > remaining) throw new CommandJournalError('capability_unavailable', null);
         let bytes = 0;
         for (const meta of metas) {
           if (typeof meta.key !== 'string' || !Number.isSafeInteger(meta.version) || meta.version < 1

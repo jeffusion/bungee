@@ -67,131 +67,6 @@ describe('directional configuration and dependency contracts', () => {
   });
 });
 
-function v13Database(input = legacy(), state: 'converged' | 'committed' | 'publishing' | 'draining' = 'converged', baseVersion = 13, slots: number[] = []): Database {
-  const db = new Database(':memory:', { strict: true });
-  db.run('PRAGMA foreign_keys=ON');
-  for (const migration of CONFIG_MIGRATIONS.slice(0,baseVersion)) migration.up(db);
-  replaceActiveMaterialization(db,input);
-  const hash = hashConfigurationContent(input);
-  const requestHash = hashConfigurationRequest({kind:'config',expected_revision:1,aggregate:input,target_worker_slots:slots});
-  db.run("INSERT INTO configuration_revisions(revision,content_hash,kind,created_at) VALUES(2,?,'config',1)",[hash]);
-  db.run(`INSERT INTO configuration_operations(mutation_id,request_hash,expected_revision,committed_revision,kind,state,result_status,
-    error_code,error_detail,drain_recovery_generation,last_drain_recovery_previous_generation,target_worker_count,created_at,updated_at)
-    VALUES('old-operation',?,1,2,'config',?,?,NULL,NULL,0,NULL,?,1,1)`,[requestHash,state,state === 'converged' ? 200 : null,slots.length]);
-  for (const slot of slots) db.run(`INSERT INTO configuration_operation_workers
-    (mutation_id,worker_slot,target_revision,drain_recovery_generation,attempt_no,last_begin_previous_attempt_no,last_begin_reason,state,applied_revision,last_error,updated_at)
-    VALUES('old-operation',?,2,0,1,0,'initial','converged',2,NULL,1)`,[slot]);
-  db.run('UPDATE configuration_state SET active_revision=2,updated_at=1 WHERE id=1');
-  db.run('INSERT INTO configuration_serving_snapshots(revision,content_hash,plugin_catalog_hash,aggregate_json) VALUES(2,?,?,?)',
-    [hash,`sha256:${'a'.repeat(64)}`,canonicalJson(input)]);
-  return db;
-}
-function durableRows(db: Database) {
-  return ['configuration_revisions','configuration_operations','configuration_serving_snapshots','routes','upstreams','schema_migrations']
-    .map(table => db.query(`SELECT * FROM ${table} ORDER BY 1`).all());
-}
-describe('directional v15 migration', () => {
-  test('upgrades released v14 without replacing its communication schema or historical rules', () => {
-    const db=v13Database(legacy(),'converged',14,[0]); try {
-      const previous=durableRows(db);
-      expect(db.query('SELECT name FROM schema_migrations WHERE version=14').get()).toEqual({name:'plugin_communication_and_command_journal'});
-      migrateConfigurationDatabase(db,1);
-      expect(db.query('SELECT version,name FROM schema_migrations WHERE version>=14 ORDER BY version').all()).toEqual([
-        {version:14,name:'plugin_communication_and_command_journal'},
-        {version:15,name:'directional_request_response_modifications'},
-      ]);
-      expect(readRepositorySnapshot(db).aggregate).toEqual(migrateLegacyDirectionalAggregate(legacy()) as ConfigurationAggregateV2);
-      expect(db.query('SELECT * FROM configuration_serving_snapshots ORDER BY 1').all()).toEqual(previous[2]);
-      expect(db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='plugin_communication_records'").get()).toEqual({name:'plugin_communication_records'});
-      verifySchemaFingerprint(db);
-    } finally {db.close();}
-  });
-  test('fresh schema creates no redundant revision', () => {
-    const db = new Database(':memory:'); try {
-      migrateConfigurationDatabase(db);
-      expect(db.query('SELECT count(*) AS count FROM configuration_revisions').get()).toEqual({count:1});
-      expect(CONFIG_MIGRATIONS.at(-1)?.version).toBe(15);
-      verifySchemaFingerprint(db);
-    } finally { db.close(); }
-  });
-  test('creates revision and preserves all historical hashes, operations, and serving bytes; reopen is idempotent', () => {
-    const db=v13Database(); try {
-      const before=durableRows(db); migrateConfigurationDatabase(db,2);
-      const snapshot=readRepositorySnapshot(db);
-      expect(snapshot.revision).toBe(3);
-      expect(snapshot.aggregate).toEqual(migrateLegacyDirectionalAggregate(legacy()) as ConfigurationAggregateV2);
-      expect(db.query('SELECT * FROM configuration_revisions WHERE revision<=2 ORDER BY 1').all()).toEqual(before[0]);
-      expect(db.query("SELECT * FROM configuration_operations WHERE mutation_id='old-operation'").all()).toEqual(before[1]);
-      expect(db.query('SELECT * FROM configuration_serving_snapshots ORDER BY 1').all()).toEqual(before[2]);
-      const old = getServingSnapshot(db,{revision:2,content_hash:hashConfigurationContent(legacy()),plugin_catalog_hash:`sha256:${'a'.repeat(64)}`});
-      expect(old).toBeDefined();
-      expect(old!.aggregate).toEqual(legacy());
-      expect(hashConfigurationContent(old!.aggregate)).toBe(old!.content_hash);
-      expect(parseNormalizeCompileAggregate(old?.aggregate).ok).toBe(false);
-      expect(db.query('SELECT worker_slot,state FROM configuration_operation_workers ORDER BY worker_slot').all()).toEqual([{worker_slot:0,state:'pending'},{worker_slot:1,state:'pending'}]);
-      const after=durableRows(db); migrateConfigurationDatabase(db,2); expect(durableRows(db)).toEqual(after);
-      verifySchemaFingerprint(db); expect(db.query('PRAGMA integrity_check').get()).toEqual({integrity_check:'ok'});
-      expect(db.query('PRAGMA foreign_key_check').all()).toEqual([]);
-    } finally {db.close();}
-  });
-  test('pending publication prevents conversion and rolls back migration history', () => {
-    for (const phase of ['committed','publishing','draining'] as const) {
-      const db=v13Database(legacy(),phase); try {
-        const before=durableRows(db); expect(()=>migrateConfigurationDatabase(db,1)).toThrow('not terminal'); expect(durableRows(db)).toEqual(before);
-      } finally {db.close();}
-    }
-  });
-  test('active recovery prevents conversion', () => {
-    const db=v13Database(); try {
-      db.run(`INSERT INTO configuration_recoveries(recovery_id,source_mutation_id,target_revision,trigger,state,attempt_count,max_attempts,
-        next_retry_at,final_reason_code,final_reason_detail,created_at,updated_at)
-        VALUES('30000000-0000-4000-8000-000000000001','old-operation',2,'manual','scheduled',0,6,2,NULL,NULL,1,1)`);
-      const before=durableRows(db); expect(()=>migrateConfigurationDatabase(db,1)).toThrow('recovery'); expect(durableRows(db)).toEqual(before);
-    } finally {db.close();}
-  });
-  test('v11, v13 and v15 merge one unpublished revision while preserving original history', () => {
-    const input=legacy();
-    input.logical_configuration.auth={enabled:true,tokens:['legacy']};
-    input.logical_configuration.routes[0].auth={enabled:true,tokens:['legacy-route']};
-    input.logical_configuration.services=[{id:'30000000-0000-4000-8000-000000000001',position:0,name:'legacy-service',plugins:[],timeouts:{connect_ms:100},
-      endpoints:[{id:'40000000-0000-4000-8000-000000000001',position:0,target:'https://service.example.com',weight:100,priority:1,is_disabled:false,plugins:[]}]}];
-    const db=v13Database(input,'converged',10,[0]); try {
-      const before=durableRows(db); migrateConfigurationDatabase(db,2);
-      const snapshot=readRepositorySnapshot(db); expect(snapshot.revision).toBe(3);
-      expect(snapshot.aggregate.logical_configuration).not.toHaveProperty('auth');
-      expect(snapshot.aggregate.logical_configuration.routes[0]).not.toHaveProperty('auth');
-      expect(snapshot.aggregate.logical_configuration.services[0]).not.toHaveProperty('timeouts');
-      expect(snapshot.aggregate.logical_configuration.routes[0]?.request?.body).toEqual({add:{route:true}});
-      expect(db.query('SELECT * FROM configuration_revisions WHERE revision<=2 ORDER BY 1').all()).toEqual(before[0]);
-      expect(db.query("SELECT * FROM configuration_operations WHERE mutation_id='old-operation'").all()).toEqual(before[1]);
-      expect(db.query('SELECT * FROM configuration_serving_snapshots ORDER BY 1').all()).toEqual(before[2]);
-      const after=durableRows(db); migrateConfigurationDatabase(db,2); expect(durableRows(db)).toEqual(after);
-    } finally {db.close();}
-  });
-  test('mixed and invalid modification rules migrate locally, report once, and preserve history', () => {
-    const input=aggregate({headers:{add:{old:'old'}},request:{headers:{add:{new:'new',bad:5}}}});
-    const db=v13Database(input); const warn=spyOn(logger,'warn').mockImplementation(()=>logger); try {
-      const before=durableRows(db); migrateConfigurationDatabase(db,1);
-      expect(readRepositorySnapshot(db).aggregate.logical_configuration.routes[0]?.request).toEqual({headers:{add:{new:'new'}}});
-      expect(db.query('SELECT * FROM configuration_serving_snapshots ORDER BY 1').all()).toEqual(before[2]);
-      expect(warn).toHaveBeenCalledTimes(1);
-      expect(warn.mock.calls[0]?.[0]).toMatchObject({version:15,ignored_rules:[
-        {path:'logical_configuration.routes[0].headers',reason:'new_format_preferred'},
-        {path:'logical_configuration.routes[0].request.headers.add.bad',reason:'invalid_modification'},
-      ]});
-      const after=durableRows(db); migrateConfigurationDatabase(db,1);
-      expect(durableRows(db)).toEqual(after); expect(warn).toHaveBeenCalledTimes(1);
-    } finally {warn.mockRestore();db.close();}
-  });
-  test('failed migration emits no ignored-rule success summary and preserves original rows', () => {
-    const db=v13Database(aggregate({body:{add:{bad:'{{response.body.x}}'}}}), 'publishing');
-    const warn=spyOn(logger,'warn').mockImplementation(()=>logger); try {
-      const before=durableRows(db); expect(()=>migrateConfigurationDatabase(db,1)).toThrow('not terminal');
-      expect(durableRows(db)).toEqual(before); expect(warn).not.toHaveBeenCalled();
-    } finally {warn.mockRestore();db.close();}
-  });
-});
-
 describe('one-time modification rule cleanup', () => {
   test('new fields win individually, empty blocks disable old fields, and other legacy fields survive', () => {
     const warnings:DirectionalMigrationWarning[]=[];
@@ -273,9 +148,9 @@ test('sealed legacy import validates original hashes and commits converted schem
   const old=legacy(); const current:any={revision:1,content_hash:hashConfigurationContent(aggregate()),aggregate:aggregate()};
   let committed:any;
   const operation:any={mutation_id:'legacy-import',committed_revision:2,state:'committed'};
-  const api=createConfigControlApi({ workerCount:1, repository: { getSnapshot:()=>current, getOperationState:()=>({operation,workers:[]}),
-    getActivePublication:()=>null, commit:(command:any)=>{committed=command;return {kind:'committed',snapshot:current,operation};} },
-    managementAuth:{authenticate:async()=>({}),recheck:async()=>true,identity:()=>({}),authorized:()=>true,validateWrite:()=>{},selected:()=>null},
+  const api=createConfigControlApi({ workerCount:1, repository: { getSnapshot:()=>current, getOperationState:async()=>({operation,workers:[]}),
+    getActivePublication:async()=>null, commit:async(command:any)=>{committed=command;return {kind:'committed',snapshot:current,operation};} },
+    managementAuth:{authenticate:async()=>({}),recheck:async()=>true,identity:()=>({}),authorized:async()=>true,validateWrite:async()=>{},selected:()=>null},
     parseAggregate:parseNormalizeCompileAggregate, publicationTasks:{enqueue:()=>{}}, admission:{snapshot:()=>[]}, clock:{now:()=>1},
     isMutationReady:()=>true, resolveAuthToken:(value:any)=>value,
   } as any);
@@ -294,9 +169,9 @@ function importHarness() {
   const current:any={revision:1,content_hash:hashConfigurationContent(aggregate()),aggregate:aggregate()};
   const operation:any={mutation_id:'legacy-import',committed_revision:2,state:'committed'};
   const commands:any[]=[];
-  const api=createConfigControlApi({workerCount:1,repository:{getSnapshot:()=>current,getOperationState:()=>({operation,workers:[]}),
-    getActivePublication:()=>null,commit:(command:any)=>{commands.push(command);return {kind:'committed',snapshot:current,operation};}},
-    managementAuth:{authenticate:async()=>({}),recheck:async()=>true,identity:()=>({}),authorized:()=>true,validateWrite:()=>{},selected:()=>null},
+  const api=createConfigControlApi({workerCount:1,repository:{getSnapshot:()=>current,getOperationState:async()=>({operation,workers:[]}),
+    getActivePublication:async()=>null,commit:async(command:any)=>{commands.push(command);return {kind:'committed',snapshot:current,operation};}},
+    managementAuth:{authenticate:async()=>({}),recheck:async()=>true,identity:()=>({}),authorized:async()=>true,validateWrite:async()=>{},selected:()=>null},
     parseAggregate:parseNormalizeCompileAggregate,publicationTasks:{enqueue:()=>{}},admission:{snapshot:()=>[]},clock:{now:()=>1},
     isMutationReady:()=>true,resolveAuthToken:(value:any)=>value,
   } as any);

@@ -157,6 +157,8 @@ export type ConfigRepositoryErrorCode =
   | 'attempts_exhausted'
   | 'migration_failed'
   | 'repository_failure'
+  | 'queue_full'
+  | 'result_unknown'
   | 'schema_corrupt'
   | 'serving_snapshot_corrupt';
 
@@ -175,7 +177,5 @@ export class ConfigRepositoryError extends Error {
 
 export type ConfigRepositoryOptions = {
   readonly compileOptions?: ConfigurationCompileOptions;
-  readonly workerCount?: number;
-  readonly faultInjection?: (stage: 'after_materialization' | 'after_targets' | 'after_automatic_recovery' |
-    'during_v11_after_materialization' | 'during_v12_after_schema_change') => void;
+  readonly faultInjection?: (stage: 'after_materialization' | 'after_targets' | 'after_automatic_recovery') => void;
 };

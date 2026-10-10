@@ -1,123 +1,38 @@
-import { Database, type SQLQueryBindings } from 'bun:sqlite';
-import { canonicalJson } from './content-hash';
-import { CONFIG_MIGRATION_V1 } from './migrations/v1';
-import { CONFIG_MIGRATION_V2 } from './migrations/v2';
-import { CONFIG_MIGRATION_V3 } from './migrations/v3';
-import { CONFIG_MIGRATION_V4 } from './migrations/v4';
-import { CONFIG_MIGRATION_V5 } from './migrations/v5';
-import { CONFIG_MIGRATION_V6 } from './migrations/v6';
-import { CONFIG_MIGRATION_V7 } from './migrations/v7';
-import { CONFIG_MIGRATION_V8 } from './migrations/v8';
-import { CONFIG_MIGRATION_V9 } from './migrations/v9';
-import { CONFIG_MIGRATION_V10 } from './migrations/v10';
-import { CONFIG_MIGRATION_V11 } from './migrations/v11';
-import { CONFIG_MIGRATION_V12 } from './migrations/v12';
-import { CONFIG_MIGRATION_V13 } from './migrations/v13';
-import { CONFIG_MIGRATION_V14 } from './migrations/v14';
+import { Database } from 'bun:sqlite';
+import { databaseSchemaDescriptor } from '../database-schema';
+import { CONFIG_MIGRATIONS, CONFIG_SCHEMA_VERSION, type ConfigMigration } from './migrations/plan';
 import { ConfigRepositoryError } from './repository-types';
+import { canonicalJson } from './content-hash';
 import { sqliteAll } from './sqlite-query';
 
-import { CONFIG_MIGRATION_V15 } from './migrations/v15';
-
-type SchemaRow = { readonly name: string; readonly sql: string | null };
-type TableListRow = { readonly name: string; readonly type: string; readonly ncol: number; readonly wr: number; readonly strict: number };
-type ColumnRow = {
-  readonly cid: number; readonly name: string; readonly type: string; readonly notnull: number;
-  readonly dflt_value: string | null; readonly pk: number; readonly hidden: number;
-};
-type ForeignKeyRow = {
-  readonly id: number; readonly seq: number; readonly table: string; readonly from: string; readonly to: string;
-  readonly on_update: string; readonly on_delete: string; readonly match: string;
-};
-type IndexRow = { readonly name: string; readonly unique: number; readonly origin: string; readonly partial: number };
-type IndexColumnRow = {
-  readonly seqno: number; readonly cid: number; readonly name: string | null;
-  readonly desc: number; readonly coll: string; readonly key: number;
-};
-
-function pragmaName(name: string): string {
-  return `'${name.replaceAll("'", "''")}'`;
-}
-
-function normalizedSql(sql: string | null): string {
-  return (sql ?? '').trim();
-}
-
-function indexDescriptor(db: Database, table: string): readonly unknown[] {
-  const indexes = sqliteAll<IndexRow, [string]>(db, 'SELECT name,"unique",origin,partial FROM pragma_index_list(?)', table);
-  return indexes.map((index) => ({
-    unique: index.unique,
-    origin: index.origin,
-    partial: index.partial,
-    columns: sqliteAll<IndexColumnRow, SQLQueryBindings[]>(
-      db,
-      `PRAGMA index_xinfo(${pragmaName(index.name)})`,
-    ).map(({ seqno, cid, name, desc, coll, key }) => ({ seqno, cid, name, desc, coll, key })),
-  })).sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
-}
-
-function schemaDescriptor(db: Database): string {
-  const definitions = new Map(sqliteAll<SchemaRow, []>(db, `SELECT name,sql FROM sqlite_schema
-    WHERE type='table' AND name NOT LIKE 'sqlite_%'`).map((row) => [row.name, row.sql]));
-  const tables = sqliteAll<TableListRow, []>(db, `SELECT name,type,ncol,wr,strict FROM pragma_table_list
-    WHERE schema='main' AND name NOT LIKE 'sqlite_%' ORDER BY name`);
-  const objects = sqliteAll<SchemaRow & { readonly type: string; readonly tbl_name: string }, []>(db, `SELECT type,name,tbl_name,sql
-    FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name`).map((row) => ({
-      type: row.type, name: row.name, table: row.tbl_name, sql: normalizedSql(row.sql),
-    }));
-  return canonicalJson({
-    objects,
-    tables: tables.map((table) => ({
-      name: table.name,
-      type: table.type,
-      ncol: table.ncol,
-      wr: table.wr,
-      strict: table.strict,
-      sql: normalizedSql(definitions.get(table.name) ?? null),
-      columns: sqliteAll<ColumnRow, [string]>(db, `SELECT cid,name,type,"notnull",dflt_value,pk,hidden
-        FROM pragma_table_xinfo(?) ORDER BY cid`, table.name),
-      foreignKeys: sqliteAll<ForeignKeyRow, [string]>(db, `SELECT id,seq,"table","from","to",on_update,on_delete,"match"
-        FROM pragma_foreign_key_list(?) ORDER BY id,seq`, table.name),
-      indexes: indexDescriptor(db, table.name),
-    })),
-  });
+/** Bounded mutation guard: schema objects only, without table contents or page scans. */
+export function readSchemaObjectFingerprint(db: Database): string {
+  return canonicalJson(sqliteAll<Record<string, unknown>, []>(db, `SELECT type,name,tbl_name,sql
+    FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name`));
 }
 
 const expectedDescriptors = new Map<number, string>();
-const CONFIG_MIGRATIONS = [
-  CONFIG_MIGRATION_V1,
-  CONFIG_MIGRATION_V2,
-  CONFIG_MIGRATION_V3,
-  CONFIG_MIGRATION_V4,
-  CONFIG_MIGRATION_V5,
-  CONFIG_MIGRATION_V6,
-  CONFIG_MIGRATION_V7,
-  CONFIG_MIGRATION_V8,
-  CONFIG_MIGRATION_V9,
-  CONFIG_MIGRATION_V10,
-  CONFIG_MIGRATION_V11,
-  CONFIG_MIGRATION_V12,
-  CONFIG_MIGRATION_V13,
-  CONFIG_MIGRATION_V14,
-  CONFIG_MIGRATION_V15,
-] as const;
 
-function getExpectedDescriptor(version: number): string {
-  const cached = expectedDescriptors.get(version);
-  if (cached !== undefined) return cached;
-  const expected = new Database(':memory:', { create: true, readwrite: true, strict: true });
-  try {
-    for (const migration of CONFIG_MIGRATIONS.slice(0, version)) migration.up(expected);
-    const descriptor = schemaDescriptor(expected);
-    expectedDescriptors.set(version, descriptor);
-    return descriptor;
-  } finally {
-    expected.close(true);
+export function verifySchemaFingerprint(
+  db: Database,
+  version = CONFIG_SCHEMA_VERSION,
+  plan: readonly ConfigMigration[] = CONFIG_MIGRATIONS,
+): void {
+  if (!plan.some(migration => migration.version === version)) {
+    throw new ConfigRepositoryError('schema_corrupt', 'unsupported configuration schema version');
   }
-}
-
-export function verifySchemaFingerprint(db: Database, version: number = CONFIG_MIGRATIONS.length): void {
-  if (schemaDescriptor(db) !== getExpectedDescriptor(version)) {
+  let expected = plan === CONFIG_MIGRATIONS ? expectedDescriptors.get(version) : undefined;
+  if (expected === undefined) {
+    const reference = new Database(':memory:', { strict: true });
+    try {
+      for (const migration of plan.filter(migration => migration.version <= version)) migration.up(reference);
+      expected = databaseSchemaDescriptor(reference);
+    } finally {
+      reference.close(true);
+    }
+    if (plan === CONFIG_MIGRATIONS) expectedDescriptors.set(version, expected);
+  }
+  if (databaseSchemaDescriptor(db) !== expected) {
     throw new ConfigRepositoryError('schema_corrupt', 'configuration schema fingerprint is invalid');
   }
 }

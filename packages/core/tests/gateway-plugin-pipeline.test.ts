@@ -60,7 +60,7 @@ describe('registered gateway pipeline',()=>{
     const config={plugins:same?[]:[plugin('read')],routes:[{path:'/views',plugins:same?[plugin('all')]:[plugin('second')],
       endpoints:[{id:'primary',target:'http://views.test',plugins:same?[]:[plugin('first')]}]}]} as AppConfig;
     const registry=new ScopedPluginRegistry(import.meta.dir);expect((await registry.initializeFromConfig(config)).failed).toBe(0);setScopedPluginRegistry(registry);
-    globalThis.fetch=Object.assign(async()=>new Response(gzipSync('{"value":1}'),{headers:{'content-type':'application/json','content-encoding':'gzip'}}),{preconnect(){}}) as typeof fetch;
+    globalThis.fetch=Object.assign(async()=>new Response(Uint8Array.from(gzipSync('{"value":1}')),{headers:{'content-type':'application/json','content-encoding':'gzip'}}),{preconnect(){}}) as typeof fetch;
     try{
       const response=await handleRequest(new Request('http://local/views'),config,{logging});expect(await response.json()).toEqual({value:3});
       expect(response.headers.get('content-encoding')).toBeNull();
@@ -138,7 +138,7 @@ describe('registered gateway pipeline',()=>{
   });
   test('a read-only SDK callback retains compressed wire entity headers',async()=>{
     const {config,hooks}=fixtures(true);
-    const bytes=gzipSync('{"value":1}');
+    const bytes=Uint8Array.from(gzipSync('{"value":1}'));
     globalThis.fetch=Object.assign(async()=>new Response(bytes,{headers:{'content-type':'application/json','content-encoding':'gzip','content-length':String(bytes.byteLength)}}),{preconnect(){}}) as typeof fetch;
     hooks.onResponse.tapPromise('reader',async(response,context)=>{
       expect(await context.bodyHandle!.json()).toEqual({value:1});
@@ -181,7 +181,7 @@ describe('registered gateway pipeline',()=>{
     const {config,hooks,phase}=fixtures(true,[{name:'usage',async callback(event){observations.push(event);}}]);
     phase.hasRawResponseCallbacks=true;
     const wire='data: {"value":1,"usage":{"output_tokens":7}}\n\ndata: [DONE]\n\n';
-    globalThis.fetch=Object.assign(async()=>new Response(gzipSync(wire),{headers:{'content-type':'text/event-stream','content-encoding':'gzip'}}),{preconnect(){}}) as typeof fetch;
+    globalThis.fetch=Object.assign(async()=>new Response(Uint8Array.from(gzipSync(wire)),{headers:{'content-type':'text/event-stream','content-encoding':'gzip'}}),{preconnect(){}}) as typeof fetch;
     hooks.onRawResponse.tapPromise('raw-events',async(result,context)=>{
       const frames:string[]=[];for await(const event of context.bodyHandle!.events({id:'raw-events'}))frames.push(event.raw!);
       const headers=new Headers(result.response.headers);headers.delete('content-encoding');
@@ -199,7 +199,7 @@ describe('registered gateway pipeline',()=>{
     config.routes[0]!.response={body:{add:{value:2}},body_formats:['sse-json']};
     const control=': heartbeat\r\n\r\n';
     const wire=control+'id: abc\r\nretry: 007\r\ndata: {"value":1,"usage":{"output_tokens":7}}\r\n\r\ndata: [DONE]\r\n\r\n';
-    globalThis.fetch=Object.assign(async ()=>new Response(gzipSync(wire),{headers:{'content-type':'text/event-stream','content-encoding':'gzip'}}),{preconnect(){}}) as typeof fetch;
+    globalThis.fetch=Object.assign(async ()=>new Response(Uint8Array.from(gzipSync(wire)),{headers:{'content-type':'text/event-stream','content-encoding':'gzip'}}),{preconnect(){}}) as typeof fetch;
     const before={...bodyMetrics};
     const response=await handleRequest(new Request('http://local/gateway-test'),config,{logging});
     const result=await response.text();

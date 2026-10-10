@@ -15,7 +15,7 @@ export async function recoverCommand(options: {file?:string; directLaunch?:Launc
       file = await openRecoveryInputFile(options.file);
     }
     await new Promise<void>((accept,reject) => {
-      const child = spawn(launch.executable,[...(launch.entrypoint === null ? [] : [launch.entrypoint]),'--recover',db],{cwd:ConfigPaths.DATA_DIR,stdio:[file?.fd ?? 'inherit','inherit','inherit'],env:{...process.env,BUNGEE_ROLE:'master'}});
+      const child = spawn(launch.executable,[...(launch.entrypoint === null ? [] : [launch.entrypoint]),'--recover',db],{cwd:ConfigPaths.DATA_DIR,stdio:[file?.fd ?? 'inherit','inherit','inherit'],env:{...process.env,BUNGEE_ROLE:'master',BUNGEE_ACCESS_DB_PATH:process.env.BUNGEE_ACCESS_DB_PATH??join(ConfigPaths.LOGS_DIR,'access.db')}});
       child.once('error',reject);
       child.once('exit',code=>code===0?accept():reject(new Error('Offline recovery failed')));
     });

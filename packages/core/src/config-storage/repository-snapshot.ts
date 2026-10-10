@@ -1,8 +1,7 @@
 import type { Database } from 'bun:sqlite';
 import { hashConfigurationContent } from './content-hash';
 import { auditConfigurationTables, verifyActiveRequestIdentity } from './cross-table-audit';
-import { readActiveAggregate, readRawActiveAggregate } from './read-materialization';
-import { validatePreDirectionalAggregate } from './directional-migration';
+import { readActiveAggregate } from './read-materialization';
 import { verifySchemaFingerprint } from './schema-fingerprint';
 import type { RepositorySnapshot } from './repository-types';
 import { ConfigRepositoryError } from './repository-types';
@@ -11,10 +10,13 @@ import { verifyRecoveryIntegrity } from './recovery-store';
 import { withConsistentRead } from './consistent-read';
 import { isSqliteBusyError, repositoryFailure } from './sqlite-errors';
 
-function verifyIntegrity(db: Database, allowActiveRecoveryDrift = false, schemaVersion?: number): void {
-  verifySchemaFingerprint(db, schemaVersion);
+function verifyIntegrity(db: Database, allowActiveRecoveryDrift = false, checkDatabasePages = true): void {
+  verifySchemaFingerprint(db);
   verifyRecoveryIntegrity(db, allowActiveRecoveryDrift);
-  const integrity = sqliteGet<{ readonly integrity_check: string }, []>(db, 'PRAGMA integrity_check')?.integrity_check;
+  // Full page scans include plugin history and must not run on routine config reads:
+  // blocking the master here can prevent worker supervision leases from renewing.
+  const integrity = checkDatabasePages
+    ? sqliteGet<{ readonly integrity_check: string }, []>(db, 'PRAGMA integrity_check')?.integrity_check : 'ok';
   const foreignKeyFailures = sqliteAll<Record<string, string | number | null>, []>(db, 'PRAGMA foreign_key_check');
   if (integrity !== 'ok' || foreignKeyFailures.length > 0) {
     throw new ConfigRepositoryError('schema_corrupt', 'SQLite integrity checks failed');
@@ -24,19 +26,13 @@ function verifyIntegrity(db: Database, allowActiveRecoveryDrift = false, schemaV
 export function readRepositorySnapshot(
   db: Database,
   allowActiveRecoveryDrift = false,
-  schemaVersion?: number,
 ): RepositorySnapshot {
   try {
     return withConsistentRead(db, () => {
-      verifyIntegrity(db, allowActiveRecoveryDrift, schemaVersion);
+      verifyIntegrity(db, allowActiveRecoveryDrift, false);
       const audited = auditConfigurationTables(db);
       const revision = audited.activeRevisionRow;
-      // Explicit earlier-migration audits retain the old aggregate/hash. Normal reads
-      // and new workers always use the strict directional compiler.
-      const historical = schemaVersion !== undefined && schemaVersion < 15
-        ? validatePreDirectionalAggregate(readRawActiveAggregate(db)) : undefined;
-      if (historical && !historical.ok) throw new ConfigRepositoryError('schema_corrupt', 'historical configuration is invalid', historical.errors);
-      const aggregate = historical?.ok ? historical.value : readActiveAggregate(db);
+      const aggregate = readActiveAggregate(db);
       verifyActiveRequestIdentity(audited, aggregate);
       if (hashConfigurationContent(aggregate) !== revision.content_hash) {
         throw new ConfigRepositoryError('schema_corrupt', 'active configuration content hash does not match');
