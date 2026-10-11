@@ -62,7 +62,7 @@ test('two real proxy routes sharing one OAuth endpoint preserve exact caller sco
   const store:SecretStore={namespace:'chatgpt-oauth',get:async()=>value&&{...value},compareAndSet:async(_key,expected,next)=>{if((value?.version??null)!==expected)throw Object.assign(new Error('conflict'),{code:'version_conflict'});const version=(value?.version??0)+1;value={version,value:next};return version;},delete:async()=>{value=null;}};
   const account=await new AccountStore(store).create('Shared Peer Account',{accessToken:'test-peer-access',refreshToken:'test-peer-refresh',expiresAt:Date.now()+3600000,identity:{accountId:'trusted-peer-account'},identityStatus:'parsed'});
   const endpointId=crypto.randomUUID(),bindingId=crypto.randomUUID();
-  const scopes=['/v1/chat/completions','/v1/responses'].map(route=>`upstream:${route}#${endpointId}`);
+  const scopes=['/oauth-a/responses','/oauth-b/responses'].map(route=>`upstream:${route}#${endpointId}`);
   const projected:Array<{scope:string;method:string}>=[];
   let broker!:ControlPeerBroker;
   const host:PluginServiceHost=new PluginServiceHost('control',{identity:(plugin,scope)=>pluginPeerLifecycleIdentity({process:'control',instance:worker.master_generation,generation:1,catalog},plugin,scope),resolvePlacement:request=>broker.placementResolver(request),resolveJournal:()=>null,resolveCallee:()=>host.currentInvocation()?.callee??null});

@@ -109,7 +109,7 @@ describe('ChatGPT OAuth account routing', () => {
           for (const [model, accountRef] of [
             ['gpt-5.6-luna', 'free'], ['gpt-6-luna', 'free'], ['gpt-6.1-sol', 'paid'],
           ]) {
-            const response = await handleRequest(new Request('http://proxy.test/codex/v1/responses', {
+            const response = await handleRequest(new Request('http://proxy.test/codex/responses', {
               method: 'POST', headers: { 'content-type': 'application/json' },
               body: JSON.stringify({ model, input: 'test', stream: false }),
             }), nextConfig, { servingRevision: 1 });

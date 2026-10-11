@@ -27,7 +27,7 @@ test('Codex large response and durable failure diagnostics survive with bounded 
   ]);
   const originalFetch = global.fetch;
   const bodyStorage = new BodyStorageManager({ enabled: true, maxSize: 5 * 1024 * 1024 }, dataPlaneBodyLogDir);
-  const routeId = '/codex/v1/responses';
+  const routeId = '/codex/responses';
   let upstreamRequests = 0;
   let eventSize = 20 * 1024 * 1024;
   const upstream = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(req) {
