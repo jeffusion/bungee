@@ -16,7 +16,7 @@ function payload(response: any, param: string): string {
 export async function relayPayload(result: GatewayAuxiliaryResult, param: string, signal: AbortSignal): Promise<string> {
     if (result.kind === 'reused') { if (typeof result.value !== 'string') invalid(param); return result.value; }
     try {
-        if (result.status < 200 || result.status >= 300) throw new DataAdmissionError(result.status === 401 || result.status === 429 ? result.status : 502, 'llm_adapter_relay_upstream_failed', undefined, {param, message: 'Relay upstream rejected the request'});
+        if (result.status < 200 || result.status >= 300) throw new DataAdmissionError(result.status === 401 || result.status === 429 ? result.status : 502, 'llm_adapter_relay_upstream_failed', undefined, {param, message: `Relay upstream rejected the request (HTTP ${result.status})`});
         let response: any;
         if (result.bodyHandle.identity.contentType.includes('text/event-stream') || result.bodyHandle.identity.contentType.includes('application/octet-stream')) {
             const iterator = result.bodyHandle.events({id:'llm-adapter.relay', mandatory:true, signal})[Symbol.asyncIterator]();

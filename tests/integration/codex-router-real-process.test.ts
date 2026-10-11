@@ -334,16 +334,16 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         plugins: [binding(CODEX_PROCESS_PROBE, 22)],
         services: [{id: CHAT, position: 1, name: 'Chat fixture', plugins: [], endpoints: [endpoint(13)]}],
         routes: [
-          {id: ENTRY, position: 1, path: '/codex', websocket: {enabled: true}, endpoints: [endpoint(11)],
+          {id: ENTRY, position: 1, path: '/codex/', websocket: {enabled: true}, endpoints: [endpoint(11)],
             path_rewrite: {'^/codex': ''}, plugins: [binding(CODEX_PROCESS_PROBE, 20, {priority: -1000}), binding('codex-router', 21, {models: [
               {provider: 'lab', model: CODEX_MODELS[0], target: {type: 'route', id: NATIVE, protocol: 'responses'}},
               {provider: 'zai', source: CODEX_MODELS[1], model: CODEX_CHAT_MODEL, target: {type: 'service', id: CHAT, protocol: 'chat_completions'}},
               {provider: 'anthropic', source: CODEX_MODELS[2], model: CODEX_ANTHROPIC_MODEL, target: {type: 'route', id: ANTHROPIC, protocol: 'anthropic_messages'}},
               {provider: 'lab', model: CODEX_MODELS[3], target: {type: 'route', id: NATIVE_WS, protocol: 'responses'}},
             ]})]},
-          {id: NATIVE, position: 2, path: '/native-target', endpoints: [endpoint(12)], path_rewrite: {'^/native-target': ''}, plugins: []},
-          {id: ANTHROPIC, position: 3, path: '/anthropic-target', endpoints: [endpoint(14)], path_rewrite: {'^/anthropic-target': ''}, plugins: []},
-          {id: NATIVE_WS, position: 4, path: '/native-ws-target', websocket: {enabled: true}, endpoints: [endpoint(15)], path_rewrite: {'^/native-ws-target': ''}, plugins: []},
+          {id: NATIVE, position: 2, path: '/native-target/', endpoints: [endpoint(12)], path_rewrite: {'^/native-target': ''}, plugins: []},
+          {id: ANTHROPIC, position: 3, path: '/anthropic-target/', endpoints: [endpoint(14)], path_rewrite: {'^/anthropic-target': ''}, plugins: []},
+          {id: NATIVE_WS, position: 4, path: '/native-ws-target/', websocket: {enabled: true}, endpoints: [endpoint(15)], path_rewrite: {'^/native-ws-target': ''}, plugins: []},
         ],
       },
     };

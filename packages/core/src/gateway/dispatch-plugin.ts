@@ -2,6 +2,7 @@ import type { Plugin, PluginHooks, GatewayDispatchInput, GatewayDispatchDecision
 import { DataAdmissionError } from '../data-admission/errors';
 import { getScopedPluginRegistry } from '../scoped-plugin-registry';
 import { resolveEffectiveRoute } from './routing-plugin';
+import { joinPaths } from '../worker/request/context';
 import type { RouteConfig } from '@jeffusion/bungee-types';
 
 export class DispatchPlugin implements Plugin {
@@ -26,7 +27,7 @@ export function resolveDispatchTarget(config:import('@jeffusion/bungee-types').A
     const route=config.routes.find(route=>route.id===target.id);
     if(!route || route.id===entry.id || route.direct_response?.enabled || route.redirect?.enabled || route.response_rules?.some(rule=>rule.enabled))throw new DataAdmissionError(422,'dispatch_target_unavailable');
     const suffix=context.url.pathname.startsWith(entry.path)?context.url.pathname.slice(entry.path.length):'';
-    context.url.pathname=route.path.replace(/\/$/,'')+suffix;
+    context.url.pathname=joinPaths(route.path,suffix);
     return route;
   }
   if(target.type!=='service')throw new DataAdmissionError(422,'dispatch_target_unavailable');
