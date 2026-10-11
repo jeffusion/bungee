@@ -11,9 +11,9 @@ afterEach(()=>{globalThis.fetch=originalFetch;setScopedPluginRegistry(previous);
 const logging={accessLogWriter:{write(){},updateBodyId(){},updateResponseBodyId(){},updateProtocolOutcome(){}},fileLogWriter:{async write(){}}};
 const path=new URL('../fixtures/dispatch-plugin.ts',import.meta.url).pathname;
 const plugin=(mark:string,target?:any)=>({name:'dispatch-fixture',path,options:{mark,target}});
-for(const type of ['route','service'] as const) test(`one native request dispatches to ${type} with final scoped plugins`,async()=>{
-  const config:any={routes:[{id:'entry',path:'/codex',plugins:[plugin('entry',{type,id:'target'})],endpoints:[{id:'old',target:'http://old.test'}]},
-    {id:'target',path:'/target',plugins:[plugin('route')],endpoints:[{id:'target-up',target:'http://route.test',plugins:[plugin('upstream')]}]}],
+for(const type of ['route','service'] as const) for(const trailing of [false,true]) test(`one native request dispatches to ${type} with final scoped plugins (${trailing?'trailing slash':'plain prefix'})`,async()=>{
+  const config:any={routes:[{id:'entry',path:trailing?'/codex/':'/codex',plugins:[plugin('entry',{type,id:'target'})],endpoints:[{id:'old',target:'http://old.test'}]},
+    {id:'target',path:trailing?'/target/':'/target',plugins:[plugin('route')],endpoints:[{id:'target-up',target:'http://route.test',plugins:[plugin('upstream')]}]}],
     services:[{id:'target',name:'service',plugins:[plugin('service')],endpoints:[{id:'service-up',target:'http://service.test',plugins:[plugin('upstream')]}]}]};
   const registry=new ScopedPluginRegistry(import.meta.dir);expect((await registry.initializeFromConfig(config)).failed).toBe(0);setScopedPluginRegistry(registry);
   const seen:any[]=[];globalThis.fetch=Object.assign(async(input:any,init:any)=>{seen.push({url:String(input),headers:new Headers(init.headers),body:JSON.parse(await new Response(init.body).text())});return Response.json({object:'response',id:'r',output:[]});},{preconnect(){}}) as any;
