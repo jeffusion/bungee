@@ -37,7 +37,7 @@ export interface SnapshotSource {
   };
   read(offset: number, length: number): Promise<Uint8Array>;
   retain?(): void;
-  release?(): void;
+  release?(): void | Promise<void>;
 }
 
 /** Read-only view over the loaded catalog. Mutations are whole-index swaps. */
@@ -125,7 +125,7 @@ export async function readCatalogSnapshot(source: SnapshotSource): Promise<Catal
     }
     if (`sha256:${createHash('sha256').update(bytes).digest('hex')}` !== digest) throw new Error('catalog_snapshot_digest');
     return decodeCatalogSnapshot(bytes, version);
-  } finally { source.release?.(); }
+  } finally { await source.release?.(); }
 }
 
 /** Apply only a complete Host-verified snapshot; a failed read never clears the prior view. */

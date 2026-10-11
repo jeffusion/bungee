@@ -1,0 +1,888 @@
+import { afterAll as afterDataPlaneTests } from 'bun:test';
+import { createDataPlaneRuntime } from '../helpers/data-plane-runtime';
+const dataPlaneRuntime = await createDataPlaneRuntime();
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { gzipSync, zstdCompressSync } from 'node:zlib';
+import type { AppConfig, InterceptResult } from '@jeffusion/bungee-types';
+import type { FinallyContext, MutableRequestContext, RawResponseContext, ResponseContext } from '../../src/hooks';
+const { createPluginHooks } = await import('../../src/hooks');
+import type { RawResponseResult } from '../../src/plugin-control/contracts';
+const { logger } = await import('../../src/logger');
+import type { AccessLogEntry } from '../../src/logger/access-log-writer';
+import type { RequestLoggerDependencies } from '../../src/logger/request-logger';
+import type { PhaseAwareHooks, PrecompiledHooks, ScopedPluginRegistry } from '../../src/scoped-plugin-registry';
+const { setScopedPluginRegistry } = await import('../../src/scoped-plugin-registry');
+
+
+const originalFetch = global.fetch;
+const originalWarn = logger.warn;
+let handleRequest: typeof import('../../src/worker/request/handler').handleRequest;
+let initializeRuntimeState: typeof import('../../src/worker/state/runtime-state').initializeRuntimeState;
+let runtimeState: typeof import('../../src/worker/state/runtime-state').runtimeState;
+let getActiveRequestCount: typeof import('../../src/worker/state/runtime-state').getActiveRequestCount;
+let accessLogWriter: typeof import('../../src/logger/access-log-writer').accessLogWriter;
+
+function createPrecompiledHooks(options: {
+  label?: string;
+  responseDemand?: boolean;
+  onBeforeRequest?: (ctx: MutableRequestContext) => MutableRequestContext | Promise<MutableRequestContext>;
+  onInterceptRequest?: (ctx: MutableRequestContext) => InterceptResult | Promise<InterceptResult>;
+  onResponse?: (response: Response, ctx: ResponseContext) => Response | Promise<Response>;
+  onRawResponse?: (result: RawResponseResult, ctx: RawResponseContext) => RawResponseResult | Promise<RawResponseResult>;
+  onFinally?: (ctx: FinallyContext) => void | Promise<void>;
+} = {}): PrecompiledHooks {
+  const hooks = createPluginHooks();
+  const label = options.label ?? 'phase-test';
+
+  if (options.onBeforeRequest) {
+    hooks.onBeforeRequest.tapPromise({ name: `${label}:before` }, async (ctx) => await options.onBeforeRequest!(ctx));
+  }
+  if (options.onInterceptRequest) {
+    hooks.onInterceptRequest.tapPromise({ name: `${label}:intercept` }, async (ctx) => await options.onInterceptRequest!(ctx));
+  }
+  if (options.onResponse) {
+    hooks.onResponse.tapPromise({ name: `${label}:response` }, async (response, ctx) => await options.onResponse!(response, ctx));
+  }
+  if (options.onRawResponse) {
+    hooks.onRawResponse.tapPromise({ name: `${label}:raw-response` }, async (result, ctx) => await options.onRawResponse!(result, ctx));
+  }
+  if (options.onFinally) {
+    hooks.onFinally.tapPromise({ name: `${label}:finally` }, async (ctx) => await options.onFinally!(ctx));
+  }
+
+  return {
+    handlers: Object.values(options).some(value => typeof value === 'function')
+      ? [{ pluginName: label, config: {}, bodyRequirements: () => ({ request: 'none', response: options.responseDemand ? ['json','sse-json'] : options.onResponse ? ['json'] : [] }), register() {} }]
+      : [],
+    hooks,
+    hasInterceptCallbacks: hooks.onInterceptRequest.hasCallbacks(),
+    hasResponseCallbacks: hooks.onResponse.hasCallbacks(),
+    hasRawResponseCallbacks: hooks.onRawResponse.hasCallbacks(),
+    hasStreamCallbacks: hooks.onStreamChunk.hasCallbacks(),
+    metadata: {
+      createdAt: Date.now(),
+      pluginCount: hooks.onBeforeRequest.hasCallbacks() || hooks.onInterceptRequest.hasCallbacks() || hooks.onResponse.hasCallbacks() || hooks.onRawResponse.hasCallbacks() || hooks.onFinally.hasCallbacks() ? 1 : 0,
+      pluginNames: [label],
+      scope: label,
+    },
+  };
+}
+
+function installPhaseHooks(factory: (upstreamId?: string) => Omit<PhaseAwareHooks, 'globalPrecompiled' | 'routePrecompiled'> & { globalPrecompiled?: PrecompiledHooks | null; routePrecompiled?: PrecompiledHooks | null }): void {
+  setScopedPluginRegistry({
+    runWithRequestLeases<T>(_leases: ReadonlyMap<string, () => void>, run: () => T): T { return run(); },
+    async dispatchRequest() { return undefined; },
+    getPrecompiledHooks: (_routeId: string, upstreamId?: string) => {
+      const partial = factory(upstreamId);
+      return {
+        ...partial,
+        globalPrecompiled: partial.globalPrecompiled ?? null,
+        routePrecompiled: partial.routePrecompiled ?? partial.routePhase ?? null,
+      };
+    },
+  } as unknown as ScopedPluginRegistry);
+}
+
+function createInboundChain(
+  onResponse?: (response: Response, context: ResponseContext) => Promise<Response> | Response,
+  onRawResponse?: (result: RawResponseResult, context: RawResponseContext) => Promise<RawResponseResult> | RawResponseResult,
+  onError: () => Promise<void> = async () => {},
+): PhaseAwareHooks['inbound'] {
+  return {
+    onResponse: async (response, context) => onResponse ? await onResponse(response, context) : response,
+    onRawResponse: async (result, context) => onRawResponse ? await onRawResponse(result, context) : result,
+    onStreamChunk: async (chunk) => [chunk],
+    onFlushStream: async (chunks) => chunks,
+    onError,
+  };
+}
+
+function setFetchMock(mockFetch: (...args: Parameters<typeof fetch>) => Promise<Response>): void {
+  global.fetch = mockFetch as unknown as typeof fetch;
+}
+
+function inputToUrl(input: Parameters<typeof fetch>[0]): string {
+  if (typeof input === 'string') return input;
+  if (input instanceof URL) return input.toString();
+  return input.url;
+}
+
+function createTestLogging(): { logging: RequestLoggerDependencies; entries: Map<string, AccessLogEntry> } {
+  const entries = new Map<string, AccessLogEntry>();
+  const pendingRespBodyIds = new Map<string, string>();
+  const pendingOutcomes = new Map<string, {
+    outcome: NonNullable<AccessLogEntry['protocolOutcome']>;
+    success: boolean;
+    code?: string;
+  }>();
+
+  return {
+    entries,
+    logging: {
+      accessLogWriter: {
+        write: (entry) => {
+          const captured = { ...entry };
+          const respBodyId = pendingRespBodyIds.get(entry.requestId);
+          if (respBodyId) captured.respBodyId = respBodyId;
+          const outcome = pendingOutcomes.get(entry.requestId);
+          if (outcome) {
+            captured.protocolOutcome = outcome.outcome;
+            captured.protocolCode = outcome.code;
+            captured.success = outcome.success;
+          }
+          entries.set(entry.requestId, captured);
+          if (respBodyId) pendingRespBodyIds.delete(entry.requestId);
+          if (outcome) pendingOutcomes.delete(entry.requestId);
+        },
+        updateResponseBodyId: (requestId, respBodyId) => {
+          const entry = entries.get(requestId);
+          if (entry) entry.respBodyId = respBodyId;
+          else pendingRespBodyIds.set(requestId, respBodyId);
+        },
+        updateProtocolOutcome: (requestId, outcome, success, code) => {
+          const entry = entries.get(requestId);
+          if (entry) {
+            entry.protocolOutcome = outcome;
+            entry.protocolCode = code;
+            entry.success = success;
+          } else {
+            pendingOutcomes.set(requestId, { outcome, success, code });
+          }
+        },
+      },
+      fileLogWriter: { write: async () => {} },
+    },
+  };
+}
+
+function createSingleEndpointConfig(): AppConfig {
+  return {
+    routes: [
+      {
+        path: '/api',
+        endpoints: [{ id: 'primary', target: 'http://primary.test' }],
+      },
+    ],
+  };
+}
+
+function createFailoverConfig(): AppConfig {
+  return {
+    services: [
+      {
+        name: 'api-service',
+        failover: { enabled: true, retry_on: [503] },
+        endpoints: [
+          { id: 'primary', target: 'http://primary.test' },
+          { id: 'secondary', target: 'http://secondary.test' },
+        ],
+      },
+    ],
+    routes: [{ path: '/api', service: 'api-service' }],
+  };
+}
+
+beforeAll(async () => {
+
+  ({ handleRequest } = await import('../../src/worker/request/handler'));
+  ({ initializeRuntimeState, runtimeState, getActiveRequestCount } = await import('../../src/worker/state/runtime-state'));
+  ({ accessLogWriter } = await import('../../src/logger/access-log-writer'));
+});
+
+afterAll(async () => {
+  runtimeState?.clear();
+});
+
+beforeEach(() => {
+  runtimeState.clear();
+  setScopedPluginRegistry(null);
+  global.fetch = originalFetch;
+  logger.warn = originalWarn;
+});
+
+afterEach(() => {
+  runtimeState.clear();
+  setScopedPluginRegistry(null);
+  global.fetch = originalFetch;
+  logger.warn = originalWarn;
+});
+
+describe('phase-aware request pipeline', () => {
+  test('runs strict raw response hook through the real local upstream path', async () => {
+    const upstream = Bun.serve({
+      port: 0,
+      fetch: () => new Response('upstream-body', { headers: { 'content-type': 'text/plain' } }),
+    });
+    let called = false;
+    try {
+      installPhaseHooks(() => ({
+        routePhase: createPrecompiledHooks({
+          onRawResponse: async (result) => result,
+        }),
+        servicePhase: null,
+        upstreamPhase: createPrecompiledHooks(),
+        inbound: createInboundChain(undefined, async (result) => {
+          called = true;
+          const body = await result.response.text();
+          return {
+            response: new Response(body.toUpperCase(), { status: result.response.status, headers: result.response.headers }),
+            completion: Promise.resolve({ status: 'completed' as const }),
+          };
+        }),
+      }));
+      const response = await handleRequest(new Request('http://proxy.test/api'), {
+        routes: [{ path: '/api', endpoints: [{ id: 'local', target: upstream.url.href }] }],
+      });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe('UPSTREAM-BODY');
+      expect(called).toBe(true);
+    } finally {
+      upstream.stop();
+    }
+  });
+
+  test.each([400, 404, 422])('returns a safe raw %p without failover or passive health failure', async (status) => {
+    const serviceName = `safe-client-${status}`;
+    const routePath = `/safe-client-${status}`;
+    let fetchCount = 0;
+    installPhaseHooks(() => ({
+      routePhase: createPrecompiledHooks({ onRawResponse: async (result) => result }),
+      servicePhase: null,
+      upstreamPhase: createPrecompiledHooks(),
+      inbound: createInboundChain(undefined, async (result) => {
+        await result.response.arrayBuffer();
+        return {
+          response: new Response(JSON.stringify({ error: { message: 'safe upstream error' } }), {
+            status: result.response.status,
+            headers: { 'content-type': 'application/json' },
+          }),
+          completion: Promise.resolve({ status: 'failed' as const, code: 'upstream_http_error' }),
+        };
+      }),
+    }));
+    setFetchMock(async () => {
+      fetchCount++;
+      return new Response(`secret-${status}`, { status });
+    });
+    const config: AppConfig = {
+      services: [{
+        name: serviceName,
+        failover: { enabled: true, retry_on: [503] },
+        endpoints: [
+          { id: 'primary', target: 'http://primary.test' },
+          { id: 'secondary', target: 'http://secondary.test' },
+        ],
+      }],
+      routes: [{ path: routePath, service: serviceName }],
+    };
+    initializeRuntimeState(config);
+    const { entries, logging } = createTestLogging();
+
+    const requestCount = status === 400 ? 3 : 1;
+    let response!: Response;
+    let body = '';
+    for (let attempt = 0; attempt < requestCount; attempt++) {
+      response = await handleRequest(new Request(`http://localhost${routePath}`), config, { logging });
+      body = await response.text();
+    }
+    const logEntries = [...entries.values()].filter((entry) => entry.path === routePath);
+
+    expect(response.status).toBe(status);
+    expect(body).not.toContain(`secret-${status}`);
+    expect(fetchCount).toBe(requestCount);
+    expect(runtimeState.get(serviceName)?.upstreams).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'primary', status: 'HEALTHY', consecutive_failures: 0 }),
+    ]));
+    expect(logEntries).toHaveLength(requestCount);
+    for (const entry of logEntries) {
+      expect(entry).toEqual(expect.objectContaining({
+        status,
+        protocolOutcome: 'failed',
+        protocolCode: 'upstream_http_error',
+        success: false,
+        path: routePath,
+      }));
+    }
+  });
+
+  test('finite body EOF retains the deadline for a pending strict raw proof', async () => {
+    const base=createFailoverConfig();const config:AppConfig={...base,routes:base.routes.map(route=>({...route,timeouts:{request_ms:30}}))};
+    initializeRuntimeState(config);
+    const raw=async(result:RawResponseResult):Promise<RawResponseResult>=>({...result,completion:new Promise(()=>{})});
+    installPhaseHooks(()=>({routePhase:createPrecompiledHooks({onRawResponse:raw}),servicePhase:null,upstreamPhase:createPrecompiledHooks(),inbound:createInboundChain(undefined,raw)}));
+    setFetchMock(async()=>new Response('finite'));
+    const {entries,logging}=createTestLogging();
+    const response=await handleRequest(new Request('http://proxy.test/api'),config,{logging});
+    const body=await Promise.race([response.text(),Bun.sleep(500).then(()=>{throw new Error('strict proof exceeded attempt deadline');})]);
+    expect(body).toBe('finite');
+    const entry=[...entries.values()].find(entry=>entry.isFailoverAttempt);
+    expect(entry?.protocolOutcome).toBe('failed');expect(entry?.protocolCode).toBe('request_timeout');
+    expect(getActiveRequestCount(config.services![0]!.name,'primary')).toBe(0);
+  });
+
+  test.each(['throw','locked-throw','deadline'] as const)('host releases abandoned raw decoder after %s',async(mode)=>{
+    const base=createFailoverConfig();const config:AppConfig={...base,services:base.services!.map(service=>({...service,failover:{enabled:false}})),routes:base.routes.map(route=>({...route,timeouts:{request_ms:30}}))};
+    initializeRuntimeState(config);let abandon=true;
+    const raw=async(result:RawResponseResult,context:RawResponseContext):Promise<RawResponseResult>=>{
+      const decoded=context.bodyHandle!;
+      if(abandon){if(mode==='locked-throw')void decoded.decoded().catch(()=>undefined);if(mode==='deadline')return new Promise(()=>{});throw new Error('raw decoder abandoned');}
+      const body=new TextDecoder().decode(await decoded.decoded());return {...result,response:new Response(body,{headers:{'content-type':'text/event-stream'}})};
+    };
+    installPhaseHooks(()=>({routePhase:createPrecompiledHooks({onRawResponse:raw,responseDemand:true}),servicePhase:null,upstreamPhase:createPrecompiledHooks(),inbound:createInboundChain(undefined,raw)}));
+    let coding:'gzip'|'zstd'='gzip';
+    setFetchMock(async()=>new Response(new Uint8Array(coding==='gzip'?gzipSync(Buffer.from('data: {"x":1}\n\n')):zstdCompressSync(Buffer.from('data: {"x":1}\n\n'))),{headers:{'content-type':'text/event-stream','content-encoding':coding}}));
+    for(let i=0;i<2;i++){
+      const pending=handleRequest(new Request('http://proxy.test/api'),config);
+      if(mode==='deadline'){const response=await pending;expect(response.status).toBeGreaterThanOrEqual(400);await response.text();}
+      else await expect(pending).rejects.toThrow('raw decoder abandoned');
+    }
+    abandon=false;
+    for(coding of ['gzip','zstd'] as const){const response=await handleRequest(new Request('http://proxy.test/api'),config);expect(response.status).toBe(200);expect(await response.text()).toBe('data: {"x":1}\n\n');}
+    expect(getActiveRequestCount(config.services![0]!.name,'primary')).toBe(0);
+  });
+
+  test.each(['reject', 'hang'] as const)('cleanup failure (%s) after a request deadline prevents GET failover', async (mode) => {
+    const base = createFailoverConfig();
+    const config: AppConfig = {
+      ...base,
+      routes: base.routes.map((route) => ({ ...route, timeouts: { request_ms: 15 } })),
+    };
+    initializeRuntimeState(config);
+    let fetchCalls = 0;
+    let cancelCalls = 0;
+    installPhaseHooks(() => ({
+      routePhase: createPrecompiledHooks({ onRawResponse: async () => new Promise(() => {}) }),
+      servicePhase: null,
+      upstreamPhase: createPrecompiledHooks(),
+      inbound: createInboundChain(undefined, async () => new Promise(() => {})),
+    }));
+    setFetchMock(async () => {
+      fetchCalls++;
+      return new Response(new ReadableStream<Uint8Array>({
+        cancel() {
+          cancelCalls++;
+          return mode === 'reject' ? Promise.reject(new Error('cancel failed')) : new Promise(() => {});
+        },
+      }));
+    });
+    const { entries, logging } = createTestLogging();
+
+    const response = await handleRequest(new Request('http://proxy.test/api'), config, { logging });
+    expect(response.status).toBe(503);
+    expect(fetchCalls).toBe(1);
+    expect(cancelCalls).toBe(1);
+    const attempt = [...entries.values()].find((entry) => entry.isFailoverAttempt);
+    expect(attempt?.status).toBe(503);
+    expect(attempt?.protocolOutcome).toBe('failed');
+  });
+
+  test('explicit failover retry_on 400 still selects the sibling upstream', async () => {
+    const fetchedUrls: string[] = [];
+    installPhaseHooks(() => ({
+      routePhase: createPrecompiledHooks({ onRawResponse: async (result) => result }),
+      servicePhase: null,
+      upstreamPhase: createPrecompiledHooks(),
+      inbound: createInboundChain(undefined, async (result) => {
+        if (result.response.ok) return result;
+        await result.response.arrayBuffer();
+        return {
+          response: new Response('safe-400', { status: 400 }),
+          completion: Promise.resolve({ status: 'failed' as const, code: 'upstream_http_error' }),
+        };
+      }),
+    }));
+    setFetchMock(async (input) => {
+      const target = inputToUrl(input);
+      fetchedUrls.push(target);
+      return target.includes('primary.test') ? new Response('secret', { status: 400 }) : new Response('sibling-ok');
+    });
+    const config = {
+      services: [{
+        name: 'explicit-400-retry',
+        failover: { enabled: true, retry_on: [400] },
+        endpoints: [
+          { id: 'primary', target: 'http://primary.test', priority: 0 },
+          { id: 'secondary', target: 'http://secondary.test', priority: 1 },
+        ],
+      }],
+      routes: [{ path: '/explicit-400-retry', service: 'explicit-400-retry' }],
+    } as AppConfig;
+    initializeRuntimeState(config);
+
+    let response!: Response;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      response = await handleRequest(new Request('http://localhost/explicit-400-retry'), config);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe('sibling-ok');
+    }
+    expect(fetchedUrls).toHaveLength(6);
+    expect(runtimeState.get('explicit-400-retry')?.upstreams).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'primary', status: 'UNHEALTHY', consecutive_failures: 3 }),
+    ]));
+    expect(fetchedUrls[0]).toContain('primary.test');
+    expect(fetchedUrls[1]).toContain('secondary.test');
+    await accessLogWriter.flush();
+    const primaryAttempt = accessLogWriter.getDatabase().prepare(
+      'SELECT status, success, protocol_outcome, protocol_code FROM access_logs WHERE path = ? AND attempt_upstream LIKE ? ORDER BY timestamp DESC LIMIT 1',
+    ).get('/explicit-400-retry', '%primary.test%') as { status: number; success: number; protocol_outcome: string; protocol_code: string } | null;
+    const primaryAttemptCount = accessLogWriter.getDatabase().prepare(
+      'SELECT COUNT(*) AS count FROM access_logs WHERE path = ? AND attempt_upstream LIKE ?',
+    ).get('/explicit-400-retry', '%primary.test%') as { count: number };
+    expect(primaryAttempt).toEqual({ status: 400, success: 0, protocol_outcome: 'failed', protocol_code: 'upstream_http_error' });
+    expect(primaryAttemptCount.count).toBe(3);
+    accessLogWriter.getDatabase().prepare('DELETE FROM access_logs WHERE path = ?').run('/explicit-400-retry');
+  });
+
+  test.each([
+    { name: 'original 200 masquerades as SSE 400', originalStatus: 200, consumeOriginal: true, replacement: 'new' as const },
+    { name: 'original 400 gets an SSE replacement', originalStatus: 400, consumeOriginal: true, replacement: 'new' as const },
+    { name: 'original 400 is reused with an unread body', originalStatus: 400, consumeOriginal: false, replacement: 'same' as const },
+  ])('strictly rejects non-2xx streaming raw errors: $name', async ({ originalStatus, consumeOriginal, replacement }) => {
+    let originalResponse: Response | undefined;
+    installPhaseHooks(() => ({
+      routePhase: createPrecompiledHooks({ onRawResponse: async (result) => result }),
+      servicePhase: null,
+      upstreamPhase: createPrecompiledHooks(),
+      inbound: createInboundChain(undefined, async (result) => {
+        if (consumeOriginal) await result.response.arrayBuffer();
+        return {
+          response: replacement === 'same'
+            ? result.response
+            : new Response('data: safe\n\n', { status: 400, headers: { 'content-type': 'text/event-stream' } }),
+          completion: Promise.resolve({ status: 'failed' as const, code: 'upstream_http_error' }),
+        };
+      }),
+    }));
+    setFetchMock(async () => {
+      originalResponse = new Response('data: secret\n\n', {
+        status: originalStatus,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+      return originalResponse;
+    });
+    const config: AppConfig = {
+      services: [{
+        name: 'stream-safe-client-error',
+        failover: { enabled: true, retry_on: [503] },
+        endpoints: [{ id: 'primary', target: 'http://primary.test' }],
+      }],
+      routes: [{ path: '/stream-safe-client-error', service: 'stream-safe-client-error' }],
+    };
+    initializeRuntimeState(config);
+
+    const response = await handleRequest(new Request('http://localhost/stream-safe-client-error', {
+      method: 'POST',
+      body: JSON.stringify({ stream: true }),
+      headers: { 'content-type': 'application/json' },
+    }), config);
+
+    expect(response.status).toBe(503);
+    expect(await response.text()).not.toContain('secret');
+    expect(originalResponse?.bodyUsed).toBe(true);
+    expect(getActiveRequestCount('stream-safe-client-error', 'primary')).toBe(0);
+  });
+
+  test.each([
+    { name: 'original 200 is disguised as 400', originalStatus: 200, replacementStatus: 400, consumeOriginal: true },
+    { name: 'original 500 is changed to 400', originalStatus: 500, replacementStatus: 400, consumeOriginal: true },
+    { name: 'raw 400 is changed to 200 by onResponse', originalStatus: 400, replacementStatus: 400, finalStatus: 200, consumeOriginal: true },
+    { name: 'raw 400 reuses the original response', originalStatus: 400, replacementStatus: 400, consumeOriginal: true, reuseOriginal: true },
+    { name: 'raw 400 leaves the original body unread', originalStatus: 400, replacementStatus: 400, consumeOriginal: false },
+  ])('rejects unsafe raw HTTP completion: $name', async ({ originalStatus, replacementStatus, finalStatus, consumeOriginal, reuseOriginal }) => {
+    installPhaseHooks(() => ({
+      routePhase: createPrecompiledHooks({ onRawResponse: async (result) => result }),
+      servicePhase: null,
+      upstreamPhase: createPrecompiledHooks(),
+      inbound: createInboundChain(
+        finalStatus === undefined ? undefined : async () => new Response('changed', { status: finalStatus }),
+        async (result) => {
+          if (consumeOriginal) await result.response.arrayBuffer();
+          return {
+            response: reuseOriginal ? result.response : new Response('safe', { status: replacementStatus }),
+            completion: Promise.resolve({ status: 'failed' as const, code: 'upstream_http_error' }),
+          };
+        },
+      ),
+    }));
+    setFetchMock(async () => new Response('secret', { status: originalStatus }));
+    const config: AppConfig = {
+      services: [{
+        name: 'unsafe-raw-completion',
+        failover: { enabled: true, retry_on: [503] },
+        endpoints: [{ id: 'primary', target: 'http://primary.test' }],
+      }],
+      routes: [{ path: '/unsafe-raw-completion', service: 'unsafe-raw-completion' }],
+    };
+    initializeRuntimeState(config);
+
+    const response = await handleRequest(new Request('http://localhost/unsafe-raw-completion'), config);
+
+    expect(response.status).toBe(503);
+    expect(getActiveRequestCount('unsafe-raw-completion', 'primary')).toBe(0);
+  });
+
+  test('neutral HALF_OPEN client errors release the slot and preserve recovery state', async () => {
+    installPhaseHooks(() => ({
+      routePhase: createPrecompiledHooks({ onRawResponse: async (result) => result }),
+      servicePhase: null,
+      upstreamPhase: createPrecompiledHooks(),
+      inbound: createInboundChain(undefined, async (result) => {
+        await result.response.arrayBuffer();
+        return {
+          response: new Response('safe-half-open-400', { status: 400 }),
+          completion: Promise.resolve({ status: 'failed' as const, code: 'upstream_http_error' }),
+        };
+      }),
+    }));
+    setFetchMock(async () => new Response('secret', { status: 400 }));
+    const config: AppConfig = {
+      services: [{
+        name: 'half-open-neutral',
+        failover: { enabled: true, retry_on: [503] },
+        endpoints: [{ id: 'primary', target: 'http://primary.test' }],
+      }],
+      routes: [{ path: '/half-open-neutral', service: 'half-open-neutral' }],
+    };
+    initializeRuntimeState(config);
+    const selected = runtimeState.get('half-open-neutral')!.upstreams[0]!;
+    selected.status = 'HALF_OPEN';
+    selected.consecutive_failures = 2;
+    selected.consecutive_successes = 1;
+    selected.recovery_attempt_count = 3;
+
+    const response = await handleRequest(new Request('http://localhost/half-open-neutral'), config);
+
+    expect(response.status).toBe(400);
+    await response.text();
+    expect(selected).toMatchObject({
+      status: 'HALF_OPEN',
+      consecutive_failures: 2,
+      consecutive_successes: 1,
+      recovery_attempt_count: 3,
+    });
+    expect(getActiveRequestCount('half-open-neutral', 'primary')).toBe(0);
+  });
+
+  test('three neutral 400 responses do not open the circuit before a real 200 success', async () => {
+    let fetchCount = 0;
+    installPhaseHooks(() => ({
+      routePhase: createPrecompiledHooks({ onRawResponse: async (result) => result }),
+      servicePhase: null,
+      upstreamPhase: createPrecompiledHooks(),
+      inbound: createInboundChain(undefined, async (result) => {
+        if (result.response.ok) return result;
+        await result.response.arrayBuffer();
+        return {
+          response: new Response('safe-400', { status: 400 }),
+          completion: Promise.resolve({ status: 'failed' as const, code: 'upstream_http_error' }),
+        };
+      }),
+    }));
+    setFetchMock(async () => {
+      fetchCount++;
+      return fetchCount <= 3 ? new Response('secret', { status: 400 }) : new Response('real-success');
+    });
+    const config: AppConfig = {
+      services: [{
+        name: 'neutral-then-success',
+        failover: { enabled: true, retry_on: [503] },
+        endpoints: [{ id: 'primary', target: 'http://primary.test' }],
+      }],
+      routes: [{ path: '/neutral-then-success', service: 'neutral-then-success' }],
+    };
+    initializeRuntimeState(config);
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const response = await handleRequest(new Request('http://localhost/neutral-then-success'), config);
+      expect(response.status).toBe(400);
+    }
+    const beforeSuccess = runtimeState.get('neutral-then-success')!.upstreams[0]!;
+    expect(beforeSuccess).toMatchObject({ status: 'HEALTHY', consecutive_failures: 0 });
+
+    const success = await handleRequest(new Request('http://localhost/neutral-then-success'), config);
+
+    expect(success.status).toBe(200);
+    expect(await success.text()).toBe('real-success');
+    expect(fetchCount).toBe(4);
+    expect(beforeSuccess).toMatchObject({ status: 'HEALTHY', consecutive_failures: 0 });
+  });
+
+  test('legacy completed 500 keeps status-only health behavior', async () => {
+    installPhaseHooks(() => ({
+      routePhase: createPrecompiledHooks(),
+      servicePhase: null,
+      upstreamPhase: createPrecompiledHooks(),
+      inbound: createInboundChain(),
+    }));
+    setFetchMock(async () => new Response('legacy-error', { status: 500 }));
+    const config: AppConfig = {
+      services: [{
+        name: 'legacy-completed-500',
+        failover: { enabled: true, retry_on: [503] },
+        endpoints: [{ id: 'primary', target: 'http://primary.test' }],
+      }],
+      routes: [{ path: '/legacy-completed-500', service: 'legacy-completed-500' }],
+    };
+    initializeRuntimeState(config);
+    const selected = runtimeState.get('legacy-completed-500')!.upstreams[0]!;
+    selected.consecutive_failures = 1;
+    selected.consecutive_successes = 2;
+
+    const response = await handleRequest(new Request('http://localhost/legacy-completed-500'), config);
+
+    expect(response.status).toBe(500);
+    await response.text();
+    expect(selected).toMatchObject({ status: 'HEALTHY', consecutive_failures: 1, consecutive_successes: 0 });
+  });
+
+  test.each([408, 425, 429, 500, 503])('status-triggered retry %p still fails health on the final endpoint', async (status) => {
+    const serviceName = `status-retry-${status}`;
+    const routePath = `/${serviceName}`;
+    const fetched: string[] = [];
+    installPhaseHooks(() => ({
+      routePhase: createPrecompiledHooks({ onRawResponse: async (result) => result }),
+      servicePhase: null,
+      upstreamPhase: createPrecompiledHooks(),
+      inbound: createInboundChain(undefined, async (result) => {
+        if (result.response.ok) return result;
+        await result.response.arrayBuffer();
+        return {
+          response: new Response('safe-status-error', { status: result.response.status }),
+          completion: Promise.resolve({ status: 'failed' as const, code: 'upstream_http_error' }),
+        };
+      }),
+    }));
+    setFetchMock(async (input) => {
+      fetched.push(inputToUrl(input));
+      return new Response('secret', { status });
+    });
+    const config: AppConfig = {
+      services: [{
+        name: serviceName,
+        failover: { enabled: true, retry_on: [status] },
+        endpoints: [
+          { id: 'primary', target: 'http://primary.test', priority: 0 },
+          { id: 'secondary', target: 'http://secondary.test', priority: 1 },
+        ],
+      }],
+      routes: [{ path: routePath, service: serviceName }],
+    };
+    initializeRuntimeState(config);
+
+    let response!: Response;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      response = await handleRequest(new Request(`http://localhost${routePath}`), config);
+      expect(response.status).toBe(status);
+      await response.text();
+    }
+    expect(fetched).toHaveLength(6);
+    expect(runtimeState.get(serviceName)?.upstreams).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'primary', status: 'UNHEALTHY', consecutive_failures: 3 }),
+      expect.objectContaining({ id: 'secondary', status: 'UNHEALTHY', consecutive_failures: 3 }),
+    ]));
+  });
+
+  test('Phase 1 failover action logs a warning and continues to upstream', async () => {
+    const warnings: string[] = [];
+    logger.warn = ((_data: unknown, message?: string) => {
+      warnings.push(message ?? '');
+    }) as typeof logger.warn;
+    installPhaseHooks(() => ({
+      routePhase: createPrecompiledHooks({ onInterceptRequest: async () => ({ action: 'failover', reason: 'route-says-next' }) }),
+      servicePhase: null,
+      upstreamPhase: createPrecompiledHooks(),
+      inbound: createInboundChain(),
+    }));
+    setFetchMock(async () => new Response('origin', { status: 200 }));
+    const config = createSingleEndpointConfig();
+
+    const response = await handleRequest(new Request('http://localhost/api/test'), config);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('origin');
+    expect(warnings.some(message => message.includes('Phase 1 onInterceptRequest returned failover action'))).toBeTrue();
+  });
+
+  test('Phase 1 respond returns immediately without fetch or inbound chain', async () => {
+    let fetchCount = 0;
+    let inboundCount = 0;
+    installPhaseHooks(() => ({
+      routePhase: createPrecompiledHooks({ onInterceptRequest: async () => ({ action: 'respond', response: new Response('route-hit', { status: 209 }) }) }),
+      servicePhase: null,
+      upstreamPhase: createPrecompiledHooks(),
+      inbound: createInboundChain((response) => {
+        inboundCount++;
+        return response;
+      }),
+    }));
+    setFetchMock(async () => {
+      fetchCount++;
+      return new Response('origin', { status: 200 });
+    });
+    const config = createSingleEndpointConfig();
+
+    const response = await handleRequest(new Request('http://localhost/api/test'), config);
+
+    expect(response.status).toBe(209);
+    expect(await response.text()).toBe('route-hit');
+    expect(fetchCount).toBe(0);
+    expect(inboundCount).toBe(0);
+  });
+
+  test('Phase 2 respond returns immediately after Phase 1 continues', async () => {
+    let fetchCount = 0;
+    installPhaseHooks(() => ({
+      routePhase: createPrecompiledHooks(),
+      servicePhase: createPrecompiledHooks({ onInterceptRequest: async () => ({ action: 'respond', response: new Response('service-hit', { status: 210 }) }) }),
+      upstreamPhase: createPrecompiledHooks(),
+      inbound: createInboundChain(),
+    }));
+    setFetchMock(async () => {
+      fetchCount++;
+      return new Response('origin', { status: 200 });
+    });
+    const config = createFailoverConfig();
+    initializeRuntimeState(config);
+
+    const response = await handleRequest(new Request('http://localhost/api/test'), config);
+
+    expect(response.status).toBe(210);
+    expect(await response.text()).toBe('service-hit');
+    expect(fetchCount).toBe(0);
+  });
+
+  test('Phase 2 failover action logs a warning and continues to upstream', async () => {
+    const warnings: string[] = [];
+    logger.warn = ((_data: unknown, message?: string) => {
+      warnings.push(message ?? '');
+    }) as typeof logger.warn;
+    installPhaseHooks(() => ({
+      routePhase: createPrecompiledHooks(),
+      servicePhase: createPrecompiledHooks({ onInterceptRequest: async () => ({ action: 'failover', reason: 'service-says-next' }) }),
+      upstreamPhase: createPrecompiledHooks(),
+      inbound: createInboundChain(),
+    }));
+    setFetchMock(async () => new Response('origin', { status: 200 }));
+    const config = createFailoverConfig();
+    initializeRuntimeState(config);
+
+    const response = await handleRequest(new Request('http://localhost/api/test'), config);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('origin');
+    expect(warnings.some(message => message.includes('Phase 2 onInterceptRequest returned failover action'))).toBeTrue();
+  });
+
+  test('Phase 3 failover action skips the current upstream and tries the next upstream', async () => {
+    const fetchedUrls: string[] = [];
+    installPhaseHooks((upstreamId) => ({
+      routePhase: createPrecompiledHooks(),
+      servicePhase: null,
+      upstreamPhase: createPrecompiledHooks({
+        onInterceptRequest: upstreamId === 'primary' ? async () => ({ action: 'failover', reason: 'primary-skipped' }) : undefined,
+      }),
+      inbound: createInboundChain(),
+    }));
+    setFetchMock(async (input) => {
+      const url = inputToUrl(input);
+      fetchedUrls.push(url);
+      return new Response('secondary-ok', { status: 200 });
+    });
+    const config = createFailoverConfig();
+    initializeRuntimeState(config);
+
+    const response = await handleRequest(new Request('http://localhost/api/test'), config);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('secondary-ok');
+    expect(fetchedUrls).toHaveLength(1);
+    expect(fetchedUrls[0]).toContain('secondary.test');
+  });
+
+  test('Phase 3 respond is terminal and bypasses inbound chain', async () => {
+    let inboundCount = 0;
+    installPhaseHooks(() => ({
+      routePhase: createPrecompiledHooks(),
+      servicePhase: null,
+      upstreamPhase: createPrecompiledHooks({ onInterceptRequest: async () => ({ action: 'respond', response: new Response('endpoint-hit', { status: 211 }) }) }),
+      inbound: createInboundChain((response) => {
+        inboundCount++;
+        return response;
+      }),
+    }));
+    const config = createSingleEndpointConfig();
+
+    const response = await handleRequest(new Request('http://localhost/api/test'), config);
+
+    expect(response.status).toBe(211);
+    expect(await response.text()).toBe('endpoint-hit');
+    expect(inboundCount).toBe(0);
+  });
+
+  test('successful upstream responses use the explicit inbound chain', async () => {
+    installPhaseHooks(() => ({
+      routePhase: createPrecompiledHooks({onResponse:async response=>response}),
+      servicePhase: null,
+      upstreamPhase: createPrecompiledHooks(),
+      inbound: createInboundChain(async (response,context) => new Response(`${await context.bodyHandle!.json({id:'inbound-test'})}>endpoint>service>route>global`, { status: response.status })),
+    }));
+    setFetchMock(async () => Response.json('origin', { status: 200 }));
+    const config = createSingleEndpointConfig();
+
+    const response = await handleRequest(new Request('http://localhost/api/test'), config);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('origin>endpoint>service>route>global');
+  });
+
+  test('onFinally runs request-level once and final-upstream-level only for final upstream', async () => {
+    const finallyRecords: string[] = [];
+    const finalized = Promise.withResolvers<void>();
+    installPhaseHooks((upstreamId) => ({
+      routePhase: createPrecompiledHooks({ label: 'route', onFinally: async () => { finallyRecords.push('route'); finalized.resolve(); } }),
+      servicePhase: createPrecompiledHooks({ label: 'service', onFinally: async () => { finallyRecords.push('service'); } }),
+      upstreamPhase: createPrecompiledHooks({ label: `upstream:${upstreamId ?? 'none'}`, onFinally: async () => { finallyRecords.push(`upstream:${upstreamId}`); } }),
+      inbound: createInboundChain(),
+    }));
+    setFetchMock(async (input) => {
+      const url = inputToUrl(input);
+      if (url.includes('primary.test')) {
+        return new Response('retry', { status: 503 });
+      }
+      return new Response('ok', { status: 200 });
+    });
+    const config = createFailoverConfig();
+    initializeRuntimeState(config);
+
+    const response = await handleRequest(new Request('http://localhost/api/test'), config);
+
+    expect(response.status).toBe(200);
+  await response.text();
+  await finalized.promise;
+  expect(finallyRecords).toEqual(['upstream:secondary', 'service', 'route']);
+});
+
+test('onFinally skips endpoint when all upstreams fail but still runs request-level', async () => {
+  const finallyRecords: string[] = [];
+  const finalized = Promise.withResolvers<void>();
+  installPhaseHooks((upstreamId) => ({
+    routePhase: createPrecompiledHooks({ label: 'route', onFinally: async () => { finallyRecords.push('route'); finalized.resolve(); } }),
+    servicePhase: createPrecompiledHooks({ label: 'service', onFinally: async () => { finallyRecords.push('service'); } }),
+    upstreamPhase: createPrecompiledHooks({ label: `upstream:${upstreamId ?? 'none'}`, onFinally: async () => { finallyRecords.push(`upstream:${upstreamId}`); } }),
+    inbound: createInboundChain(),
+  }));
+  setFetchMock(async () => new Response('error', { status: 503 }));
+  const config = createFailoverConfig();
+  initializeRuntimeState(config);
+
+  const response = await handleRequest(new Request('http://localhost/api/test'), config);
+
+  expect(response.status).toBe(503);
+  await response.text();
+  await finalized.promise;
+  expect(finallyRecords).toEqual(['service', 'route']);
+  expect(finallyRecords).not.toContain(expect.stringContaining('upstream:'));
+});
+});
+
+afterDataPlaneTests(() => dataPlaneRuntime.close());

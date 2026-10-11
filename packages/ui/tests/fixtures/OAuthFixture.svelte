@@ -13,6 +13,7 @@
   const endpoint = new URLSearchParams(window.location.search).get('endpoint');
   const dialogKind = new URLSearchParams(window.location.search).get('dialog');
   const routeFlow = new URLSearchParams(window.location.search).has('routeFlow');
+  let pickerGeneration = $state(0);
   let hash = $state(window.location.hash.slice(1));
   const editPath = $derived(hash.match(/^\/routes\/edit\/([^?]+)/)?.[1]);
   let dialogOpen = $state(false);
@@ -57,6 +58,10 @@
     <UpstreamsSection bind:this={endpointSection} bind:route={service} isService />
   {:else if endpoint === 'inline'}
     <UpstreamForm bind:upstream={service.endpoints[0]} index={0} onRemove={() => {}} onDuplicate={() => {}} />
-  {:else if picker}<UpstreamSourcePicker bind:upstream />{:else}<AccountsPage />{/if}
+  {:else if picker}
+    <button onclick={() => { upstream = { target: 'https://manual.test' }; pickerGeneration++; }}>Use manual upstream</button>
+    <button onclick={() => upstream.target = 'https://newer-edit.test'}>Edit endpoint</button>
+    {#key pickerGeneration}<UpstreamSourcePicker bind:upstream />{/key}
+    <output data-testid="picker-upstream">{JSON.stringify(upstream)}</output>{:else}<AccountsPage />{/if}
 </main>
 {/if}

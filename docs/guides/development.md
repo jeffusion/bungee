@@ -1,0 +1,276 @@
+# Development Guide
+
+This guide covers the current monorepo workflow for Bungee.
+
+---
+
+## 1) Prerequisites
+
+- Bun `1.4.2` (the version fixed by the project, Docker and CI)
+- Node.js `>=18` (for ecosystem/tooling compatibility)
+
+---
+
+## 2) Monorepo Structure
+
+```text
+.
+├── packages/
+│   ├── core/    # runtime engine
+│   ├── cli/     # CLI binary
+│   ├── llms/    # protocol conversion facade
+│   ├── types/   # shared TS types
+│   └── ui/      # dashboard frontend
+├── docs/
+├── scripts/
+└── docker-compose.yml
+```
+
+Package roles:
+
+- `core`: master-worker runtime, request handling, plugin runtime, API/UI handlers
+- `cli`: operational commands (`start/stop/status/logs/ui/upgrade`)
+- `llms`: reusable protocol conversion and public plugin facade
+- `types`: shared contract types used by core and tooling
+- `ui`: Svelte dashboard build artifacts bundled into core
+
+---
+
+## 3) Key Scripts
+
+Root scripts from `package.json`:
+
+| Script | Purpose |
+|---|---|
+| `bun dev` | run core in watch mode |
+| `bun run test` | build current artifacts, then run unit, integration and browser regressions |
+| `bun run test:plan --base <ref>` | print the cumulative changed-file scope as JSON; no build or tests |
+| `bun run test:affected --base <ref>` | build if required, then run all unit tests and selected integration/browser files |
+| `bun run test:fast` | run unit tests without databases, services, child processes or browsers |
+| `bun run test:integration` | run tests with isolated local resources |
+| `bun run test:browser` | run real browser tests with owned local services |
+| `bun run benchmark` | measure synthetic body resource usage |
+| `bun run build` | build types + llms + widgets + UI + bundled UI + core + CLI |
+| `bun run build:full` | build + binary packaging |
+| `bun run build:types` | build shared types package |
+| `bun run build:ui` | build UI package |
+| `bun run build:core` | build core package |
+| `bun run build:cli` | build CLI package |
+| `bun run build:binaries` | build standalone binaries |
+
+---
+
+## 4) Local Development Workflow
+
+```bash
+# 1) Install dependencies
+bun install
+
+# 2) Initialize isolated storage, then run in watch mode
+bun packages/core/src/main.ts --initialize-config /tmp/bungee-dev/data/bungee.db
+BUNGEE_CONFIG_DB_PATH=/tmp/bungee-dev/data/bungee.db BUNGEE_ACCESS_DB_PATH=/tmp/bungee-dev/logs/access.db bun run dev
+
+# 3) Run the complete regression
+bun run test
+```
+
+Dashboard default endpoint:
+
+```text
+http://localhost:8089/
+```
+
+The public listener at `0.0.0.0:8088` is proxy-only. The management API is
+under `/api`, plugin static assets under `/plugins`, and health under
+`/health`. The design page is `http://localhost:8089/#/design`.
+
+---
+
+## 5) Build Pipeline Notes
+
+Production build chain (root `build`) includes:
+
+1. Build shared types and llms
+2. Generate widget registry
+3. Build UI and bundle its assets into core
+4. Build core, storage Worker entries and external plugins
+5. Build CLI
+
+This ensures UI and runtime artifacts are synchronized.
+
+---
+
+## 6) Testing Strategy
+
+Tests belong to the module whose responsibility they primarily verify: `packages/<package>/tests/`, `plugins/<plugin>/tests/`, or `scripts/tests/`. Cross-module workflows belong to root `tests/`. Each owner uses only the directories it needs:
+
+- `unit/`: pure behavior with injected fakes; no real database, listener, subprocess or browser.
+- `integration/`: real local databases, services and process contracts.
+- `browser/`: real rendered components and user interactions; services are shared within a file and contexts are isolated between cases.
+- `helpers/`: explicit setup, waiting and cleanup; importing a helper must not allocate resources.
+- `fixtures/`: data and components loaded by the tested system.
+
+Use a descriptive kebab-case `<behavior>.test.ts`; the directory identifies its layer. Tests never import other test entries, and production code never imports tests. Keep snapshots beside their tests; keep databases, screenshots, logs and measurement results outside the checkout.
+
+`bun run test` builds before all three categories. Install Chromium with `bunx playwright install chromium`. Run an initial build before using category commands directly, and rebuild whenever the tested SDK or artifact changes. Bun discovers categories by path substring, with helper, fixture, manual and generated directories excluded in `bunfig.toml`; there is no separate test list.
+
+The build command only builds; architecture assertions run with unit tests. `bun run check:architecture` remains available for focused checks.
+
+### Changed-file validation
+
+From the repository root, choose an explicit baseline:
+
+```bash
+bun run test:plan --base origin/main
+bun run test:affected --base origin/main
+```
+
+Local selection includes cumulative commits, staged and unstaged edits, and unignored new files. Renames and deletions consider both paths and the dependencies in both trees. Plans record the baseline commit, tested commit and content identity; a local working-tree identity is a SHA256 fingerprint, while committed CI plans use the Git tree SHA. A missing baseline or unreadable Git/configuration fails instead of producing an empty scope.
+
+All non-documentation changes run the complete unit category. Integration and browser selection takes the union of these rules:
+
+| Change | Additional scope |
+| --- | --- |
+| Explicit documentation, license, Agent-rule or skill paths | No product build or application tests when the entire change is documentation |
+| UI or plugin UI | UI integration, all UI/plugin browser files and root browser workflows |
+| Plugin server | Plugin and reverse-dependent plugin integration, core/root integration and root browser workflows |
+| Plugin manifest | Plugin-server scope plus UI scope |
+| CLI | CLI/core/root integration and root browser workflows |
+| LLMS | LLMS/core/root integration, SDK-consuming plugins and their reverse dependencies, root browser workflows |
+| Core, shared types, tools, dependencies, build configuration or CI | Full regression |
+| Test entry | Changed surviving entry, with the full unit category |
+| Module helpers/fixtures | All owner tests plus confirmed cross-module consumers |
+| Root helpers/fixtures, unknown paths or an executable module without tests | Full regression with an explanation |
+
+The rules and dependency discovery live in [test-selection.ts](../../scripts/checks/test-selection.ts); the entry point is [select-tests.ts](../../scripts/checks/select-tests.ts). Documentation exemptions are path based; fixture Markdown is input data. Additions are discovered from directories, not a test-file whitelist. When adding modules or cross-module dependencies, maintain the rules and their tests. Do not silently broaden documentation exemptions or report an affected run as full validation.
+
+`test:affected` handles its own build. Category commands still require an initial/current build and always run the whole category. Plan-only mode never builds. CI consumes one committed plan per run; execution records and native Bun timings remain outside versioned source. Execution rejects stale commit/tree identities.
+
+### CI and releases
+
+Development branches submit PRs directly to `main`. CI runs on pull
+requests targeting `main`, including subsequent updates, and as the reusable full-validation workflow invoked by Release.
+The Linux and macOS test jobs must pass before a PR can merge into `main`,
+and its branch must be up to date with `main`. Windows CI is disabled; the active matrix covers Linux and macOS.
+
+PR planning compares the PR base SHA with the actual checked-out test commit, covering the entire PR rather than the latest push. Each Linux/macOS workspace builds once and completes all fast tests. Integration runs in a separate serial job; browser files use at most two native Bun shards, each internally serial with `--isolate`. Jobs own independent workspaces and ports; artifacts are bound to their platform and code tree, including both generated source files. No browser service or mutable context is shared across files or jobs. The final checks verify native executed-file records: missing, failed, cancelled or unexpectedly skipped work cannot pass.
+
+A push to `main` starts Release.
+Before publishing, Release verifies that the pushed commit is the final commit
+of a merged PR targeting `main`, that its latest PR CI run and both Linux/macOS
+test jobs succeeded, and that the release Git tree matches the tree recorded by
+that CI run. The proof records scope (`none`, `affected`, or `full`), run/attempt identity and both platform results. Comparing trees supports rebase merges even when commit SHAs
+change. Only a successful two-platform full proof for the same tree can be reused. Otherwise Release calls the shared full CI workflow on the release commit before entering the release environment, obtaining publishing credentials, changing versions or uploading artifacts. Missing, expired or old-format `tested-pr` artifacts block publication; rerun
+the PR CI before retrying Release. Artifacts are retained for 14 days.
+
+Keep the required checks `test (ubuntu-latest)` and `test (macos-latest)` bound
+to GitHub Actions, with strict status checks enabled. Do not require
+`test (windows-latest)` while the Windows job is disabled. The current
+administrator bypass is needed by `GH_TOKEN` for
+semantic-release to commit package versions and `CHANGELOG.md`; the release
+verification above also applies when an administrator bypasses merge rules.
+Release metadata commits include `[skip ci]` to avoid triggering another run.
+Release also serializes publishing and checks that remote `main` still points
+to the selected commit before invoking semantic-release.
+
+Recommended local pre-PR checks:
+
+```bash
+bun run test
+```
+
+---
+
+## 7) Contribution Conventions
+
+- Use Conventional Commits
+- Keep PRs focused and incremental
+- Add/adjust tests for behavior changes
+- Update docs when configuration or operational behavior changes
+- UI and plugin UI changes must follow [component ownership and style isolation](../../packages/ui/docs/INDUSTRIAL_DESIGN_SYSTEM.md#347-mandatory-component-ownership-and-style-isolation): extract repeated DOM into shared components and keep component CSS scoped. Ad hoc global styles are forbidden; any genuine exception needs a documented reason, narrow scope, explicit review and browser verification. `bun test packages/ui/tests/unit/style-scope.test.ts` enforces the frozen global-style baseline in normal CI.
+
+### Investigating intermittent shutdown failures
+
+The runtime emits `Shutdown step failed` at the failing operation before errors
+are aggregated. Its `shutdown` object includes the cleanup `stage`, elapsed time,
+and a bounded, redacted error chain with the original error codes and stack.
+Worker shutdown failures report expected/confirmed counts and up to 16
+unconfirmed PIDs. Exit probes distinguish `exact`, `unknown`, `threw`, and
+`not_run`, retain whether an identity was captured, and report the probe count.
+Ingress evidence also includes the shutdown command outcome, probe timeout, and
+whether that deadline was reached. A `process_identity_probe` record retains
+underlying OS/query errors before they become an `unknown` result.
+
+When the canonical lifecycle test fails, its CI output includes
+`shutdownDiagnostics`, the child's PID/exit code/signal, and `windowStatus`.
+Diagnostics are read from that child's frozen app and daemon log windows and
+filtered by `reporterPid` to exclude a competing process sharing an app log; the
+last 16 recognized records are included, with `shutdownDiagnosticsTruncated`
+when older records were omitted. `truncated` or `unavailable` means the
+captured evidence is incomplete. Do not infer a runtime or test-framework root
+cause from an empty diagnostic list or from one successful retry.
+
+Fault-injection tests verify evidence extraction and redaction even when the
+intermittent failure cannot be reproduced. Diagnostic logging does not change
+shutdown deadlines, retries, cleanup order, or the required exit proof.
+
+### Cross-process publication deadlines
+
+Drain-start (C) and worker-exit (E) deadlines use a shared kernel clock, not Bun's
+process-relative `process.hrtime.bigint()`. Linux uses `CLOCK_BOOTTIME`, macOS uses
+`CLOCK_MONOTONIC_RAW`, and Windows uses `QueryPerformanceCounter`; suspend time
+consumes these windows. The system-library bindings initialize before controller
+or worker admission and fail closed if unavailable.
+
+The `kernel-monotonic-v1:` deadline identity binds the clock domain. Processes
+must agree on this domain and boot identity before interpreting deadlines.
+A failed domain/boot match retains worker ownership instead of inventing an exit
+proof or restarting the deadline.
+
+## Tool locations and execution
+
+Run commands from the repository root unless a tool specifies otherwise. Permanent tools live under `scripts/`; package-only tooling stays in its package.
+
+| Location | Entry | Inputs, outputs and side effects |
+| --- | --- | --- |
+| `scripts/build/` | Root build commands | Sources/manifests → dist, generated widgets, bundled UI and binary archives; overwrites generated artifacts |
+| `scripts/checks/` | `bun run check:architecture` | Source AST → diagnostics and nonzero exit on violations; no product writes |
+| `scripts/runtime/` | Docker entrypoint and health check | Container environment → process launch or management-readiness exit status |
+| `scripts/release/` | `version:sync`, `publish:dry`, `publish`, `release:binaries` | Version, registry/GitHub credentials and artifacts → version changes or external publication; publishing needs authorization |
+| `tests/browser/` | Browser entry points below | Isolated server/fixtures → assertions, screenshots and diagnostic output |
+| `tests/benchmarks/` | Body resource measurement | Synthetic payloads → resource/latency metrics; no production data |
+
+`generate-favicons.ts` also requires `rsvg-convert` and regenerates `packages/ui/public` icon assets. `version:sync <version>` writes root and workspace package metadata. Binary upload requires an explicit release tag and credentials; consult its argument validation before use. Browser tools require Playwright Chromium (`bunx playwright install chromium`). Temporary diagnostics and evidence belong outside versioned source.
+
+The release tool resolves the repository root from its own location. `--dry-run` still performs a full build, but packs into a temporary directory outside the project, removes that directory on exit, and restores package.json. It preserves existing repository tarballs. Binary upload failures during manual publishing return a nonzero exit code; packages already published to npm remain published. Follow the error message to retry the upload after fixing the failure.
+
+### UI smoke
+
+After building and installing Chromium:
+
+```bash
+bun test --isolate tests/browser/ui-smoke.test.ts
+```
+
+The test serves the current UI build through an owned static service and mocks management APIs. Component-host tests use the existing Vite configuration with isolated caches. Both modes expose only the service origin, evidence directory and close method through [ui-runtime.ts](../../tests/helpers/ui-runtime.ts). Reuse a service and browser within one file; isolate contexts between cases. Wait for observable responses, component state or layout instead of fixed preparation delays; retain real timeout/cancellation semantics and representative screenshots. It verifies rendered routes, login, page errors and screenshots; it does not establish production authentication or provider connectivity. The service and browser close on exit. Evidence uses temporary storage outside the checkout.
+
+### Built runtime and storage
+
+The default browser category includes the built JS runtime and storage check:
+
+```bash
+bun test --isolate tests/browser/storage-acceptance.test.ts
+```
+
+It creates private temporary storage and a local upstream, verifies management login, an actual proxy response, restart and session recovery, then checks owned process exit and port release. A failed run retains its private fixture for diagnosis. Passing JS tests does not establish native or other-platform acceptance.
+
+Native and external-service acceptance remains manual:
+
+```bash
+bun tests/manual/storage-native-acceptance.ts /absolute/path/to/bungee-linux
+bun tests/manual/plugin-business-browser-acceptance.ts --evidence-dir /tmp/bungee-plugin-browser
+```
+
+The plugin business check downloads the public models.dev catalog and requires network access; it does not call paid model providers. Header and publication acceptance tools under `tests/manual/` require a disposable loopback backend and their declared environment inputs. They are excluded from automatic discovery. Read their ownership checks before using them, and never pass production data or credentials.
+
+Package-local browser checks include NumberInput, scrolling, route editors and dashboard widget ownership. Use `bun test --isolate <path-to-test>` for a focused file. All browser evidence must distinguish mocked APIs, local real gateways and external providers.

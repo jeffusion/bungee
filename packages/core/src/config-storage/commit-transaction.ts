@@ -2,15 +2,14 @@ import type { Database } from 'bun:sqlite';
 import { replaceActiveMaterialization } from './materialize';
 import { operationFromRow, type OperationRow } from './operation-store';
 import type { PreparedCommitCommand } from './prepared-command';
-import { readRepositorySnapshot, verifyRepositoryIntegrity } from './repository-snapshot';
+import { readActiveRevision } from './current-revision';
 import { readActiveRecovery } from './recovery-store';
-import type { CommitConfigurationResult, ConfigurationOperation, ConfigRepositoryOptions } from './repository-types';
+import type { CommitConfigurationResult, ConfigurationOperation, ConfigRepositoryOptions, RepositorySnapshot } from './repository-types';
+import { validateActiveOperationIdentity } from './operation-relations';
+import { readOperationWorkers } from './operation-records';
 import { ConfigRepositoryError } from './repository-types';
-import { sqliteAll, sqliteGet } from './sqlite-query';
+import { sqliteGet } from './sqlite-query';
 
-type StateRow = {
-  readonly active_revision: number;
-};
 export type CommitDecision =
   | { readonly kind: 'committed'; readonly operation: ConfigurationOperation }
   | { readonly kind: 'duplicate'; readonly operation: ConfigurationOperation }
@@ -20,8 +19,8 @@ export function commitTransaction(
   db: Database,
   prepared: PreparedCommitCommand,
   options: ConfigRepositoryOptions,
+  snapshot: RepositorySnapshot,
 ): CommitDecision {
-  readRepositorySnapshot(db);
   const existing = sqliteGet<OperationRow, [string]>(db, `SELECT mutation_id,request_hash,expected_revision,
     committed_revision,kind,target_worker_count,state,result_status,error_code,error_detail,
     drain_recovery_generation,last_drain_recovery_previous_generation,created_at,updated_at
@@ -33,8 +32,7 @@ export function commitTransaction(
     }
     return { kind: 'duplicate', operation };
   }
-  const state = sqliteAll<StateRow, []>(db, `SELECT active_revision FROM configuration_state WHERE id=1`)[0];
-  if (state === undefined) throw new ConfigRepositoryError('schema_corrupt', 'configuration state is missing');
+  const state = { active_revision: readActiveRevision(db) };
   if (state.active_revision !== prepared.expectedRevision) {
     return { kind: 'stale_revision', expected_revision: prepared.expectedRevision, active_revision: state.active_revision };
   }
@@ -44,10 +42,13 @@ export function commitTransaction(
     FROM configuration_operations WHERE committed_revision=?`, state.active_revision);
   if (activeRow !== null) {
     const active = operationFromRow(activeRow);
+    validateActiveOperationIdentity(db, active, readOperationWorkers(db, active.mutation_id), snapshot);
     if (active.state === 'committed' || active.state === 'publishing' || active.state === 'draining') {
       return { kind: 'operation_in_progress', mutation_id: active.mutation_id,
         committed_revision: active.committed_revision, state: active.state };
     }
+  } else if (state.active_revision !== 1) {
+    throw new ConfigRepositoryError('schema_corrupt', 'active revision operation is missing');
   }
   const activeRecovery = readActiveRecovery(db, state.active_revision);
   if (activeRecovery !== null && (activeRecovery.state === 'scheduled' || activeRecovery.state === 'running')) {
@@ -82,7 +83,6 @@ export function commitTransaction(
     committedRevision, prepared.createdAt, prepared.expectedRevision,
   ]).changes;
   if (changed !== 1) throw new ConfigRepositoryError('repository_failure', 'configuration state CAS update failed');
-  verifyRepositoryIntegrity(db);
   return { kind: 'committed', operation: {
     mutation_id: prepared.mutationId, request_hash: prepared.requestHash,
     expected_revision: prepared.expectedRevision, committed_revision: committedRevision,

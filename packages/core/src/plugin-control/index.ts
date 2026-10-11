@@ -12,8 +12,6 @@ export type {
   SecretStore,
 } from './contracts';
 export {
-  createDatabaseSecretStoreFactory,
-  createDatabasePluginStorageFactory,
   createPluginControlHost,
   parsePluginSecretsKey,
   PluginControlHostError,

@@ -273,30 +273,8 @@ export class TokenStatsRepository {
     if (keyword !== undefined && (typeof keyword !== 'string' || keyword.length > CLIENT_MODEL_KEYWORD_MAX)) {
       throw new TokenStatsRepositoryError('invalid token-stats keyword');
     }
-    const observation = this.storage.observation;
-    if (observation === undefined) throw new TokenStatsRepositoryError('token-stats observation storage is required');
-    const since = Date.now() - TOKEN_STATS_RETENTION_MS;
-    const hasKeyword = keyword !== undefined && keyword.length > 0;
-    const escaped = hasKeyword ? keyword.replace(/[\\%_]/g, character => `\\${character}`) : null;
-    return observation.withDatabase((db) => {
-      const countSql = hasKeyword
-        ? "SELECT COUNT(DISTINCT model) AS total FROM token_stats_attempts WHERE finished_at_ms >= ? AND model LIKE ? ESCAPE '\\'"
-        : 'SELECT COUNT(DISTINCT model) AS total FROM token_stats_attempts WHERE finished_at_ms >= ?';
-      const totalRow = db.query<{ total: number }, (number | string)[]>(countSql)
-        .get(...(hasKeyword ? [since, `%${escaped}%`] : [since]));
-      const total = Number(totalRow?.total ?? 0);
-      const pageSql = hasKeyword
-        ? "SELECT DISTINCT model FROM token_stats_attempts WHERE finished_at_ms >= ? AND model LIKE ? ESCAPE '\\' ORDER BY model ASC LIMIT ? OFFSET ?"
-        : 'SELECT DISTINCT model FROM token_stats_attempts WHERE finished_at_ms >= ? ORDER BY model ASC LIMIT ? OFFSET ?';
-      const rows = db.query<{ model: string }, (number | string)[]>(pageSql)
-        .all(...(hasKeyword ? [since, `%${escaped}%`, pageSize, (page - 1) * pageSize] : [since, pageSize, (page - 1) * pageSize]));
-      return {
-        models: rows.map(row => String(row.model)),
-        total: Number.isSafeInteger(total) && total >= 0 ? total : 0,
-        page,
-        pageSize,
-      };
-    });
+    if (this.metering.listClientModels) return this.metering.listClientModels({page,pageSize,keyword});
+    throw new TokenStatsRepositoryError('token-stats client models capability is required');
   }
 
   /** Price aliases are token-stats business state, read/written through this repository. */

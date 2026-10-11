@@ -4,11 +4,10 @@ import {
   MasterConfigPublicationCoordinator,
   WorkerAdmissionRegistry,
 } from './config-publication';
-import { ConfigRepository } from './config-storage';
+import { AsyncConfigRepository } from './config-storage';
 import { deriveWorkerTransportSecret } from './supervision';
 import { processDynamicValue } from './expression-engine';
 import { logger } from './logger';
-import { MigrationManager } from './migrations';
 import {
   startMasterComposition,
   type MasterProcessDependencies,
@@ -16,15 +15,14 @@ import {
 } from './master-runtime/composition';
 import { acquireMasterInstanceLock, mintControllerClaimCapability } from './master-runtime/instance-lock';
 import { SupervisedConfigWorkerFactory } from './master-runtime/supervised-worker-factory';
-import { readMasterProcessOptions, resolveWorkerLaunch } from './master-runtime/process-options';
+import { readMasterProcessOptions, resolveWorkerLaunch, resolveStorageWorkerUrls } from './master-runtime/process-options';
 import { MasterRuntime } from './master-runtime/runtime';
 import { installMasterSignalHandlers } from './master-runtime/signal-handlers';
 import { PluginManifestCatalog } from './plugin-manifest-catalog';
 import { PluginPathResolver } from './plugin-path-resolver';
 import { createManagementListener } from './management-listener';
 import { MasterIngressController } from './ingress/master-controller';
-import { createMasterStats } from './master-runtime/master-stats';
-import { initializeAccessDatabaseForMaster } from './access-database';
+import { createAsyncMasterStats, migrateAccessDatabaseAsync, resolveObservabilityWorkerUrl } from './master-runtime/observability-client';
 import { takeOverDaemonBootstrap } from './daemon-control/bootstrap';
 import { currentLaunchIdentity } from './daemon-control/launch-identity';
 import { serializeErrorChain } from './master-runtime/error-chain';
@@ -53,16 +51,6 @@ function accessLogDatabasePath(): string {
   return resolve(process.cwd(), value);
 }
 
-async function migrateAccessDatabase(path: string): Promise<void> {
-  const settings = initializeAccessDatabaseForMaster(path);
-  logger.info({ version: settings.version, mode: settings.journalMode, synchronous: settings.synchronous },
-    'Access database SQLite contract selected');
-  const result = await new MigrationManager(path).migrate();
-  if (!result.success) {
-    throw new Error(`access database migration failed: ${result.error ?? result.userMessage ?? 'unknown error'}`);
-  }
-}
-
 const PRODUCTION_DEPENDENCIES: MasterProcessDependencies = {
   context: {
     cwd: process.cwd(),
@@ -75,13 +63,13 @@ const PRODUCTION_DEPENDENCIES: MasterProcessDependencies = {
   clock: { now: Date.now },
   readOptions: readMasterProcessOptions,
   acquireInstanceLock: acquireMasterInstanceLock,
-  migrateAccessDatabase,
-  createMasterStats,
+  migrateAccessDatabase: path => migrateAccessDatabaseAsync(path, resolveObservabilityWorkerUrl(import.meta.url)),
+  createMasterStats: path => createAsyncMasterStats(path, {workerUrl:resolveObservabilityWorkerUrl(import.meta.url)}),
   createPluginPathResolver: ({ moduleDirectory, cwd }) =>
     new PluginPathResolver(moduleDirectory, cwd),
   buildPluginCatalog: (resolver) => PluginManifestCatalog.build({ pathResolver: resolver }),
   resolveAuthToken,
-  openRepository: ConfigRepository.open,
+  openRepository: (path, options) => AsyncConfigRepository.open(path, { ...options, workerUrl: resolveStorageWorkerUrls(import.meta.url).configuration }),
   createAdmission: () => new WorkerAdmissionRegistry(),
   deriveTransportSecret: deriveWorkerTransportSecret,
   resolveWorkerLaunch,

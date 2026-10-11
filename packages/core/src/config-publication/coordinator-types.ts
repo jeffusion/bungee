@@ -76,28 +76,28 @@ export interface WorkerAdmissionController {
 
 export interface ConfigPublicationRepository {
   getSnapshot(): RepositorySnapshot;
-  getActivePublication(): ActiveConfigurationPublication | null;
-  beginPublication(mutationId: string, updatedAt: number): ConfigurationOperation;
+  getActivePublication(): Promise<ActiveConfigurationPublication | null>;
+  beginPublication(mutationId: string, updatedAt: number): Promise<ConfigurationOperation>;
   beginWorkerAttempt(
     mutationId: string,
     workerSlot: number,
     previousAttemptNo: number,
     reason: WorkerAttemptReason,
     updatedAt: number,
-  ): ConfigurationOperationWorker;
-  beginDrainingRecovery(mutationId: string, previousGeneration: number, updatedAt: number): ConfigurationOperation;
+  ): Promise<ConfigurationOperationWorker>;
+  beginDrainingRecovery(mutationId: string, previousGeneration: number, updatedAt: number): Promise<ConfigurationOperation>;
   recordWorkerResult(
     mutationId: string,
     workerSlot: number,
     result: WorkerPublicationResult,
     updatedAt: number,
-  ): ConfigurationOperationWorker;
-  markDraining(mutationId: string, updatedAt: number): ConfigurationOperation;
+  ): Promise<ConfigurationOperationWorker>;
+  markDraining(mutationId: string, updatedAt: number): Promise<ConfigurationOperation>;
   finalizePublication(
     mutationId: string,
     outcome: FinalizePublicationOutcome,
     updatedAt: number,
-  ): ConfigurationOperation;
+  ): Promise<ConfigurationOperation>;
 }
 
 export interface PublicationClock {

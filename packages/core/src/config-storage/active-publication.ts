@@ -1,10 +1,12 @@
 import type { Database } from 'bun:sqlite';
 import { operationFromRow, type OperationRow } from './operation-store';
 import { readOperationWorkers } from './operation-records';
-import { readRepositorySnapshot } from './repository-snapshot';
+import { readActiveRevision } from './current-revision';
+import type { RepositorySnapshot } from './repository-types';
 import type { ActiveConfigurationPublication, ConfigurationOperation } from './repository-types';
 import { ConfigRepositoryError } from './repository-types';
 import { sqliteAll } from './sqlite-query';
+import { validateActiveOperationIdentity } from './operation-relations';
 
 type ActiveOperation = Extract<ConfigurationOperation, { readonly result_status: null }>;
 
@@ -21,18 +23,24 @@ function requireActiveOperation(row: OperationRow): ActiveOperation {
   }
 }
 
-export function readActivePublication(db: Database): ActiveConfigurationPublication | null {
-  const snapshot = readRepositorySnapshot(db);
-  const rows = sqliteAll<OperationRow, []>(db, `SELECT mutation_id,request_hash,expected_revision,
+export function readActivePublication(db: Database, snapshot: RepositorySnapshot): ActiveConfigurationPublication | null {
+  const revision = readActiveRevision(db);
+  if (revision !== snapshot.revision) throw new ConfigRepositoryError('schema_corrupt', 'storage snapshot revision drifted');
+  const rows = sqliteAll<OperationRow, [number]>(db, `SELECT mutation_id,request_hash,expected_revision,
     committed_revision,kind,state,target_worker_count,result_status,error_code,error_detail,
     drain_recovery_generation,last_drain_recovery_previous_generation,created_at,updated_at
-    FROM configuration_operations WHERE state IN ('committed','publishing','draining') ORDER BY committed_revision`);
+    FROM configuration_operations WHERE committed_revision=?`, revision);
   const row = rows[0];
   if (rows.length > 1) throw new ConfigRepositoryError('schema_corrupt', 'multiple active publications exist');
-  if (row === undefined) return null;
+  if (row === undefined) {
+    if (revision !== 1) throw new ConfigRepositoryError('schema_corrupt', 'active revision operation is missing');
+    return null;
+  }
+  if (row.state === 'converged' || row.state === 'degraded') return null;
 
   const operation = requireActiveOperation(row);
   const targets = readOperationWorkers(db, operation.mutation_id);
+  validateActiveOperationIdentity(db, operation, targets, snapshot);
   const uniqueSlots = new Set(targets.map(({ worker_slot }) => worker_slot));
   if (targets.length !== operation.target_worker_count || uniqueSlots.size !== targets.length) {
     throw new ConfigRepositoryError('schema_corrupt', 'active publication target cardinality is incoherent');

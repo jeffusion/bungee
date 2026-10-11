@@ -655,6 +655,7 @@ export type TokenStatsSnapshotMetrics = Record<TokenStatsMetricName, number> & {
 };
 
 export interface TokenStatsMeteringStorage {
+  listClientModels?(input: {page?:number;pageSize?:number;keyword?:string}): Promise<{models:string[];total:number;page:number;pageSize:number}>;
   recordAttempt(row: TokenStatsAttempt): Promise<void>;
   queryWindowSnapshot(input: {
     asOfMs: number;

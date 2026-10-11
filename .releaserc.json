@@ -7,8 +7,8 @@
     [
       "@semantic-release/exec",
       {
-        "prepareCmd": "bun scripts/sync-versions.ts ${nextRelease.version}",
-        "publishCmd": "bun scripts/publish.ts --ci"
+        "prepareCmd": "bun scripts/release/sync-versions.ts ${nextRelease.version}",
+        "publishCmd": "bun scripts/release/publish.ts --ci"
       }
     ],
     [

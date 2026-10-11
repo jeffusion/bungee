@@ -70,6 +70,9 @@ function expectSchemaCorrupt(action: () => unknown): void {
 
 function corrupt(repository: ConfigRepository, sql: string): void {
   const db = repository['db'];
+  const triggers = db.query<{ sql: string }, []>(`SELECT sql FROM sqlite_schema
+    WHERE type='trigger' AND name IN ('configuration_operations_terminal_immutable_update',
+      'configuration_operations_terminal_immutable_delete')`).all();
   db.run('DROP TRIGGER IF EXISTS configuration_operations_terminal_immutable_update');
   db.run('DROP TRIGGER IF EXISTS configuration_operations_terminal_immutable_delete');
   db.run('PRAGMA foreign_keys=OFF');
@@ -77,6 +80,7 @@ function corrupt(repository: ConfigRepository, sql: string): void {
   db.run(sql);
   db.run('PRAGMA ignore_check_constraints=OFF');
   db.run('PRAGMA foreign_keys=ON');
+  for (const trigger of triggers) db.run(trigger.sql);
 }
 
 function persistedPublicationRows(dbPath: string): string {
@@ -243,9 +247,9 @@ describe('ConfigRepository active publication recovery', () => {
     }
   }, 30_000);
 
-  test('fails closed when more than one nonterminal operation is persisted', () => {
+  test('explicit maintenance audit fails closed on a resurrected historical publication', () => {
     // Given
-    const { repository } = openRepository();
+    const { repository, dbPath } = openRepository();
     commit(repository, 'historical-operation', [0]);
     repository.beginPublication('historical-operation', CREATED_AT + 1);
     repository.beginWorkerAttempt('historical-operation', 0, 0, 'initial', CREATED_AT + 2);
@@ -271,6 +275,10 @@ describe('ConfigRepository active publication recovery', () => {
       SET state='pending',applied_revision=NULL,last_error=NULL WHERE mutation_id='historical-operation'`);
 
     // When / Then
-    expectSchemaCorrupt(() => repository.getActivePublication());
+    // Ordinary lookup is bounded to the current revision. Historical corruption is
+    // checked at startup or by the stopped-instance maintenance audit.
+    expect(repository.getActivePublication()?.operation.mutation_id).toBe('active-operation');
+    expectSchemaCorrupt(() => repository.verify());
+    expectSchemaCorrupt(() => ConfigRepository.open(dbPath));
   });
 });

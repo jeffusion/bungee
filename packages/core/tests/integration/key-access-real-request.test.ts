@@ -8,7 +8,7 @@ import {hashConfigurationContent} from '../../src/config-storage/content-hash';
 import {
   FIXTURE_PUBLICATION_POLICY, FIXTURE_PUBLICATION_WAIT_MS, FIXTURE_STARTUP_WAIT_MS,
   waitForFixturePublication,
-} from '../../../../tests/support/publication-fixture';
+} from '../../../../tests/helpers/publication-fixture';
 
 test('real master/ingress/worker enforces model policy and honors Authorization header rules', async () => {
   const root = await mkdtemp(join(tmpdir(), 'bungee-key-access-request-'));
@@ -25,15 +25,20 @@ test('real master/ingress/worker enforces model policy and honors Authorization 
     ports.push(listener.port!); await listener.stop(true);
   }
   try {
-    child = spawn(process.execPath,[fileURLToPath(new URL('../../src/main.ts', import.meta.url))],{
-      cwd:root, env:{...process.env,BUNGEE_ROLE:'master',
+    const entry = fileURLToPath(new URL('../../src/main.ts', import.meta.url));
+    const env = {...process.env,BUNGEE_ROLE:'master',
         BUNGEE_CONFIG_DB_PATH:join(root,'config.db'),BUNGEE_ACCESS_DB_PATH:join(root,'access.db'),
         BUNGEE_INGRESS_INSTANCE_LOCK_PATH:join(root,'ingress.lock'),WORKER_COUNT:'1',
         HOST:'127.0.0.1',PORT:String(ports[0]),BUNGEE_MANAGEMENT_HOST:'127.0.0.1',
         BUNGEE_MANAGEMENT_PORT:String(ports[1]),BUNGEE_MASTER_CONTROL_PORT:String(ports[2]),
         BUNGEE_INGRESS_SUPERVISION_PORT:String(ports[3]),
         BUNGEE_PLUGIN_SECRETS_KEY:Buffer.alloc(32,7).toString('base64'),
-        BUNGEE_INCLUDE_SYSTEM_PLUGINS:'false',PLUGINS_DIR:fileURLToPath(new URL('../../../../plugins', import.meta.url))},
+        BUNGEE_INCLUDE_SYSTEM_PLUGINS:'false',PLUGINS_DIR:fileURLToPath(new URL('../../../../plugins', import.meta.url))};
+    const initialize = Bun.spawn([process.execPath,entry,'--initialize-config',env.BUNGEE_CONFIG_DB_PATH],{cwd:root,env,stdout:'pipe',stderr:'pipe'});
+    const [initialized,initializationOutput,initializationErrors] = await Promise.all([initialize.exited,new Response(initialize.stdout).text(),new Response(initialize.stderr).text()]);
+    expect(initialized,initializationOutput+'\n'+initializationErrors).toBe(0);
+    child = spawn(process.execPath,[entry],{
+      cwd:root, env,
       stdio:['ignore','pipe','pipe'],
     });
     child.stdout!.on('data',data=>output+=data); child.stderr!.on('data',data=>output+=data);

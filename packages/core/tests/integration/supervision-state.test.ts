@@ -4,12 +4,6 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ConfigRepository, ConfigRepositoryError } from '../../src/config-storage';
-import { CONFIG_MIGRATION_V1 } from '../../src/config-storage/migrations/v1';
-import { CONFIG_MIGRATION_V2 } from '../../src/config-storage/migrations/v2';
-import { CONFIG_MIGRATION_V3 } from '../../src/config-storage/migrations/v3';
-import { CONFIG_MIGRATION_V4 } from '../../src/config-storage/migrations/v4';
-import { CONFIG_MIGRATION_V5 } from '../../src/config-storage/migrations/v5';
-import { CONFIG_MIGRATION_V6 } from '../../src/config-storage/migrations/v6';
 import { acquireMasterInstanceLock, mintControllerClaimCapability } from '../../src/master-runtime/instance-lock';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 
@@ -44,7 +38,7 @@ afterEach(() => {
 });
 
 describe('persistent supervision state', () => {
-  test('fresh init and v6 upgrade create one stable state row and atomically advance epochs', async () => {
+  test('fresh initialization creates one stable state row and atomically advance epochs', async () => {
     const freshPath = path();
     const fresh = ConfigRepository.open(freshPath);
     repositories.push(fresh);
@@ -71,16 +65,6 @@ describe('persistent supervision state', () => {
     await expect(claim(reopened, freshPath, SECOND, 12)).rejects.toBeInstanceOf(ConfigRepositoryError);
     expect(reopened.getSupervisionState().controller_epoch).toBe(Number.MAX_SAFE_INTEGER - 1);
 
-    const oldPath = path();
-    const old = new Database(oldPath, { create: true, readwrite: true, strict: true });
-    old.transaction(() => {
-      CONFIG_MIGRATION_V1.up(old); CONFIG_MIGRATION_V2.up(old); CONFIG_MIGRATION_V3.up(old);
-      CONFIG_MIGRATION_V4.up(old); CONFIG_MIGRATION_V5.up(old); CONFIG_MIGRATION_V6.up(old);
-    }).immediate();
-    old.close(true);
-    const upgraded = ConfigRepository.open(oldPath);
-    repositories.push(upgraded);
-    expect(upgraded.getSupervisionState().controller_epoch).toBe(0);
   });
 
   test('fails closed for a corrupted singleton row', () => {

@@ -13,16 +13,16 @@ export interface ManagementSubject {
 }
 export interface ManagementProvider {
   authenticate(request: Request): Promise<ManagementSubject | null>;
-  authorize(subject: ManagementSubject, capability: string): boolean;
+  authorize(subject: ManagementSubject, capability: string): Promise<boolean>;
   login(request: Request): Promise<Response>;
   logout(request: Request): Promise<Response>;
   bootstrap(input: unknown): Promise<void>;
-  hasIdentity(): boolean;
-  revokeSessions(): void;
+  hasIdentity(): Promise<boolean>;
+  revokeSessions(): Promise<void>;
   validateWrite?(request: Request): void;
   csrfToken?(request: Request): string | undefined;
   /** Optional browser cookie renewal after successful session verification. Must not extend the server-side absolute deadline. */
-  sessionCookie?(request: Request): string | undefined;
+  sessionCookie?(request: Request): Promise<string | undefined>;
 }
 export interface AdmissionTarget {
   /** Host-pinned entry scope for one internal handoff. */
