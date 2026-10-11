@@ -1,7 +1,7 @@
 import { pluginConfigConstraintSatisfied } from '@jeffusion/bungee-types';
 import { validateGatewayTargets } from './gateway-target-validation';
 import type {
-  LogicalConfigurationV2, PluginBindingV2, RouteV2, ServiceV2, UpstreamManagedByV2, UpstreamV2,
+  LogicalConfiguration, PluginBinding, ConfigurationRoute, ConfigurationService, UpstreamManagedBy, ConfigurationUpstream,
 } from '@jeffusion/bungee-types';
 import {
   validateRouteDomain, validateServiceDomain, validateUpstreamDomain,
@@ -50,9 +50,9 @@ const MANAGED_BY_FIELDS = new Set(['plugin', 'contributionId', 'bindingId']);
 function parseManagedBy(
   value: unknown,
   path: string,
-  plugins: readonly PluginBindingV2[],
+  plugins: readonly PluginBinding[],
   context: ValidationContext,
-): UpstreamManagedByV2 | undefined {
+): UpstreamManagedBy | undefined {
   if (value === undefined) return undefined;
   const object = context.object(value, path);
   if (!object) return undefined;
@@ -73,8 +73,8 @@ function parsePlugins(
   catalog: PluginSchemaCatalog | undefined,
   context: ValidationContext,
   present = false,
-): PluginBindingV2[] {
-  const plugins: PluginBindingV2[] = [];
+): PluginBinding[] {
+  const plugins: PluginBinding[] = [];
   const candidates = context.array(value, path, present);
   const positions = normalizePositions(candidates, path, context);
   candidates.forEach((candidate, index) => {
@@ -88,7 +88,7 @@ function parsePlugins(
       context.add('invalid_value', `${itemPath}.name`, 'Plugin name must use lowercase ASCII letters, digits, and single hyphens');
     }
     if ('path' in object) context.add('plugin_path_forbidden', `${itemPath}.path`, 'Plugin paths are forbidden');
-    let options: PluginBindingV2['options'];
+    let options: PluginBinding['options'];
     if (object.options !== undefined) {
       const cloned = copyJsonValue(object.options, `${itemPath}.options`, context);
       if (isObject(cloned)) options = cloned;
@@ -145,8 +145,8 @@ function parseUpstreams(
   catalog: PluginSchemaCatalog | undefined,
   context: ValidationContext,
   present = false,
-): UpstreamV2[] {
-  const upstreams: UpstreamV2[] = [];
+): ConfigurationUpstream[] {
+  const upstreams: ConfigurationUpstream[] = [];
   const candidates = context.array(value, path, present);
   const positions = normalizePositions(candidates, path, context);
   candidates.forEach((candidate, index) => {
@@ -178,8 +178,8 @@ function parseServices(
   value: unknown,
   catalog: PluginSchemaCatalog | undefined,
   context: ValidationContext,
-): ServiceV2[] {
-  const services: ServiceV2[] = [];
+): ConfigurationService[] {
+  const services: ConfigurationService[] = [];
   const names = new Set<string>();
   const candidates = context.array(value, 'services', value !== undefined);
   const positions = normalizePositions(candidates, 'services', context);
@@ -211,8 +211,8 @@ function parseRoutes(
   serviceIds: ReadonlySet<string>,
   catalog: PluginSchemaCatalog | undefined,
   context: ValidationContext,
-): RouteV2[] {
-  const routes: RouteV2[] = [];
+): ConfigurationRoute[] {
+  const routes: ConfigurationRoute[] = [];
   const paths = new Set<string>();
   const candidates = context.array(value, 'routes', value !== undefined);
   const positions = normalizePositions(candidates, 'routes', context);
@@ -263,7 +263,7 @@ function validateServiceReference(
 export function parseNormalizeCompile(
   input: unknown,
   options?: ConfigurationCompileOptions,
-): ConfigurationResult<LogicalConfigurationV2> {
+): ConfigurationResult<LogicalConfiguration> {
   const context = new ValidationContext();
   const safeInput = preflightJsonGraph(input, context);
   if (context.errors.length) return { ok: false, errors: context.errors };
@@ -283,7 +283,7 @@ export function parseNormalizeCompile(
   const plugins = parsePlugins(root.plugins, 'plugins', catalog, context, 'plugins' in root);
   const services = parseServices(root.services, catalog, context);
   const serviceIds = new Set(services.map(({ id }) => id));
-  const value: LogicalConfigurationV2 = {
+  const value: LogicalConfiguration = {
     ...policies,
     services,
     routes: parseRoutes(root.routes, serviceIds, catalog, context),
@@ -291,7 +291,7 @@ export function parseNormalizeCompile(
   };
   validateGatewayTargets(value, catalog, context);
   if (options?.pluginConstraints) {
-    const validate = (bindings: readonly PluginBindingV2[], path: string): void => {
+    const validate = (bindings: readonly PluginBinding[], path: string): void => {
       bindings.forEach((binding, index) => {
         for (const constraint of options.pluginConstraints!.get(binding.name) ?? []) {
           if (!pluginConfigConstraintSatisfied(binding.options ?? {}, constraint)) {
@@ -311,7 +311,7 @@ export function parseNormalizeCompile(
     });
   }
   if (options?.globalPlugins) {
-    const validateScopedBindings = (bindings: readonly PluginBindingV2[], path: string): void => {
+    const validateScopedBindings = (bindings: readonly PluginBinding[], path: string): void => {
       bindings.forEach((binding, index) => {
         if (options.globalPlugins!.has(binding.name)) {
           context.add('invalid_value', `${path}[${index}].name`, 'Global provider plugins cannot be bound to route, service, or upstream scopes');

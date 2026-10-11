@@ -1,4 +1,4 @@
-import type { LogicalConfigurationV2, ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { LogicalConfiguration, ConfigurationAggregate } from '@jeffusion/bungee-types';
 import type { ConfigurationPublication, ConfigurationRuntime } from '../../src/api/config';
 
 export function publicationFixture(patch: Partial<ConfigurationPublication> = {}): ConfigurationPublication {
@@ -12,7 +12,7 @@ export function publicationFixture(patch: Partial<ConfigurationPublication> = {}
   };
 }
 
-type FixtureRuntime = Omit<ConfigurationRuntime, 'config'> & { config: Omit<ConfigurationAggregateV2, 'logical_configuration'> & { logical_configuration: { -readonly [K in keyof LogicalConfigurationV2]: LogicalConfigurationV2[K] } } };
+type FixtureRuntime = Omit<ConfigurationRuntime, 'config'> & { config: Omit<ConfigurationAggregate, 'logical_configuration'> & { logical_configuration: { -readonly [K in keyof LogicalConfiguration]: LogicalConfiguration[K] } } };
 
 export function configurationRuntimeFixture(publication = publicationFixture()): FixtureRuntime {
   return {

@@ -1,12 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import type { ConfigurationAggregateV2, Sha256Digest } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate, Sha256Digest } from '@jeffusion/bungee-types';
 import type { ActiveConfigurationPublication, CommitConfigurationResult, ConfigurationOperationState,
   ConfigurationResult, RepositorySnapshot } from '../config-storage';
 import { ConfigRepositoryError } from '../config-storage';
 import { validateMutationId } from '../config-storage/repository-validation';
 import { hashConfigurationContent } from '../config-storage/content-hash';
 import { parseNormalizeCompileAggregate } from '../config-storage/aggregate';
-import { migrateLegacyDirectionalAggregate, type DirectionalMigrationWarning } from '../config-storage/directional-migration';
 import { isPluginName } from '../config-storage/plugin-name';
 import type { ServingConfigWorker } from '../config-publication';
 import { readControlJson } from './control-api-body';
@@ -23,7 +22,7 @@ const PUT_FIELDS = new Set(['expected_revision', 'aggregate', 'mutation_id', 'ki
 const VALIDATE_FIELDS = new Set(['aggregate', 'envelope']);
 const EXPORT_FORMAT = 'bungee-config-snapshot';
 const EXPORT_FORMAT_VERSION = 1;
-const EXPORT_SCHEMA_VERSION = 2;
+const EXPORT_SCHEMA_VERSION = 1;
 const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/;
 
 export interface ConfigControlRepository {
@@ -35,7 +34,7 @@ export interface ConfigControlRepository {
   getOperationState(mutationId: string): Promise<ConfigurationOperationState | null>;
   commit(command: {
     readonly mutation_id: string; readonly expected_revision: number;
-    readonly aggregate: ConfigurationAggregateV2; readonly kind: 'config' | 'admin_state';
+    readonly aggregate: ConfigurationAggregate; readonly kind: 'config' | 'admin_state';
     readonly created_at: number; readonly target_worker_slots: readonly number[];
   }): Promise<CommitConfigurationResult>;
 }
@@ -46,9 +45,9 @@ export type ConfigControlApiOptions = {
   readonly managementAuth?: ManagementAuthentication;
   readonly resourceCollection?: () => Promise<readonly unknown[]>;
   readonly resourceExtensions?: (keyId: string) => Promise<readonly unknown[]>;
-  readonly guardDataTransition?: (active: ConfigurationAggregateV2, next: ConfigurationAggregateV2) => Promise<Response | null>;
-  readonly guardManagementTransition?: (request: Request, active: ConfigurationAggregateV2, next: ConfigurationAggregateV2, setup?: unknown) => Promise<Response | null>;
-  readonly validateManagementTransition?: (request: Request, active: ConfigurationAggregateV2, next: ConfigurationAggregateV2) => Promise<Response | null>;
+  readonly guardDataTransition?: (active: ConfigurationAggregate, next: ConfigurationAggregate) => Promise<Response | null>;
+  readonly guardManagementTransition?: (request: Request, active: ConfigurationAggregate, next: ConfigurationAggregate, setup?: unknown) => Promise<Response | null>;
+  readonly validateManagementTransition?: (request: Request, active: ConfigurationAggregate, next: ConfigurationAggregate) => Promise<Response | null>;
   readonly pluginCapability?: (request: Request) => string | null;
   readonly pluginDependencies?: import('../plugin-dependencies').PluginDependencyGraph;
   readonly repository: ConfigControlRepository;
@@ -56,7 +55,7 @@ export type ConfigControlApiOptions = {
   readonly workerCount: number;
   readonly clock: { now(): number };
   readonly resolveAuthToken: (tokenExpression: string) => unknown;
-  readonly parseAggregate: (value: unknown) => ConfigurationResult<ConfigurationAggregateV2>;
+  readonly parseAggregate: (value: unknown) => ConfigurationResult<ConfigurationAggregate>;
   readonly publicationTasks: Pick<PublicationTaskLifecycle, 'enqueue'>;
   readonly pluginControlApi?: { handle(request: Request, subject?: ManagementSubject): Promise<Response | null> };
   readonly pluginControlPreflight?: {
@@ -241,7 +240,7 @@ async function validateRequest(request: Request, options: ConfigControlApiOption
   if (envelope === null || Object.keys(envelope).length !== 1) return json({ error: 'invalid_request' }, 400);
   if ('envelope' in envelope) {
     const prepared = prepareImport(envelope.envelope, options);
-    return prepared instanceof Response ? prepared : json({ valid: true, errors: [], aggregate: prepared.aggregate, warnings: prepared.warnings });
+    return prepared instanceof Response ? prepared : json({ valid: true, errors: [], aggregate: prepared.aggregate });
   }
   if (!('aggregate' in envelope)) return json({ error: 'invalid_request' }, 400);
   const parsed = options.parseAggregate(envelope.aggregate);
@@ -325,11 +324,11 @@ async function putConfig(
 type ConfigurationSnapshotEnvelope = {
   readonly format: 'bungee-config-snapshot';
   readonly format_version: 1;
-  readonly schema_version: 2;
+  readonly schema_version: 1;
   readonly exported_at: number;
   readonly source_revision: number;
   readonly content_hash: Sha256Digest;
-  readonly aggregate: ConfigurationAggregateV2;
+  readonly aggregate: ConfigurationAggregate;
   readonly envelope_hash: Sha256Digest;
 };
 type UntrustedConfigurationSnapshotEnvelope = Omit<ConfigurationSnapshotEnvelope, 'aggregate'> & {
@@ -390,31 +389,27 @@ function parseSnapshotEnvelope(value: unknown): UntrustedConfigurationSnapshotEn
   };
 }
 
-/** Preview and commit share one conversion boundary; verify original bytes before conversion. */
+/** Preview and commit validate the same sealed current configuration. */
 function prepareImport(value: unknown, options: ConfigControlApiOptions): Response | {
-  aggregate: ConfigurationAggregateV2; warnings: DirectionalMigrationWarning[];
+  aggregate: ConfigurationAggregate;
 } {
   const envelope = parseSnapshotEnvelope(value);
   if (envelope === null) return json({ error: 'invalid_snapshot' }, 400);
   const { envelope_hash: envelopeHash, ...base } = envelope;
   if (envelopeHash !== hashConfigurationContent(base)
     || envelope.content_hash !== hashConfigurationContent(envelope.aggregate)) return json({ error: 'invalid_snapshot' }, 400);
-  const warnings: DirectionalMigrationWarning[] = [];
-  let converted: unknown;
-  try { converted = migrateLegacyDirectionalAggregate(envelope.aggregate, warnings); }
-  catch { return json({ error: 'invalid_configuration' }, 422); }
-  const exported = parseNormalizeCompileAggregate(converted);
+  const exported = parseNormalizeCompileAggregate(envelope.aggregate);
   if (!exported.ok) return json({ error: 'invalid_configuration', errors: exported.errors }, 422);
   // Apply the installed catalog's dependency closure only after checking the sealed content.
   const parsed = options.parseAggregate(exported.value);
   if (!parsed.ok) return json({ error: 'invalid_configuration', errors: parsed.errors }, 422);
-  return { aggregate: parsed.value, warnings };
+  return { aggregate: parsed.value };
 }
 
 const UPSTREAM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const TOGGLE_FIELDS = new Set(['enabled']);
 
-function findUpstreamDisabled(aggregate: ConfigurationAggregateV2, upstreamId: string): boolean | null {
+function findUpstreamDisabled(aggregate: ConfigurationAggregate, upstreamId: string): boolean | null {
   for (const service of aggregate.logical_configuration.services) {
     const endpoint = service.endpoints.find((candidate) => candidate.id === upstreamId);
     if (endpoint !== undefined) return endpoint.is_disabled;
@@ -428,10 +423,10 @@ function findUpstreamDisabled(aggregate: ConfigurationAggregateV2, upstreamId: s
 }
 
 function withUpstreamDisabledState(
-  aggregate: ConfigurationAggregateV2,
+  aggregate: ConfigurationAggregate,
   upstreamId: string,
   disabled: boolean,
-): ConfigurationAggregateV2 | null {
+): ConfigurationAggregate | null {
   let changed = false;
   const services = aggregate.logical_configuration.services.map((service) => {
     if (!service.endpoints.some((endpoint) => endpoint.id === upstreamId)) return service;
@@ -460,7 +455,7 @@ function withUpstreamDisabledState(
 
 type ConfigurationMutation = {
   readonly active: RepositorySnapshot;
-  readonly next: ConfigurationAggregateV2;
+  readonly next: ConfigurationAggregate;
   readonly kind: 'config' | 'admin_state';
   readonly mutationId: string;
   readonly expectedRevision: number;
@@ -831,7 +826,7 @@ async function togglePluginActivation(
     const activations = active.aggregate.plugin_activations;
     const activated = activations.some((activation) => activation.plugin_name === pluginName);
     if (!options.pluginDependencies && activated === enable) return unchangedMutationResponse(options, active.revision);
-    let nextActivations: ConfigurationAggregateV2['plugin_activations'];
+    let nextActivations: ConfigurationAggregate['plugin_activations'];
     if (options.pluginDependencies) {
       const { updatePluginActivations } = await import('../plugin-dependencies');
       try {
@@ -850,7 +845,7 @@ async function togglePluginActivation(
     if (nextActivations.length === activations.length && nextActivations.every(
       (value, index) => value.plugin_name === activations[index]?.plugin_name,
     )) return unchangedMutationResponse(options, active.revision);
-    const next: ConfigurationAggregateV2 = { ...active.aggregate, plugin_activations: nextActivations };
+    const next: ConfigurationAggregate = { ...active.aggregate, plugin_activations: nextActivations };
     return commitConfigurationMutation(request, options, {
       active, next, kind: 'config', mutationId: typeof envelope.mutation_id === 'string' ? envelope.mutation_id : randomUUID(), expectedRevision: typeof envelope.expected_revision === 'number' ? envelope.expected_revision : active.revision, managementSetup: envelope.managementSetup,
     });
@@ -877,12 +872,9 @@ async function importConfig(
     const prepared = prepareImport(wrapper.envelope, options);
     if (prepared instanceof Response) return prepared;
     freezeJson(prepared.aggregate);
-    const response = await commitConfigurationMutation(request, options, {
+    return commitConfigurationMutation(request, options, {
       active, next: prepared.aggregate, kind: 'config', mutationId, expectedRevision, managementSetup: wrapper.managementSetup,
     });
-    if (!response.ok || prepared.warnings.length === 0) return response;
-    logger.warn({ mutationId, ignored_rules: prepared.warnings }, 'Incompatible configuration modification rules were ignored during import');
-    return json({ ...await response.json(), warnings: prepared.warnings }, response.status);
   });
 }
 

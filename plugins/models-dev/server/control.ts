@@ -23,7 +23,7 @@ import { buildCatalogIndex } from './catalog';
 import { downloadModelsDevCatalog } from './download';
 import { CatalogView, capabilitiesServiceOf, catalogServiceOf, readCatalogSnapshot, type SnapshotSource } from './local';
 import {
-  DEFAULT_MODELS_DEV_SETTINGS, parseModelsDevSettings, readCatalogRecord, readModelsDevSettings, readPersistedStatus,
+  DEFAULT_MODELS_DEV_SETTINGS, parseModelsDevSettings, readModelsDevSettings, readPersistedStatus,
   writeModelsDevSettings, writePersistedStatus,
   type ModelsDevPersistedStatus, type ModelsDevSettings,
 } from './store';
@@ -141,16 +141,7 @@ export class ModelsDevCatalogManager {
       this.status.lastError = 'storage';
     }
     try {
-      let source = await this.publisher.current();
-      // A legacy KV is read ONLY before the first valid snapshot, never as a corruption fallback.
-      if (source === null) {
-        const legacy = await readCatalogRecord(this.storage);
-        if (legacy !== null) {
-          buildCatalogIndex(legacy);
-          await this.publisher.publish(legacy.version, new TextEncoder().encode(JSON.stringify(legacy)));
-          source = await this.publisher.current();
-        }
-      }
+      const source = await this.publisher.current();
       const record = source === null ? null : await readCatalogSnapshot(source);
       if (record !== null) {
         const index = buildCatalogIndex(record);

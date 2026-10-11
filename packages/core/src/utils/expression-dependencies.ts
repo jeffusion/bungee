@@ -1,5 +1,4 @@
 import { parse } from 'acorn';
-import type { Node } from 'acorn';
 import { isAllowedExpression } from '../config-storage/expression-ast';
 
 export type ExpressionDirection = 'request' | 'response';
@@ -75,45 +74,4 @@ export function hasBodyModification(rules: unknown): boolean {
     const value = (rules as Record<string, unknown>)[key];
     return value !== null && typeof value === 'object' && Object.keys(value).length > 0;
   });
-}
-
-/** 仅改写标识符节点，绝不改写字符串内容或 headers 同名属性。 */
-export function rewriteLegacyResponseHeaders(value: unknown): unknown {
-  if (typeof value === 'string') return value.replace(/\{\{([\s\S]+?)\}\}/g, (_whole, source: string) => {
-    const expression = parseDynamicExpression(source);
-    const edits: number[] = [];
-    const walk = (node: any): void => {
-      if (node.type === 'Identifier') {
-        if (node.name === 'headers') edits.push(node.start - 1);
-        return;
-      }
-      if (node.type === 'MemberExpression') {
-        walk(node.object);
-        if (node.computed) walk(node.property);
-        return;
-      }
-      if (node.type === 'Property') {
-        if (node.computed) walk(node.key);
-        if (node.shorthand && node.value.type === 'Identifier' && node.value.name === 'headers') {
-          edits.push(-(node.value.start));
-        } else walk(node.value);
-        return;
-      }
-      for (const child of Object.values(node)) {
-        if (Array.isArray(child)) child.forEach((item) => item && typeof item.type === 'string' && walk(item));
-        else if (child && typeof child === 'object' && 'type' in child) walk(child);
-      }
-    };
-    walk(expression as Node);
-    let rewritten = source;
-    for (const edit of edits.sort((a, b) => Math.abs(b) - Math.abs(a))) {
-      const offset = edit < 0 ? -edit - 1 : edit;
-      const replacement = edit < 0 ? 'headers: request.headers' : 'request.headers';
-      rewritten = rewritten.slice(0, offset) + replacement + rewritten.slice(offset + 7);
-    }
-    return `{{${rewritten}}}`;
-  });
-  if (Array.isArray(value)) return value.map(rewriteLegacyResponseHeaders);
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, rewriteLegacyResponseHeaders(item)]));
-  return value;
 }

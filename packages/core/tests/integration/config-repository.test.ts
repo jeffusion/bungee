@@ -4,7 +4,7 @@ import { Database } from 'bun:sqlite';
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import {
   ConfigRepository,
   ConfigRepositoryError,
@@ -26,7 +26,7 @@ import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 
 setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
-const EMPTY_AGGREGATE: ConfigurationAggregateV2 = {
+const EMPTY_AGGREGATE: ConfigurationAggregate = {
   logical_configuration: { services: [], routes: [], plugins: [] },
   plugin_activations: [],
 };
@@ -154,7 +154,7 @@ const CONSISTENT_READ_READER_CHILD = `
   }
 `;
 
-function richAggregate(): ConfigurationAggregateV2 {
+function richAggregate(): ConfigurationAggregate {
   const result = parseNormalizeCompileAggregate({
     logical_configuration: {
       log_level: 'debug',
@@ -209,7 +209,7 @@ function richAggregate(): ConfigurationAggregateV2 {
   return result.value;
 }
 
-function richAggregateWithLogLevel(logLevel: 'debug' | 'warn'): ConfigurationAggregateV2 {
+function richAggregateWithLogLevel(logLevel: 'debug' | 'warn'): ConfigurationAggregate {
   const aggregate = richAggregate();
   return {
     ...aggregate,
@@ -233,7 +233,7 @@ function openOfflineConfigurationRepository(dbPath: string, options: ConfigRepos
 function command(
   mutationId: string,
   expectedRevision: number,
-  aggregate: ConfigurationAggregateV2,
+  aggregate: ConfigurationAggregate,
   kind: 'config' | 'admin_state' = 'config',
   createdAt = 1_700_000_000_000 + expectedRevision,
   targetWorkerSlots: readonly number[] = [0],
@@ -421,7 +421,7 @@ describe('ConfigRepository initialization and migration', () => {
 
   test('persists publication policy as part of the revision and content hash', () => {
     const { repository } = openRepository();
-    const aggregate: ConfigurationAggregateV2 = {
+    const aggregate: ConfigurationAggregate = {
       logical_configuration: {
         publication: {
           drain_start_timeout_ms: 300_000,
@@ -789,7 +789,7 @@ describe('ConfigRepository normalized commits', () => {
     };
     invalid.logical_configuration.services[0]!.timeouts = { connect_ms: 100, send_ms: 200, read_ms: 300 };
 
-    expect(() => repository.commit(command('reject-service-timeouts', 1, invalid as unknown as ConfigurationAggregateV2)))
+    expect(() => repository.commit(command('reject-service-timeouts', 1, invalid as unknown as ConfigurationAggregate)))
       .toThrow(ConfigRepositoryError);
     expect(repository.getSnapshot()).toEqual(current);
     expect(counts(dbPath)).toEqual({ revisions: 1, operations: 0, services: 0 });
@@ -801,7 +801,7 @@ describe('ConfigRepository normalized commits', () => {
     const serviceRoute = logical.routes.find((route) => route.id === IDS.serviceRoute);
     if (!serviceRoute) throw new Error('service route fixture missing');
     Object.assign(serviceRoute, { timeouts: { request_ms: 2000, first_response_ms: 1000 } });
-    const next: ConfigurationAggregateV2 = { ...aggregate, logical_configuration: logical };
+    const next: ConfigurationAggregate = { ...aggregate, logical_configuration: logical };
     const { repository } = openRepository({ compileOptions: COMPILE_OPTIONS });
 
     const invalid = structuredClone(next);

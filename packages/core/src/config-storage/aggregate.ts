@@ -1,6 +1,6 @@
 import type {
-  ConfigurationAggregateV2,
-  PluginActivationV2,
+  ConfigurationAggregate,
+  PluginActivation,
 } from '@jeffusion/bungee-types';
 import { parseNormalizeCompile } from './compiler';
 import { preflightJsonGraph } from './json-preflight';
@@ -29,8 +29,8 @@ function prefixLogicalError(error: ConfigurationError): ConfigurationError {
 }
 
 function comparePluginNames(
-  left: PluginActivationV2,
-  right: PluginActivationV2,
+  left: PluginActivation,
+  right: PluginActivation,
 ): number {
   if (left.plugin_name < right.plugin_name) return -1;
   if (left.plugin_name > right.plugin_name) return 1;
@@ -42,14 +42,14 @@ function parsePluginActivations(
   present: boolean,
   context: ValidationContext,
   availablePlugins?: ReadonlySet<string>,
-): PluginActivationV2[] {
+): PluginActivation[] {
   if (!present) {
     context.add('required', 'plugin_activations', 'Required field is missing');
     return [];
   }
 
   const candidates = context.array(value, 'plugin_activations', true);
-  const activations: PluginActivationV2[] = [];
+  const activations: PluginActivation[] = [];
   const names = new Set<string>();
   candidates.forEach((candidate, index) => {
     const itemPath = `plugin_activations[${index}]`;
@@ -87,7 +87,7 @@ function parsePluginActivations(
 export function parseNormalizeCompileAggregate(
   input: unknown,
   options?: ConfigurationCompileOptions,
-): ConfigurationResult<ConfigurationAggregateV2> {
+): ConfigurationResult<ConfigurationAggregate> {
   const context = new ValidationContext();
   const safeInput = preflightJsonGraph(input, context);
   if (context.errors.length) return { ok: false, errors: context.errors };

@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import type {
-  CommittedConfigurationSnapshotV2,
-  RouteV2,
-  ServiceRouteV2,
+  CommittedConfigurationSnapshot,
+  ConfigurationRoute,
+  ConfigurationServiceRoute,
 } from '@jeffusion/bungee-types';
 import type { RepositorySnapshot } from '../../../src/config-storage';
 import {
@@ -22,14 +22,14 @@ const ID = {
   inactiveBinding: '40000000-0000-4000-8000-000000000006',
 } as const;
 
-function snapshot(input: unknown, revision = 17): CommittedConfigurationSnapshotV2 {
+function snapshot(input: unknown, revision = 17): CommittedConfigurationSnapshot {
   const result = parseNormalizeCompileAggregate(input);
   if (!result.ok) throw new Error(`invalid test fixture: ${result.errors[0]?.path ?? 'unknown'}`);
   return { revision, content_hash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     aggregate: result.value };
 }
 
-function fullSnapshot(): CommittedConfigurationSnapshotV2 {
+function fullSnapshot(): CommittedConfigurationSnapshot {
   return snapshot({
     logical_configuration: {
       log_level: 'warn',
@@ -109,7 +109,7 @@ function fullSnapshot(): CommittedConfigurationSnapshotV2 {
   });
 }
 
-function isServiceRoute(route: RouteV2): route is ServiceRouteV2 {
+function isServiceRoute(route: ConfigurationRoute): route is ConfigurationServiceRoute {
   return route.service_id !== undefined;
 }
 
@@ -237,7 +237,7 @@ describe('compileRuntimeConfigSnapshot', () => {
 
   test('rejects inconsistent direct snapshots with typed errors', () => {
     const valid = fullSnapshot();
-    const duplicateActivation: CommittedConfigurationSnapshotV2 = {
+    const duplicateActivation: CommittedConfigurationSnapshot = {
       ...valid,
       aggregate: {
         ...valid.aggregate,
@@ -249,7 +249,7 @@ describe('compileRuntimeConfigSnapshot', () => {
 
     const serviceRoute = valid.aggregate.logical_configuration.routes.find(isServiceRoute);
     if (!serviceRoute) throw new Error('missing service route fixture');
-    const unknownService: CommittedConfigurationSnapshotV2 = {
+    const unknownService: CommittedConfigurationSnapshot = {
       ...valid,
       aggregate: {
         ...valid.aggregate,

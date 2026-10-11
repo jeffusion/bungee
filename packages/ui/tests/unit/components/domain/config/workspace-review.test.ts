@@ -4,7 +4,7 @@ import { resolveLoggingBody, withLoggingBody } from '../../../../../src/componen
 import { publicationFixture } from '../../../../helpers/publication';
 
 const base = () => ({ logical_configuration: { auth: { enabled: true, tokens: ['secret-value'] }, logging: { body: { enabled: true, max_size: 51200 } }, routes: [], services: [], plugins: [] }, plugin_activations: [] });
-const envelope = (aggregate: unknown) => JSON.stringify({ format: 'bungee-config-snapshot', format_version: 1, schema_version: 2, exported_at: 1, source_revision: 7, content_hash: `sha256:${'a'.repeat(64)}`, envelope_hash: `sha256:${'b'.repeat(64)}`, aggregate });
+const envelope = (aggregate: unknown) => JSON.stringify({ format: 'bungee-config-snapshot', format_version: 1, schema_version: 1, exported_at: 1, source_revision: 7, content_hash: `sha256:${'a'.repeat(64)}`, envelope_hash: `sha256:${'b'.repeat(64)}`, aggregate });
 
 test('known degraded terminal does not lock edits; succeeded recovery on a degraded operation is terminal', () => {
   expect(publicationBusy(publicationFixture())).toBe(false);

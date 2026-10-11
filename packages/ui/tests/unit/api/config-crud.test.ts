@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { RouteStaleError, RoutesAPI } from '../../../src/api/routes';
 import { ServicesAPI, ServiceStaleError } from '../../../src/api/services';
 import { ManagedBindingError, toEditorRoute, toEditorService } from '../../../src/api/config-adapters';
 import { ConfigurationStaleError } from '../../../src/api/config';
 
-const aggregate: ConfigurationAggregateV2 = {
+const aggregate: ConfigurationAggregate = {
   logical_configuration: {
     auth: { enabled: false, tokens: [] },
     plugins: [],

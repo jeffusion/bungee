@@ -4,7 +4,7 @@ import { Database } from 'bun:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { ConfigRepository, ConfigRepositoryError } from '../../src/config-storage';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 
@@ -12,7 +12,7 @@ setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
 const roots: string[] = [];
 const repositories: ConfigRepository[] = [];
-const VALUE: ConfigurationAggregateV2 = {
+const VALUE: ConfigurationAggregate = {
   logical_configuration: {
     auth: { enabled: true, tokens: ['literal'] }, services: [], routes: [], plugins: [],
   },

@@ -1,4 +1,4 @@
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { resolvePublicationPolicy } from '@jeffusion/bungee-types';
 import { parseNormalizeCompileAggregate } from '../config-storage/aggregate';
 import { hashConfigurationContent } from '../config-storage/content-hash';
@@ -26,7 +26,7 @@ const DRAIN_FIELDS = new Set([
   'drain_id', 'policy', 'boot_nonce', 'pid', 'start_boot_id', 'start_deadline_ns',
 ]);
 
-function aggregate(value: unknown): ConfigurationAggregateV2 {
+function aggregate(value: unknown): ConfigurationAggregate {
   const result = parseNormalizeCompileAggregate(value);
   if (!result.ok) invalid('aggregate');
   return result.value;

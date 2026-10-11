@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, test } from 'bun:test';
 import { chromium, expect, type Browser, type Page } from 'playwright/test';
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import type { ConfigurationOperationState } from '../../src/api/config';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
@@ -11,10 +11,10 @@ beforeAll(async () => {
   try { browser = await chromium.launch(); } catch (error) { await runtime.close(); throw error; }
 }, 120_000);
 afterAll(async () => { try { await browser?.close(); } finally { await runtime?.close(); } });
-const aggregate = (): ConfigurationAggregateV2 => ({ logical_configuration: { log_level: 'info', routes: [], services: [], plugins: [],
+const aggregate = (): ConfigurationAggregate => ({ logical_configuration: { log_level: 'info', routes: [], services: [], plugins: [],
   logging: { body: { enabled: true, max_size: 51200, retention_days: 1 } } }, plugin_activations: [] });
 const digest = `sha256:${'a'.repeat(64)}` as const;
-const envelope = (value: ConfigurationAggregateV2) => ({format:'bungee-config-snapshot',format_version:1,schema_version:2,
+const envelope = (value: ConfigurationAggregate) => ({format:'bungee-config-snapshot',format_version:1,schema_version:1,
   exported_at:1,source_revision:42,content_hash:digest,envelope_hash:digest,aggregate:value});
 function operation(id: string, state: 'converged' | 'committed' | 'degraded' = 'converged'): ConfigurationOperationState {
   return { operation: { mutation_id:id, request_hash:digest, expected_revision:42, committed_revision:43, kind:'config',
@@ -45,7 +45,7 @@ async function withSettings(run: (page: Page, model: ReturnType<typeof createMod
     if(path === '/api/config/validate') {
       const body=request.postDataJSON(); model.validations.push(body);
       if(model.validationGate) await model.validationGate;
-      return body.envelope ? json({valid:true,errors:[],aggregate:body.envelope.aggregate,warnings:[]}) : json({valid:true,errors:[]});
+      return body.envelope ? json({valid:true,errors:[],aggregate:body.envelope.aggregate}) : json({valid:true,errors:[]});
     }
     if(path === '/api/config' && method === 'PUT' || path === '/api/config/import' && method === 'POST') {
       const body=request.postDataJSON(); model.writes.push({method,path,body}); model.id=body.mutation_id;

@@ -1,6 +1,6 @@
 import type {
-  ConfigurationAggregateV2,
-  LogicalConfigurationV2,
+  ConfigurationAggregate,
+  LogicalConfiguration,
   Sha256Digest,
 } from '@jeffusion/bungee-types';
 import { v4 as uuidv4 } from 'uuid';
@@ -8,7 +8,7 @@ import { api, ApiError } from './client';
 
 
 export type ConfigurationSnapshot = {
-  readonly config: ConfigurationAggregateV2;
+  readonly config: ConfigurationAggregate;
   readonly revision: number;
   readonly content_hash: Sha256Digest;
 };
@@ -229,7 +229,7 @@ export async function getConfigSnapshot(headers?: Headers): Promise<Configuratio
   return await api.get<ConfigurationSnapshot>('/config', headers ? { headers, preserveSessionOnUnauthorized: true } : undefined);
 }
 
-export async function getConfig(): Promise<LogicalConfigurationV2> {
+export async function getConfig(): Promise<LogicalConfiguration> {
   return (await getConfigSnapshot()).config.logical_configuration;
 }
 
@@ -251,7 +251,7 @@ export function getConfigurationOperation(mutationId: string, headers?: Headers)
   return api.get(`/config/operations/${encodeURIComponent(mutationId)}`, { headers, preserveSessionOnUnauthorized: true });
 }
 
-export function validateAggregate(aggregate: ConfigurationAggregateV2): Promise<ValidationResponse> {
+export function validateAggregate(aggregate: ConfigurationAggregate): Promise<ValidationResponse> {
   return api.post('/config/validate', { aggregate });
 }
 
@@ -269,7 +269,7 @@ export function retryConfigurationPublication(operationId: string, requestId: st
  */
 function prepareNextAuthorization(
   _snapshot: ConfigurationSnapshot,
-  _aggregate: ConfigurationAggregateV2,
+  _aggregate: ConfigurationAggregate,
   options: ConfigurationCommitOptions,
 ): { readonly headers: Headers; readonly pollHeaders: Headers } {
   const headers = new Headers();
@@ -279,7 +279,7 @@ function prepareNextAuthorization(
 
 export async function commitConfiguration(
   snapshot: ConfigurationSnapshot,
-  aggregate: ConfigurationAggregateV2,
+  aggregate: ConfigurationAggregate,
   options: ConfigurationCommitOptions = {},
 ): Promise<ConfigurationOperationState> {
   const mutationId = uuidv4();
@@ -336,15 +336,14 @@ export async function commitConfiguration(
 }
 
 export type ConfigurationImportEnvelope = {
-  readonly aggregate: ConfigurationAggregateV2;
+  readonly aggregate: ConfigurationAggregate;
   readonly [key: string]: unknown;
 };
 
 export type ConfigurationImportPreview = {
   readonly valid: true;
   readonly errors: readonly [];
-  readonly aggregate: ConfigurationAggregateV2;
-  readonly warnings: readonly { readonly path: string; readonly reason: string }[];
+  readonly aggregate: ConfigurationAggregate;
 };
 
 /** Preview the same normalized configuration that the sealed import will commit. */
@@ -396,7 +395,7 @@ export async function importConfig(
 
 export async function commitLogicalConfiguration(
   snapshot: ConfigurationSnapshot,
-  logicalConfiguration: LogicalConfigurationV2,
+  logicalConfiguration: LogicalConfiguration,
   options?: ConfigurationCommitOptions,
 ): Promise<ConfigurationOperationState> {
   return await commitConfiguration(snapshot, {
@@ -407,7 +406,7 @@ export async function commitLogicalConfiguration(
 
 export async function updateConfig(
   snapshot: ConfigurationSnapshot,
-  config: LogicalConfigurationV2,
+  config: LogicalConfiguration,
   options?: ConfigurationCommitOptions,
 ): Promise<{ readonly success: true; readonly message: string }> {
   await commitLogicalConfiguration(snapshot, config, options);
@@ -416,7 +415,7 @@ export async function updateConfig(
 
 export async function validateConfig(
   snapshot: ConfigurationSnapshot,
-  config: LogicalConfigurationV2,
+  config: LogicalConfiguration,
 ): Promise<{ readonly valid: boolean; readonly error?: string }> {
   const result = await api.post<ValidationResponse>('/config/validate', {
     aggregate: { ...snapshot.config, logical_configuration: config },

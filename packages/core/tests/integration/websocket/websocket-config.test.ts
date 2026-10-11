@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import {
   ConfigRepository, compileRuntimeConfigSnapshot, hashConfigurationContent,
   parseNormalizeCompileAggregate,
@@ -31,7 +31,7 @@ function input(websocket?: unknown): unknown {
   };
 }
 
-function aggregate(websocket?: unknown): ConfigurationAggregateV2 {
+function aggregate(websocket?: unknown): ConfigurationAggregate {
   const result = parseNormalizeCompileAggregate(input(websocket));
   if (!result.ok) throw new Error(JSON.stringify(result.errors));
   return result.value;

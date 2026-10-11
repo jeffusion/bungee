@@ -1,10 +1,10 @@
-import type { LogicalConfigurationV2, PluginBindingV2 } from '@jeffusion/bungee-types';
+import type { LogicalConfiguration, PluginBinding } from '@jeffusion/bungee-types';
 import type { ReadonlyPluginConfigField } from '../plugin-manifest-catalog/types';
 import type { PluginSchemaCatalog } from './plugin-schema';
 import type { ValidationContext } from './validation';
 
 /** Only schema-declared references participate. Client JSON and headers never supply targets. */
-export function validateGatewayTargets(config: LogicalConfigurationV2, schemas: PluginSchemaCatalog | undefined, context: ValidationContext): void {
+export function validateGatewayTargets(config: LogicalConfiguration, schemas: PluginSchemaCatalog | undefined, context: ValidationContext): void {
   if (!schemas) return;
   const routes = new Map(config.routes.map(route => [route.id,route]));
   const services = new Map(config.services.map(service => [service.id,service]));
@@ -21,7 +21,7 @@ export function validateGatewayTargets(config: LogicalConfigurationV2, schemas: 
       for (const property of field.properties) visit((value as Record<string,unknown>)[property.name],property,owner,`${path}.${property.name}`);
     }
   };
-  const bindings = (plugins: readonly PluginBindingV2[], owner: string, path: string) => {
+  const bindings = (plugins: readonly PluginBinding[], owner: string, path: string) => {
     plugins.forEach((plugin,index) => {
       if (!plugin.enabled) return;
       for (const field of schemas.get(plugin.name) ?? []) visit(plugin.options?.[field.name],field,owner,`${path}[${index}].options.${field.name}`);

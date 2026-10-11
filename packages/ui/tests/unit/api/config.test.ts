@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { retainAccepted } from '../../../src/components/domain/config/publication-state';
 import {
   ConfigurationOperationDegradedError,
@@ -12,7 +12,7 @@ import {
   updateConfig,
 } from '../../../src/api/config';
 
-const aggregate: ConfigurationAggregateV2 = {
+const aggregate: ConfigurationAggregate = {
   logical_configuration: {
     auth: { enabled: false, tokens: [] },
     services: [],
@@ -72,7 +72,7 @@ function operation(state: 'committed' | 'converged' | 'degraded') {
   };
 }
 
-function snapshot(config: ConfigurationAggregateV2 = aggregate): Response {
+function snapshot(config: ConfigurationAggregate = aggregate): Response {
   return Response.json({ config, revision: 7, content_hash: 'sha256:before' });
 }
 

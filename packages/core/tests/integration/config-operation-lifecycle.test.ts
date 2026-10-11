@@ -3,7 +3,7 @@ import { Database } from 'bun:sqlite';
 import { copyFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import {
   ConfigRepository,
   ConfigRepositoryError,
@@ -18,7 +18,7 @@ const roots: string[] = [];
 const repositories: ConfigRepository[] = [];
 const CREATED_AT = 1_700_000_000_000;
 
-function aggregate(tokens: readonly string[] = ['literal'], enabled = true): ConfigurationAggregateV2 {
+function aggregate(tokens: readonly string[] = ['literal'], enabled = true): ConfigurationAggregate {
   return {
     logical_configuration: { auth: { enabled, tokens: [...tokens] }, services: [], routes: [], plugins: [] },
     plugin_activations: [],

@@ -4,7 +4,7 @@ import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { ConfigRepository, hashConfigurationContent, parseNormalizeCompileAggregate } from '../../src/config-storage';
 import { createConfigControlApi, type ConfigControlApiOptions } from '../../src/master-runtime/control-api';
 import { PublicationTaskManager } from '../../src/master-runtime/publication-task-manager';
@@ -26,7 +26,7 @@ const publicationManagers: PublicationTaskManager[] = [];
 let TOKEN = '';
 let NEXT_TOKEN = '';
 const credentials: ReturnType<typeof createManagementAuthFixture>[] = [];
-function aggregate(logLevel: 'info' | 'debug' = 'info'): ConfigurationAggregateV2 {
+function aggregate(logLevel: 'info' | 'debug' = 'info'): ConfigurationAggregate {
   return {
     logical_configuration: {
       log_level: logLevel,
@@ -37,7 +37,7 @@ function aggregate(logLevel: 'info' | 'debug' = 'info'): ConfigurationAggregateV
   };
 }
 
-function aggregateWithToken(token: string, logLevel: 'info' | 'debug' = 'info'): ConfigurationAggregateV2 {
+function aggregateWithToken(token: string, logLevel: 'info' | 'debug' = 'info'): ConfigurationAggregate {
   const value = aggregate(logLevel);
   return {
     ...value,
@@ -255,7 +255,7 @@ describe('configuration control with an explicit management provider', () => {
 
   test('returns recovery_in_progress with the durable recovery identity', async () => {
     const { api, repository, publicationTasks } = fixture(1, 'degraded');
-    const recoveryAggregate = (logLevel: 'debug' | 'info'): ConfigurationAggregateV2 => ({
+    const recoveryAggregate = (logLevel: 'debug' | 'info'): ConfigurationAggregate => ({
       logical_configuration: { log_level: logLevel, auth: { enabled: false, tokens: [] }, services: [], routes: [], plugins: [] },
       plugin_activations: [],
     });
@@ -309,7 +309,7 @@ describe('configuration control with an explicit management provider', () => {
   test('keeps auth-absent and disabled revisions protected by independent administrator sessions', async () => {
     // Given
     const { api, repository, publicationTasks } = fixture(1, 'converged');
-    const commit = (value: ConfigurationAggregateV2, revision: number, mutationId: string, next?: string) =>
+    const commit = (value: ConfigurationAggregate, revision: number, mutationId: string, next?: string) =>
       api.handle(authorized('/api/config', {
         method: 'PUT',
         headers: {
@@ -317,10 +317,10 @@ describe('configuration control with an explicit management provider', () => {
         },
         body: JSON.stringify({ expected_revision: revision, aggregate: value, mutation_id: mutationId }),
       }));
-    const authLess: ConfigurationAggregateV2 = {
+    const authLess: ConfigurationAggregate = {
       logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [],
     };
-    const disabled: ConfigurationAggregateV2 = {
+    const disabled: ConfigurationAggregate = {
       logical_configuration: { auth: { enabled: false, tokens: [] }, services: [], routes: [], plugins: [] },
       plugin_activations: [],
     };
@@ -352,7 +352,7 @@ describe('configuration control with an explicit management provider', () => {
     // Given
     const { api, repository, publicationTasks } = fixture(1, 'converged');
     const endpointId = 'b0000000-0000-4000-8000-000000000002';
-    const setup: ConfigurationAggregateV2 = {
+    const setup: ConfigurationAggregate = {
       logical_configuration: {
         services: [{
           id: 'a0000000-0000-4000-8000-000000000001', position: 1, name: 'setup', plugins: [],
@@ -402,7 +402,7 @@ describe('configuration control with an explicit management provider', () => {
       // Given
       const { api, repository, publicationTasks, publishCalls } = fixture(1, 'converged');
       const endpointId = 'b0000000-0000-4000-8000-000000000002';
-      const setup: ConfigurationAggregateV2 = {
+      const setup: ConfigurationAggregate = {
         logical_configuration: {
           auth: { enabled: true, tokens: [TOKEN] },
           services: [{
@@ -528,7 +528,7 @@ describe('configuration control with an explicit management provider', () => {
     });
     const imported = { ...aggregate(), plugin_activations: [{ plugin_name: 'fake-control' }] };
     const baseEnvelope = {
-      format: 'bungee-config-snapshot' as const, format_version: 1 as const, schema_version: 2 as const,
+      format: 'bungee-config-snapshot' as const, format_version: 1 as const, schema_version: 1 as const,
       exported_at: 1, source_revision: 1, content_hash: hashConfigurationContent(imported), aggregate: imported,
     };
     const envelope = { ...baseEnvelope, envelope_hash: hashConfigurationContent(baseEnvelope) };
@@ -592,7 +592,7 @@ describe('configuration control with an explicit management provider', () => {
 
     const imported = { ...aggregateWithToken(NEXT_TOKEN, 'debug'), plugin_activations: [{ plugin_name: 'fake-control' }] };
     const envelopeBase = {
-      format: 'bungee-config-snapshot' as const, format_version: 1 as const, schema_version: 2 as const,
+      format: 'bungee-config-snapshot' as const, format_version: 1 as const, schema_version: 1 as const,
       exported_at: 1, source_revision: 2, content_hash: hashConfigurationContent(imported), aggregate: imported,
     };
     const envelope = { ...envelopeBase, envelope_hash: hashConfigurationContent(envelopeBase) };
@@ -803,7 +803,7 @@ describe('configuration control with an explicit management provider', () => {
     expect(envelope).toMatchObject({
       format: 'bungee-config-snapshot',
       format_version: 1,
-      schema_version: 2,
+      schema_version: 1,
       source_revision: 3,
     });
     expect(typeof envelope.aggregate).toBe('object');
@@ -819,15 +819,15 @@ describe('configuration control with an explicit management provider', () => {
       return JSON.stringify({ ...base, envelope_hash: hashConfigurationContent(base) });
     }
 
-    const exportedAggregate = envelope.aggregate as ConfigurationAggregateV2;
-    const modified: ConfigurationAggregateV2 = {
+    const exportedAggregate = envelope.aggregate as ConfigurationAggregate;
+    const modified: ConfigurationAggregate = {
       ...exportedAggregate,
       logical_configuration: { ...exportedAggregate.logical_configuration, log_level: 'debug' },
     };
     const modifiedBase = {
       format: 'bungee-config-snapshot',
       format_version: 1,
-      schema_version: 2,
+      schema_version: 1,
       exported_at: envelope.exported_at,
       source_revision: envelope.source_revision,
       content_hash: hashConfigurationContent(modified),
@@ -857,11 +857,11 @@ describe('configuration control with an explicit management provider', () => {
     expect(staleResponse?.status).toBe(400);
     expect((await staleResponse!.json() as Record<string, unknown>).error).toBe('invalid_snapshot');
 
-    const badAggregate = { logical_configuration: {} } as unknown as ConfigurationAggregateV2;
+    const badAggregate = { logical_configuration: {} } as unknown as ConfigurationAggregate;
     const tamperedAggregateBase = {
       format: 'bungee-config-snapshot',
       format_version: 1,
-      schema_version: 2,
+      schema_version: 1,
       exported_at: 1,
       source_revision: 2,
       content_hash: envelope.content_hash,
@@ -881,7 +881,7 @@ describe('configuration control with an explicit management provider', () => {
     const structurallyInvalidBase = {
       format: 'bungee-config-snapshot',
       format_version: 1,
-      schema_version: 2,
+      schema_version: 1,
       exported_at: 1,
       source_revision: 2,
       content_hash: hashConfigurationContent(badAggregate),
@@ -902,6 +902,39 @@ describe('configuration control with an explicit management provider', () => {
     expect((await legacyResponse!.json() as Record<string, unknown>).error).toBe('invalid_snapshot');
   });
 
+  test('sealed preview and import reject noncurrent modification fields without rewriting or committing', async () => {
+    const { api, repository } = fixture(1, 'converged', value => value, () => true, undefined, false);
+    const before = repository.getSnapshot();
+    const unsupported = {
+      ...before.aggregate,
+      logical_configuration: { ...before.aggregate.logical_configuration, routes: [{
+        id: '10000000-0000-4000-8000-000000000001', position: 0, path: '/api', plugins: [],
+        headers: { add: { 'x-old': 'value' } },
+        endpoints: [{ id: '20000000-0000-4000-8000-000000000001', position: 0,
+          target: 'https://example.com', weight: 100, priority: 1, is_disabled: false, plugins: [] }],
+      }] },
+    };
+    const base = { format: 'bungee-config-snapshot', format_version: 1, schema_version: 1,
+      exported_at: 1, source_revision: before.revision,
+      content_hash: hashConfigurationContent(unsupported), aggregate: unsupported };
+    const envelope = { ...base, envelope_hash: hashConfigurationContent(base) };
+    for (const path of ['validate', 'import']) {
+      const body = path === 'validate' ? { envelope }
+        : { expected_revision: before.revision, mutation_id: 'reject-old-modifications', envelope };
+      const response = await api.handle(authorized(`/api/config/${path}`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      }));
+      expect(response?.status).toBe(422);
+      const error = await response!.json();
+      expect(error.error).toBe('invalid_configuration');
+      expect(error.errors).toContainEqual(expect.objectContaining({
+        code: 'unknown_field', path: 'logical_configuration.routes[0].headers',
+      }));
+      expect(error).not.toHaveProperty('warnings');
+      expect(repository.getSnapshot()).toEqual(before);
+    }
+  });
+
   test('rejects missing, extra, wrong-type, and unsafe snapshot metadata before commit', async () => {
     const { api, repository, publicationTasks } = fixture(1, 'converged');
     const seed = await api.handle(authorized('/api/config', {
@@ -919,7 +952,7 @@ describe('configuration control with an explicit management provider', () => {
     const base: Record<string, unknown> = {
       format: 'bungee-config-snapshot',
       format_version: 1,
-      schema_version: 2,
+      schema_version: 1,
       exported_at: 0,
       source_revision: 2,
       content_hash: contentHash,
@@ -948,7 +981,7 @@ describe('configuration control with an explicit management provider', () => {
       seal({ ...base, format_version: '1' }),
       seal({ ...base, format_version: 2 }),
       seal({ ...base, schema_version: '2' }),
-      seal({ ...base, schema_version: 1 }),
+      seal({ ...base, schema_version: 999 }),
       seal({ ...base, exported_at: 'invalid' }),
       seal({ ...base, exported_at: -1 }),
       seal({ ...base, exported_at: 1.5 }),
@@ -1055,7 +1088,7 @@ describe('configuration control with an explicit management provider', () => {
     const { api, repository, publicationTasks, publishCalls } = fixture(2, 'converged');
     const serviceId = 'a0000000-0000-4000-8000-000000000001';
     const endpointId = 'b0000000-0000-4000-8000-000000000002';
-    const upstreamAggregate: ConfigurationAggregateV2 = {
+    const upstreamAggregate: ConfigurationAggregate = {
       logical_configuration: {
         log_level: 'info',
         auth: { enabled: true, tokens: [TOKEN] },
@@ -1136,7 +1169,7 @@ describe('configuration control with an explicit management provider', () => {
   test('returns the active upstream operation for a repeated no-op toggle', async () => {
     const { api, repository, publicationTasks, setPublicationMode } = fixture(2, 'converged');
     const endpointId = 'b0000000-0000-4000-8000-000000000002';
-    const upstreamAggregate: ConfigurationAggregateV2 = {
+    const upstreamAggregate: ConfigurationAggregate = {
       logical_configuration: {
         log_level: 'info',
         auth: { enabled: true, tokens: [TOKEN] },

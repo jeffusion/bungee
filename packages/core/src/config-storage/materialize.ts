@@ -1,9 +1,9 @@
 import type {
-  ConfigurationAggregateV2,
-  PluginBindingV2,
-  RouteV2,
-  ServiceV2,
-  UpstreamV2,
+  ConfigurationAggregate,
+  PluginBinding,
+  ConfigurationRoute,
+  ConfigurationService,
+  ConfigurationUpstream,
 } from '@jeffusion/bungee-types';
 import type { Database } from 'bun:sqlite';
 import { canonicalJson } from './content-hash';
@@ -14,7 +14,7 @@ type BindingOwner =
   | { readonly kind: 'route'; readonly id: string }
   | { readonly kind: 'upstream'; readonly id: string };
 
-function writeBindings(db: Database, bindings: readonly PluginBindingV2[], owner: BindingOwner): void {
+function writeBindings(db: Database, bindings: readonly PluginBinding[], owner: BindingOwner): void {
   for (const binding of bindings) {
     db.run(`INSERT INTO plugin_bindings
       (id,scope_kind,scope_owner,service_id,route_id,upstream_id,position,plugin_name,options_json,enabled)
@@ -33,14 +33,14 @@ function writeBindings(db: Database, bindings: readonly PluginBindingV2[], owner
   }
 }
 
-function upstreamPolicy(upstream: UpstreamV2): Record<string, unknown> {
+function upstreamPolicy(upstream: ConfigurationUpstream): Record<string, unknown> {
   const { id, position, target, weight, priority, is_disabled, plugins, ...policy } = upstream;
   return policy;
 }
 
 function writeUpstreams(
   db: Database,
-  upstreams: readonly UpstreamV2[],
+  upstreams: readonly ConfigurationUpstream[],
   owner: { readonly kind: 'service' | 'route'; readonly id: string },
 ): void {
   for (const upstream of upstreams) {
@@ -62,12 +62,12 @@ function writeUpstreams(
   }
 }
 
-function servicePolicy(service: ServiceV2): Record<string, unknown> {
+function servicePolicy(service: ConfigurationService): Record<string, unknown> {
   const { id, position, name, endpoints, plugins, ...policy } = service;
   return policy;
 }
 
-function routePolicy(route: RouteV2): Record<string, unknown> {
+function routePolicy(route: ConfigurationRoute): Record<string, unknown> {
   const { id, position, path, plugins, ...remainder } = route;
   if ('service_id' in remainder) {
     const { service_id, ...policy } = remainder;
@@ -77,7 +77,7 @@ function routePolicy(route: RouteV2): Record<string, unknown> {
   return policy;
 }
 
-function writeServices(db: Database, services: readonly ServiceV2[]): void {
+function writeServices(db: Database, services: readonly ConfigurationService[]): void {
   for (const service of services) {
     db.run('INSERT INTO services (id,position,name,policy_json) VALUES (?,?,?,?)', [
       service.id, service.position, service.name, canonicalJson(servicePolicy(service)),
@@ -87,7 +87,7 @@ function writeServices(db: Database, services: readonly ServiceV2[]): void {
   }
 }
 
-function writeRoutes(db: Database, routes: readonly RouteV2[]): void {
+function writeRoutes(db: Database, routes: readonly ConfigurationRoute[]): void {
   for (const route of routes) {
     const serviceId = typeof route.service_id === 'string' ? route.service_id : null;
     db.run('INSERT INTO routes (id,position,path,service_id,policy_json) VALUES (?,?,?,?,?)', [
@@ -98,7 +98,7 @@ function writeRoutes(db: Database, routes: readonly RouteV2[]): void {
   }
 }
 
-export function replaceActiveMaterialization(db: Database, aggregate: ConfigurationAggregateV2): void {
+export function replaceActiveMaterialization(db: Database, aggregate: ConfigurationAggregate): void {
   db.run('DELETE FROM plugin_bindings');
   db.run('DELETE FROM plugin_activations');
   db.run('DELETE FROM upstreams');

@@ -1,4 +1,4 @@
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import type { ManagementProvider, ManagementSubject } from '../plugin-extensions';
 import type { PluginControlHost } from '../plugin-control';
 import type { PluginDurableState } from '../plugin-durable-state';
@@ -8,7 +8,7 @@ export class ManagementAuthentication {
   private readonly identities = new WeakMap<Request, ManagementIdentity>();
   private readonly knownProviders: Set<string>;
   constructor(private readonly host: PluginControlHost,
-    private readonly aggregate: () => ConfigurationAggregateV2,
+    private readonly aggregate: () => ConfigurationAggregate,
     providers: ReadonlySet<string>, private readonly managementOrigin?: string,
     private readonly selectionState?: PluginDurableState) {
     this.knownProviders = new Set(providers);
@@ -30,7 +30,7 @@ export class ManagementAuthentication {
     if (arguments.length === 0 && persisted?.selected && names.length === 0) throw new Error('management_selection_mismatch');
     return names[0]?.plugin_name ?? null;
   }
-  async rememberSelection(aggregate: ConfigurationAggregateV2, committed = true): Promise<void> {
+  async rememberSelection(aggregate: ConfigurationAggregate, committed = true): Promise<void> {
     const previous = await this.selectionState?.get('selection');
     const selected = this.selected(aggregate);
     const old = previous?.value as {selected?: string | null} | undefined;
@@ -82,7 +82,7 @@ export function parseManagementOrigin(value: string | undefined): string | undef
 
 /** Asynchronous identity and authorization preflight for a management mode change. */
 export async function validateManagementTransition(
-  request: Request, active: ConfigurationAggregateV2, next: ConfigurationAggregateV2,
+  request: Request, active: ConfigurationAggregate, next: ConfigurationAggregate,
   managementAuth: ManagementAuthentication | undefined, host: PluginControlHost,
 ): Promise<Response | null> {
   const before = managementAuth?.selected(active), after = managementAuth?.selected(next);

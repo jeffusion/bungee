@@ -1,11 +1,11 @@
 import { describe, expect, test } from 'bun:test';
-import type { ServiceV2, UpstreamV2, LogicalConfigurationV2, RouteV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationService, ConfigurationUpstream, LogicalConfiguration, ConfigurationRoute } from '@jeffusion/bungee-types';
 import {
   cloneUpstreamDraft, duplicateEditorUpstream, ManagedBindingError,
   toEditorService, toEditorRoute, toEditorUpstream, toV2Service, toV2Route,
 } from '../../../src/api/config-adapters';
 
-const endpoint: UpstreamV2 = {
+const endpoint: ConfigurationUpstream = {
   id: 'endpoint', position: 0, target: 'https://managed.example.test/backend',
   weight: 100, priority: 1, is_disabled: false,
   managedBy: { plugin: 'provider', contributionId: 'accounts', bindingId: 'binding' },
@@ -15,13 +15,13 @@ const endpoint: UpstreamV2 = {
     { id: 'other', position: 1, name: 'other-plugin', enabled: true, options: { future: null } },
   ],
 };
-const service: ServiceV2 = { id: 'service', position: 0, name: 'managed', endpoints: [endpoint], plugins: [] };
-const logical: LogicalConfigurationV2 = { services: [service], routes: [], plugins: [] };
+const service: ConfigurationService = { id: 'service', position: 0, name: 'managed', endpoints: [endpoint], plugins: [] };
+const logical: LogicalConfiguration = { services: [service], routes: [], plugins: [] };
 
 describe('managed endpoint editor contract', () => {
   test('service and route roundtrip retain marker, inactive bindings and unknown options', () => {
     expect(toV2Service(toEditorService(service), service, 0)).toEqual(service);
-    const route: RouteV2 = { id: 'route', position: 0, path: '/managed', endpoints: [endpoint], plugins: [] };
+    const route: ConfigurationRoute = { id: 'route', position: 0, path: '/managed', endpoints: [endpoint], plugins: [] };
     expect(toV2Route(toEditorRoute(route, []), logical, route, 0)).toEqual(route);
   });
 

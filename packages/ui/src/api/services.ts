@@ -1,11 +1,11 @@
 import { saveLogicalConfiguration } from './configuration-save';
 import { getConfigSnapshot } from './config';
 import { toEditorService, toV2Service, type EditorService } from './config-adapters';
-import type { ServiceV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationService } from '@jeffusion/bungee-types';
 import { isEqual } from 'lodash-es';
 
 export type Service = EditorService;
-export type ServiceBaseline = ServiceV2;
+export type ServiceBaseline = ConfigurationService;
 
 export class ServiceStaleError extends Error {
   readonly name = 'ServiceStaleError';
@@ -17,7 +17,7 @@ export class ServiceStaleError extends Error {
 }
 
 // Reuse the persistence adapter: editor descriptions and endpoint health are not configuration.
-function persistedService(service: ServiceV2): ServiceV2 {
+function persistedService(service: ConfigurationService): ConfigurationService {
   return toV2Service(toEditorService(service), service, service.position);
 }
 

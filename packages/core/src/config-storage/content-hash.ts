@@ -1,4 +1,4 @@
-import type { ConfigurationAggregateV2, Sha256Digest } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate, Sha256Digest } from '@jeffusion/bungee-types';
 import canonicalize from 'canonicalize';
 import { snapshotJsonGraph } from './json-preflight';
 
@@ -29,7 +29,7 @@ export function hashConfigurationContent(value: unknown): Sha256Digest {
 export type ConfigurationRequestIdentity = {
   readonly kind: 'config' | 'admin_state';
   readonly expected_revision: number;
-  readonly aggregate: ConfigurationAggregateV2;
+  readonly aggregate: ConfigurationAggregate;
   readonly target_worker_slots: readonly number[];
 };
 

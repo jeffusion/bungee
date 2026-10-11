@@ -4,7 +4,7 @@ import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { ConfigRepository, ConfigRepositoryError, parseNormalizeCompileAggregate } from '../../src/config-storage';
 import { hashConfigurationContent, hashConfigurationRequest } from '../../src/config-storage/content-hash';
 import { createConfigControlApi, type ConfigControlApiOptions } from '../../src/master-runtime/control-api';
@@ -19,18 +19,18 @@ const credentials: ReturnType<typeof createManagementAuthFixture>[] = [];
 const roots: string[] = [];
 const repositories: ConfigRepository[] = [];
 
-function aggregate(token: string, log_level: 'info' | 'debug' = 'info'): ConfigurationAggregateV2 {
+function aggregate(token: string, log_level: 'info' | 'debug' = 'info'): ConfigurationAggregate {
   return { logical_configuration: { log_level, auth: { enabled: true, tokens: [token] },
     services: [], routes: [], plugins: [] }, plugin_activations: [] };
 }
 
-function disabledAggregate(): ConfigurationAggregateV2 {
+function disabledAggregate(): ConfigurationAggregate {
   return { logical_configuration: { auth: { enabled: false, tokens: [] },
     services: [], routes: [], plugins: [] }, plugin_activations: [] };
 }
 
 const UPSTREAM_ID = 'b0000000-0000-4000-8000-000000000002';
-function upstreamAggregate(token: string): ConfigurationAggregateV2 {
+function upstreamAggregate(token: string): ConfigurationAggregate {
   return { logical_configuration: { auth: { enabled: true, tokens: [token] }, services: [{
     id: 'a0000000-0000-4000-8000-000000000001', position: 1, name: 'slow-auth', plugins: [],
     endpoints: [{ id: UPSTREAM_ID, position: 1, target: 'http://127.0.0.1:9', weight: 100,
@@ -76,7 +76,7 @@ function fixture(
 }
 
 function put(api: ReturnType<typeof createConfigControlApi>, expected_revision: number,
-  value: ConfigurationAggregateV2, mutation_id: string, headers: HeadersInit) {
+  value: ConfigurationAggregate, mutation_id: string, headers: HeadersInit) {
   return api.handle(new Request('http://control.test/api/config', { method: 'PUT', headers: { authorization: `Bearer ${OLD}`, ...headers },
     body: JSON.stringify({ expected_revision, aggregate: value, mutation_id }) }));
 }
@@ -125,7 +125,7 @@ describe('asynchronous configuration control with an explicit management provide
     const { api, repository, publishedOperationIds } = fixture(preflight);
     const next = { ...disabledAggregate(), plugin_activations: [{ plugin_name: 'fake-control' }] };
     const baseEnvelope = {
-      format: 'bungee-config-snapshot' as const, format_version: 1 as const, schema_version: 2 as const,
+      format: 'bungee-config-snapshot' as const, format_version: 1 as const, schema_version: 1 as const,
       exported_at: 1, source_revision: 1, content_hash: hashConfigurationContent(next), aggregate: next,
     };
     const envelope = { ...baseEnvelope, envelope_hash: hashConfigurationContent(baseEnvelope) };
@@ -503,7 +503,7 @@ describe('asynchronous configuration control with an explicit management provide
     });
     const imported = aggregate(OLD, 'debug');
     const baseEnvelope = {
-      format: 'bungee-config-snapshot' as const, format_version: 1 as const, schema_version: 2 as const,
+      format: 'bungee-config-snapshot' as const, format_version: 1 as const, schema_version: 1 as const,
       exported_at: 1, source_revision: 2, content_hash: hashConfigurationContent(imported), aggregate: imported,
     };
     const envelope = { ...baseEnvelope, envelope_hash: hashConfigurationContent(baseEnvelope) };

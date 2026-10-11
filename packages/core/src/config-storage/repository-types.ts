@@ -1,6 +1,6 @@
 import type {
-  CommittedConfigurationSnapshotV2,
-  ConfigurationAggregateV2,
+  CommittedConfigurationSnapshot,
+  ConfigurationAggregate,
   Sha256Digest,
 } from '@jeffusion/bungee-types';
 import type { ConfigurationCompileOptions } from './plugin-schema';
@@ -110,7 +110,7 @@ export type FinalizePublicationOutcome =
   | { readonly outcome: 'degraded'; readonly error_code: 'old_worker_drain_failed'; readonly error_detail: string;
       readonly retired_without_exit_proof: true; readonly recovery_disposition: ConfigurationRecoveryDisposition };
 
-export type RepositorySnapshot = CommittedConfigurationSnapshotV2;
+export type RepositorySnapshot = CommittedConfigurationSnapshot;
 
 export type ServingSnapshotKey = {
   readonly revision: number;
@@ -127,7 +127,7 @@ export type ActiveConfigurationPublication = {
 export type CommitConfigurationCommandV1 = {
   readonly mutation_id: string;
   readonly expected_revision: number;
-  readonly aggregate: ConfigurationAggregateV2;
+  readonly aggregate: ConfigurationAggregate;
   readonly kind: 'config' | 'admin_state';
   readonly created_at: number;
   readonly target_worker_slots: readonly number[];

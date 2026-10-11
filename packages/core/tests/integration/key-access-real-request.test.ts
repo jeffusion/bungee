@@ -96,7 +96,7 @@ test('real master/ingress/worker enforces model policy and honors Authorization 
     const unprotected={...active.config,plugin_activations:[]};
     const fullPut=await fetch(base+'/api/config',{method:'PUT',headers,body:JSON.stringify({expected_revision:active.revision,mutation_id:crypto.randomUUID(),aggregate:unprotected})});
     expect(fullPut.status).toBe(422);
-    const envelope={format:'bungee-config-snapshot',format_version:1,schema_version:2,exported_at:Date.now(),source_revision:active.revision,content_hash:hashConfigurationContent(unprotected),aggregate:unprotected};
+    const envelope={format:'bungee-config-snapshot',format_version:1,schema_version:1,exported_at:Date.now(),source_revision:active.revision,content_hash:hashConfigurationContent(unprotected),aggregate:unprotected};
     const imported=await fetch(base+'/api/config/import',{method:'POST',headers,body:JSON.stringify({expected_revision:active.revision,mutation_id:crypto.randomUUID(),envelope:{...envelope,envelope_hash:hashConfigurationContent(envelope)}})});
     expect(imported.status).toBe(422);
     const collection=await (await fetch(base+'/api/resources/api-key')).json();

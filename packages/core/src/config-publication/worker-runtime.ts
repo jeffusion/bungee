@@ -1,5 +1,5 @@
 import { kernelMonotonicNowNs } from '../master-runtime/kernel-monotonic-clock';
-import type { CommittedConfigurationSnapshotV2 } from '@jeffusion/bungee-types';
+import type { CommittedConfigurationSnapshot } from '@jeffusion/bungee-types';
 import { randomUUID } from 'node:crypto';
 import {
   compileRuntimeConfigSnapshot,
@@ -51,7 +51,7 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
   readonly persistTerminalEvidence?: (message: WorkerDrainedMessage | WorkerDrainFailedMessage) => Promise<void>;
   readonly lifecycle: ConfigWorkerLifecycle<ServingHandle>;
   readonly compileSnapshot?: (
-    snapshot: CommittedConfigurationSnapshotV2,
+    snapshot: CommittedConfigurationSnapshot,
     command: StartWorkerCommand,
   ) => RuntimeConfigSnapshot | Promise<RuntimeConfigSnapshot>;
 }): ConfigWorkerRuntimeController {

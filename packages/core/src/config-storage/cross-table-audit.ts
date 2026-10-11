@@ -1,5 +1,5 @@
 import type { Database } from 'bun:sqlite';
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { hashConfigurationContent, hashConfigurationRequest } from './content-hash';
 import type { ConfigurationOperation } from './repository-types';
 import { readAllOperations, readAllWorkers } from './operation-store';
@@ -101,7 +101,7 @@ export function auditConfigurationTables(db: Database): AuditedConfigurationStat
 
 export function verifyActiveRequestIdentity(
   audited: AuditedConfigurationState,
-  aggregate: ConfigurationAggregateV2,
+  aggregate: ConfigurationAggregate,
 ): void {
   const operation = audited.activeOperation;
   if (operation === null) return;

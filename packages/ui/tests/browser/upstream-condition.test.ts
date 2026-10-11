@@ -2,7 +2,7 @@ import { test as browserTest } from 'bun:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { parseNormalizeCompileAggregate } from '../../../core/src/config-storage/aggregate';
 
 browserTest('upstream condition', async () => {
@@ -21,7 +21,7 @@ try {
     { managed: true, initialCondition: "{{ body.model?.endsWith('-luna') }}", blank: ' \t ' },
   ]) {
     let revision = 1;
-    let config: ConfigurationAggregateV2 = { logical_configuration: {
+    let config: ConfigurationAggregate = { logical_configuration: {
       services: [{ id: '10000000-0000-4000-8000-000000000001', position: 0, name: 'original', plugins: [],
         endpoints: [{ id: '20000000-0000-4000-8000-000000000001', position: 0,
           target: 'https://example.test', weight: 100, priority: 1, is_disabled: false,
@@ -36,7 +36,7 @@ try {
     }, plugin_activations: [] };
     const original = structuredClone(config);
     const errors: string[] = [];
-    const writes: ConfigurationAggregateV2[] = [];
+    const writes: ConfigurationAggregate[] = [];
     const page = await browser.newPage();
     page.setDefaultTimeout(10_000);
     page.on('pageerror', error => errors.push(error.message));

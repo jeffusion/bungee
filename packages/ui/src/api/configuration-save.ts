@@ -1,4 +1,4 @@
-import type { LogicalConfigurationV2 } from '@jeffusion/bungee-types';
+import type { LogicalConfiguration } from '@jeffusion/bungee-types';
 import {
   commitLogicalConfiguration, ConfigurationOperationConflictError, ConfigurationOperationDegradedError,
   ConfigurationSubmissionUnknownError, waitForConfigurationOperation, type ConfigurationSnapshot,
@@ -8,7 +8,7 @@ import { retainAccepted } from '../components/domain/config/publication-state';
 import { pendingPublicationKey } from '../components/domain/config/workspace';
 
 /** Storage ACK ends an entity save. Publication remains visible across navigation. */
-export async function saveLogicalConfiguration(snapshot: ConfigurationSnapshot, logical: LogicalConfigurationV2): Promise<void> {
+export async function saveLogicalConfiguration(snapshot: ConfigurationSnapshot, logical: LogicalConfiguration): Promise<void> {
   const commit = () => commitLogicalConfiguration(snapshot, logical, {
     completion: 'committed',
     onOperation(state) { retainAccepted(state.operation.mutation_id); },

@@ -9,7 +9,7 @@ import { EventEmitter } from 'node:events';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import {
   DAEMON_AUTHORIZATION_HEADER, DAEMON_BOOT_HEADER, DAEMON_INSTANCE_HEADER, DAEMON_PID_HEADER,
   DAEMON_SHUTDOWN_PATH,
@@ -1171,7 +1171,7 @@ describe.serial('start diagnostics helpers', () => {
   }, { timeout: 30_000 });
 });
 
-function aggregate(upstreamPort: number, path = '/proxy', managed = false, managedPort = upstreamPort): ConfigurationAggregateV2 {
+function aggregate(upstreamPort: number, path = '/proxy', managed = false, managedPort = upstreamPort): ConfigurationAggregate {
   const endpoint = {
     id: '20000000-0000-4000-8000-000000000001', position: 1, target: `http://127.0.0.1:${upstreamPort}`, weight: 100, priority: 1, is_disabled: false, plugins: [],
   };

@@ -1,5 +1,5 @@
 /**
- * Small private settings/status records and a one-time legacy catalog reader.
+ * Small private settings/status records and catalog snapshot validation.
  * Catalog bodies and their versions are owned exclusively by the Host snapshot store.
  *
  * No consumer may import this module or read these keys.
@@ -8,9 +8,8 @@
 import type { PluginStorage } from '@jeffusion/bungee-core/plugin';
 import type { CatalogRecord } from './catalog';
 
-export const MODELS_DEV_SETTINGS_KEY = 'catalog:settings:v2';
-export const MODELS_DEV_CATALOG_KEY = 'catalog:v1';
-export const MODELS_DEV_STATUS_KEY = 'catalog:status:v1';
+export const MODELS_DEV_SETTINGS_KEY = 'catalog:settings';
+export const MODELS_DEV_STATUS_KEY = 'catalog:status';
 
 export interface ModelsDevSettings {
   autoRefresh: boolean;
@@ -71,17 +70,6 @@ export async function readModelsDevSettings(storage: PluginStorage): Promise<Mod
 
 export async function writeModelsDevSettings(storage: PluginStorage, settings: ModelsDevSettings): Promise<void> {
   await storage.set(MODELS_DEV_SETTINGS_KEY, settings);
-}
-
-/**
- * Strict catalog read. `readStrict` is required: the legacy `get` swallows SQL and
- * JSON errors, which would turn a storage failure into a fabricated "no catalog".
- */
-export async function readCatalogRecord(storage: PluginStorage): Promise<CatalogRecord | null> {
-  if (typeof storage.readStrict !== 'function') throw new Error('models-dev requires strict plugin storage reads');
-  const result = await storage.readStrict<unknown>(MODELS_DEV_CATALOG_KEY);
-  if (!result.found) return null;
-  return parseCatalogRecord(result.value);
 }
 
 export function parseCatalogRecord(value: unknown): CatalogRecord {

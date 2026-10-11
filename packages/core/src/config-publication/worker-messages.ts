@@ -1,4 +1,4 @@
-import { MAX_PUBLICATION_TIMEOUT_MS, resolvePublicationPolicy, type ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import { MAX_PUBLICATION_TIMEOUT_MS, resolvePublicationPolicy, type ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { parseNormalizeCompileAggregate } from '../config-storage/aggregate';
 import type { JsonObject } from '../config-storage/validation';
 import { isLowercaseUuid } from '../config-storage/validation';
@@ -48,7 +48,7 @@ const COMMIT_FIELDS = new Set(['command', ...PROCESS_IDENTITY_FIELDS, 'request_i
 const MUTATION_FIELDS = new Set(['mutation_id', 'expected_revision', 'kind', 'aggregate']);
 const GET_FIELDS = new Set(['command', ...PROCESS_IDENTITY_FIELDS, 'request_id', 'mutation_id']);
 
-function aggregate(value: unknown): ConfigurationAggregateV2 {
+function aggregate(value: unknown): ConfigurationAggregate {
   const result = parseNormalizeCompileAggregate(value);
   if (!result.ok) invalid('mutation.aggregate');
   return result.value;

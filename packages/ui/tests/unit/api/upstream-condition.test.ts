@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import type { ConfigurationAggregateV2, ServiceV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate, ConfigurationService } from '@jeffusion/bungee-types';
 import { parseNormalizeCompileAggregate } from '../../../../core/src/config-storage/aggregate';
 import { ConfigurationValidationError } from '../../../src/api/config';
 import { duplicateEditorService, toEditorService, toEditorRoute } from '../../../src/api/config-adapters';
@@ -7,19 +7,19 @@ import { ServicesAPI } from '../../../src/api/services';
 import { RoutesAPI } from '../../../src/api/routes';
 
 const condition = "{{ body.model?.endsWith('-luna') }}";
-const service: ServiceV2 = {
+const service: ConfigurationService = {
   id: '10000000-0000-4000-8000-000000000001', position: 0, name: 'original', plugins: [],
   endpoints: [{ id: '20000000-0000-4000-8000-000000000001', position: 0,
     target: 'https://example.test', weight: 100, priority: 1, is_disabled: false, condition, plugins: [] }],
 };
-const aggregate: ConfigurationAggregateV2 = {
+const aggregate: ConfigurationAggregate = {
   logical_configuration: { services: [service], routes: [], plugins: [] }, plugin_activations: [],
 };
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 
 function mockValidatedSave() {
-  let submitted: ConfigurationAggregateV2 | undefined;
+  let submitted: ConfigurationAggregate | undefined;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(new URL(String(input), 'http://ui.test'), init);
     if (request.method === 'GET') return Response.json({ config: aggregate, revision: 4, content_hash: 'sha256:fixture' });
