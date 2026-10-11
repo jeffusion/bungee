@@ -2,6 +2,7 @@ import { test as browserTest } from 'bun:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
+import { expect } from 'playwright/test';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 
 browserTest('carousel scroll', async () => {
@@ -116,12 +117,14 @@ try {
     await swipe(100, 0); assert.equal(await selected(), 0, 'native right touch switches back');
     const outer = await mobile.evaluate(() => scrollY);
     await swipe(0, -80);
+    await expect.poll(() => mobile.evaluate(() => scrollY), { timeout: 10000 }).toBeGreaterThan(outer);
     assert(await mobile.evaluate(() => scrollY) > outer, 'vertical touch on fitting content scrolls the page');
     assert.equal(await selected(), 0);
     await mobile.evaluate(() => (window as any).carouselTest.configure({ longContent: true }));
     await current.scrollIntoViewIfNeeded();
     await current.evaluate(el => { el.scrollTop = 0; });
     await swipe(0, -80);
+    await expect.poll(() => current.evaluate(el => el.scrollTop), { timeout: 10000 }).toBeGreaterThan(0);
     assert(await current.evaluate(el => el.scrollTop > 0), 'vertical touch still scrolls overflowing content');
     assert.equal(await selected(), 0);
     // After scrolling, the header position can contain an input/label, whose
