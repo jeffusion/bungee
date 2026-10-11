@@ -1,7 +1,7 @@
 import { createServer as createPortProbe } from 'node:net';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { extname, join, resolve, sep } from 'node:path';
+import { extname, join, resolve, sep, relative, posix } from 'node:path';
 import type { Alias } from 'vite';
 
 type UiRuntimeOptions =
@@ -91,6 +91,22 @@ export async function startUiRuntime(options: UiRuntimeOptions) {
       await server.listen();
       const address = server.httpServer?.address();
       if (!address || typeof address === 'string') throw new Error('UI fixture did not bind an owned local port');
+      // Prepare the fixture's static module graph before the browser's navigation budget starts.
+      // Vite's HTML transform schedules its normal pre-transforms; no fixture code runs here.
+      for (const entry of options.entries) {
+        const file = resolve(root, entry);
+        const url = file.startsWith(root + sep)
+          ? `/${relative(root, file).split(sep).join('/')}`
+          : posix.join('/@fs/', file.split(sep).join('/'));
+        if (extname(file) === '.html') await server.transformIndexHtml(url, await Bun.file(file).text());
+        else await server.warmupRequest(url);
+      }
+      await server.waitForRequestsIdle();
+      for (const environment of Object.values(server.environments)) {
+        const optimizer = environment.depsOptimizer;
+        await optimizer?.scanProcessing;
+        await Promise.all(Object.values(optimizer?.metadata.discovered ?? {}).map(dependency => dependency.processing));
+      }
       origin = `http://127.0.0.1:${address.port}`;
     }
     return { origin, evidence, close };

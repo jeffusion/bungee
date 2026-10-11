@@ -66,9 +66,13 @@ describe('owned UI test runtimes', () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
-  test('component fixtures retain Vite transforms and aliases, then release their port, cache and cwd', async () => {
+  test('relative and absolute HTML or module fixtures retain Vite transforms and aliases, then release their port, cache and cwd', async () => {
     const previousDirectory = process.cwd();
-    const runtime = await startUiRuntime({ mode: 'component-fixture', entries: ['tests/fixtures/components/lazy/index.html'], aliases: [
+    const runtime = await startUiRuntime({ mode: 'component-fixture', entries: [
+      'tests/fixtures/components/lazy/index.html',
+      resolve(import.meta.dir, '../../../packages/ui/tests/fixtures/components/lazy/index.html'),
+      'tests/fixtures/components/lazy/entry.js',
+    ], aliases: [
       { find: '$i18n', replacement: resolve(import.meta.dir, '../../../packages/ui/tests/fixtures/components/lazy/i18n.js') },
       { find: '$components/industrial/LoadingIndicator.svelte', replacement: resolve(import.meta.dir, '../../../packages/ui/tests/fixtures/components/lazy/loading.svelte') },
     ] });
