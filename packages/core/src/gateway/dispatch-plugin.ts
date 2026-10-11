@@ -4,6 +4,7 @@ import { getScopedPluginRegistry } from '../scoped-plugin-registry';
 import { resolveEffectiveRoute } from './routing-plugin';
 import { joinPaths } from '../worker/request/context';
 import type { RouteConfig } from '@jeffusion/bungee-types';
+import { protocolRequestPath, type LLMProtocol } from '@jeffusion/bungee-llms/plugin-api';
 
 export class DispatchPlugin implements Plugin {
   bodyRequirements() { return {request:'none' as const}; }
@@ -15,23 +16,26 @@ export class DispatchPlugin implements Plugin {
       if (!dispatch) return {route:entry,effective:resolveEffectiveRoute(config,entry),context};
       if (!targets.some(target => target.type === dispatch.target.type && target.id === dispatch.target.id)) throw new DataAdmissionError(403,'dispatch_target_not_declared');
       signal.throwIfAborted();
-      const route=resolveDispatchTarget(config,entry,dispatch.target,context);
+      const route=resolveDispatchTarget(config,entry,dispatch.target,context,dispatch.protocol);
       return {route,effective:resolveEffectiveRoute(config,route),context,entryRouteId:entry.id ?? entry.path,target:dispatch.target,requiredUpstreamId:dispatch.requiredUpstreamId,protocol:dispatch.protocol,adapter:dispatch.adapter,canonicalInput:dispatch.canonicalInput,diagnostics:dispatch.diagnostics,prepareRequest:dispatch.prepareRequest};
     });
   }
 }
 
 /** Resolve a schema-bound target without invoking another dispatch hook. */
-export function resolveDispatchTarget(config:import('@jeffusion/bungee-types').AppConfig,entry:RouteConfig,target:GatewayDispatchTarget,context:GatewayDispatchInput['context']):RouteConfig {
+export function resolveDispatchTarget(config:import('@jeffusion/bungee-types').AppConfig,entry:RouteConfig,target:GatewayDispatchTarget,context:GatewayDispatchInput['context'],protocol?:LLMProtocol):RouteConfig {
+  const suffix=protocol ? protocolRequestPath(protocol,context.body?.model,context.body?.stream===true)
+    : context.url.pathname.startsWith(entry.path) ? context.url.pathname.slice(entry.path.length) : '';
+  if(protocol==='gemini_generate_content' && context.body?.stream===true)context.url.searchParams.set('alt','sse');
   if(target.type==='route') {
     const route=config.routes.find(route=>route.id===target.id);
     if(!route || route.id===entry.id || route.direct_response?.enabled || route.redirect?.enabled || route.response_rules?.some(rule=>rule.enabled))throw new DataAdmissionError(422,'dispatch_target_unavailable');
-    const suffix=context.url.pathname.startsWith(entry.path)?context.url.pathname.slice(entry.path.length):'';
     context.url.pathname=joinPaths(route.path,suffix);
     return route;
   }
   if(target.type!=='service')throw new DataAdmissionError(422,'dispatch_target_unavailable');
   const service=config.services?.find(service=>service.id===target.id);
   if(!service)throw new DataAdmissionError(422,'dispatch_target_unavailable');
-  return {...entry,service:service.name,service_id:service.id,endpoints:undefined} as RouteConfig;
+  context.url.pathname=joinPaths('/',suffix);
+  return {...entry,path_rewrite:undefined,service:service.name,service_id:service.id,endpoints:undefined} as RouteConfig;
 }

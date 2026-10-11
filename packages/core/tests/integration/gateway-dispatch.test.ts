@@ -12,7 +12,7 @@ const logging={accessLogWriter:{write(){},updateBodyId(){},updateResponseBodyId(
 const path=new URL('../fixtures/dispatch-plugin.ts',import.meta.url).pathname;
 const plugin=(mark:string,target?:any)=>({name:'dispatch-fixture',path,options:{mark,target}});
 for(const type of ['route','service'] as const) for(const trailing of [false,true]) test(`one native request dispatches to ${type} with final scoped plugins (${trailing?'trailing slash':'plain prefix'})`,async()=>{
-  const config:any={routes:[{id:'entry',path:trailing?'/codex/':'/codex',plugins:[plugin('entry',{type,id:'target'})],endpoints:[{id:'old',target:'http://old.test'}]},
+  const config:any={routes:[{id:'entry',path:trailing?'/codex/':'/codex',path_rewrite:{'^/codex':'/backend-api/codex'},plugins:[plugin('entry',{type,id:'target'})],endpoints:[{id:'old',target:'http://old.test'}]},
     {id:'target',path:trailing?'/target/':'/target',plugins:[plugin('route')],endpoints:[{id:'target-up',target:'http://route.test',plugins:[plugin('upstream')]}]}],
     services:[{id:'target',name:'service',plugins:[plugin('service')],endpoints:[{id:'service-up',target:'http://service.test',plugins:[plugin('upstream')]}]}]};
   const registry=new ScopedPluginRegistry(import.meta.dir);expect((await registry.initializeFromConfig(config)).failed).toBe(0);setScopedPluginRegistry(registry);
@@ -20,7 +20,7 @@ for(const type of ['route','service'] as const) for(const trailing of [false,tru
   try{
     const response=await handleRequest(new Request('http://local/codex/responses',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'alias',input:'hello',target:{type:'route',id:'evil'}})}),config,{logging});
     expect(response.status).toBe(200);await response.text();expect(seen).toHaveLength(1);expect(seen[0].body.model).toBe('actual');
-    expect(seen[0].url).toContain(type==='route'?'route.test/target/responses':'service.test/codex/responses');
+    expect(seen[0].url).toContain(type==='route'?'route.test/target/responses':'service.test/responses');
     expect(seen[0].headers.get('x-upstream')).toBe('yes');expect(seen[0].headers.get(type==='route'?'x-route':'x-service')).toBe('yes');
     expect(seen[0].headers.get('x-entry')).toBe(type==='route'?null:'yes');
   }finally{await registry.destroy();}

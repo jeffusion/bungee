@@ -86,7 +86,6 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
         // Host logs may flush after the consumer lease is revoked during drain.
         diagnostics=structuredClone([...relayDiagnostics,...decoded.diagnostics]);
       } catch(error) {session.dispose();const e=error as any;if(typeof e.code==='string')throw new DataAdmissionError(422,`llm_adapter_${e.code}`,undefined,{message:e.message,param:e.param});throw error;}
-      if(protocol!=='responses')context.url.pathname=context.url.pathname.replace(/\/responses$/,protocol==='chat_completions'?'/chat/completions':'/messages');
       const adapter=protocolAdapter({session,protocol,model:bindingSource(binding),signal,
         save:async(response,responseContext)=>{if(scope && typeof response.id==='string')await this.history.put({scope,id:response.id,value:{target:binding.target,origin:{provider:binding.provider,model:binding.model,upstreamId:responseContext?.upstreamId},items:[...logicalInput,...response.output]}},{signal,operationId:crypto.randomUUID()});}});
       return {requiredUpstreamId,adapter,...(protocol!=='responses'?{canonicalInput:logicalInput,diagnostics}:{})};

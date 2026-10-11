@@ -116,6 +116,10 @@ hooks.onStreamChunk.tap('example', envelope => {
 
 `onDispatchRequest` 只解析编译配置声明的 `gateway_target`，返回最终 target/protocol 及可选一次性 `prepareRequest`。宿主先执行入口和最终目标的只读访问授权，再调用准备回调，随后转换正文并进入正常上游链路。Ingress 插件通过 `authorize(target, policy)` 返回拒绝或 null；此阶段不调用 plan、生成准入票据或提交预算。实际发送前仍执行正式准入，每次最终模型映射和尝试都检查适用权限。
 
+声明 `protocol` 的生成调度使用 `@jeffusion/bungee-llms/plugin-api` 的 `protocolRequestPath`：Responses 为 `/responses`，Chat Completions 为 `/v1/chat/completions`，Anthropic Messages 为 `/v1/messages`，Gemini 为 `/v1beta/models/{model}:generateContent` 或 `:streamGenerateContent`，流式 Gemini 设置 `alt=sse`。函数覆盖上述四种格式，具体插件的可选协议仍由其配置和转换能力限定。端点不继承入口路径。service 目标直接使用端点，不执行入口的 `path_rewrite`；route 目标在端点前加目标 route.path，再执行该目标的路径规则。未声明协议的调度使用入口相对路径，同样只为 route 目标添加路由前缀。附属 Responses 请求使用相同端点规则。
+
+上游 URL 的路径作为网关基址前缀拼接。Responses 保留宿主及提供商插件的 `/responses` 入口契约：公共 OpenAI API 的上游基址包含 `/v1`；ChatGPT OAuth 上游基址使用 origin，由其插件改写到 `/v1/responses` 或原生 Codex 后端。其他三种端点已包含 API 版本，上游基址不应重复包含 `/v1` 或 `/v1beta`。
+
 准备回调获得可信 principal、固定 servingRevision、取消信号和 `executeAuxiliary`，WS 还提供宿主生成的连接身份及关闭信号。附属请求只能选择当前插件编译配置中已声明的 route/service；不能提供任意地址、凭据或可信身份，也不能再次内部转交或创建附属请求。它复用唯一 Gateway provider 和完整目标插件链，不通过监听端口绕回自身。
 
 附属请求具有独立 requestId、父请求关联、admission、尝试和结算。返回 `kind: response` 时包含 status、共享 BodyHandle、completion、实际模型/upstream 及不透明凭据作用域、dispose；`kind: reused` 返回已授权的复用值及实际目标身份。复用检查在实际凭据与模型解析及只读授权之后、上游连接和预算提交之前执行。调用方必须检查完成状态并释放响应；宿主禁用附属正文日志，保留状态及计量。

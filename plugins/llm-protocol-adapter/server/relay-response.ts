@@ -18,7 +18,9 @@ export async function relayPayload(result: GatewayAuxiliaryResult, param: string
     try {
         if (result.status < 200 || result.status >= 300) throw new DataAdmissionError(result.status === 401 || result.status === 429 ? result.status : 502, 'llm_adapter_relay_upstream_failed', undefined, {param, message: `Relay upstream rejected the request (HTTP ${result.status})`});
         let response: any;
-        if (result.bodyHandle.identity.contentType.includes('text/event-stream') || result.bodyHandle.identity.contentType.includes('application/octet-stream')) {
+        const contentType = result.bodyHandle.identity.contentType;
+        // Relay requests explicitly use Responses with stream:true; native backends may omit Content-Type.
+        if (contentType === '' || contentType.includes('text/event-stream') || contentType.includes('application/octet-stream')) {
             const iterator = result.bodyHandle.events({id:'llm-adapter.relay', mandatory:true, signal})[Symbol.asyncIterator]();
             let call: any, callIndex:number|undefined, args = '', argumentBytes=0, argumentsDone: string | undefined, outputDone = false, terminal = false, done = false;
             const reasoning=new Map<number,{id:string;done:boolean}>();let reasoningBytes=0;
@@ -67,7 +69,7 @@ export async function relayPayload(result: GatewayAuxiliaryResult, param: string
                 }
                 if (!terminal) invalid(param);
             } finally { await iterator.return?.(); }
-        } else if (result.bodyHandle.identity.contentType.includes('json')) response = await result.bodyHandle.json({id:'llm-adapter.relay', mandatory:true, signal});
+        } else if (contentType.includes('json')) response = await result.bodyHandle.json({id:'llm-adapter.relay', mandatory:true, signal});
         else invalid(param);
         const text = payload(response,param);
         signal.throwIfAborted();

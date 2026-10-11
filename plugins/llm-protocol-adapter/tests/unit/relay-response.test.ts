@@ -14,12 +14,36 @@ function frames():any[]{return [
  {type:'response.output_item.done',output_index:0,item:call},
  {type:'response.completed',response}
 ];}
-function stream(events:any[]):any{const r=result(null);r.bodyHandle.identity.contentType='text/event-stream';r.bodyHandle.events=()=>({async *[Symbol.asyncIterator](){for(const json of events)yield {data:JSON.stringify(json),json};}});return r;}
+function stream(events:any[],contentType='text/event-stream'):any{const r=result(null);r.bodyHandle.identity.contentType=contentType;r.bodyHandle.events=()=>({async *[Symbol.asyncIterator](){for(const json of events)yield {data:JSON.stringify(json),json};}});return r;}
 test('complete JSON and Chinese escaped argument fragments preserve exact payload',async()=>{
  expect(await relayPayload(result(response),'input[1].content[0].encrypted_content',new AbortController().signal)).toBe(text);
- expect(await relayPayload(stream(frames()),'input[1].content[0].encrypted_content',new AbortController().signal)).toBe(text);
- const binary=stream(frames());binary.bodyHandle.identity.contentType='application/octet-stream';
- expect(await relayPayload(binary,'input[1].content[0].encrypted_content',new AbortController().signal)).toBe(text);
+ for(const contentType of ['text/event-stream','application/octet-stream',''])
+  expect(await relayPayload(stream(frames(),contentType),'input[1].content[0].encrypted_content',new AbortController().signal)).toBe(text);
+});
+test('headerless relay still requires valid events, exact tool arguments and complete transport',async()=>{
+ const malformed=frames();malformed[1]={...malformed[1],item:{...malformed[1].item,name:'another'}};
+ const invalidArguments=frames().map(event=>event.type==='response.function_call_arguments.done'?{...event,arguments:'{'}:event);
+ const r=stream(frames(),'');r.completion=Promise.resolve({status:'incomplete'});
+ const invalidJSON=stream([],'');invalidJSON.bodyHandle.events=()=>({async *[Symbol.asyncIterator](){yield {data:'not JSON'};}});
+ const truncated=stream([],'');truncated.bodyHandle.events=()=>({async *[Symbol.asyncIterator](){yield {data:'{}',json:{},truncated:true};}});
+ for(const input of [stream(frames().slice(0,-1),''),stream(malformed,''),stream(invalidArguments,''),r,invalidJSON,truncated]){
+  let disposed=false;input.dispose=()=>{disposed=true;};
+  await expect(relayPayload(input,'input[0].content[0].encrypted_content',new AbortController().signal)).rejects.toMatchObject({status:502,code:'llm_adapter_relay_invalid_response'});
+  expect(disposed).toBe(true);
+ }
+});
+test('an explicit unsupported media type is rejected before reading the relay body',async()=>{
+ const r=stream(frames(),'text/plain');let read=false,disposed=false;
+ r.bodyHandle.events=()=>{read=true;throw Error('must not read');};r.bodyHandle.json=async()=>{read=true;throw Error('must not read');};r.dispose=()=>{disposed=true;};
+ await expect(relayPayload(r,'input[0].content[0].encrypted_content',new AbortController().signal)).rejects.toMatchObject({status:502,code:'llm_adapter_relay_invalid_response'});
+ expect(read).toBe(false);expect(disposed).toBe(true);
+});
+test('cancellation while reading a headerless relay propagates and disposes the result',async()=>{
+ const controller=new AbortController(),reason=Error('relay cancelled');let disposed=false;
+ const r=stream([], '');r.dispose=()=>{disposed=true;};
+ r.bodyHandle.events=()=>({async *[Symbol.asyncIterator](){yield {data:JSON.stringify(frames()[0]),json:frames()[0]};controller.abort(reason);yield {data:JSON.stringify(frames()[1]),json:frames()[1]};}});
+ await expect(relayPayload(r,'input[0].content[0].encrypted_content',controller.signal)).rejects.toBe(reason);
+ expect(disposed).toBe(true);
 });
 test('native reasoning and encrypted reasoning history are ignored while the unique payload stays exact',async()=>{
  const thought={id:'thought',type:'reasoning',summary:[{type:'summary_text',text:'This must never become the task'}],encrypted_content:'opaque-reasoning'};

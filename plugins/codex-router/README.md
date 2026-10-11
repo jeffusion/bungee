@@ -20,6 +20,8 @@
 
 上游地址、API Key、模型映射、重试均使用目标原配置。Codex base URL 已指向入口即可；ChatGPT 登录的模型目录请求可发现新增模型，API Key 模式不承诺自动列入选择器。
 
+模型生成和协作中继均使用宿主的[内部调度端点规则](../../docs/reference/plugin-api.md#内部调度与准备)。端点由目标协议确定：Responses `/responses`、Chat Completions `/v1/chat/completions`、Anthropic Messages `/v1/messages`。服务目标直接使用端点；路由目标在端点前加目标路由路径，再执行目标路由的规则。入口路由的路径及 `path_rewrite` 不用于外部目标。公共 OpenAI Responses 上游基址包含 `/v1`；ChatGPT OAuth 使用 origin，由提供商插件改写实际后端路径。Chat 和 Anthropic 的上游基址不应重复包含端点已有的 `/v1`。
+
 入口使用 WebSocket 时开启 route.websocket.enabled。目标接收协议必须在插件绑定的 `target.protocol` 中声明；Responses 目标也开启 websocket 时使用原生 WS 上游，否则使用 HTTP/SSE。缺少协议时拒绝保存，不从 route/service 推断。每个连接串行生成，断开取消活动请求。WS 实现沿用握手限流；需要未支持的逐生成硬预算时，目标生成在连接上游前拒绝。
 
 普通与工具历史可跨 worker/模型重编码；可信身份的临时缓存默认 10 分钟失效，不持久化正文。丢失引用、不可还原的压缩/加密历史要求新建对话；原生加密引用只能回到经验证的相同上游。协作任务的处理见下节；强制服务端搜索明确报错。

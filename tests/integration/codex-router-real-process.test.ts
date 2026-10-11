@@ -132,14 +132,17 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
           const args=JSON.stringify({payload:cipher==='fixture-native-cli-task'?cliChildTask:relayTask});
           const item={type:'function_call',id:'relay-item',call_id:'relay-call',name:'relay_external_agent_payload',status:'completed',arguments:args};
           const result={...response(`relay-${calls.length}`,body.model),output:[item]};
-          const stream=sse([
+          const events=[
             {type:'response.created',response:{...result,status:'in_progress',output:[]}},
             {type:'response.output_item.added',output_index:0,item:{...item,status:'in_progress',arguments:''}},
             ...[args.slice(0,9),args.slice(9)].map(delta=>({type:'response.function_call_arguments.delta',output_index:0,item_id:item.id,delta})),
             {type:'response.function_call_arguments.done',output_index:0,item_id:item.id,arguments:args},
             {type:'response.output_item.done',output_index:0,item},
             {type:'response.completed',response:result},
-          ]);
+          ];
+          const stream=sse(cipher==='fixture-headerless-truncated'?events.slice(0,-1):events);
+          // A stream body avoids Bun adding a default media type to a string response.
+          if(cipher?.startsWith('fixture-headerless-'))return new Response(stream.body);
           stream.headers.set('content-type','application/octet-stream');
           return stream;
         }
@@ -327,7 +330,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     registerCodexProbeTargets(fixture,[proxy,`http://127.0.0.1:${upstream!.port}`]);
     await seedCodexRouterCatalog(fixture);
     const initial: any = (await requestJson(`${management}/api/config`, {}, fixture)).body; revision = initial.revision;
-    const endpoint = (n: number) => ({id: uuid(n), position: 1, target: `http://127.0.0.1:${upstream!.port}/v1/`, weight: 100, priority: 1, is_disabled: false, plugins: []});
+    const endpoint = (n: number) => ({id: uuid(n), position: 1, target: `http://127.0.0.1:${upstream!.port}${[11,12,15].includes(n)?'/v1/':'/'}`, weight: 100, priority: 1, is_disabled: false, plugins: []});
     const binding = (name: string, n: number, options?: any) => ({id: uuid(n), position: n, name, enabled: true, ...(options ? {options} : {})});
     aggregate = {
       plugin_activations: ['models-dev', 'llm-protocol-adapter', 'codex-router', 'key-access', 'token-metering', 'token-stats', CODEX_PROCESS_PROBE].map(plugin_name => ({plugin_name})),
@@ -757,18 +760,26 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     await assertMetered(calls.slice(start));
   },60000);
 
-  test('built native auxiliary relay uses shared cache across workers, isolates identity and counts actual calls', async () => {
+  for(const cipher of ['fixture-opaque-agent-task','fixture-headerless-relay'])for(const relayType of ['route','service'] as const)test(`built native auxiliary relay (${cipher}, ${relayType}) uses shared cache across workers, isolates identity and counts actual calls`, async () => {
     const saved=structuredClone(aggregate),start=calls.length;
     try {
+      aggregate.logical_configuration.routes[0].path_rewrite={'^/codex':'/backend-api/codex'};
+      if(relayType==='service'){
+        const native=aggregate.logical_configuration.routes.find((route:any)=>route.id===NATIVE);
+        aggregate.logical_configuration.services.push({id:uuid(16),position:2,name:'Native relay fixture',plugins:[],endpoints:native.endpoints.map((endpoint:any)=>({...endpoint,id:uuid(17)}))});
+      }
       aggregate.logical_configuration.routes[0].plugins.find((p:any)=>p.name==='codex-router').options.collaborationRelay={
-        target:{type:'route',id:NATIVE,protocol:'responses'},model:'native-relay-model'};
+        target:{type:relayType,id:relayType==='route'?NATIVE:uuid(16),protocol:'responses'},model:'native-relay-model'};
+      const native=aggregate.logical_configuration.routes.find((route:any)=>route.id===NATIVE);
+      aggregate.logical_configuration.routes.unshift({...structuredClone(native),id:uuid(18),position:0,path:'/codex/v1/',
+        path_rewrite:{'^/codex/v1':''},endpoints:native.endpoints.map((endpoint:any)=>({...endpoint,id:uuid(19)}))});
       await publish();
-      const request={model:'org/chat',input:[agentMessage(),{role:'user',content:'execute restored task'}]};
+      const request={model:'org/chat',input:[agentMessage(cipher),{role:'user',content:'execute restored task'}]};
       const first=await post(request);expect(first.status).toBe(200);
       expect(calls.slice(start)).toHaveLength(2);
       const relayed=calls[start]!;
       expect(relayed.path).toBe('/v1/responses');
-      expect(relayed.body.input).toEqual([agentMessage()]);
+      expect(relayed.body.input).toEqual([agentMessage(cipher)]);
       const restored=calls[start+1]!.body.messages.find((item:any)=>item.role==='user').content;
       expect(restored.map((part:any)=>part.text)).toContain(relayTask);
       const observed=new Set([calls[start+1]!.pid]);
@@ -784,7 +795,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         expect(events.at(-1).type).toBe('response.completed');
         expect(events.some(event=>event.item?.name==='relay_external_agent_payload')).toBe(false);
         expect(calls.slice(before)).toHaveLength(1);
-        expect(JSON.stringify(calls.at(-1)!.body.messages)).not.toContain('fixture-opaque-agent-task');
+        expect(JSON.stringify(calls.at(-1)!.body.messages)).not.toContain(cipher);
       } finally {await socket.close();}
       const other=calls.length;expect((await post(request,otherToken)).status).toBe(200);
       expect(calls.slice(other)).toHaveLength(2);
@@ -794,6 +805,20 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       expect(calls.slice(failure)).toHaveLength(1);
       expect(calls.at(-1)!.body.tools[0].name).toBe('relay_external_agent_payload');
       await assertMetered(calls.slice(start,failure));
+      if(cipher==='fixture-headerless-relay'){
+        const incomplete={...request,input:[agentMessage('fixture-headerless-truncated')]};
+        for(let attempt=0;attempt<2;attempt++){
+          const before=calls.length;const result=await post(incomplete);
+          expect(result.status).toBe(502);expect(result.body.error).toBe('llm_adapter_relay_invalid_response');
+          expect(calls.slice(before)).toHaveLength(1);expect(calls.at(-1)!.body.tools[0].name).toBe('relay_external_agent_payload');
+        }
+        const socket=await openSocket();
+        try{
+          const before=calls.length;const events=await socket.create(incomplete,true);
+          expect(events.at(-1)).toMatchObject({type:'error',status:502,error:{code:'llm_adapter_relay_invalid_response'}});
+          expect(events.some(event=>event.type==='response.completed')).toBe(false);expect(calls.slice(before)).toHaveLength(1);
+        }finally{await socket.close();}
+      }
       await waitUntil(() => {
         const db = new Database(fixture!.accessDbPath, {readonly:true});
         try {
