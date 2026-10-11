@@ -121,6 +121,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         if (request.method !== 'POST') return Response.json({error: 'fixture_not_found'}, {status: 404});
         const body: any = await request.json(); const call = capture(request.headers, path, body, 'http');
         if (body.tools?.[0]?.name === 'relay_external_agent_payload') {
+          if (path !== '/v1/responses') return Response.json({error:'unsupported_relay_path'}, {status:404});
           expect(body.tools).toHaveLength(1);
           expect(body.tool_choice).toEqual({type:'function',name:'relay_external_agent_payload'});
           expect(body.input).toHaveLength(1);
@@ -766,6 +767,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       const first=await post(request);expect(first.status).toBe(200);
       expect(calls.slice(start)).toHaveLength(2);
       const relayed=calls[start]!;
+      expect(relayed.path).toBe('/v1/responses');
       expect(relayed.body.input).toEqual([agentMessage()]);
       const restored=calls[start+1]!.body.messages.find((item:any)=>item.role==='user').content;
       expect(restored.map((part:any)=>part.text)).toContain(relayTask);
