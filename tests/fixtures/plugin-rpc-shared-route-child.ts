@@ -26,12 +26,12 @@ host.setDeclarations(graph.serviceDeclarations());
 broker = new WorkerPeerBroker({services:host, credential:deriveWorkerSupervisionCredential(importWorkerSupervisionSeed(process.env.BUSINESS_PEER_SEED!),facts.boot_nonce), masterGeneration:facts.master_generation, workerInstanceId:facts.worker_instance_id, bootNonce:facts.boot_nonce,workerSlot:0,masterControlPort:()=>facts.port,catalog:()=>facts.catalog,authority:()=>facts.authority});
 const registry = new ScopedPluginRegistry(process.cwd(),host);
 const provider = createWorkerPluginControlPeerProvider();
-const routes = ['/v1/chat/completions','/v1/responses'];
+const routes = ['/oauth-a/responses','/oauth-b/responses'];
 const binding = {plugin:'chatgpt-oauth',contributionId:'chatgpt',bindingId:facts.bindingId,bindingOptions:{accountRef:'forged-worker-options'}};
 const attempt = {revision:1,endpointId:facts.endpointId,attemptId:crypto.randomUUID()};
 const signal = new AbortController().signal;
 const plugin = {id:facts.bindingId,name:'chatgpt-oauth',path:new URL('../../plugins/chatgpt-oauth/server/index.ts',import.meta.url).pathname,enabled:true,options:binding.bindingOptions};
-const config = {plugins:[],services:[{name:'shared-oauth',endpoints:[{id:facts.endpointId,target:'https://chatgpt.com',weight:100,priority:1,plugins:[plugin],managedBy:{plugin:binding.plugin,contributionId:binding.contributionId,bindingId:binding.bindingId}}]}],routes:routes.map(path=>({path,service:'shared-oauth',timeouts:{request_ms:5000}}))} as any;
+const config = {plugins:[],services:[{name:'shared-oauth',endpoints:[{id:facts.endpointId,target:'https://chatgpt.com',weight:100,priority:1,plugins:[plugin],managedBy:{plugin:binding.plugin,contributionId:binding.contributionId,bindingId:binding.bindingId}}]}],routes:routes.map(path=>({path,service:'shared-oauth',path_rewrite:{'^/oauth-[ab]':''},timeouts:{request_ms:5000}}))} as any;
 const originalFetch = global.fetch;
 let upstream: ReturnType<typeof Bun.serve> | undefined;
 let ingress: ReturnType<typeof Bun.serve> | undefined;
@@ -82,7 +82,7 @@ try {
   ingress = Bun.serve({hostname:'127.0.0.1',port:0,fetch:request=>handleRequest(request,config,{logging,servingRevision:1})});
   const statuses: number[] = [];
   for(const route of routes) {
-    const response=await originalFetch(new URL(route,ingress.url),{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer forged-client'},body:JSON.stringify(route===routes[0]?{model:'codex',messages:[{role:'user',content:'test'}]}:{model:'codex',input:'test'})});
+    const response=await originalFetch(new URL(route,ingress.url),{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer forged-client'},body:JSON.stringify({model:'codex',input:'test'})});
     statuses.push(response.status);await response.text();
   }
   const fenced = await registry.runWithRequestLeases(leases[0]!,()=>refusal(()=>registry.invokeBoundControl(binding,attempt,'getCredential',{},signal)));

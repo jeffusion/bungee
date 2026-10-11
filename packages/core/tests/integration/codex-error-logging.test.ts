@@ -22,7 +22,7 @@ test('OAuth HTTP and SSE diagnostics reach clients and durable logs with indepen
     import('../../src/logger/access-log-writer'), import('../../src/logger/file-log-writer'),
   ]);
   const originalFetch = global.fetch;
-  const routeId = '/codex-diagnostics/v1/responses';
+  const routeId = '/codex-diagnostics/responses';
   const bodyStorage = new BodyStorageManager({ enabled: true, maxSize: 1024 * 1024 }, dataPlaneBodyLogDir);
   const config: AppConfig = {
     logging: { body: { enabled: true, max_size: 1024 * 1024, retention_days: 1 } },
