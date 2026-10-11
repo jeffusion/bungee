@@ -914,7 +914,7 @@ async function executeHttpRequestInternal(
       signal:processingSignal,principal:trustedIdentity?.principal,servingRevision:runtimeContext?.servingRevision,webSocketConnection:runtimeContext?.webSocketConnection});
     let dispatch:import('./contracts').GatewayDispatchDecision;
     if(runtimeContext?.auxiliary){
-      const locked=resolveDispatchTarget(config,entryRoute,runtimeContext.auxiliary.target,dispatchContext);
+      const locked=resolveDispatchTarget(config,entryRoute,runtimeContext.auxiliary.target,dispatchContext,'responses');
       dispatch={route:locked,effective:resolveEffectiveRoute(config,locked),context:dispatchContext,target:runtimeContext.auxiliary.target,entryRouteId:entryRoute.id??entryRoute.path,protocol:'responses'};
     }else dispatch=requireGatewayResult(await (requestRegistry ? requestRegistry.runWithRequestLeases(ownerLeases,dispatchWork) : dispatchWork()), 'onGatewayDispatch');
     if (dispatch.canonicalInput) runtimeContext?.onCanonicalInput?.(dispatch.canonicalInput);

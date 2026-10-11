@@ -29,7 +29,7 @@ export async function executeAuxiliaryRequest(parent:Request,config:AppConfig,en
   const headers=new Headers(parent.headers);
   for(const name of ['connection','upgrade','content-length','content-encoding','transfer-encoding','sec-websocket-key','sec-websocket-version','sec-websocket-protocol','sec-websocket-extensions'])headers.delete(name);
   headers.set('content-type','application/json');headers.set('accept',(input.body as Record<string,unknown>).stream===true?'text/event-stream':'application/json');
-  const request=new Request(new URL(`${entry.path.replace(/\/$/,'')}/responses`,parent.url),{method:'POST',headers,body:JSON.stringify({...input.body,model:input.model}),signal:requestSignal});
+  const request=new Request(parent.url,{method:'POST',headers,body:JSON.stringify({...input.body,model:input.model}),signal:requestSignal});
   deriveWorkerRequestIdentity(parent,request,requestId);
   let identity:GatewayAuxiliaryIdentity|undefined;
   let reused:unknown;
