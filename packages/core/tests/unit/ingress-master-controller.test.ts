@@ -126,6 +126,31 @@ test('readiness expires from the injected lease clock before the renewal timer r
   void controller.disconnect();
 });
 
+test('publication cannot postpone renewal beyond the existing lease cadence', async () => {
+  let monotonicNow = 1_000;
+  const controller = new MasterIngressController({ ...options(), monotonicNow: () => monotonicNow });
+  attachFake(controller, { status: async () => status(), lease: async () => status() });
+  const internal = controller as unknown as { leaseDeadline: number; startLeaseRenewal(): void };
+  internal.leaseDeadline = 1_100;
+  const delays: number[] = [];
+  const original = globalThis.setTimeout;
+  globalThis.setTimeout = ((callback: Parameters<typeof setTimeout>[0], delay?: number, ...args: unknown[]) => {
+    delays.push(delay!);
+    return original(callback, delay, ...args);
+  }) as typeof setTimeout;
+  try {
+    internal.startLeaseRenewal();
+    monotonicNow = 1_020;
+    internal.startLeaseRenewal();
+    monotonicNow = 1_040;
+    internal.startLeaseRenewal();
+    expect(delays).toEqual([33, 13, 1]);
+  } finally {
+    await controller.disconnect();
+    globalThis.setTimeout = original;
+  }
+});
+
 test('reports every mutation readiness reason in contract order', async () => {
   const active = {
     master_generation: GENERATION, admission_sequence: 1, revision: 1,

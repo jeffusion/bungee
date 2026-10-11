@@ -981,6 +981,10 @@ export class MasterIngressController implements WorkerAdmissionController {
 
   private scheduleLeaseRenewal(): void {
     const lifecycle = this.lifecycleGeneration;
+    const renewalInterval = Math.max(1, Math.floor(this.leaseDurationMs / 3));
+    // Publication may restart the timer without renewing the lease. Keep the
+    // cadence tied to the last lease ACK rather than the publication time.
+    const renewalAt = this.leaseDeadline - this.leaseDurationMs + renewalInterval;
     this.leaseTimer = setTimeout(() => {
       if (!this.isRecoveryEligible(lifecycle)) return;
       void this.enqueue(async (signal) => {
@@ -999,7 +1003,7 @@ export class MasterIngressController implements WorkerAdmissionController {
           throw error;
         }
       }).catch(() => undefined);
-    }, Math.max(1, Math.floor(this.leaseDurationMs / 3)));
+    }, Math.max(1, Math.min(renewalInterval, renewalAt - this.monotonicNow())));
   }
 
   private scheduleRecovery(): void {
