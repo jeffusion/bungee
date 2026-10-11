@@ -394,6 +394,14 @@ try {
   await page.screenshot({ path: '/tmp/bungee-oauth-login-mobile.png' });
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await page.setViewportSize({ width: 1100, height: 850 });
+  // Keep the next status response pending while inspecting the cross-account notice.
+  // An unrelated successful background poll legitimately clears transient notices.
+  const statusRefreshBeforeReopen = dialog.getByRole('button', { name: 'Refresh status', exact: true });
+  await expect(statusRefreshBeforeReopen).toBeEnabled();
+  holdStatus = true; holdStatusSession = 'session-1'; statusHeld = false;
+  await statusRefreshBeforeReopen.evaluate(element => (element as HTMLButtonElement).click());
+  await statusRefreshBeforeReopen.locator('.nx-load-xs').waitFor();
+  await expect.poll(() => statusHeld, { timeout: 10000 }).toBe(true);
   await close(); await dialog.waitFor({ state: 'hidden' });
   await page.getByRole('button', { name: 'Add account', exact: true }).click();
   await dialog.getByText('CODE-1', { exact: true }).waitFor(); assert.equal(starts, 1);
@@ -405,6 +413,7 @@ try {
   await dialog.getByText(/different account is in progress/).waitFor(); assert.equal(starts, 1);
   for (const code of ['not_found', 'expired']) {
     statusError = code;
+    if (code === 'not_found') { holdStatus = false; holdStatusSession = ''; releaseStatus(); }
     // Let the running poll consume the error; a manual click can race its response.
     await dialog.getByRole('button', { name: 'Start login', exact: true }).waitFor();
     const count = statuses; await page.waitForTimeout(2200); assert.equal(statuses, count, `${code} must stop polling`);
