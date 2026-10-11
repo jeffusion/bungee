@@ -127,6 +127,29 @@ export class DataAdmissionHost {
   }
   /** Policy inspection performs identity/protection checks without planning or debiting. */
   inspect(target: AdmissionTarget, worker: RateLimitWorkerIdentity): {policyVersion:number;requirements:Record<string,{request:'none'|'json-read'}>} {
+    const principal = this.resolveTargetIdentity(target,worker);
+    const requirements: Record<string,{request:'none'|'json-read'}> = {};
+    for (const runtime of this.plugins) {
+      if (typeof runtime.plugin.bodyRequirements !== 'function') throw new DataAdmissionError(503,'admission_body_requirements_missing');
+      const demand = runtime.plugin.bodyRequirements({...target,principal,now:this.now()},structuredClone(runtime.publication.policy));
+      if (!demand || !['none','json-read'].includes(demand.request)) throw new DataAdmissionError(503,'admission_body_requirements_invalid');
+      requirements[runtime.publication.name] = demand;
+    }
+    return {policyVersion:this.version,requirements};
+  }
+  /** Access-only stage: no plan, preview ticket, state write or model reservation. */
+  authorize(target: AdmissionTarget, worker: RateLimitWorkerIdentity, expectedVersion: number): {policyVersion:number} {
+    if (expectedVersion !== this.version) throw new DataAdmissionError(409,'admission_version_changed');
+    const principal = this.resolveTargetIdentity(target,worker);
+    for (const runtime of this.plugins) if (runtime.plugin.authorize) {
+      let denial: AdmissionDenial | null;
+      try { denial = runtime.plugin.authorize({...target,principal,now:this.now()},structuredClone(runtime.publication.policy)); }
+      catch (error) { throw normalizeAdmissionError(error) ?? new DataAdmissionError(503,'route_authorization_unavailable'); }
+      if (denial) deny(denial);
+    }
+    return {policyVersion:this.version};
+  }
+  private resolveTargetIdentity(target: AdmissionTarget, worker: RateLimitWorkerIdentity): DataPrincipal {
     if (this.blocked) throw new DataAdmissionError(503,'admission_state_unavailable');
     if (this.publicationAdmissionSequence !== undefined && this.options.admissionSequence?.() !== this.publicationAdmissionSequence) throw new DataAdmissionError(503,'admission_worker_set_changed');
     if (this.options.authorizeWorker(worker) !== 'active') throw new DataAdmissionError(503,'admission_worker_not_active');
@@ -138,14 +161,7 @@ export class DataAdmissionHost {
       catch (error) { throw normalizeAdmissionError(error) ?? new DataAdmissionError(503,'route_protection_unavailable'); }
     }
     if (principal.domain === 'anonymous' && this.routeRequirements.some(requirement=>(requirement.routeIds.includes(target.routeId) || !!target.entryRouteId && requirement.routeIds.includes(target.entryRouteId)))) throw new DataAdmissionError(503,'route_protection_unavailable');
-    const requirements: Record<string,{request:'none'|'json-read'}> = {};
-    for (const runtime of this.plugins) {
-      if (typeof runtime.plugin.bodyRequirements !== 'function') throw new DataAdmissionError(503,'admission_body_requirements_missing');
-      const demand = runtime.plugin.bodyRequirements({...target,principal,now:this.now()},structuredClone(runtime.publication.policy));
-      if (!demand || !['none','json-read'].includes(demand.request)) throw new DataAdmissionError(503,'admission_body_requirements_invalid');
-      requirements[runtime.publication.name] = demand;
-    }
-    return {policyVersion:this.version,requirements};
+    return principal;
   }
   admit(target: AdmissionTarget, worker: RateLimitWorkerIdentity, preview = false, expectedVersion?: number): AdmissionGrant {
     if (expectedVersion !== undefined && expectedVersion !== this.version) throw new DataAdmissionError(409, 'admission_version_changed');

@@ -1,3 +1,6 @@
+import {executeAuxiliaryRequest} from './auxiliary-request';
+import {resolveDispatchTarget} from './dispatch-plugin';
+import {resolveEffectiveRoute} from './routing-plugin';
 import {normalizeAdmissionError} from '../data-admission/errors';
 import { hasWorkerAdmissionSession, type WorkerRequestAdmission, type PreparedAdmissionAttempt } from '../data-admission/worker';
 import { DataAdmissionError } from '../data-admission/host';
@@ -51,6 +54,11 @@ import { observeTransportResponse } from './body-observation-stream';
 
 export interface HandleRequestRuntimeContext {
   servingRevision?: number;
+  parentRequestId?:string;
+  webSocketConnection?:{readonly id:string;readonly signal:AbortSignal};
+  /** Core-only locked handoff: no dispatch hook or recursive preparation. */
+  auxiliary?:{target:import('./contracts').GatewayDispatchTarget;parentRequestId?:string;onIdentity:(identity:import('./contracts').GatewayAuxiliaryIdentity)=>Promise<boolean>};
+  onCompletion?:(completion:Promise<RawResponseCompletion>)=>void;
   /** Host-only session context, never accepted from client fields. */
   transport?: 'websocket';
   websocketBridge?: import('../websocket').WebSocketBridge;
@@ -366,7 +374,7 @@ async function executeHttpRequestInternal(
   transport.loggers = requestLoggers;
   const fileLogReleases: Array<() => void> = [];
   const createRequestLogger = async (request: Request, options?: ConstructorParameters<typeof RequestLogger>[1]): Promise<RequestLogger> => {
-    const requestLogger = requireGatewayResult(requireGatewayResult(await gatewayHooks().onGatewayLog.promise({phase:'create',request,options,dependencies:runtimeContext?.logging}), 'onGatewayLog').logger, 'onGatewayLog');
+    const requestLogger = requireGatewayResult(requireGatewayResult(await gatewayHooks().onGatewayLog.promise({phase:'create',request,options:runtimeContext?.auxiliary ? {...options,parentRequestId:options?.parentRequestId??runtimeContext.auxiliary.parentRequestId} : options,dependencies:runtimeContext?.logging}), 'onGatewayLog').logger, 'onGatewayLog');
     requestLogger.deferFileLogUntilTransportObserved();
     transport.logger = requestLogger;
     requestLoggers.push(requestLogger);
@@ -375,7 +383,7 @@ async function executeHttpRequestInternal(
   };
   const url = new URL(req.url);
   // Every request enters the normal pipeline and is logged before route matching.
-  const reqLogger = await createRequestLogger(req);
+  const reqLogger = await createRequestLogger(req,runtimeContext?.auxiliary ? {parentRequestId:runtimeContext.auxiliary.parentRequestId} : undefined);
   const requestLog = reqLogger.getRequestInfo();
 
   const startTime = Date.now();
@@ -538,6 +546,7 @@ async function executeHttpRequestInternal(
   };
 
   let requestBodySource: BodySource | undefined;
+  const auxiliaryDisposers=new Set<()=>void>();
   const finalizeRequest = async () => {
     if (finalized) {
       return;
@@ -645,6 +654,8 @@ async function executeHttpRequestInternal(
     } finally {
       for (const requestLogger of requestLoggers) requestLogger.stopBodyLogging();
       for (const release of fileLogReleases.splice(0)) release();
+      for(const dispose of auxiliaryDisposers)dispose();
+      auxiliaryDisposers.clear();
       requestBodySource?.dispose();
       await dataAdmission?.release();
       for (const release of leaseReleases.splice(0)) release();
@@ -665,6 +676,7 @@ async function executeHttpRequestInternal(
     const observed = attemptLogger.observeBody(response.body, 'response', response.headers, config.logging?.body, req.signal, response.status);
     if (observed !== response.body) response = cloneResponseWithBody(response, observed as ReadableStream<Uint8Array>);
     if (!isStreamingResponse(response) || !response.body) {
+      runtimeContext?.onCompletion?.(result.completion.then(async outcome=>{await finalizeRequest();return outcome;}));
       return response;
     }
 
@@ -685,6 +697,7 @@ async function executeHttpRequestInternal(
     const finalCompletion = new Promise<ProtocolOutcome>((resolve) => {
       resolveFinalCompletion = resolve;
     });
+    runtimeContext?.onCompletion?.(finalCompletion.then(async outcome=>{await finalizeRequest();return outcome;}));
     if (result.streamCompletionState) {
       result.streamCompletionState.finalCompletion = finalCompletion;
     }
@@ -892,14 +905,18 @@ async function executeHttpRequestInternal(
     const entryRoute = route;
     const dispatchContext = createPhaseContext(requestSnapshot,requestId,entryRoute.path,entryRoute.service);
     const dispatchHooks = requestRegistry?.getRoutePrecompiledHooks?.(entryRoute.path);
-    if (dispatchHooks?.hooks.onDispatchRequest.hasCallbacks()) {
+    if (runtimeContext?.auxiliary || dispatchHooks?.hooks.onDispatchRequest.hasCallbacks()) {
       await readSnapshotJson(requestSnapshot,'internal-dispatch',true);
       dispatchContext.body = structuredClone(requestSnapshot.body);
     }
     for(const owner of requestRegistry?.getRoutePluginOwners?.(entryRoute.path,true) ?? [])retainOwner(owner.pluginName,owner.scopeKey);
     const dispatchWork=()=>gatewayHooks().onGatewayDispatch.promise({config,entry:entryRoute,context:dispatchContext,
-      signal:processingSignal,principal:trustedIdentity?.principal,servingRevision:runtimeContext?.servingRevision});
-    const dispatch = requireGatewayResult(await (requestRegistry ? requestRegistry.runWithRequestLeases(ownerLeases,dispatchWork) : dispatchWork()), 'onGatewayDispatch');
+      signal:processingSignal,principal:trustedIdentity?.principal,servingRevision:runtimeContext?.servingRevision,webSocketConnection:runtimeContext?.webSocketConnection});
+    let dispatch:import('./contracts').GatewayDispatchDecision;
+    if(runtimeContext?.auxiliary){
+      const locked=resolveDispatchTarget(config,entryRoute,runtimeContext.auxiliary.target,dispatchContext);
+      dispatch={route:locked,effective:resolveEffectiveRoute(config,locked),context:dispatchContext,target:runtimeContext.auxiliary.target,entryRouteId:entryRoute.id??entryRoute.path,protocol:'responses'};
+    }else dispatch=requireGatewayResult(await (requestRegistry ? requestRegistry.runWithRequestLeases(ownerLeases,dispatchWork) : dispatchWork()), 'onGatewayDispatch');
     if (dispatch.canonicalInput) runtimeContext?.onCanonicalInput?.(dispatch.canonicalInput);
     if (dispatch.diagnostics?.length) reqLogger.addStep('codex_router_conversion',{requestId,protocol:dispatch.protocol,diagnostics:dispatch.diagnostics});
     route = dispatch.route;
@@ -920,6 +937,29 @@ async function executeHttpRequestInternal(
         serviceId: (route as { service_id?: string }).service_id
           ?? (config.services?.find(service => service.name === route.service) as { id?: string } | undefined)?.id ?? null,
       }, invoke:(plugin, method, payload, target) => requestRegistry!.invokeAdmissionRpc(plugin, method, payload, target, ownerLeases.get(`${plugin}\0global`)!)}), 'onGatewayAdmissionSession');
+    }
+
+    if(dispatch.prepareRequest || runtimeContext?.auxiliary){
+      reqLogger.addStep('request_identity',{requestId,...(runtimeContext?.auxiliary?{parentRequestId:runtimeContext.auxiliary.parentRequestId}:{})});
+      const endpoint=endpoints[0];
+      if(!endpoint)throw new DataAdmissionError(503,'upstream_unavailable');
+      await dataAdmission?.inspect({attemptId:requestId,upstreamId:endpoint.id??'0',url:dispatch.context.url.href,
+        model:typeof dispatch.context.body?.model==='string'?dispatch.context.body.model:null,body:dispatch.context.body,transport:runtimeContext?.transport},processingSignal);
+      if(dispatch.prepareRequest){
+        const preparation=()=>dispatch.prepareRequest!({context:dispatch.context,principal:trustedIdentity?.principal,servingRevision:runtimeContext?.servingRevision,webSocketConnection:runtimeContext?.webSocketConnection,signal:processingSignal,
+          executeAuxiliary:async input=>{
+            const result=await executeAuxiliaryRequest(req,config,entryRoute,{...runtimeContext,parentRequestId:requestId},input,processingSignal,requestRegistry?.getDeclaredDispatchTargets(entryRoute.path)??[]);
+            // An explicit signal transfers cancellation to an aggregate caller; its own
+            // request still owns admission, route deadlines and independent owner leases.
+            if(result.kind==='response' && !input.signal){if(finalized)result.dispose();else auxiliaryDisposers.add(result.dispose);}
+            return result;
+          }});
+        const prepared=await (requestRegistry?requestRegistry.runWithRequestLeases(ownerLeases,preparation):preparation());
+        processingSignal.throwIfAborted();
+        dispatch={...dispatch,...prepared};requestSnapshot.body=dispatch.context.body;
+        if(prepared.canonicalInput)runtimeContext?.onCanonicalInput?.(prepared.canonicalInput);
+        if(prepared.diagnostics?.length)reqLogger.addStep('dispatch_conversion',{requestId,protocol:dispatch.protocol,diagnostics:prepared.diagnostics});
+      }
     }
 
     const demandHooks = requestRegistry?.getPrecompiledHooks(currentRouteId, undefined, routeServiceName, dispatch.adapter);
@@ -1165,6 +1205,12 @@ async function executeHttpRequestInternal(
               websocketBridge: runtimeContext?.websocketBridge,
               nativeWebSocket: runtimeContext?.transport === 'websocket' && route.websocket?.enabled === true && (dispatch.protocol ?? 'responses') === 'responses',
               attemptId,requestOverride,
+              beforeReuse: runtimeContext?.auxiliary ? async (identity,target) => {
+                await dataAdmission?.inspect({...target,attemptId,upstreamId:selectedUpstream.upstream_id},req.signal);
+                const reused = await runtimeContext.auxiliary!.onIdentity(identity);
+                currentLogger.addStep('auxiliary_resolution', {model:identity.model,upstreamId:identity.upstreamId,reused});
+                return reused;
+              } : undefined,
               beforeSend: dataAdmission ? async (target) => {
                 preparedAdmission = requireGatewayResult(await gatewayHooks().onGatewayAdmissionPrepare.promise({session:dataAdmission!,target:{...target,transport:runtimeContext?.transport,attemptId,upstreamId:selectedUpstream.upstream_id},signal:req.signal,readBody:()=>requestOverride ? Promise.resolve(requestOverride.body):readSnapshotJson(requestSnapshot,'admission-body')}), 'onGatewayAdmissionPrepare');
               } : undefined,
@@ -1526,7 +1572,7 @@ async function executeHttpRequestInternal(
           if (!isStreamingResponse(result.response) || !result.response.body) {
           const outcome = await result.completion;
           await finishAttemptObservation(result, outcome.status === 'completed' ? 'completed' : outcome.status === 'cancelled' ? 'cancelled' : 'failed');
-          const neutralClientError = isNeutralClientError(result.response.status, outcome, isRetryableStatus);
+          const neutralClientError = result.shortCircuitedByPlugin || isNeutralClientError(result.response.status, outcome, isRetryableStatus);
           if (!neutralClientError) {
           if (outcome.status === 'failed' && outcome.code === 'upstream_http_error') {
             settleUpstreamFailure(selectedUpstream, 'upstream_http_error');
@@ -1910,6 +1956,8 @@ async function executeHttpRequestInternal(
     success = false;
     if (error instanceof DataAdmissionError) {
       responseStatus = error.status;
+      rootProtocolOutcome = 'failed'; rootProtocolCode = error.code; rootErrorMessage = error.code;
+      reqLogger.addStep('request_rejected',{code:error.code,...(error.details?.param?{param:error.details.param}:{})});
       return localFailureResponse ?? prepareProcessingErrorResponse(error);
     }
     if (error instanceof BodyProcessingError && !(error instanceof RequestBodyTooLargeError)) {

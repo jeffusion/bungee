@@ -21,3 +21,7 @@ test('details do not relax status, code or retry validation',()=>{
     expect(normalizeAdmissionError(Object.assign(new Error(),{name:'DataAdmissionError',status:422,code:'invalid',details:{message:'safe'},...value}))).toBeNull();
   }
 });
+test('separately bundled auxiliary processing errors preserve safe 502 status and details',()=>{
+  const foreign=Object.assign(new Error('private provider response'),{name:'DataAdmissionError',status:502,code:'auxiliary_invalid_result',details:{message:'Auxiliary response rejected',param:'output'}});
+  expect(normalizeAdmissionError(foreign)).toMatchObject({status:502,code:'auxiliary_invalid_result',details:{message:'Auxiliary response rejected',param:'output'}});
+});

@@ -62,6 +62,8 @@ export interface IngressPlugin {
   };
   authenticate?(request: Request, policy: DurableJson, now: number): DataPrincipal | null;
   resolveIdentity?(target: AdmissionTarget, policy: DurableJson): DataPrincipal;
+  /** Pure access decision before preparation/cache reuse; never plans or debits state. */
+  authorize?(target: AdmissionTarget, policy: DurableJson): AdmissionDenial | null;
   plan(target: AdmissionTarget, policy: DurableJson, state: DurableJson): AdmissionPlan;
   beforeAttempt?(target: AdmissionTarget, snapshot: DurableJson): AdmissionDenial | null;
 }

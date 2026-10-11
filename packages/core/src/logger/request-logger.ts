@@ -17,6 +17,8 @@ function diagnosticMessage(error?: RawResponseError): string | undefined {
 }
 
 export type RequestLoggerDependencies = {
+  /** Host restriction overrides configured body capture and explicit body setters. */
+  readonly captureBody?: boolean;
   readonly accessLogWriter?: Pick<AccessLogWriter, 'write' | 'updateResponseBodyId' | 'updateProtocolOutcome'>
     & Partial<Pick<AccessLogWriter, 'updateTransportOutcome' | 'updateBodyId' | 'appendProcessingStep'>>;
   readonly fileLogWriter?: { write(entry:FileLogEntry):void|Promise<void> };
@@ -119,7 +121,8 @@ export class RequestLogger {
     this.dependencies = {
       accessLogWriter: dependencies.accessLogWriter ?? accessLogWriter,
       fileLogWriter: dependencies.fileLogWriter ?? fileLogWriter,
-      bodyStorage: dependencies.bodyStorage,
+      bodyStorage: dependencies.captureBody === false ? undefined : dependencies.bodyStorage,
+      captureBody: dependencies.captureBody,
       headerStorage: dependencies.headerStorage,
     };
     this.requestId = crypto.randomUUID();
@@ -141,14 +144,14 @@ export class RequestLogger {
   }
 
   /**
-   * 添加处理步骤（无耗时信息，向后兼容）
+   * 添加处理步骤（无耗时信息）
    * @param step 步骤名称，如：'auth', 'path_rewrite', 'transformer', 'body_add'
    * @param detail 步骤详情
    */
   addStep(step: string, detail?: any) {
     const entry = {
       step,
-      detail,
+      detail: detail === undefined ? undefined : JSON.parse(JSON.stringify(detail)),
       timestamp: Date.now(),
     };
     this.steps.push(entry);
@@ -207,6 +210,7 @@ export class RequestLogger {
   }
 
   inheritOriginalBody(source: RequestLogger): void {
+    if(this.dependencies.captureBody === false)return;
     const capture = source.bodyCaptures.get('original-request');
     if (!capture) return;
     this.capturedTypes.add('original-request');
@@ -262,7 +266,7 @@ export class RequestLogger {
   addStepWithDuration(step: string, duration: number, detail?: any) {
     this.steps.push({
       step,
-      detail,
+      detail: detail === undefined ? undefined : JSON.parse(JSON.stringify(detail)),
       timestamp: Date.now(),
       duration: Math.round(Math.max(0, duration) * 100) / 100, // 四舍五入到2位小数，确保非负
     });
@@ -317,6 +321,7 @@ export class RequestLogger {
    * @param body 请求体内容
    */
   setRequestBody(body: any) {
+    if(this.dependencies.captureBody === false)return;
     this.requestBody = body;
   }
 
@@ -325,6 +330,7 @@ export class RequestLogger {
    * @param body 响应体内容
    */
   setResponseBody(body: any) {
+    if(this.dependencies.captureBody === false)return;
     this.responseBody = body;
   }
 
@@ -358,6 +364,7 @@ export class RequestLogger {
    * @param body 原始请求体
    */
   setOriginalRequestBody(body: any) {
+    if(this.dependencies.captureBody === false)return;
     this.originalRequestBody = body;
   }
 
@@ -694,6 +701,6 @@ export class RequestLogger {
    * @param steps 要添加的步骤数组
    */
   addSteps(steps: ProcessingStep[]) {
-    this.steps.push(...steps);
+    this.steps.push(...JSON.parse(JSON.stringify(steps)));
   }
 }

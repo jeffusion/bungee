@@ -65,7 +65,17 @@ function check(target: AdmissionTarget, policy: AccessPolicy | null, scopes: str
     || (policy.models !== null && (!target.model || !policy.models.some(pattern => matchesModel(pattern, target.model!)))))) return {error: 'key-access.scope_denied', status: 403};
   return null;
 }
+function authorize(target: AdmissionTarget, value: unknown): AdmissionDenial | null {
+  try {
+    const publication = validatePublication(value);
+    const scopes = protectedScopes(target, publication);
+    if (scopes.length === 0) return null;
+    if (target.principal.domain === 'anonymous') return {error:'unauthorized',status:401};
+    return check(target, validatePolicy(publication.byKey[target.principal.keyId] ?? null), scopes);
+  } catch { return {error:'key-access.policy_unavailable',status:503}; }
+}
 export function createIngress(): IngressPlugin { return {
+  authorize,
   bodyRequirements(target, value) {
     const publication = validatePublication(value);
     if (protectedScopes(target,publication).length === 0 || target.principal.domain !== 'data') return { request: 'none' };
@@ -93,11 +103,11 @@ export function createIngress(): IngressPlugin { return {
     try {
       const p = validatePublication(value);
       if (protectedScopes(target,p).length === 0) return {snapshot: null};
-      if (target.principal.domain === 'anonymous') return {denial: {error: 'unauthorized', status: 401}};
+      const denial = authorize(target,p);
+      if (denial) return {denial};
       const policy = validatePolicy(p.byKey[target.principal.keyId] ?? null);
       const scopes = protectedScopes(target,p);
-      const denial = check(target, policy,scopes);
-      return denial ? {denial} : {snapshot: {routeId: target.routeId, entryRouteId:target.entryRouteId ?? null, scopes, policy: policy as any}};
+      return {snapshot: {routeId: target.routeId, entryRouteId:target.entryRouteId ?? null, scopes, policy: policy as any}};
     } catch { return {denial: {error: 'key-access.policy_unavailable', status: 503}}; }
   },
   beforeAttempt(target, snapshot) {
