@@ -2,6 +2,7 @@
   import { _, isLoading } from '$i18n';
   import { getPluginText } from '$utils/plugin-i18n';
   import { createFormatter, isVirtualField } from '$utils/field-transform';
+  import { loadCodexGatewayTargets, type CodexGatewayTarget } from '$components/domain/codex-router/gateway-targets';
   import {
     collectSchemaFieldNames,
     displayConfigValue,
@@ -22,6 +23,27 @@
    */
   let { schema = [], config = {}, pluginName = '' }: { schema?: any[]; config?: Record<string, any>; pluginName?: string } = $props();
   const translate = (label: string) => getPluginText(label, pluginName, $_);
+  let targets = $state<CodexGatewayTarget[] | null>(null);
+  let targetsFailed = $state(false);
+  const needsTargets = $derived(pluginName === 'codex-router' && (hasDisplayValue(config.models) || hasDisplayValue(config.collaborationRelay)));
+  $effect(() => {
+    if (!needsTargets) return;
+    let active = true;
+    targets = null;
+    targetsFailed = false;
+    void loadCodexGatewayTargets().then(next => { if (active) targets = next; })
+      .catch(() => { if (active) targetsFailed = true; });
+    return () => { active = false; };
+  });
+
+  function displayTarget(target: { type: 'route' | 'service'; id: string }): string {
+    const kind = translate(`editor.${target.type}`);
+    const match = targets?.find(candidate => candidate.type === target.type && candidate.id === target.id);
+    if (match) return `${kind}: ${match.label}`;
+    if (targetsFailed) return `${kind}: ${translate('editor.targetsError')} (${target.id})`;
+    if (targets === null) return `${kind}: ${$_('common.loading')}`;
+    return `${kind}: ${translate('editor.targetUnavailable')} (${target.id})`;
+  }
 
   interface DisplayItem {
     label: string;
@@ -112,13 +134,13 @@
    */
   function formatFieldValue(field: any, value: any): string {
     if (pluginName === 'codex-router' && field.name === 'models') {
-      return displayModelBindings(value, type => translate(`editor.${type}`));
+      return displayModelBindings(value, displayTarget);
     }
 
     if (pluginName === 'codex-router' && field.name === 'collaborationRelay') {
       const target = value?.target;
       if (!target || !['route', 'service'].includes(target.type)) return displayConfigValue(value);
-      return `${value.model} · Responses · ${translate(`editor.${target.type}`)}: ${target.id}`;
+      return `${value.model} · Responses · ${displayTarget(target)}`;
     }
 
     // select: 显示翻译后的选项标签
@@ -166,7 +188,7 @@
 </script>
 
 {#if displayItems.length > 0}
-  <div class="space-y-1.5">
+  <div class="space-y-1.5" data-testid="plugin-config-summary">
     {#each displayItems as item}
       <div class="grid grid-cols-[minmax(80px,auto)_1fr] min-w-0 gap-2 border-l border-carbon-600 pl-2 text-xs">
         <span class="font-mono uppercase tracking-command text-zinc-500">{item.label}:</span>

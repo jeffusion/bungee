@@ -229,13 +229,23 @@ behavior remain unchanged. Table/list pagination remains explicit.
   cannot replace the current query. Values outside loaded pages remain visible.
 
 Model routing bindings group source and destination separately. Provider fields
-reuse searchable BSelect. An unset forwarding target shows a translated
+reuse searchable BSelect. Route/service references use two fields: target type, then a searchable target
+list filtered by that type. They share the provider/model two-column grid on
+desktop and stack vertically on narrow screens.
+Changing the type clears the target ID. An unset target shows a translated
 placeholder, never its encoded internal key. Receiving protocols belong to the
 binding editor; route/service editors contain transport settings. The binding
 editor uses IndustrialDialog with a scrolling body and stationary actions. Its
 searchable BSelect popups use fixed positioning outside the body clipping
 container; ordinary inline Bits UI selects keep scrollBody=false. Plugin
 summaries use translated labels and readable model pairs, not object coercion.
+
+Model bindings and collaboration relay use flat PanelCard containers without
+corner brackets, with the same field labels, padding and spacing. The relay
+enable switch belongs in the panel header; disabled relay shows only the header.
+Relay models reuse the catalog selector filtered to OpenAI; arbitrary typed
+names cannot be confirmed. Its Responses protocol is fixed internally and has
+no form field.
 
 The shared renderer knows no provider or API. Domain adapters supply options,
 page status, translated labels and search/cancel callbacks, reusing the existing

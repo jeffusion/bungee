@@ -9,18 +9,29 @@
     { id: string; label: string; value?: { type: 'route' | 'service'; id: string }; targets: CodexGatewayTarget[];
       loading?: boolean; error?: boolean; onchange: (target: { type: 'route' | 'service'; id: string }) => void } = $props();
   const t = (key: string) => $isLoading ? '' : getPluginText(`editor.${key}`, 'codex-router', (key, options) => $_(key, options));
-  let options = $derived.by(() => {
-    const result = targets.map(target => ({ value: JSON.stringify([target.type, target.id]), label: `${t(target.type)} · ${target.label}`, disabled: false }));
-    if (value?.id && !result.some(option => option.value === JSON.stringify([value.type, value.id]))) {
-      result.push({ value: JSON.stringify([value.type, value.id]), label: `${t(value.type)} · ${value.id}${loading ? '' : ` · ${t('targetUnavailable')}`}`, disabled: true });
+  const typeOptions = $derived((['route', 'service'] as const).map(type => ({ value: type, label: t(type) })));
+  const targetType = $derived(value?.type === 'route' || value?.type === 'service' ? value.type : '');
+  const options = $derived.by(() => {
+    const result = targets.filter(target => target.type === targetType).map(target => ({ value: target.id, label: target.label, disabled: false }));
+    if (targetType && value?.id && !result.some(option => option.value === value.id)) {
+      result.push({ value: value.id, label: `${value.id}${loading ? '' : ` · ${t('targetUnavailable')}`}`, disabled: true });
     }
     return result;
   });
 </script>
 
-<div class="min-w-0 space-y-2">
-  <Label class="block" for={id}>{label}</Label>
-  <BSelect {id} searchable searchLabels={{ empty: t('noOptions') }} value={value?.id ? JSON.stringify([value.type, value.id]) : ''}
-    {options} ariaLabel={label} placeholder={t('targetPlaceholder')} loading={loading} disabled={loading || error}
-    onchange={encoded => { const [type, id] = JSON.parse(String(encoded)); onchange({ type, id }); }} />
+<div class="grid min-w-0 gap-3 sm:grid-cols-2">
+  <div class="min-w-0 space-y-1.5">
+    <Label class="block" for={`${id}-type`}>{t('targetType')}</Label>
+    <BSelect id={`${id}-type`} searchable searchLabels={{ empty: t('noOptions') }} value={targetType}
+      options={typeOptions} ariaLabel={t('targetType')} placeholder={t('targetTypePlaceholder')}
+      onchange={type => { if ((type === 'route' || type === 'service') && type !== targetType) onchange({ type, id: '' }); }} />
+  </div>
+  <div class="min-w-0 space-y-1.5">
+    <Label class="block" for={id}>{label}</Label>
+    <BSelect {id} searchable searchLabels={{ empty: t('noOptions') }} value={targetType ? value?.id ?? '' : ''}
+      {options} ariaLabel={label} placeholder={t(targetType === 'route' ? 'routePlaceholder' : targetType === 'service' ? 'servicePlaceholder' : 'targetTypePlaceholder')}
+      {loading} disabled={loading || error || !targetType}
+      onchange={id => { if (targetType) onchange({ type: targetType, id: String(id) }); }} />
+  </div>
 </div>
