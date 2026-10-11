@@ -11,11 +11,11 @@
   import { Button } from '$components/ui/button';
   import { BSelect, IndustrialDialog } from '$components/industrial';
 
-  let { plugins = $bindable([]), protectedBindingIds = [], label = 'Plugins', scope = '', scopeName = '' }:
+  let { plugins = $bindable(), protectedBindingIds = [], label = 'Plugins', scope = '', scopeName = '' }:
     { plugins?: Array<EditorPluginBinding | string>; protectedBindingIds?: readonly string[]; label?: string;
       scope?: 'global' | 'route' | 'service' | 'upstream' | ''; scopeName?: string } = $props();
   function isProtected(index: number): boolean {
-    const binding = plugins[index];
+    const binding = plugins?.[index];
     return typeof binding !== 'string' && !!binding?._uid && protectedBindingIds.includes(binding._uid);
   }
 
@@ -23,7 +23,7 @@
 
   let availablePlugins = $state<PluginSchema[]>([]);
   let globalPluginNames = $state(new Set<string>());
-  let visiblePlugins = $derived(plugins.map((plugin, index) => ({ plugin, index }))
+  let visiblePlugins = $derived((plugins ?? []).map((plugin, index) => ({ plugin, index }))
     .filter(({ plugin }) => scope === 'global' || !globalPluginNames.has(typeof plugin === 'string' ? plugin : plugin.name)));
   let showAddDialog = $state(false);
   let selectedPluginName = $state<string | null>(null);
@@ -72,7 +72,8 @@
     captureOpener();
     showAddDialog = true;
     editingPluginIndex = index;
-    const plugin = plugins[index];
+    const plugin = plugins?.[index];
+    if (!plugin) return;
 
     if (typeof plugin === 'string') {
       selectedPluginName = plugin;
@@ -87,7 +88,7 @@
 
   function handleRemovePlugin(index: number) {
     if (isProtected(index)) return;
-    plugins = plugins.filter((_, i) => i !== index);
+    plugins = (plugins ?? []).filter((_, i) => i !== index);
     dispatch('change', plugins);
   }
 
@@ -157,7 +158,7 @@
       return;
     }
 
-    const existing = editingPluginIndex === null ? undefined : plugins[editingPluginIndex];
+    const existing = editingPluginIndex === null ? undefined : plugins?.[editingPluginIndex];
     const newPlugin: EditorPluginBinding = {
       ...(typeof existing === 'object' ? existing : {}),
       name: selectedPluginName,
@@ -168,9 +169,9 @@
       delete newPlugin.options;
     }
     if (editingPluginIndex !== null) {
-      plugins = plugins.map((p, i) => i === editingPluginIndex ? newPlugin : p);
+      plugins = (plugins ?? []).map((p, i) => i === editingPluginIndex ? newPlugin : p);
     } else {
-      plugins = [...plugins, newPlugin];
+      plugins = [...(plugins ?? []), newPlugin];
     }
 
     dispatch('change', plugins);

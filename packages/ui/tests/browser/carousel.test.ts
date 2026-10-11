@@ -146,13 +146,18 @@ try {
   // after virtual-time mouse/keyboard tests does not model a touch device.
   await configure({ autoplay: false, index: 0 });
   const mobile = await browser.newPage({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 900 } });
+  mobile.on('pageerror', error => errors.push(`Mobile fixture: ${error.message}`));
+  mobile.on('console', message => { if (message.type() === 'error') errors.push(`Mobile fixture: ${message.text()}`); });
+  mobile.on('requestfailed', request => errors.push(`Mobile fixture request failed: ${request.url()}`));
   const touchSession = await mobile.context().newCDPSession(mobile);
   try {
     await mobile.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.fulfill({ status: 200, body: '' }));
     await mobile.goto(`${origin}/tests/fixtures/carousel.html`);
     const touchCarousel = mobile.getByRole('region', { name: 'Test carousel' });
     const touchViewport = touchCarousel.locator('[id$="-viewport"]');
-    await touchCarousel.waitFor();
+    await touchCarousel.waitFor().catch(error => {
+      throw new Error(`Touch fixture did not mount: ${JSON.stringify(errors)}`, {cause:error});
+    });
     await mobile.evaluate(() => (window as any).carouselTest.configure({ autoplay: false, index: 0 }));
     const touchIndex = async () => (await mobile.evaluate(() => (window as any).carouselTest.state())).index;
     const swipe = async (x: number, y: number, dx: number, dy: number) => {
