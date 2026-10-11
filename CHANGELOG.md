@@ -1,3 +1,18 @@
+# [5.22.0](https://github.com/jeffusion/bungee/compare/v5.21.1...v5.22.0) (2026-10-11)
+
+
+### Bug Fixes
+
+* **llm:** omit validated optional Codex web search declarations ([90d381d](https://github.com/jeffusion/bungee/commit/90d381d1d532ca7e48ca269bb846f034675858da))
+* **llm:** preserve reasoning aliases without poisoning upstream health ([9b09ad9](https://github.com/jeffusion/bungee/commit/9b09ad913129afb36cd3a0a8f22319994ad262a2))
+* **plugins:** adapt protocol adapter to updated runtime and test layout ([dcfbed7](https://github.com/jeffusion/bungee/commit/dcfbed7718f741c4b948073e2696b5e205d67f59))
+
+
+### Features
+
+* **models-dev:** expose snapshot-consistent reasoning controls ([66f92de](https://github.com/jeffusion/bungee/commit/66f92de97711953ddc407f2a0111771782d01b12))
+* **plugins:** support global providers with scoped protocol bindings ([4f05eff](https://github.com/jeffusion/bungee/commit/4f05eff6c702169fddcf6073abb904ac44facaeb))
+
 ## [5.21.1](https://github.com/jeffusion/bungee/compare/v5.21.0...v5.21.1) (2026-10-11)
 
 
