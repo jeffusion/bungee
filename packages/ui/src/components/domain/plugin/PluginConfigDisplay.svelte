@@ -115,6 +115,12 @@
       return displayModelBindings(value, type => translate(`editor.${type}`));
     }
 
+    if (pluginName === 'codex-router' && field.name === 'collaborationRelay') {
+      const target = value?.target;
+      if (!target || !['route', 'service'].includes(target.type)) return displayConfigValue(value);
+      return `${value.model} · Responses · ${translate(`editor.${target.type}`)}: ${target.id}`;
+    }
+
     // select: 显示翻译后的选项标签
     if (field.type === 'select' && field.options) {
       const option = field.options.find((opt: any) => opt.value === value);

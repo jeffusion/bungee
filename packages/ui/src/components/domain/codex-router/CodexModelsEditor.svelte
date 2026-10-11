@@ -2,7 +2,8 @@
   import { onMount, untrack } from 'svelte';
   import { _, isLoading } from '$i18n';
   import { getPluginText } from '$utils/plugin-i18n';
-  import { getConfigSnapshot } from '$api/config';
+  import CodexTargetPicker from './CodexTargetPicker.svelte';
+  import { loadCodexGatewayTargets, type CodexGatewayTarget } from './gateway-targets';
   import { requestPluginControl } from '$api/client';
   import { BSelect, BCheckbox, LoadingIndicator } from '$components/industrial';
   import { Input } from '$components/ui/input';
@@ -25,20 +26,11 @@
   let providers = $state<ModelsDevProviderSummary[]>([]);
   let catalogVersion = $state<number | null>(null);
   let modelCount = $state(0), loading = $state(true), catalogError = $state(false), targetsError = $state(false), targetsLoading = $state(true);
-  let targets = $state<{ type: 'route' | 'service'; id: string; label: string }[]>([]);
+  let targets = $state<CodexGatewayTarget[]>([]);
   let alive = false;
   const controller = new AbortController();
   const t = (key: string) => $isLoading ? '' : getPluginText(`editor.${key}`, 'codex-router', (id, options) => $_(id, options));
   let providerOptions = $derived(providers.map(provider => ({ value: provider.provider, label: `${provider.name} · ${provider.provider}` })));
-  let targetOptions = $derived.by(() => {
-    const options = targets.map(target => ({ value: JSON.stringify([target.type, target.id]), label: `${t(target.type)} · ${target.label}`, disabled: false }));
-    for (const binding of value) {
-      if (!binding.target.id) continue;
-      const key = JSON.stringify([binding.target.type, binding.target.id]);
-      if (!options.some(option => option.value === key)) options.push({ value: key, label: `${t(binding.target.type)} · ${binding.target.id}${targetsLoading ? '' : ` · ${t('targetUnavailable')}`}`, disabled: true });
-    }
-    return options;
-  });
   const protocolOptions = [{ value: 'responses', label: 'Responses' }, { value: 'chat_completions', label: 'Chat Completions' }, { value: 'anthropic_messages', label: 'Anthropic Messages' }];
   $effect(() => { if (rowIds.length !== value.length) rowIds = value.map((_, index) => rowIds[index] ?? nextRowId++); });
 
@@ -91,9 +83,9 @@
   async function loadTargets() {
     targetsLoading = true; targetsError = false;
     try {
-      const config = (await getConfigSnapshot()).config.logical_configuration;
+      const next = await loadCodexGatewayTargets();
       if (!alive) return;
-      targets = [...config.routes.map(route => ({ type: 'route' as const, id: route.id, label: route.path })), ...config.services.map(service => ({ type: 'service' as const, id: service.id, label: service.name }))];
+      targets = next;
     } catch { if (alive) targetsError = true; }
     finally { if (alive) targetsLoading = false; }
   }
@@ -153,8 +145,8 @@
           </div>
         </div>
         <div class="min-w-0 space-y-2" data-testid="codex-binding-target">
-          <Label class="block" id={`${id}-target-label`}>{t('target')}</Label>
-            <BSelect searchable searchLabels={{ empty: t('noOptions') }} value={binding.target.id ? JSON.stringify([binding.target.type, binding.target.id]) : ''} options={targetOptions} ariaLabel={t('target')} placeholder={t('targetPlaceholder')} disabled={targetsLoading || targetsError} onchange={encoded => { const [type, id] = JSON.parse(String(encoded)); update(index, { target: { ...binding.target, type, id } }); }} />
+          <CodexTargetPicker id={`${id}-target`} label={t('target')} value={binding.target} {targets} loading={targetsLoading} error={targetsError}
+            onchange={target => update(index, { target: { ...binding.target, ...target } })} />
         </div>
         <div class="space-y-2">
           <Label class="block">{t('targetProtocol')}</Label>

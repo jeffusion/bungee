@@ -3,8 +3,9 @@ import { addMessages, locale, waitLocale } from 'svelte-i18n';
 import '$i18n';
 import '../../src/app.css';
 import text from '@plugins/llm-protocol-adapter/manifest.json?raw';
+import codexText from '@plugins/codex-router/manifest.json?raw';
 import Fixture from './ProtocolAdapterFixture.svelte';
-const manifest = JSON.parse(text);
+for (const manifest of [JSON.parse(text), JSON.parse(codexText)]) {
 for (const [language, messages] of Object.entries(manifest.translations)) {
   const nested: Record<string, any> = {};
   for (const [key, value] of Object.entries(messages as Record<string, string>)) {
@@ -13,6 +14,7 @@ for (const [language, messages] of Object.entries(manifest.translations)) {
     parent[parts.at(-1)!] = value;
   }
   addMessages(language, { plugins: { [manifest.name]: nested } });
+}
 }
 const language = localStorage.getItem('locale') || 'zh-CN';
 locale.set(language);

@@ -11,35 +11,26 @@
   import { Button } from '$components/ui/button';
   import { BSelect, IndustrialDialog } from '$components/industrial';
 
-  export let plugins: Array<EditorPluginBinding | string> = [];
-  export let protectedBindingIds: readonly string[] = [];
+  let { plugins = $bindable([]), protectedBindingIds = [], label = 'Plugins', scope = '', scopeName = '' }:
+    { plugins?: Array<EditorPluginBinding | string>; protectedBindingIds?: readonly string[]; label?: string;
+      scope?: 'global' | 'route' | 'service' | 'upstream' | ''; scopeName?: string } = $props();
   function isProtected(index: number): boolean {
     const binding = plugins[index];
     return typeof binding !== 'string' && !!binding?._uid && protectedBindingIds.includes(binding._uid);
   }
-  $: if (!plugins) {
-    plugins = [];
-  }
-  export let label = 'Plugins';
-  export let scope: 'global' | 'route' | 'service' | 'upstream' | '' = '';
-  export let scopeName = '';
 
   const dispatch = createEventDispatcher();
 
-  let availablePlugins: PluginSchema[] = [];
-  let globalPluginNames = new Set<string>();
-  $: visiblePlugins = plugins.map((plugin, index) => ({ plugin, index }))
-    .filter(({ plugin }) => scope === 'global' || !globalPluginNames.has(typeof plugin === 'string' ? plugin : plugin.name));
-  let showAddDialog = false;
-  let selectedPluginName: string | null = null;
-  let editingPluginIndex: number | null = null;
-  let pluginConfig: Record<string, any> = {};
-  let configErrors: Record<string, string> = {};
-  let dialogOpener: HTMLElement | null = null;
-  $: if (showAddDialog && typeof document !== 'undefined') {
-    dialogOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  }
-
+  let availablePlugins = $state<PluginSchema[]>([]);
+  let globalPluginNames = $state(new Set<string>());
+  let visiblePlugins = $derived(plugins.map((plugin, index) => ({ plugin, index }))
+    .filter(({ plugin }) => scope === 'global' || !globalPluginNames.has(typeof plugin === 'string' ? plugin : plugin.name)));
+  let showAddDialog = $state(false);
+  let selectedPluginName = $state<string | null>(null);
+  let editingPluginIndex = $state<number | null>(null);
+  let pluginConfig = $state<Record<string, any>>({});
+  let configErrors = $state<Record<string, string>>({});
+  let dialogOpener = $state<HTMLElement | null>(null);
   onMount(async () => {
     try {
       const [schemas, catalog] = await Promise.all([
@@ -56,16 +47,19 @@
     }
   });
 
-  // Reactive: cache plugin metadata only — do NOT call $_() inside `$:` (migration guard).
-  // i18n label is resolved in the template at render time, where $_() is safe.
-  $: pluginOptions = availablePlugins.map(p => ({
+  let pluginOptions = $derived(availablePlugins.map(p => ({
     value: p.name,
     metaName: p.metadata?.name ?? p.name,
     name: p.name,
     version: p.version,
-  }));
+  })));
+
+  function captureOpener() {
+    dialogOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  }
 
   function handleAddPlugin() {
+    captureOpener();
     showAddDialog = true;
     selectedPluginName = null;
     pluginConfig = {};
@@ -75,6 +69,7 @@
 
   function handleEditPlugin(index: number) {
     if (isProtected(index)) return;
+    captureOpener();
     showAddDialog = true;
     editingPluginIndex = index;
     const plugin = plugins[index];
@@ -102,8 +97,8 @@
     configErrors = {};
   }
 
-  function handleConfigChange(event: CustomEvent) {
-    pluginConfig = event.detail;
+  function handleConfigChange(next: Record<string, any>) {
+    pluginConfig = next;
     const plugin = availablePlugins.find(p => p.name === selectedPluginName);
     for (const constraint of plugin?.configConstraints ?? []) {
       const key = constraint.fields[0]!;
@@ -115,8 +110,8 @@
     }
   }
 
-  function handleConfigValidate(event: CustomEvent) {
-    configErrors = event.detail;
+  function handleConfigValidate(next: Record<string, string>) {
+    configErrors = next;
   }
 
   function handleSavePlugin() {
@@ -168,7 +163,9 @@
       name: selectedPluginName,
     };
     if (Object.keys(pluginConfig).length > 0) {
-      newPlugin.options = { ...(typeof existing === 'object' ? existing.options : {}), ...pluginConfig };
+      newPlugin.options = { ...pluginConfig };
+    } else {
+      delete newPlugin.options;
     }
     if (editingPluginIndex !== null) {
       plugins = plugins.map((p, i) => i === editingPluginIndex ? newPlugin : p);
@@ -192,9 +189,9 @@
     void tick().then(() => { if (!showAddDialog) opener?.focus({ preventScroll: true }); });
   }
 
-  $: selectedPluginSchema = selectedPluginName
+  let selectedPluginSchema = $derived(selectedPluginName
     ? availablePlugins.find(p => p.name === selectedPluginName)?.configSchema || []
-    : [];
+    : []);
 </script>
 
 <div class="space-y-3">
@@ -338,8 +335,8 @@
                 schema={selectedPluginSchema}
                 bind:value={pluginConfig}
                 bind:errors={configErrors}
-                on:change={handleConfigChange}
-                on:validate={handleConfigValidate}
+                onchange={handleConfigChange}
+                onvalidate={handleConfigValidate}
               />
             </div>
           {:else if selectedPluginName}

@@ -112,6 +112,16 @@ hooks.onStreamChunk.tap('example', envelope => {
 
 可选消费者独立取消、积压与超时；观察失败标记 incomplete，不将 unknown 记成零。安全准入、可靠预算等强制能力不能通过吞异常放行。
 
+## 内部调度与准备
+
+`onDispatchRequest` 只解析编译配置声明的 `gateway_target`，返回最终 target/protocol 及可选一次性 `prepareRequest`。宿主先执行入口和最终目标的只读访问授权，再调用准备回调，随后转换正文并进入正常上游链路。Ingress 插件通过 `authorize(target, policy)` 返回拒绝或 null；此阶段不调用 plan、生成准入票据或提交预算。实际发送前仍执行正式准入，每次最终模型映射和尝试都检查适用权限。
+
+准备回调获得可信 principal、固定 servingRevision、取消信号和 `executeAuxiliary`，WS 还提供宿主生成的连接身份及关闭信号。附属请求只能选择当前插件编译配置中已声明的 route/service；不能提供任意地址、凭据或可信身份，也不能再次内部转交或创建附属请求。它复用唯一 Gateway provider 和完整目标插件链，不通过监听端口绕回自身。
+
+附属请求具有独立 requestId、父请求关联、admission、尝试和结算。返回 `kind: response` 时包含 status、共享 BodyHandle、completion、实际模型/upstream 及不透明凭据作用域、dispose；`kind: reused` 返回已授权的复用值及实际目标身份。复用检查在实际凭据与模型解析及只读授权之后、上游连接和预算提交之前执行。调用方必须检查完成状态并释放响应；宿主禁用附属正文日志，保留状态及计量。
+
+显式传入附属 signal 表示取消由共享调用的聚合等待者管理；未传则继承父请求取消。共享调用必须通过公共 `services.runBackground` 保持独立授权帧和租约，不能借用已结束或已取消请求的 RPC 授权。
+
 ## 持久化和插件通信
 
 控制面取得命名空间 `durableState`，所有操作异步。`get/list` 返回不可变版本记录，`transact` 用 expectedVersion 做同库原子 CAS；普通更新不生成历史命令。幂等业务操作经声明的 RPC command journal，未知结果先查询或 reconciliation，禁止换 ID 自动重执行。
@@ -119,6 +129,8 @@ hooks.onStreamChunk.tap('example', envelope => {
 普通 KV、秘密存储、可靠事件与命令日志位于 plugin-state.db；观察数据位于 access.db。状态、结果及 outbox 的原子契约、纯 planner 读集、队列与关闭 ACK 见[存储说明](../architecture/storage.md)。插件不能取得配置库裸连接。
 
 同进程服务通过 `context.services.consume` 使用已声明的 provider、ID 和版本；跨进程使用声明的 RPC，事件、snapshot 和可靠 channel 使用各自契约。消费另一个插件的 namespace 不是通信接口。声明例子可查 [model-mapping manifest](../../plugins/model-mapping/manifest.json)和[插件服务类型](../../packages/core/src/plugin-services.ts)。
+
+本地服务门面受控转发 AbortSignal、Promise、异步迭代器和函数回调，数据及二进制视图提供隔离副本；实现对象身份不对外开放。所有操作仍受消费方和提供方排空、租约及撤销检查。跨进程 RPC 继续使用数据契约，不能传递这些进程内句柄。需要在插件租约结束后保存的日志详情必须在记录时取快照。
 
 ## API、UI 与资源扩展
 

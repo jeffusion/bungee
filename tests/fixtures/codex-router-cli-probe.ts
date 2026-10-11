@@ -10,6 +10,7 @@ export const CLI_TOOL_ROUNDTRIP = 'codex-fixture-real-tool-roundtrip';
 export const CLI_EXEC_MARKER = 'codex-fixture-exec-marker';
 export const CLI_MCP_MARKER = 'codex-fixture-mcp-marker';
 export const CLI_PATCH_MARKER = 'codex-fixture-patch-marker';
+export const CLI_COLLABORATION = 'codex-fixture-collaboration';
 
 // A real stdio MCP child started by Codex, not an emulated app-server tool result.
 export const echoMcpScript = String.raw`import {appendFileSync} from 'node:fs';
@@ -91,13 +92,14 @@ export async function probeCodexCli(input: {root: string; baseUrl: string; token
 }
 
 /** CLI model/list with temporary ChatGPT-shaped auth and real local key-access. */
-export async function probeCodexChatgptModels(input: {root: string; baseUrl: string; mockUrl: string; token: string; model: string; toolRoundTrip?: boolean; effort?: string}) {
+export async function probeCodexChatgptModels(input: {root: string; baseUrl: string; mockUrl: string; token: string; model: string; toolRoundTrip?: boolean; effort?: string; collaboration?: boolean}) {
   assertCodexProbeTargets(input.root,[input.baseUrl,input.mockUrl]);
   const executable = Bun.which('codex');
   if (!executable) throw new Error('BUNGEE_CODEX_CLI_PROBE requires a local codex executable');
   // A repeated tool probe must not reuse an earlier MCP PID, audit, or patched file.
   const home = join(input.root, input.toolRoundTrip ? `cli-chatgpt-tool-${input.model.replaceAll('/','-')}-${randomUUID()}` : input.model === 'org/chat' ? 'cli-chatgpt-chat-home'
     : input.model === 'org/anthropic' ? 'cli-chatgpt-anthropic-home' : 'cli-chatgpt-home'); await mkdir(home, {recursive: true});
+  if(input.collaboration)await writeFile(join(home,'fixture-patched.txt'),'pending\n');
   const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
   const claims = {email: 'fixture@example.invalid', exp: Math.floor(Date.now() / 1000) + 86400,
     'https://api.openai.com/auth': {chatgpt_plan_type: 'pro', chatgpt_account_id: 'fixture-account', chatgpt_user_id: 'fixture-user'}};
@@ -113,8 +115,8 @@ export async function probeCodexChatgptModels(input: {root: string; baseUrl: str
     const scriptPath = join(home, 'echo-mcp.mjs'); await writeFile(scriptPath, echoMcpScript);
     mcpConfig = `\n[mcp_servers.codex_fixture]\ncommand = ${JSON.stringify(process.execPath)}\nargs = ${JSON.stringify([scriptPath, mcpAuditPath, `--bungee-process-identity=${mcpInstanceId}`])}\nstartup_timeout_sec = 5\ntool_timeout_sec = 5\n`;
   }
-  await writeFile(join(home, 'config.toml'), `model_provider = "openai"\nopenai_base_url = ${JSON.stringify(input.baseUrl)}\nchatgpt_base_url = ${JSON.stringify(`${input.mockUrl}/backend-api`)}\ncli_auth_credentials_store = "file"\n[analytics]\nenabled = false\n${mcpConfig}`);
-  const child = spawn(executable, ['app-server', '--stdio'], {cwd: home, env: isolatedEnv(home), stdio: ['pipe', 'pipe', 'pipe']});
+  await writeFile(join(home, 'config.toml'), `model_provider = "openai"\nopenai_base_url = ${JSON.stringify(input.baseUrl)}\nchatgpt_base_url = ${JSON.stringify(`${input.mockUrl}/backend-api`)}\ncli_auth_credentials_store = "file"\n${input.collaboration?'[features]\nmulti_agent_v2 = true\n':''}[analytics]\nenabled = false\n${mcpConfig}`);
+  const child = spawn(executable, ['app-server', '--stdio'], {cwd: home, env: {...isolatedEnv(home),OPENAI_BASE_URL:input.baseUrl}, stdio: ['pipe', 'pipe', 'pipe']});
   let buffer = '', stderr = '', exitCode: number | null = null, exited = false;
   const messages: any[] = [], waiters = new Map<number, {resolve(value: any): void; reject(error: Error): void}>();
   const closed = new Promise<void>(resolve => child.once('close', code => {exitCode = code; exited = true; resolve();}));
@@ -153,23 +155,25 @@ export async function probeCodexChatgptModels(input: {root: string; baseUrl: str
       while (!(started = (await readMcpAudit()).find(event => event.event === 'started')) && Date.now() < deadline && !exited) await Bun.sleep(25);
       if (started) mcpIdentity = await captureProcessIdentity(started.pid, mcpInstanceId);
     }
-    const prompt = input.toolRoundTrip
+    const prompt = input.collaboration ? `${CLI_COLLABORATION}: follow the local fixture collaboration calls; delegate only the isolated file and MCP task, wait for the child and summarize its completed work.` : input.toolRoundTrip
       ? `${CLI_TOOL_ROUNDTRIP}: follow the fixture model's three tool calls, then finish. Only run its printf marker command, apply its patch to fixture-patched.txt in this temporary working directory, and call the local MCP echo. Do not inspect or modify other files.`
       : 'Reply with fixture answer. Do not call tools or inspect files.';
     const turn = await rpc(5, 'turn/start', {threadId: thread.result.thread.id, input: [{type: 'text', text: prompt}], ...(input.effort ? {effort: input.effort} : {})});
     if (turn.error) throw new Error(`app-server turn failed: ${JSON.stringify(turn.error)}`);
-    const deadline = Date.now() + 15000;
-    while (!messages.some(message => message.method === 'turn/completed') && Date.now() < deadline && !exited) await Bun.sleep(25);
-    if (!messages.some(message => message.method === 'turn/completed')) throw new Error('app-server model dispatch did not complete');
+    const deadline = Date.now() + (input.collaboration?45000:15000);
+    const parentCompleted = () => messages.some(message => message.method === 'turn/completed' && message.params?.threadId === thread.result.thread.id);
+    while (!parentCompleted() && Date.now() < deadline && !exited) await Bun.sleep(25);
+    if (!parentCompleted()) throw new Error('app-server model dispatch did not complete');
     report = {pid: child.pid, userAgent: initialize.result?.userAgent ?? null, accountType: account.result?.account?.type, accountError: account.error ?? null,
       listedModels, reasoningModels: (catalog.result?.data ?? []).filter((model: any) => model.model === input.model)
         .map((model: any) => ({model:model.model,levels:model.supportedReasoningEfforts?.map((entry: any)=>entry.reasoningEffort),defaultEffort:model.defaultReasoningEffort})),
       modelListError: catalog.error ?? null, selectedModel: input.model, selectedEffort: input.effort ?? null,
       notifications: messages.filter(message => ['turn/completed', 'error', 'item/started', 'item/completed'].includes(message.method)).map(message => {
         const item = message.params?.item;
-        return {method: message.method, status: message.params?.turn?.status ?? item?.status, itemType: item?.type, itemId: item?.id,
+        return {method: message.method, threadId: message.params?.threadId, parentThread: message.params?.threadId === thread.result.thread.id, status: message.params?.turn?.status ?? item?.status, itemType: item?.type, itemId: item?.id,
           text: item?.text, command: item?.command, output: item?.aggregatedOutput, exitCode: item?.exitCode,
-          server: item?.server, tool: item?.tool, changeCount: item?.changes?.length, error: message.params?.error?.message};
+          server: item?.server, tool: item?.tool, changeCount: item?.changes?.length, error: message.params?.error?.message,
+          ...(input.collaboration&&item?.type==='subAgentActivity'?{activity:item}:{})};
       }),
       authSource: 'isolated stub id_token claims and fresh local key-access token'};
   } finally {
