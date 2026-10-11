@@ -1,4 +1,4 @@
-import { DEFAULT_PUBLICATION_POLICY, MAX_PUBLICATION_TIMEOUT_MS, type ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import { DEFAULT_PUBLICATION_POLICY, MAX_PUBLICATION_TIMEOUT_MS, type ConfigurationAggregate } from '@jeffusion/bungee-types';
 import type { ConfigurationImportEnvelope, ConfigurationPublication } from '$api/config';
 
 export const IMPORT_LIMITS = { bytes: 1024 * 1024, depth: 16, nodes: 12000, items: 500 } as const;
@@ -130,7 +130,7 @@ export function parseImportPreview(text: string): ConfigurationImportEnvelope {
   const keys = ['format', 'format_version', 'schema_version', 'exported_at', 'source_revision', 'content_hash', 'aggregate', 'envelope_hash'];
   if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)
     || Object.keys(envelope).length !== keys.length || keys.some(k => !Object.hasOwn(envelope, k))
-    || envelope.format !== 'bungee-config-snapshot' || envelope.format_version !== 1 || envelope.schema_version !== 2
+    || envelope.format !== 'bungee-config-snapshot' || envelope.format_version !== 1 || envelope.schema_version !== 1
     || !Number.isSafeInteger(envelope.source_revision) || envelope.source_revision < 1
     || !Number.isSafeInteger(envelope.exported_at) || envelope.exported_at < 0
     || typeof envelope.content_hash !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(envelope.content_hash)
@@ -140,7 +140,7 @@ export function parseImportPreview(text: string): ConfigurationImportEnvelope {
     || ['routes', 'services', 'plugins'].some(k => !Array.isArray(envelope.aggregate.logical_configuration[k]))) throw new Error('invalid_snapshot');
   return envelope;
 }
-export function aggregateCounts(aggregate: ConfigurationAggregateV2) {
+export function aggregateCounts(aggregate: ConfigurationAggregate) {
   return { routes: aggregate.logical_configuration.routes.length, services: aggregate.logical_configuration.services.length,
     bindings: aggregate.logical_configuration.plugins.length, activations: aggregate.plugin_activations.length };
 }

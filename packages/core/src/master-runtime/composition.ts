@@ -773,7 +773,7 @@ export async function startMasterComposition(
       (catalog.records?.() ?? []).filter(record => record.controlPath).map(record => record.name),resources.pluginControl!,
     );
     await refreshRouteProtections();
-    const guardDataTransition = async (_active: import('@jeffusion/bungee-types').ConfigurationAggregateV2, next: import('@jeffusion/bungee-types').ConfigurationAggregateV2): Promise<Response | null> => {
+    const guardDataTransition = async (_active: import('@jeffusion/bungee-types').ConfigurationAggregate, next: import('@jeffusion/bungee-types').ConfigurationAggregate): Promise<Response | null> => {
       await refreshRouteProtections();
       for (const [plugin,routeIds] of routeProtections) if (routeIds.length && !next.plugin_activations.some(value => value.plugin_name === plugin)) {
         return Response.json({error:'protected_routes_require_plugin',plugin,routeIds},{status:422});

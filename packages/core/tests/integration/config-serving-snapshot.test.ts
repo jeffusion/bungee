@@ -3,7 +3,7 @@ import { Database } from 'bun:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ConfigurationAggregateV2, Sha256Digest } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate, Sha256Digest } from '@jeffusion/bungee-types';
 import {
   ConfigRepository,
   ConfigRepositoryError,
@@ -18,7 +18,7 @@ import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 
 setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
-const EMPTY_AGGREGATE: ConfigurationAggregateV2 = {
+const EMPTY_AGGREGATE: ConfigurationAggregate = {
   logical_configuration: { services: [], routes: [], plugins: [] },
   plugin_activations: [],
 };
@@ -84,7 +84,7 @@ describe('configuration serving snapshots', () => {
     const catalogA: ConfigRepositoryOptions = { compileOptions: { pluginSchemas: new Map([['foo', []]]) } };
     const first = ConfigRepository.open(path, catalogA);
     repositories.push(first);
-    const aggregate: ConfigurationAggregateV2 = {
+    const aggregate: ConfigurationAggregate = {
       logical_configuration: {
         services: [], routes: [],
         plugins: [{ id: '40000000-0000-4000-8000-000000000001', position: 0, name: 'foo', enabled: true }],
@@ -117,6 +117,24 @@ describe('configuration serving snapshots', () => {
     })).toEqual(committed.snapshot);
   });
 
+  test('rejects a sealed noncurrent aggregate without a pre-directional fallback', () => {
+    const repository = openRepository();
+    const aggregate = { logical_configuration: { services: [], plugins: [], routes: [{
+      id: '10000000-0000-4000-8000-000000000001', position: 0, path: '/api', plugins: [],
+      headers: { add: { 'x-old': 'value' } },
+      endpoints: [{ id: '20000000-0000-4000-8000-000000000001', position: 0,
+        target: 'https://example.com', weight: 100, priority: 1, is_disabled: false, plugins: [] }],
+    }] }, plugin_activations: [] };
+    const digest = hashConfigurationContent(aggregate);
+    const db = repository.getDatabase();
+    db.run("INSERT INTO configuration_revisions (revision,content_hash,kind,created_at) VALUES (2,?,'config',1)", [digest]);
+    db.run(`INSERT INTO configuration_serving_snapshots
+      (revision,content_hash,plugin_catalog_hash,aggregate_json) VALUES (2,?,?,?)`,
+      [digest, CATALOG_A, canonicalJson(aggregate)]);
+    expectError(() => repository.getServingSnapshot({ revision: 2, content_hash: digest, plugin_catalog_hash: CATALOG_A }),
+      'serving_snapshot_corrupt');
+  });
+
   test('round-trips, is idempotent, and permits catalog-only keys', () => {
     const repository = openRepository();
     const value = snapshot(repository);
@@ -143,7 +161,7 @@ describe('configuration serving snapshots', () => {
     const repository = openRepository();
     const value = snapshot(repository);
     expectError(() => repository.appendServingSnapshot(value, 'sha256:bad' as Sha256Digest), 'invalid_configuration');
-    const oversized: ConfigurationAggregateV2 = {
+    const oversized: ConfigurationAggregate = {
       logical_configuration: { auth: { enabled: true, tokens: ['x'.repeat(1_100_000)] }, services: [], routes: [], plugins: [] },
       plugin_activations: [],
     };
@@ -175,13 +193,13 @@ describe('configuration serving snapshots', () => {
       revision: value.revision, content_hash: value.content_hash, plugin_catalog_hash: 'sha256:bad' as Sha256Digest,
     }), 'invalid_configuration');
 
-    const base: ConfigurationAggregateV2 = {
+    const base: ConfigurationAggregate = {
       logical_configuration: { auth: { enabled: true, tokens: [''] }, services: [], routes: [], plugins: [] },
       plugin_activations: [],
     };
     const remaining = MAX_AGGREGATE_BYTES - new TextEncoder().encode(canonicalJson(base)).byteLength;
     const token = '😀'.repeat(Math.floor(remaining / 4)) + 'x'.repeat(remaining % 4);
-    const boundary: ConfigurationAggregateV2 = {
+    const boundary: ConfigurationAggregate = {
       ...base,
       logical_configuration: { ...base.logical_configuration, auth: { enabled: true, tokens: [token] } },
     };
@@ -191,7 +209,7 @@ describe('configuration serving snapshots', () => {
     expect(() => repository.appendServingSnapshot({
       revision: 2, content_hash: boundaryHash, aggregate: boundary,
     }, CATALOG_A)).not.toThrow();
-    const oversized: ConfigurationAggregateV2 = {
+    const oversized: ConfigurationAggregate = {
       ...boundary,
       logical_configuration: { ...boundary.logical_configuration, auth: { enabled: true, tokens: [token + 'x'] } },
     };

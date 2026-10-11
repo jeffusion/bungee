@@ -3,9 +3,9 @@ import { buildRouteBodyPlans } from '../../src/master-runtime/route-body-plan';
 import { createConfigControlApi } from '../../src/master-runtime/control-api';
 import { createManagementAuthFixture } from '../helpers/management-auth';
 import { hashConfigurationContent, parseNormalizeCompileAggregate } from '../../src/config-storage';
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 
-function aggregate():ConfigurationAggregateV2 {
+function aggregate():ConfigurationAggregate {
   return {logical_configuration:{services:[],plugins:[],routes:[{id:'r',position:0,path:'/test',plugins:[],request:{body:{add:{},remove:[]}},response:{body_formats:['json']},
     endpoints:[{id:'e',position:0,target:'http://upstream.test',priority:1,weight:100,is_disabled:false,plugins:[],
       request:{headers:{add:{'x-model':'{{request.body.model}}'}}},response:{body:{add:{ok:true}},body_formats:['json','sse-json']}}]}]},plugin_activations:[]};

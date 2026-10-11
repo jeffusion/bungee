@@ -3,7 +3,7 @@
   import { get } from 'svelte/store';
   import { _ } from '$i18n';
   import { isLoading } from 'svelte-i18n';
-  import type { LogicalConfigurationV2 } from '@jeffusion/bungee-types';
+  import type { LogicalConfiguration } from '@jeffusion/bungee-types';
   import { ApiError } from '$api/client';
   import { getToken } from '$stores/auth';
   import { publicationRecovery } from '$stores/runtime';
@@ -33,7 +33,7 @@
   import { retainAccepted, forgetDispatch, submissionLocked, isTerminal, queryFailure, replacementSummary, drainSummary, preCommitRejection,
     type SubmissionPhase } from '$components/domain/config/publication-state';
 
-  type Draft = { -readonly [K in keyof LogicalConfigurationV2]: LogicalConfigurationV2[K] };
+  type Draft = { -readonly [K in keyof LogicalConfiguration]: LogicalConfiguration[K] };
   let snapshot = $state<ConfigurationSnapshot | null>(null);
   let draft = $state<Draft | null>(null);
   let publicationRaw = $state<PublicationInputs>(publicationInputs());
@@ -425,7 +425,6 @@
           <p class="break-all font-mono text-xs text-zinc-400">{imported.content_hash}</p>
           <p class="text-sm text-zinc-300">{t('importRoutes')} {importCounts.routes} · {t('importServices')} {importCounts.services} · {t('activations')} {importCounts.activations} · {t('globalBindings')} {importCounts.bindings}</p>
           <p class="text-sm text-zinc-400">{t('importImpact')}</p>
-          {#if importPreview?.warnings.length}<p class="text-sm text-amber-300" role="status" data-testid="import-ignored-rules">{$_('settings.importIgnoredRules', { values: { count: importPreview.warnings.length } })}</p>{/if}
           <ConfigurationDiff changes={diff} testId="import-diff" />
           <Button variant="outline" onclick={cancelImport} disabled={locked}>{t('cancelImport')}</Button>
         </div>

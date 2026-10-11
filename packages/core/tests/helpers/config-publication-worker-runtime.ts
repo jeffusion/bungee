@@ -1,5 +1,5 @@
 import { kernelMonotonicNowNs } from '../../src/master-runtime/kernel-monotonic-clock';
-import type { AppConfig, ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { AppConfig, ConfigurationAggregate } from '@jeffusion/bungee-types';
 import type { ConfigWorkerLifecycle, ConfigWorkerRuntimeResult } from '../../src/config-publication';
 import type { PluginRuntimeOrchestratorStatusReport } from '../../src/plugin-runtime-orchestrator';
 import { hashConfigurationContent, parseNormalizeCompileAggregate } from '../../src/config-storage';
@@ -27,7 +27,7 @@ export const PROCESS_IDENTITY = {
   worker_slot: 3,
 } as const;
 
-export function aggregate(): ConfigurationAggregateV2 {
+export function aggregate(): ConfigurationAggregate {
   const result = parseNormalizeCompileAggregate({
     logical_configuration: {
       plugins: [

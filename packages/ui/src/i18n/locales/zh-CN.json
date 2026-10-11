@@ -447,7 +447,7 @@
     "loadError": "读取配置失败，已完成的发布不会因此撤销。请重新读取。", "loading": "正在读取全局设置", "unknown": "未知", "detailsUnavailable": "发布详情暂不可用，不能据此认定未提交。",
     "publicationDetails": "发布详情", "operationStages": "校验 → 提交版本 → 新流量切换 → 前置请求交接 → 排空启动确认 → 自然排空 → 清理退出 → 发布收敛", "committedRevision": "已提交版本", "resultStatus": "结果状态", "workerReports": "工作进程上报（不等同于接流确认）", "recovery": "恢复状态", "checkOperation": "查询本次发布", "dashboardRecovery": "前往仪表板查看恢复摘要",
     "importPreview": "快照预览 · 尚未提交", "snapshotWarning": "配置快照不等于系统备份，可能包含令牌及插件配置。请妥善保管；导入覆盖完整配置，不会恢复日志或插件运行数据。",
-    "sourceRevision": "快照来源版本", "activations": "插件启用项", "globalBindings": "全局绑定", "importImpact": "包含全部路由、服务、作用域绑定和插件启用状态。下方只显示安全摘要。确认后才发布新版本，完整性由服务端再次校验。", "importIgnoredRules": "已自动忽略 {count} 项无法兼容或被新格式覆盖的修改规则，其余有效规则将保留。无需手动修复，具体原因记录在服务日志中。", "cancelImport": "取消导入", "invalidImport": "快照格式无效、服务端校验未通过或预览不可用。未提交配置。", "exportError": "导出快照失败。"
+    "sourceRevision": "快照来源版本", "activations": "插件启用项", "globalBindings": "全局绑定", "importImpact": "包含全部路由、服务、作用域绑定和插件启用状态。下方只显示安全摘要。确认后才发布新版本，完整性由服务端再次校验。", "cancelImport": "取消导入", "invalidImport": "快照格式无效、服务端校验未通过或预览不可用。未提交配置。", "exportError": "导出快照失败。"
   },
   "configuration": {
     "title": "全局设置",

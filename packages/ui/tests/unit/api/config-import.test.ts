@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import {
   ConfigurationOperationDegradedError,
   ConfigurationStaleError,
@@ -13,7 +13,7 @@ import {
 import { preCommitRejection } from '../../../src/components/domain/config/publication-state';
 import { ApiError } from '../../../src/api/client';
 
-const activeAggregate: ConfigurationAggregateV2 = {
+const activeAggregate: ConfigurationAggregate = {
   logical_configuration: { auth: { enabled: true, tokens: ['current-token'] }, services: [], routes: [], plugins: [] },
   plugin_activations: [],
 };
@@ -22,7 +22,7 @@ function envelope(tokens: string[], enabled = true) {
   return {
     format: 'bungee-config-snapshot',
     format_version: 1,
-    schema_version: 2,
+    schema_version: 1,
     exported_at: 1,
     source_revision: 3,
     content_hash: 'sha256:content',
@@ -100,7 +100,7 @@ describe('configuration snapshot import', () => {
   test('previews the original sealed snapshot through the server without writing or mutating it', async () => {
     const requests:RequestRecord[]=[];
     const original=envelope(['current-token']), before=JSON.stringify(original);
-    const report={valid:true,errors:[],aggregate:activeAggregate,warnings:[{path:'logical_configuration.routes[0].body',reason:'invalid_modification'}]};
+    const report={valid:true,errors:[],aggregate:activeAggregate};
     install(requests,[Response.json(report)]);
     expect(await validateImport(original)).toEqual(report);
     expect(requests).toHaveLength(1); expect(requests[0].url).toBe('/api/config/validate');

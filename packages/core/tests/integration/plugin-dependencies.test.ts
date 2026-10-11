@@ -162,7 +162,7 @@ test.each(['enable', 'put', 'import'] as const)('$entry activation persists the 
     });
     const before = repository.getSnapshot().revision;
     const candidate = { ...repository.getSnapshot().aggregate, plugin_activations: [{ plugin_name: 'consumer' }] };
-    const initialEnvelope = { format: 'bungee-config-snapshot', format_version: 1, schema_version: 2,
+    const initialEnvelope = { format: 'bungee-config-snapshot', format_version: 1, schema_version: 1,
       exported_at: ++time, source_revision: before, content_hash: hashConfigurationContent(candidate), aggregate: candidate };
     const response = await api.handle(entry === 'enable' ? request('/api/plugins/consumer/enable')
       : entry === 'put' ? request('/api/config', 'PUT', { expected_revision: before, mutation_id: 'initial-put', aggregate: candidate })
@@ -192,7 +192,7 @@ test.each(['enable', 'put', 'import'] as const)('$entry activation persists the 
     ]);
     expect(putSnapshot.content_hash).toBe(hashConfigurationContent(putSnapshot.aggregate));
     settle();
-    const base = { format: 'bungee-config-snapshot', format_version: 1, schema_version: 2,
+    const base = { format: 'bungee-config-snapshot', format_version: 1, schema_version: 1,
       exported_at: ++time, source_revision: active.revision, content_hash: hashConfigurationContent(incomplete), aggregate: incomplete };
     expect((await api.handle(request('/api/config/import', 'POST', { expected_revision: putSnapshot.revision,
       mutation_id: 'incomplete-import', envelope: { ...base, envelope_hash: hashConfigurationContent(base) } })))?.status).toBe(202);

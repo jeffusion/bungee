@@ -174,7 +174,7 @@ export function rejectUnknownFields(
 ): void {
   for (const key of Object.keys(object)) {
     if (!allowed.has(key)) {
-      context.add('unknown_field', path ? `${path}.${key}` : key, 'Field is not part of configuration v2');
+      context.add('unknown_field', path ? `${path}.${key}` : key, 'Field is not part of the current configuration schema');
     }
   }
 }

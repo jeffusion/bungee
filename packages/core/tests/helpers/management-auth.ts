@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import type { PluginControlHost } from '../../src/plugin-control';
 import type { ManagementProvider, ManagementSubject } from '../../src/plugin-extensions';
 import { ManagementAuthentication, MANAGEMENT_CAPABILITIES } from '../../src/master-runtime/management-auth';
 
 /** Anonymous by default; selected-provider tests use revocable simulated plugin sessions. */
-export function createManagementAuthFixture(aggregate: () => ConfigurationAggregateV2, options: {provider?: boolean} = {}) {
+export function createManagementAuthFixture(aggregate: () => ConfigurationAggregate, options: {provider?: boolean} = {}) {
   const current = { id: randomUUID(), token: randomUUID() };
   const next = { id: randomUUID(), token: randomUUID() };
   const activeSessions = new Map<string, typeof current>([current, next].map(session => [session.id, session]));

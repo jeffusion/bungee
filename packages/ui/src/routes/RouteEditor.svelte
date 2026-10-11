@@ -5,7 +5,7 @@
   import { resolveRouteEndpoints, RoutesAPI, RouteStaleError } from '$api/routes';
   import { ConfigurationStaleError, ConfigurationOperationTimeoutError } from '$api/config';
   import { consumeRouteSourceHandoff, prepareRouteSourceHandoff, RouteSourceHandoffError, type RouteSourceHandoffErrorCode } from '$api/source-handoff';
-  import type { RouteV2 } from '@jeffusion/bungee-types';
+  import type { ConfigurationRoute } from '@jeffusion/bungee-types';
   import type { Route, Service } from '$api/routes';
   import { ServicesAPI } from '$api/services';
   import { validateRoute, validateWeights, type ValidationError } from '$validation';
@@ -43,7 +43,7 @@
     return handoffText(code ? handoffErrorKeys[code] : 'ui.routeDraftError');
   };
   const lifetime = new AbortController();
-  let baseline: RouteV2 | null = $state.raw(null);
+  let baseline: ConfigurationRoute | null = $state.raw(null);
   let conflictMessage = $state(''), handoffMessage = $state('');
   let handoffError = $state.raw<unknown>(null);
   let reloading = $state(false);

@@ -20,7 +20,7 @@ class MemoryStorage implements PluginStorage {
   failStatus = false;
   async get<T>(key: string): Promise<T | null> { return (this.values.get(key) as T | undefined) ?? null; }
   async set(key: string, value: unknown): Promise<void> {
-    if (this.failStatus && key === 'catalog:status:v1') throw new Error('injected metadata failure');
+    if (this.failStatus && key === 'catalog:status') throw new Error('injected metadata failure');
     if (key === 'catalog:v1') throw new Error('catalog KV writes must never happen');
     this.values.set(key, structuredClone(value));
   }
@@ -55,7 +55,7 @@ describe('models-dev authoritative snapshot', () => {
   test('the production async store restores and publishes only after the database commit', async () => {
     const client = await PluginStateClient.open(':memory:', { initialize: true });
     const storage = client.pluginStorage('models-dev');
-    await storage.set('catalog:settings:v2', { autoRefresh: false, intervalHours: 24, timeoutSeconds: 15 });
+    await storage.set('catalog:settings', { autoRefresh: false, intervalHours: 24, timeoutSeconds: 15 });
     const store = client.snapshotStore('models-dev', { id: 'models-dev.catalog.v1', schemaVersion: 1 });
     let unblock!: () => void;
     let entered!: () => void;
@@ -135,32 +135,39 @@ describe('models-dev authoritative snapshot', () => {
   });
   test('restart restores the committed snapshot even when status metadata is stale', async () => {
     const storage = new MemoryStorage();
-    storage.values.set('catalog:settings:v2', { autoRefresh: true, intervalHours: 2, timeoutSeconds: 15 });
+    storage.values.set('catalog:settings', { autoRefresh: true, intervalHours: 2, timeoutSeconds: 15 });
     const first = manager(storage, okFetch(smallCatalog));
     await first.instance.start(); await first.instance.refresh(); first.instance.stop();
-    storage.values.set('catalog:status:v1', { lastSuccessAt: 0 });
+    storage.values.set('catalog:status', { lastSuccessAt: 0 });
     const second = manager(storage, okFetch({}), first.store); await second.instance.start();
     expect(second.instance.statusSnapshot()).toMatchObject({ version: 1, lastSuccessAt: 1000, modelCount: 1,
       settings: { intervalHours: 2 }, nextRefreshAt: 1000 + 2 * 60 * 60 * 1000 });
     expect(second.published).toEqual([]); second.instance.stop();
   });
-  test('imports a legacy KV only once, then ignores it', async () => {
+  test('an empty host snapshot starts empty without importing private KV data', async () => {
     const storage = new MemoryStorage();
     storage.values.set('catalog:v1', { version: 7, fetchedAt: 50, catalog: smallCatalog });
-    const first = manager(storage, okFetch(smallCatalog)); await first.instance.start();
-    expect(first.store.current()!.descriptor.version).toBe(7); first.instance.stop();
-    storage.values.set('catalog:v1', { invalid: true });
-    const second = manager(storage, okFetch({}), first.store); await second.instance.start();
-    expect(second.instance.statusSnapshot()).toMatchObject({ version: 7, lastSuccessAt: 50, lastError: null });
-    second.instance.stop();
+    storage.values.set('catalog:settings:v2', { autoRefresh: false, intervalHours: 2, timeoutSeconds: 15 });
+    const { instance, store, published } = manager(storage, okFetch(smallCatalog));
+    try {
+      await instance.start();
+      expect(instance.statusSnapshot()).toMatchObject({ state: 'empty', version: null, lastSuccessAt: null,
+        settings: { autoRefresh: true, intervalHours: 24 } });
+      expect(store.current()).toBeNull();
+      expect(published).toEqual([]);
+      await instance.refresh();
+      expect(instance.statusSnapshot()).toMatchObject({ state: 'ready', version: 1 });
+    } finally { await instance.stop(); }
   });
-  test('corrupt persisted snapshot never falls back to a valid but different KV', async () => {
-    const storage = new MemoryStorage(); const store = snapshotStore();
+  test('a corrupt persisted snapshot is rejected', async () => {
+    const store = snapshotStore();
     store.publish(8, { version: 9, fetchedAt: 50, catalog: smallCatalog });
-    storage.values.set('catalog:v1', { version: 7, fetchedAt: 50, catalog: smallCatalog });
-    const { instance } = manager(storage, okFetch(smallCatalog), store); await instance.start();
-    expect(instance.statusSnapshot()).toMatchObject({ state: 'failed', version: null, lastError: 'snapshot' });
-    expect(store.current()!.descriptor.version).toBe(8); instance.stop();
+    const { instance } = manager(new MemoryStorage(), okFetch(smallCatalog), store);
+    try {
+      await instance.start();
+      expect(instance.statusSnapshot()).toMatchObject({ state: 'failed', version: null, lastError: 'snapshot' });
+      expect(store.current()!.descriptor.version).toBe(8);
+    } finally { await instance.stop(); }
   });
   test('rejects invalid settings without changing persisted settings', async () => {
     const { instance } = manager(new MemoryStorage(), okFetch(smallCatalog)); await instance.start();

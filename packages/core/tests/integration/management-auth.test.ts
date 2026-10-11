@@ -7,7 +7,7 @@ import {createControl} from '../../../../plugins/local-accounts/server/control';
 import {loadPluginManifestRecord} from '../../src/plugin-manifest-catalog/manifest-filesystem';
 import {ManagementAuthentication,validateManagementTransition} from '../../src/master-runtime/management-auth';
 import {createConfigControlApi} from '../../src/master-runtime/control-api';
-import type {ConfigurationAggregateV2} from '@jeffusion/bungee-types';
+import type {ConfigurationAggregate} from '@jeffusion/bungee-types';
 const PASSWORD='Administrator password 123!';
 const disposals:(()=>Promise<void>)[]=[];
 afterEach(async()=>{for(const dispose of disposals.splice(0).reverse())await dispose();});
@@ -19,13 +19,13 @@ async function fixture() {
  const host=createPluginControlHost({records:[record],loadControl:async()=>({createControl}),
   secretStores:{create:()=>({namespace:'local-accounts',get:async()=>null,compareAndSet:async()=>1,delete:async()=>{}}),revoke(){},clear(){}},
   storage:{create:()=>({}) as any},durableState:name=>state.forNamespace(name)});
- let aggregate:ConfigurationAggregateV2={logical_configuration:{services:[],routes:[],plugins:[]},plugin_activations:[]};
+ let aggregate:ConfigurationAggregate={logical_configuration:{services:[],routes:[],plugins:[]},plugin_activations:[]};
  const auth=new ManagementAuthentication(host,()=>aggregate,new Set(['local-accounts']));
  await auth.initialize();
  const snapshot=()=>({aggregate,revision:1,content_hash:'sha256:'+'0'.repeat(64)}) as any;
  const api=createConfigControlApi({repository:{getSnapshot:snapshot,getActivePublication:async()=>null,getOperationState:async()=>null,commit:()=>{throw Error('unexpected');}},
   admission:{snapshot:()=>[]},workerCount:1,clock:{now:Date.now},resolveAuthToken:()=>null,
-  parseAggregate:value=>({ok:true,value:value as ConfigurationAggregateV2}),publicationTasks:{enqueue(){}},isMutationReady:()=>true,
+  parseAggregate:value=>({ok:true,value:value as ConfigurationAggregate}),publicationTasks:{enqueue(){}},isMutationReady:()=>true,
   managementAuth:auth,
   validateManagementTransition:(request,active,next)=>validateManagementTransition(request,active,next,auth,host),
   pluginControlApi:host.api,pluginCapability:()=> 'self.password'});

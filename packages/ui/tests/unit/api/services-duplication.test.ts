@@ -1,10 +1,10 @@
 import { afterEach, expect, test } from 'bun:test';
-import type { ConfigurationAggregateV2, ServiceV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate, ConfigurationService } from '@jeffusion/bungee-types';
 import { parseNormalizeCompileAggregate } from '../../../../core/src/config-storage/aggregate';
 import { duplicateEditorService, toEditorService, toV2Service } from '../../../src/api/config-adapters';
 import { ServicesAPI } from '../../../src/api/services';
 
-const source: ServiceV2 = {
+const source: ConfigurationService = {
   id: '10000000-0000-4000-8000-000000000001', position: 3, name: 'alpha',
   endpoints: [{
     id: '20000000-0000-4000-8000-000000000001', position: 5,
@@ -30,7 +30,7 @@ test.each([false, true])('duplicating a service passes real configuration valida
       plugin: 'provider', contributionId: 'accounts', bindingId: service.endpoints[0]!.plugins[0]!.id,
     };
   }
-  const aggregate: ConfigurationAggregateV2 = {
+  const aggregate: ConfigurationAggregate = {
     logical_configuration: {
       services: [service], routes: [{
         id: '50000000-0000-4000-8000-000000000001', position: 0,
@@ -51,7 +51,7 @@ test.each([false, true])('duplicating a service passes real configuration valida
   expect(invalid.ok).toBe(false);
   if (!invalid.ok) expect(invalid.errors.map(error => error.code)).toEqual(['duplicate_id', 'duplicate_id', 'duplicate_id']);
 
-  let committed: ConfigurationAggregateV2 | undefined;
+  let committed: ConfigurationAggregate | undefined;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(new URL(String(input), 'http://ui.test'), init);
     if (request.method === 'GET') return Response.json({ config: aggregate, revision: 4, content_hash: 'sha256:before' });

@@ -10,7 +10,7 @@
 
 ## 数据与一致性
 
-- control 是唯一网络写入者：下载、解析并将 `{version, fetchedAt, catalog}` 原子提交到 Host 分块快照，成功提交后才发布新版本。旧 KV 目录仅在没有快照时一次性导入，不再双写。
+- control 是唯一网络写入者：下载、解析并将 `{version, fetchedAt, catalog}` 原子提交到 Host 分块快照，成功提交后才发布新版本。目录正文仅从 Host 快照恢复；没有快照时保持空状态，等待首次成功下载。
 - 刷新失败保留最后一次有效目录并给出明确 `error`；快照缺失时服务状态为 `empty`/`failed`，绝不伪装成价格 0。
 - worker 不下载：它消费 control 的 Host 版本化快照，验证摘要和正文结构后在本进程构建只读目录视图，按后台周期（5s）对账并在版本更新时整体原子替换。定价/查询因此不逐请求访问网络或 SQLite。
 - 外部消费者（其他 plugin、UI）只能使用公开接口：本进程本地只读服务 `models-dev.catalog.v1`，或版本化快照 `models-dev.catalog.snapshot.v1`。任何消费者都不得读取 models-dev 的 KV/表/文件，也不得 import `server/*` 内部实现。

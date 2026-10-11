@@ -2,7 +2,7 @@ import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { ConfigRepository, ConfigRepositoryError } from '../../src/config-storage';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 
@@ -19,7 +19,7 @@ function open(): ConfigRepository {
   return repository;
 }
 
-function aggregate(): ConfigurationAggregateV2 {
+function aggregate(): ConfigurationAggregate {
   return {
     logical_configuration: {
       auth: { enabled: true, tokens: ['literal'] }, services: [], routes: [], plugins: [],

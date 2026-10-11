@@ -5,7 +5,7 @@ import type {
   PluginConfig,
   PluginConfigValue,
   RouteTimeoutsConfig,
-  RouteV2,
+  ConfigurationRoute,
 } from '@jeffusion/bungee-types';
 import { getConfigSnapshot, validateConfig } from './config';
 import { isEqual } from 'lodash-es';
@@ -56,9 +56,9 @@ export class RouteStaleError extends Error {
   }
 }
 
-export type RouteBaseline = RouteV2;
+export type RouteBaseline = ConfigurationRoute;
 
-function persistedRoute(route: RouteV2, logical: Awaited<ReturnType<typeof getConfigSnapshot>>['config']['logical_configuration']): RouteV2 {
+function persistedRoute(route: ConfigurationRoute, logical: Awaited<ReturnType<typeof getConfigSnapshot>>['config']['logical_configuration']): ConfigurationRoute {
   return toV2Route(toEditorRoute(route, logical.services), logical, route, route.position);
 }
 

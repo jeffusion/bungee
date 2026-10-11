@@ -1,15 +1,15 @@
 import type {
   AppConfig,
-  CommittedConfigurationSnapshotV2,
+  CommittedConfigurationSnapshot,
   Endpoint,
-  PluginBindingV2,
+  PluginBinding,
   PluginConfig,
   RouteConfig,
-  RouteV2,
+  ConfigurationRoute,
   Service,
-  ServiceV2,
+  ConfigurationService,
   Sha256Digest,
-  UpstreamV2,
+  ConfigurationUpstream,
 } from '@jeffusion/bungee-types';
 
 export type RuntimeConfigCompileErrorCode =
@@ -43,7 +43,7 @@ function comparePosition(
 }
 
 function compilePlugins(
-  bindings: readonly PluginBindingV2[],
+  bindings: readonly PluginBinding[],
   activeNames: ReadonlySet<string>,
 ): PluginConfig[] | undefined {
   const plugins = [...bindings]
@@ -59,7 +59,7 @@ function compilePlugins(
 }
 
 function compileEndpoint(
-  upstream: UpstreamV2,
+  upstream: ConfigurationUpstream,
   activeNames: ReadonlySet<string>,
 ): Endpoint {
   const { id, position: _position, plugins: bindings, ...policies } = upstream;
@@ -72,7 +72,7 @@ function compileEndpoint(
 }
 
 function compileService(
-  service: ServiceV2,
+  service: ConfigurationService,
   activeNames: ReadonlySet<string>,
 ): Service {
   const {
@@ -96,8 +96,8 @@ function compileService(
 }
 
 function compileRoute(
-  route: RouteV2,
-  servicesById: ReadonlyMap<string, ServiceV2>,
+  route: ConfigurationRoute,
+  servicesById: ReadonlyMap<string, ConfigurationService>,
   activeNames: ReadonlySet<string>,
 ): RouteConfig {
   const {
@@ -138,7 +138,7 @@ function compileRoute(
   };
 }
 
-function activePluginNames(snapshot: CommittedConfigurationSnapshotV2): ReadonlySet<string> {
+function activePluginNames(snapshot: CommittedConfigurationSnapshot): ReadonlySet<string> {
   const names = new Set<string>();
   for (const { plugin_name: name } of snapshot.aggregate.plugin_activations) {
     if (names.has(name)) {
@@ -152,8 +152,8 @@ function activePluginNames(snapshot: CommittedConfigurationSnapshotV2): Readonly
   return names;
 }
 
-function indexServices(services: readonly ServiceV2[]): ReadonlyMap<string, ServiceV2> {
-  const byId = new Map<string, ServiceV2>();
+function indexServices(services: readonly ConfigurationService[]): ReadonlyMap<string, ConfigurationService> {
+  const byId = new Map<string, ConfigurationService>();
   for (const service of services) {
     if (byId.has(service.id)) {
       throw new RuntimeConfigCompileError('duplicate_service_id', `duplicate service id: ${service.id}`);
@@ -164,7 +164,7 @@ function indexServices(services: readonly ServiceV2[]): ReadonlyMap<string, Serv
 }
 
 export function compileRuntimeConfigSnapshot(
-  snapshot: CommittedConfigurationSnapshotV2,
+  snapshot: CommittedConfigurationSnapshot,
 ): RuntimeConfigSnapshot {
   const activeNames = activePluginNames(snapshot);
   const logical = structuredClone(snapshot.aggregate.logical_configuration);

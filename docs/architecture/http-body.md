@@ -86,9 +86,9 @@ SSE 日志保存为 `[{event,data}, ...]`：多行 data 合并，合法 JSON 使
 
 ## 配置整理与约束检查
 
-运行时只执行 request/response，数据库初始化与升级见[存储契约](storage.md)。配置导入整理时，新方向块的显式字段优先，包括空规则；剩余旧字段按方向搬迁。不可用的规则、操作或条目自动局部忽略，保留有效兄弟项，不回退到已被新字段覆盖的旧值。旧 Endpoint.body 的响应语义仍为普通 JSON；混合的新 body_formats 不能把它扩大到 SSE。鉴权、目标、插件及数据库完整性继续严格校验。
+运行时、配置编辑和快照导入只接受当前 request/response 结构。导入预览和提交先验证封装及内容 hash，再执行相同的严格校验；旧字段、无效规则或不支持的表达式直接报错，不自动迁移或丢弃。
 
-导入先验证原封装 hash，再执行同一整理，预览与提交保持一致，warnings 仅记录位置及固定原因。历史修订和 serving snapshot 不改写；升级和发布是独立状态，不把构建或测试通过当作部署完成。
+Serving snapshot 使用相同的当前格式校验，并核对规范 JSON、内容 hash 和修订身份；格式不符视为损坏，不尝试旧格式回退。数据库初始化见[存储契约](storage.md)。
 
 `bun run check:architecture` 使用 TypeScript AST 检查公共 SDK 导入、正文构造、原生读体和中央解码边界；负例测试包含错误 import、getReader、clone、原生 json/text/arrayBuffer、tee 与 codec 旁路。OAuth 交换、账号 usage、模型目录及管理 API 属于明确辅助网络边界，业务 JSON 字段解析不被全局禁用。CI 在构建前运行检查。
 

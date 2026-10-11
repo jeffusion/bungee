@@ -52,7 +52,7 @@ const removed=await fetch(base+'/api/keys');if(removed.status!==404)throw Error(
 const initial=await (await fetch(base+'/api/config',{})).json();
 const nextAggregate={...initial.config,plugin_activations:[{plugin_name:'local-accounts'}]};
 const fullPut=await fetch(base+'/api/config',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({expected_revision:1,mutation_id:crypto.randomUUID(),aggregate:nextAggregate})});if(fullPut.status!==422)throw Error('full PUT bypass '+fullPut.status);
-const envelopeBase={format:'bungee-config-snapshot',format_version:1,schema_version:2,exported_at:Date.now(),source_revision:1,content_hash:hashConfigurationContent(nextAggregate),aggregate:nextAggregate};
+const envelopeBase={format:'bungee-config-snapshot',format_version:1,schema_version:1,exported_at:Date.now(),source_revision:1,content_hash:hashConfigurationContent(nextAggregate),aggregate:nextAggregate};
 const imported=await fetch(base+'/api/config/import',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({expected_revision:1,mutation_id:crypto.randomUUID(),envelope:{...envelopeBase,envelope_hash:hashConfigurationContent(envelopeBase)}})});if(imported.status!==422)throw Error('import bypass '+imported.status);
 const setup={username:'owner',password:'Owner password 123!',passwordConfirmation:'Owner password 123!'};
 const missing=await fetch(base+'/api/plugins/local-accounts/enable',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({expected_revision:1,mutation_id:crypto.randomUUID()})});if(missing.status!==422)throw Error('setup missing '+missing.status);

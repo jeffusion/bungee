@@ -1,4 +1,4 @@
-import type { CommittedConfigurationSnapshotV2 } from '@jeffusion/bungee-types';
+import type { CommittedConfigurationSnapshot } from '@jeffusion/bungee-types';
 import { hashConfigurationContent } from '../config-storage/content-hash';
 import { parseNormalizeCompileAggregate } from '../config-storage/aggregate';
 import { compileRuntimeConfigSnapshot, type RuntimeConfigSnapshot } from '../config-storage/runtime-config';
@@ -8,7 +8,7 @@ import type { PluginManifestCatalog } from '../plugin-manifest-catalog';
 export function createCatalogSnapshotCompiler(loadCatalog: () => Promise<PluginManifestCatalog>) {
   let catalogPromise: Promise<PluginManifestCatalog> | null = null;
   return async (
-    snapshot: CommittedConfigurationSnapshotV2,
+    snapshot: CommittedConfigurationSnapshot,
     command: StartWorkerCommand,
   ): Promise<RuntimeConfigSnapshot> => {
     if (catalogPromise === null) catalogPromise = Promise.resolve().then(loadCatalog);

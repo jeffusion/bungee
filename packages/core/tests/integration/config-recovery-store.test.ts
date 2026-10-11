@@ -3,7 +3,7 @@ import { Database } from 'bun:sqlite';
 import { rmSync, mkdtempSync, writeFileSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { ConfigRepository, ConfigRepositoryError, hashConfigurationContent, hashConfigurationRequest,
   type ConfigRepositoryOptions } from '../../src/config-storage';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
@@ -13,7 +13,7 @@ setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 const ROOTS: string[] = [];
 const REPOSITORIES: ConfigRepository[] = [];
 const NOW = 1_700_000_000_000;
-const AGGREGATE: ConfigurationAggregateV2 = {
+const AGGREGATE: ConfigurationAggregate = {
   logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [],
 };
 

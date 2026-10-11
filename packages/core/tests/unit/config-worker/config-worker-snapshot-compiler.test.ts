@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { createCatalogSnapshotCompiler } from '../../../src/config-worker/snapshot-compiler';
 import { hashConfigurationContent, parseNormalizeCompileAggregate } from '../../../src/config-storage';
 import { PluginManifestCatalog } from '../../../src/plugin-manifest-catalog';
@@ -12,7 +12,7 @@ beforeAll(async () => {
   catalog = await PluginManifestCatalog.build({ scanDirectories: [BUILTINS] });
 });
 
-function aggregate(overrides: Partial<ConfigurationAggregateV2> = {}): ConfigurationAggregateV2 {
+function aggregate(overrides: Partial<ConfigurationAggregate> = {}): ConfigurationAggregate {
   return {
     logical_configuration: { services: [], routes: [], plugins: [] },
     plugin_activations: [],
@@ -20,7 +20,7 @@ function aggregate(overrides: Partial<ConfigurationAggregateV2> = {}): Configura
   };
 }
 
-function command(value: ConfigurationAggregateV2) {
+function command(value: ConfigurationAggregate) {
   return {
     command: 'start-current-config-worker' as const,
     ...PROCESS_IDENTITY,

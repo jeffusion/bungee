@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { consumeRouteSourceHandoff, consumeSourceHandoff, prepareRouteSourceHandoff, prepareSourceHandoff, RouteSourceHandoffError, routeSourceHandoffUrl, sourceHandoffUrl, type RouteSourceHandoff, type SourceHandoff } from '../../../src/api/source-handoff';
 import { ServicesAPI, ServiceStaleError } from '../../../src/api/services';
 import { toEditorService } from '../../../src/api/config-adapters';
@@ -11,7 +11,7 @@ const plugin: Plugin = { name: handoff.sourcePlugin, enabled: true, metadata: { 
   upstreamSources: [{ id: 'source', label: '来源', listAccounts: 'accounts', createDraft: 'draft', credentialPolicy: { allowedOrigins: [], allowedRequests: [], allowedHeaderNames: [] } }],
   api: [{ path: '/accounts', methods: ['GET'], handler: 'accounts', execution: 'control' }, { path: '/draft', methods: ['POST'], handler: 'draft', execution: 'control' }],
 } } };
-const aggregate: ConfigurationAggregateV2 = { logical_configuration: {
+const aggregate: ConfigurationAggregate = { logical_configuration: {
   auth: { enabled: false, tokens: [] }, plugins: [], routes: [], services: [{ id, position: 0, name: 'existing', plugins: [],
     endpoints: [{ id: 'first', position: 0, target: 'https://manual.test', weight: 100, priority: 1, is_disabled: false,
       plugins: [{ id: 'conflicting', position: 0, name: 'test-provider', enabled: false, options: { accountRef: 'other' } }] }],
@@ -20,7 +20,7 @@ const aggregate: ConfigurationAggregateV2 = { logical_configuration: {
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 
-function mockApi(options: { enabled?: boolean; available?: boolean; current?: ConfigurationAggregateV2; draftAccount?: string; sourceError?: boolean; accountError?: boolean; draftError?: boolean } = {}) {
+function mockApi(options: { enabled?: boolean; available?: boolean; current?: ConfigurationAggregate; draftAccount?: string; sourceError?: boolean; accountError?: boolean; draftError?: boolean } = {}) {
   const requests: Request[] = [];
   let published: any;
   globalThis.fetch = (async (input, init) => {

@@ -1,4 +1,4 @@
-import type { ConfigurationAggregateV2, Sha256Digest } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate, Sha256Digest } from '@jeffusion/bungee-types';
 import { parseNormalizeCompileAggregate } from './aggregate';
 import type { ConfigurationCompileOptions } from './plugin-schema';
 import { ConfigRepositoryError } from './repository-types';
@@ -18,7 +18,7 @@ export function validateMutationId(value: string): boolean {
 export function validateCommitCommand(
   command: JsonObject,
   compileOptions?: ConfigurationCompileOptions,
-): ConfigurationAggregateV2 {
+): ConfigurationAggregate {
   if (typeof command.mutation_id !== 'string' || !validateMutationId(command.mutation_id)) {
     throw new ConfigRepositoryError('invalid_command', 'mutation_id must match [A-Za-z0-9][A-Za-z0-9._:-]{0,127}');
   }

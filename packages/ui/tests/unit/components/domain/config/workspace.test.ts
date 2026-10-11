@@ -51,7 +51,7 @@ test('viewing defaults and cancelling a copied draft does not materialize defaul
 
 test('file selection and cancellation are a local preview, not an import write', () => {
   const aggregate = { logical_configuration: { routes: [], services: [], plugins: [] }, plugin_activations: [] };
-  const envelope = { format: 'bungee-config-snapshot', format_version: 1, schema_version: 2, exported_at: 1,
+  const envelope = { format: 'bungee-config-snapshot', format_version: 1, schema_version: 1, exported_at: 1,
     source_revision: 7, content_hash: `sha256:${'a'.repeat(64)}`, envelope_hash: `sha256:${'b'.repeat(64)}`, aggregate };
   expect(parseImportPreview(JSON.stringify(envelope)).aggregate).toEqual(aggregate);
   expect(() => parseImportPreview(JSON.stringify({ aggregate }))).toThrow();

@@ -44,7 +44,9 @@ For a retry, send exactly `{"request_id":"<lowercase UUID>","expected_revision":
 
 ### Aggregate schema
 
-Every write replaces one complete `ConfigurationAggregateV2`. Entity IDs are stable UUIDs; `position` controls deterministic ordering; routes reference services by `service_id`.
+Every write replaces one complete `ConfigurationAggregate`. Entity IDs are stable UUIDs; `position` controls deterministic ordering; routes reference services by `service_id`.
+
+Exported snapshots use `format_version: 1` and `schema_version: 1`. Import preview and commit accept only this envelope and the current aggregate schema; unsupported versions or fields are rejected without migration.
 
 ```json
 {

@@ -1,13 +1,13 @@
 import type {
   Endpoint,
-  LogicalConfigurationV2,
-  PluginBindingV2,
+  LogicalConfiguration,
+  PluginBinding,
   PluginConfig,
   RouteConfig,
-  RouteV2,
+  ConfigurationRoute,
   Service as BaseService,
-  ServiceV2,
-  UpstreamV2,
+  ConfigurationService,
+  ConfigurationUpstream,
 } from '@jeffusion/bungee-types';
 import { v4 as uuidv4 } from 'uuid';
 import type { EditorRouteTimeouts } from '$utils/route-timeouts';
@@ -18,7 +18,7 @@ export type EditorPluginBinding = PluginConfig & {
 };
 
 export type EditorUpstream = Omit<Endpoint, 'id' | 'plugins'> & {
-  managedBy?: UpstreamV2['managedBy'];
+  managedBy?: ConfigurationUpstream['managedBy'];
   _uid?: string;
   _position?: number;
   plugins?: Array<EditorPluginBinding | string>;
@@ -42,7 +42,7 @@ export type EditorRoute = Omit<RouteConfig, 'endpoints' | 'plugins' | 'timeouts'
   transformer?: string | object;
 };
 
-function toEditorPlugin(binding: PluginBindingV2): EditorPluginBinding {
+function toEditorPlugin(binding: PluginBinding): EditorPluginBinding {
   return {
     _uid: binding.id,
     _position: binding.position,
@@ -54,8 +54,8 @@ function toEditorPlugin(binding: PluginBindingV2): EditorPluginBinding {
 
 function toV2Plugins(
   plugins: readonly (EditorPluginBinding | string)[],
-  previous: readonly PluginBindingV2[],
-): readonly PluginBindingV2[] {
+  previous: readonly PluginBinding[],
+): readonly PluginBinding[] {
   const used = new Set<string>();
   let nextPosition = previous.reduce((maximum, binding) => Math.max(maximum, binding.position), -1) + 1;
   return plugins.map((plugin) => {
@@ -75,7 +75,7 @@ function toV2Plugins(
   });
 }
 
-export function toEditorUpstream(upstream: UpstreamV2): EditorUpstream {
+export function toEditorUpstream(upstream: ConfigurationUpstream): EditorUpstream {
   assertManagedBinding(upstream.managedBy, upstream.plugins);
   const { id, position, plugins, ...policy } = upstream;
   return {
@@ -92,8 +92,8 @@ export class ManagedBindingError extends Error {
 }
 
 function assertManagedBinding(
-  managedBy: UpstreamV2['managedBy'],
-  plugins: readonly (PluginBindingV2 | EditorPluginBinding | string)[] | undefined,
+  managedBy: ConfigurationUpstream['managedBy'],
+  plugins: readonly (PluginBinding | EditorPluginBinding | string)[] | undefined,
 ): void {
   if (managedBy === undefined) return;
   if (!managedBy || !managedBy.plugin || !managedBy.contributionId || !managedBy.bindingId
@@ -148,8 +148,8 @@ export function duplicateEditorService(service: EditorService): EditorService {
 
 function toV2Upstreams(
   upstreams: readonly EditorUpstream[],
-  previous: readonly UpstreamV2[],
-): readonly UpstreamV2[] {
+  previous: readonly ConfigurationUpstream[],
+): readonly ConfigurationUpstream[] {
   const used = new Set<string>();
   let nextPosition = previous.reduce((maximum, upstream) => Math.max(maximum, upstream.position), -1) + 1;
   return upstreams.map((upstream) => {
@@ -175,8 +175,8 @@ function toV2Upstreams(
   });
 }
 
-export function toEditorService(service: ServiceV2): EditorService {
-  const { id, position, endpoints, plugins, timeouts: _removedTimeouts, ...policy } = service as ServiceV2 & { timeouts?: unknown };
+export function toEditorService(service: ConfigurationService): EditorService {
+  const { id, position, endpoints, plugins, timeouts: _removedTimeouts, ...policy } = service as ConfigurationService & { timeouts?: unknown };
   return {
     ...policy,
     _uid: id,
@@ -188,9 +188,9 @@ export function toEditorService(service: ServiceV2): EditorService {
 
 export function toV2Service(
   service: EditorService,
-  previous: ServiceV2 | undefined,
+  previous: ConfigurationService | undefined,
   position: number,
-): ServiceV2 {
+): ConfigurationService {
   const {
     _uid, _position, description, endpoints, plugins = [], timeouts: _removedTimeouts, ...policy
   } = service as EditorService & { timeouts?: unknown };
@@ -203,7 +203,7 @@ export function toV2Service(
   };
 }
 
-export function toEditorRoute(route: RouteV2, services: readonly ServiceV2[]): EditorRoute {
+export function toEditorRoute(route: ConfigurationRoute, services: readonly ConfigurationService[]): EditorRoute {
   if (route.service_id !== undefined) {
     const { id, position, plugins, service_id, ...servicePolicy } = route;
     return {
@@ -227,10 +227,10 @@ export function toEditorRoute(route: RouteV2, services: readonly ServiceV2[]): E
 
 export function toV2Route(
   route: EditorRoute,
-  logical: LogicalConfigurationV2,
-  previous: RouteV2 | undefined,
+  logical: LogicalConfiguration,
+  previous: ConfigurationRoute | undefined,
   position: number,
-): RouteV2 {
+): ConfigurationRoute {
   const {
     _uid, _position, _serviceId, service, service_id: _runtimeServiceId, endpoints = [], plugins = [], transformer, auth: _legacyAuth, ...policy
   } = route as EditorRoute & {auth?:unknown};

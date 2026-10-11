@@ -17,7 +17,7 @@
 }
 ```
 
-这是 binding 片段；完整配置使用 revisioned ConfigurationAggregateV2 的稳定 ID 和 position，见 [配置文档](configuration.md)。插件激活项为 `{"plugin_name":"llm-protocol-adapter"}`，依赖 `models-dev` 一并激活。不要把 provider ID 当作协议：协议描述线路格式，provider/model 指向能力目录中的精确记录。
+这是 binding 片段；完整配置使用 revisioned ConfigurationAggregate 的稳定 ID 和 position，见 [配置文档](configuration.md)。插件激活项为 `{"plugin_name":"llm-protocol-adapter"}`，依赖 `models-dev` 一并激活。不要把 provider ID 当作协议：协议描述线路格式，provider/model 指向能力目录中的精确记录。
 
 | 源 → 目标 | `responses` | `chat_completions` | `anthropic_messages` | `gemini_generate_content` |
 |---|---|---|---|---|

@@ -1,4 +1,4 @@
-import type { ConfigurationAggregateV2, Sha256Digest } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate, Sha256Digest } from '@jeffusion/bungee-types';
 import { hashConfigurationContent, hashConfigurationRequest } from './content-hash';
 import { snapshotJsonGraph } from './json-preflight';
 import type { PluginConfigValue } from '@jeffusion/bungee-types';
@@ -14,7 +14,7 @@ const COMMAND_FIELDS = new Set([
 export type PreparedCommitCommand = {
   readonly mutationId: string;
   readonly expectedRevision: number;
-  readonly aggregate: ConfigurationAggregateV2;
+  readonly aggregate: ConfigurationAggregate;
   readonly kind: 'config' | 'admin_state';
   readonly createdAt: number;
   readonly targetSlots: readonly number[];

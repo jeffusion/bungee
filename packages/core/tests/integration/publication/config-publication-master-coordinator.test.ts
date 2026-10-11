@@ -2,7 +2,7 @@ import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_PUBLICATION_POLICY, type ConfigurationAggregateV2, type Sha256Digest } from '@jeffusion/bungee-types';
+import { DEFAULT_PUBLICATION_POLICY, type ConfigurationAggregate, type Sha256Digest } from '@jeffusion/bungee-types';
 import { ConfigRepository } from '../../../src/config-storage';
 import {
   MasterConfigPublicationCoordinator as BaseMasterConfigPublicationCoordinator,
@@ -33,13 +33,13 @@ const OTHER_PLUGIN_CATALOG_HASH: Sha256Digest = `sha256:${'d'.repeat(64)}`;
 let nextInstance = 1;
 const createWorkerInstanceId = (): string =>
   `20000000-0000-4000-8000-${String(nextInstance++).padStart(12, '0')}`;
-const AGGREGATE: ConfigurationAggregateV2 = {
+const AGGREGATE: ConfigurationAggregate = {
   logical_configuration: {
     auth: { enabled: true, tokens: ['literal'] }, services: [], routes: [], plugins: [],
   },
   plugin_activations: [],
 };
-const SETUP_AGGREGATE: ConfigurationAggregateV2 = {
+const SETUP_AGGREGATE: ConfigurationAggregate = {
   logical_configuration: { services: [], routes: [], plugins: [] },
   plugin_activations: [],
 };

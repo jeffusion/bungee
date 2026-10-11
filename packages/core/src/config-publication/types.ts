@@ -1,5 +1,5 @@
 import type {
-  ConfigurationAggregateV2,
+  ConfigurationAggregate,
   PublicationPolicy,
   Sha256Digest,
 } from '@jeffusion/bungee-types';
@@ -20,7 +20,7 @@ type StartWorkerCommandBase = ConfigProcessIdentity & {
   readonly revision: number;
   readonly content_hash: Sha256Digest;
   readonly plugin_catalog_hash: Sha256Digest;
-  readonly aggregate: ConfigurationAggregateV2;
+  readonly aggregate: ConfigurationAggregate;
   readonly activated_plugin_names: readonly string[];
 };
 
@@ -130,7 +130,7 @@ export type ConfigMutationEnvelope = {
   readonly mutation_id: string;
   readonly expected_revision: number;
   readonly kind: 'config' | 'admin_state';
-  readonly aggregate: ConfigurationAggregateV2;
+  readonly aggregate: ConfigurationAggregate;
 };
 
 export type CommitConfigRequest = ConfigProcessIdentity & {

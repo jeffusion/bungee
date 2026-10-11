@@ -1,4 +1,4 @@
-import type { ConfigurationAggregateV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import type { Database } from 'bun:sqlite';
 import { parseNormalizeCompileAggregate } from './aggregate';
 import { parseCanonicalObject, type PersistedJsonObject } from './persisted-json';
@@ -78,7 +78,7 @@ export function readRawActiveAggregate(db: Database): unknown {
   return input;
 }
 
-export function readActiveAggregate(db: Database): ConfigurationAggregateV2 {
+export function readActiveAggregate(db: Database): ConfigurationAggregate {
   const result = parseNormalizeCompileAggregate(readRawActiveAggregate(db));
   if (!result.ok) throw new ConfigRepositoryError('schema_corrupt', 'active configuration is invalid', result.errors);
   return result.value;

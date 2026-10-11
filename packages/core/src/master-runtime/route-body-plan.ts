@@ -1,4 +1,4 @@
-import type { ConfigurationAggregateV2, ModificationRules, ResponseModificationRules, UpstreamV2 } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate, ModificationRules, ResponseModificationRules, ConfigurationUpstream } from '@jeffusion/bungee-types';
 import { analyzeExpressionDependencies, hasBodyModification } from '../utils/expression-dependencies';
 import { deepMergeRules } from '../worker/rules/deep-merge';
 
@@ -20,14 +20,14 @@ function directionPlan(request: ModificationRules, response: ResponseModificatio
 }
 
 /** A committed configuration plan; dynamic plugin/policy decisions belong to individual request logs. */
-export function buildRouteBodyPlans(aggregate: ConfigurationAggregateV2) {
+export function buildRouteBodyPlans(aggregate: ConfigurationAggregate) {
   const logical = aggregate.logical_configuration;
   const active = new Set(aggregate.plugin_activations.map(value => value.plugin_name));
   const pluginNames = (...bindings: Array<readonly {name: string; enabled: boolean}[] | undefined>) =>
     [...new Set(bindings.flatMap(values => (values ?? []).filter(value => value.enabled && active.has(value.name)).map(value => value.name)))];
   return logical.routes.map(route => {
     const service = 'service_id' in route ? logical.services.find(value => value.id === route.service_id) : undefined;
-    const endpoints: readonly UpstreamV2[] = service?.endpoints ?? route.endpoints ?? [];
+    const endpoints: readonly ConfigurationUpstream[] = service?.endpoints ?? route.endpoints ?? [];
     const retry = Boolean(route.retry?.enabled || service?.failover?.enabled);
     return {
       route_id: route.id, path: route.path,
