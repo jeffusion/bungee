@@ -1,3 +1,23 @@
+# [5.23.0](https://github.com/jeffusion/bungee/compare/v5.22.0...v5.23.0) (2026-10-11)
+
+
+### Bug Fixes
+
+* **chatgpt-oauth:** unify Responses entry paths ([b97a16e](https://github.com/jeffusion/bungee/commit/b97a16eab46745e0db34a92c35ec5c3dd7f92094))
+* **gateway:** preserve protocol paths across route dispatch ([058d68c](https://github.com/jeffusion/bungee/commit/058d68c41d3ee0c6226b7bbc61a6797bd4fa46db))
+* **ingress:** keep renewal tied to the active lease ([268aa75](https://github.com/jeffusion/bungee/commit/268aa759f6a19b7b98c6f173b1c0518b39bf140c))
+* **ui:** allow unset optional plugin bindings ([bebb7a1](https://github.com/jeffusion/bungee/commit/bebb7a1d407c6ef530a0897052e06ccf7a7fb93a))
+* **ui:** unify Codex router target selection and summaries ([0716ff4](https://github.com/jeffusion/bungee/commit/0716ff4b4a3de604097cd6a0efe9d684037e20dd))
+
+
+### Features
+
+* **codex-router:** configure and verify collaboration relay ([c698b9b](https://github.com/jeffusion/bungee/commit/c698b9b0d2be3c05627bb36df9809c4338a35149))
+* **codex-router:** distinguish added and replaced models ([d66f1f9](https://github.com/jeffusion/bungee/commit/d66f1f9e9fe9b64950747dde8fb45f3208467bf3))
+* **codex-router:** relay encrypted collaboration tasks ([6802e59](https://github.com/jeffusion/bungee/commit/6802e5937454ffb2b6533727cfb117e8f544acad))
+* **gateway:** authorize and meter internal auxiliary requests ([0dd431b](https://github.com/jeffusion/bungee/commit/0dd431bfa815ba81eacb14a1ac5af224bf9d7152))
+* **llms:** normalize plaintext agent collaboration ([2386eff](https://github.com/jeffusion/bungee/commit/2386effb128c92a83a5dec38d9251947d5eb6d4f))
+
 # [5.22.0](https://github.com/jeffusion/bungee/compare/v5.21.1...v5.22.0) (2026-10-11)
 
 
