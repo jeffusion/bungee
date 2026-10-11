@@ -11,9 +11,9 @@ const { handleRequest } = await import('../../src/worker/request/handler');
 const { bodyMetrics } = await import('../../src/gateway/body-resources');
 const { BodyServicePlugin } = await import('../../src/gateway/body-plugin');
 import { gzipSync } from 'node:zlib';
-import { DataAdmissionError } from '../src/data-admission/errors';
-import { runtimeState, getActiveRequestCount } from '../src/worker/state/runtime-state';
-import type { RuntimeUpstream } from '../src/worker/types';
+const { DataAdmissionError } = await import('../../src/data-admission/errors');
+const { runtimeState, getActiveRequestCount } = await import('../../src/worker/state/runtime-state');
+import type { RuntimeUpstream } from '../../src/worker/types';
 
 const previousRegistry = getScopedPluginRegistry();
 const originalFetch = globalThis.fetch;

@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test';
 import { join } from 'node:path';
 import { PluginRuntimeOrchestrator } from '../../src/plugin-runtime-orchestrator';
-import { cleanupCatalogRoots, manifest, tempRoot, writePlugin } from './plugin-manifest-catalog-fixtures';
+import { cleanupCatalogRoots, manifest, tempRoot, writePlugin } from '../helpers/plugin-manifest-catalog';
 
 afterEach(cleanupCatalogRoots);
 test('dual provider failure rejects runtime hot reload and retains the serving generation',async()=>{
@@ -28,7 +28,7 @@ export default class Consumer {
   }
 }
 `);
-  const orchestrator=new PluginRuntimeOrchestrator(root,undefined,['dual-provider','dual-consumer']);
+  const orchestrator=new PluginRuntimeOrchestrator(root,['dual-provider','dual-consumer']);
   try {
     const first=await orchestrator.applyConfig({plugins:[{name:'dual-consumer'}],routes:[{path:'/r',plugins:[{name:'dual-provider',options:{source:'a'}}],endpoints:[{target:'http://test'}]}]});
     expect(first.runtime).toEqual({success:3,failed:0});

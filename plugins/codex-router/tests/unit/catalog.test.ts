@@ -1,4 +1,4 @@
-import {conversionService} from '../../llm-protocol-adapter/server/service';
+import {conversionService} from '../../../llm-protocol-adapter/server/service';
 import {expect,test} from 'bun:test';
 import {CatalogView,capabilitiesServiceOf} from '../../../models-dev/server/local';
 import {buildCatalogIndex} from '../../../models-dev/server/catalog';

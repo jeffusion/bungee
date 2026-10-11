@@ -217,7 +217,7 @@ describe('models-dev authoritative snapshot', () => {
     let subscriberStopped = false, timerStopped = false;
     const control = createControl({ storage: new MemoryStorage(), signal: new AbortController().signal,
       services: { publish: (id: string, _version: number, value: unknown) => controlServices.set(id, value),
-        snapshot: { store: () => store, provide: () => {} },
+        snapshot: { store: () => ({ current: async () => store.current(), version: async (version: number) => store.version(version), publish: async (version: number, body: unknown) => store.publish(version, body) }), provide: () => {} },
       },
     } as unknown as ControlHostContext, {
       fetch: (async () => { fetchCount++; throw new Error('fixture forbids network'); }) as typeof fetch,

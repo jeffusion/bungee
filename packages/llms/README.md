@@ -12,4 +12,4 @@ const request = session.convertRequest({input: 'Hello'});
 session.dispose();
 ```
 
-The matrix has four passthrough pairs, ten direct conversions and two rejected Responses/Gemini pairs. Explicit reasoning controls require a verified wire policy. Tools, history and output constraints fail with a safe reason and param when their semantics cannot be preserved. See [LLM Protocol Adapter](../../docs/llm-protocol-adapter.md).
+The matrix has four passthrough pairs, ten direct conversions and two rejected Responses/Gemini pairs. Explicit reasoning controls require a verified wire policy. Tools, history and output constraints fail with a safe reason and param when their semantics cannot be preserved. See [LLM Protocol Adapter](../../docs/reference/llm-protocol-adapter.md).

@@ -1,38 +1,39 @@
-// Local component server with fixture APIs only. No production instance or credentials.
-import { fileURLToPath } from 'node:url';
-import { createServer } from 'vite';
-import { chromium, expect } from 'playwright/test';
-import appConfig from '../vite.config';
-const manifest = await Bun.file(new URL('../../../plugins/llm-protocol-adapter/manifest.json', import.meta.url)).json();
-const root = fileURLToPath(new URL('../', import.meta.url));
-// Svelte's PostCSS preprocessor resolves Tailwind from cwd, independently of Vite root.
-process.chdir(root);
-const server = await createServer({ ...appConfig, configFile: false, root,
-  resolve: { ...appConfig.resolve, alias: [...appConfig.resolve!.alias as any[], { find: '@jeffusion/bungee-types', replacement: fileURLToPath(new URL('../../types/src/index.ts', import.meta.url)) }] }, cacheDir: '/tmp/bungee-adapter-ui-vite',
-  optimizeDeps: { entries: ['tests/fixtures/protocol-adapter.html'], include: ['deepmerge', 'cmdk-sv', 'lucide-svelte/icons/search'], exclude: ['svelte-spa-router'] },
-  server: { host: '127.0.0.1', port: 0, proxy: {} } });
-await server.listen();
-const address = server.httpServer!.address();
-if (!address || typeof address === 'string') throw new Error('Missing local fixture address');
-const origin = `http://127.0.0.1:${address.port}`;
-const browser = await chromium.launch({ headless: true });
-try {
-  for (const language of ['zh-CN', 'en']) {
-    const page = await browser.newPage({ viewport: { width: 390, height: 850 } });
+import {afterAll,beforeAll,test} from 'bun:test';
+import {resolve} from 'node:path';
+import {chromium,type Browser} from 'playwright';
+import {expect} from 'playwright/test';
+import {startUiRuntime} from '../../../../tests/helpers/ui-runtime';
+
+const fixture=resolve(import.meta.dir,'../fixtures/protocol-adapter.html');
+const manifest=await Bun.file(new URL('../../../../plugins/llm-protocol-adapter/manifest.json',import.meta.url)).json();
+let runtime:Awaited<ReturnType<typeof startUiRuntime>>;
+let browser:Browser;
+beforeAll(async()=>{
+  runtime=await startUiRuntime({mode:'component-fixture',entries:['index.html',fixture]});
+  try {browser=await chromium.launch({headless:true});}
+  catch(error){await runtime.close();throw error;}
+},120_000);
+afterAll(async()=>{try {await browser?.close();}finally{await runtime?.close();}});
+
+for(const language of ['zh-CN','en'])test(`adapter independent protocol fields, validation and edit round trip: ${language}`,async()=>{
+
+    const context = await browser.newContext({ viewport: { width: 390, height: 850 } });
+    const page = await context.newPage();
+    try {
     await page.addInitScript(lang => localStorage.setItem('locale', lang), language);
     const errors: string[] = [];
     page.on('pageerror', error => { errors.push(error.message); console.error('Fixture error:', error.message); });
     page.on('console', message => { if (message.type() === 'error') console.error(message.text()); });
-    await page.route(`${origin}/api/**`, async route => {
+    await page.route(`${runtime.origin}/api/**`, async route => {
       const path = new URL(route.request().url()).pathname;
       if (path === '/api/plugins') return route.fulfill({ json: [{ ...manifest, enabled: true }] });
       if (path === '/api/plugins/schemas') return route.fulfill({ json: { [manifest.name]: { ...manifest,
         configSchema: manifest.configSchema.map((field: any) => ({ ...field, label: `plugins.${manifest.name}.${field.label}`,
           options: field.options.map((option: any) => ({ ...option, label: `plugins.${manifest.name}.${option.label}` })) })) } } });
-      if (path === '/api/auth/mode') return route.fulfill({ json: { mode: 'anonymous', publicOrigin: origin } });
+      if (path === '/api/auth/mode') return route.fulfill({ json: { mode: 'anonymous', publicOrigin: runtime.origin } });
       return route.fulfill({ status: 404, json: { error: 'unexpected_fixture_request' } });
     });
-    await page.goto(`${origin}/tests/fixtures/protocol-adapter.html`);
+    await page.goto(`${runtime.origin}/@fs${fixture}`);
     const zh = language === 'zh-CN';
     await page.getByRole('button', { name: zh ? '添加插件' : 'Add Plugin', exact: true }).click();
     await page.getByRole('combobox', { name: zh ? '选择插件' : 'Select Plugin' }).click();
@@ -52,10 +53,10 @@ try {
     await save.click();
     await expect(dialog.getByRole('alert')).toContainText(zh ? '不支持该协议组合' : 'Unsupported protocol pair');
     await expect(save).toBeDisabled();
-    await page.screenshot({ path: `/tmp/llm-protocol-adapter-invalid-${language}.png`, fullPage: true });
+    await page.screenshot({ path: resolve(runtime.evidence, `invalid-${language}.png`), fullPage: true });
     await target.click(); await page.getByRole('option', { name: 'Chat Completions', exact: true }).click();
     await expect(source).toContainText('Responses'); await expect(save).toBeEnabled();
-    await page.screenshot({ path: `/tmp/llm-protocol-adapter-${language}.png`, fullPage: true });
+    await page.screenshot({ path: resolve(runtime.evidence, `valid-${language}.png`), fullPage: true });
     await save.click(); await expect(dialog).toHaveCount(0);
     await expect(page.getByTestId('saved-bindings')).toContainText('"sourceProtocol":"responses","targetProtocol":"chat_completions"');
     await expect(page.getByTestId('protocol-adapter-fixture')).toContainText(zh ? '源协议' : 'Source protocol');
@@ -66,8 +67,10 @@ try {
     await source.click(); await source.press('Escape'); await expect(dialog).toBeVisible();
     await dialog.getByRole('button', { name: zh ? '取消' : 'Cancel', exact: true }).click();
     await expect(page.getByRole('button', { name: zh ? '编辑' : 'Edit', exact: true })).toBeFocused();
-    expect(errors).toEqual([]); await page.close();
-  }
-  expect(manifest.uiExtensionMode).toBe('none'); expect(manifest.contributes?.settings).toBeUndefined();
-  console.log('Protocol Adapter isolated UI passed: zh/en, vertical independent selectors, keyboard, required fields, unsupported-pair rejection, corrected-pair save, summary and reopen.');
-} finally { await browser.close(); await server.close(); }
+    expect(errors).toEqual([]);
+    } finally { await context.close(); }
+},60_000);
+
+test('adapter contributes bindings without a separate settings page',()=>{
+  expect(manifest.uiExtensionMode).toBe('none');expect(manifest.contributes?.settings).toBeUndefined();
+});

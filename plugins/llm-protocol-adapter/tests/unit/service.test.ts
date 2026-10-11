@@ -1,7 +1,7 @@
 import {expect,test} from 'bun:test';
-import {conversionService} from './service';
-import {CatalogView,capabilitiesServiceOf} from '../../models-dev/server/local';
-import {buildCatalogIndex} from '../../models-dev/server/catalog';
+import {conversionService} from '../../server/service';
+import {CatalogView,capabilitiesServiceOf} from '../../../models-dev/server/local';
+import {buildCatalogIndex} from '../../../models-dev/server/catalog';
 function fixture(options?:unknown) {
  if(arguments.length===0)options=[{type:'effort',values:['low','high','max']}];
  const view=new CatalogView();
