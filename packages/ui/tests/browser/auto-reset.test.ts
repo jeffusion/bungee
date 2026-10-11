@@ -60,10 +60,12 @@ try {
   assert.equal(settings.length, 0, 'opening the confirmation must not enable automation');
   assert.equal(await toggle.getAttribute('aria-checked'), 'false', 'the switch must reflect persisted state before confirmation');
   await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+  await dialog.waitFor({ state: 'hidden' });
   assert.equal(settings.length, 0, 'cancelling must not change automatic reset');
   await toggle.focus();
   await page.keyboard.press('Space');
   await dialog.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await dialog.waitFor({ state: 'hidden' });
   await status.getByText('Automatic reset enabled (30 minutes before expiry)', { exact: true }).waitFor();
   assert.equal(await toggle.getAttribute('aria-checked'), 'true');
   assert.deepEqual(settings, [{ accountRef: 'simulation-account', enabled: true }]);
@@ -91,6 +93,7 @@ try {
   await chineseToggle.click();
   await dialog.getByText(/停止为此账号安排自动重置/).waitFor();
   await dialog.getByRole('button', { name: '确认', exact: true }).click();
+  await dialog.waitFor({ state: 'hidden' });
   await status.getByText('自动重置已关闭', { exact: true }).waitFor();
   assert.equal(await chineseToggle.getAttribute('aria-checked'), 'false');
   assert.deepEqual(settings[1], { accountRef: 'simulation-account', enabled: false });
