@@ -76,3 +76,14 @@ test('source protocol defaults to Responses and binding target accepts only supp
   expect(() => parseBindings([{ ...bindings[0], sourceProtocol: 'chat_completions' }])).toThrow('source_protocol_unsupported');
   expect(() => parseBindings([{ ...bindings[0], target: { ...bindings[0].target, protocol: 'unknown' } }])).toThrow('target_protocol_invalid');
 });
+
+test('equal source and destination IDs add a model while preserving the native directory', () => {
+  const added = parseBindings([{ ...bindings[0], source: 'org/model' }]);
+  const native = { models: [{ slug: 'gpt-native', extra: 'keep' }] };
+  const result = mergeCatalog(native, added, service) as any;
+  expect(result.models[0]).toEqual(native.models[0]);
+  expect(result.models[1]).toMatchObject({ slug: 'org/model', display_name: 'Model', context_window: 16000 });
+  expect(bindingSource(added[0])).toBe(added[0].model);
+  expect((mergeCatalog({ data: [{ id: 'gpt-native' }] }, added, service) as any).data)
+    .toEqual([{ id: 'gpt-native' }, { id: 'org/model', object: 'model', owned_by: 'lab' }]);
+});

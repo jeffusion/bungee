@@ -70,8 +70,8 @@ describe('plugin-config-display-utils', () => {
 
 test('structured plugin summaries show model bindings and translated target kinds without object coercion', () => {
   const binding = { source: 'client', provider: 'lab', model: 'org/model', target: { type: 'service', id: 'upstream', protocol: 'chat_completions' } };
-  expect(displayModelBindings([binding], target => `服务: ${target.id}`)).toBe('client → lab/org/model · Chat Completions · 服务: upstream');
-  expect(displayModelBindings([{ ...binding, source: undefined, alias: 'old' }], target => `Service: ${target.id}`)).toContain('old →');
+  expect(displayModelBindings([binding], target => `服务: ${target.id}`, mode => mode === 'add' ? '新增模型' : '替换模型')).toBe('替换模型: client → lab/org/model · Chat Completions · 服务: upstream');
+  expect(displayModelBindings([{ ...binding, source: undefined, alias: 'custom' }], target => `Service: ${target.id}`, mode => mode === 'add' ? 'Add model' : 'Replace model')).toContain('Replace model: custom →');
   expect(displayConfigValue([{ x: 1 }])).toBe('[{"x":1}]');
   expect(displayConfigValue({ x: 1 })).not.toContain('[object Object]');
 });
@@ -85,8 +85,14 @@ test('model summaries delegate the complete target reference to the name resolve
   const summary = displayModelBindings(bindings, target => {
     references.push(target);
     return target.type === 'route' ? 'Route: /relay' : 'Service: relay-service';
-  });
+  }, mode => mode === 'add' ? 'Add model' : 'Replace model');
   expect(references).toEqual(bindings.map(binding => binding.target));
-  expect(summary).toBe('first → lab/model · Responses · Route: /relay\nsecond → lab/model · Responses · Service: relay-service');
+  expect(summary).toBe('Replace model: first → lab/model · Responses · Route: /relay\nReplace model: second → lab/model · Responses · Service: relay-service');
   expect(summary).not.toContain('shared');
+});
+
+test('equal source and target IDs summarize additions without a redundant arrow', () => {
+  const added = { source: 'glm-5.3-flash', provider: 'zai', model: 'glm-5.3-flash', target: { type: 'service', id: 'glm', protocol: 'chat_completions' } };
+  expect(displayModelBindings([added], () => '服务: GLM', mode => mode === 'add' ? '新增模型' : '替换模型'))
+    .toBe('新增模型: zai/glm-5.3-flash · Chat Completions · 服务: GLM');
 });

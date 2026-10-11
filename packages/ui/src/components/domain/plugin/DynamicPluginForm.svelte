@@ -280,7 +280,7 @@
           />
 
         {:else if pluginName === 'codex-router' && field.name === 'models'}
-          <CodexModelsEditor value={Array.isArray(formattedValues[field.name]) ? formattedValues[field.name] : []} onchange={models=>handleChange(field.name,models)}/>
+          <CodexModelsEditor value={Array.isArray(formattedValues[field.name]) ? formattedValues[field.name] : []} onchange={models=>handleChange(field.name,models)} onvalidate={error=>handleFieldValidation(field.name,error)}/>
         {:else if pluginName === 'codex-router' && field.name === 'collaborationRelay'}
           <CollaborationRelayEditor value={formattedValues[field.name]} onchange={relay => handleChange(field.name, relay)}
             onvalidate={error => handleFieldValidation(field.name, error)} />

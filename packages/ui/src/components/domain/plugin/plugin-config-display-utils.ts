@@ -61,7 +61,7 @@ export function displayConfigValue(value: unknown): string {
   return value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value);
 }
 
-export function displayModelBindings(value: unknown, displayTarget: (target: { type: 'route' | 'service'; id: string }) => string): string {
+export function displayModelBindings(value: unknown, displayTarget: (target: { type: 'route' | 'service'; id: string }) => string, modeLabel: (mode: 'add' | 'replace') => string): string {
   if (!Array.isArray(value)) return displayConfigValue(value);
   return value.map(binding => {
     if (!binding || typeof binding !== 'object') return displayConfigValue(binding);
@@ -71,6 +71,7 @@ export function displayModelBindings(value: unknown, displayTarget: (target: { t
     const protocolNames: Record<string, string> = { responses: 'Responses', chat_completions: 'Chat Completions', anthropic_messages: 'Anthropic Messages' };
     const protocol = target?.protocol ? ` · ${protocolNames[target.protocol] ?? target.protocol}` : '';
     const forwarding = target && ['route', 'service'].includes(target.type) ? ` · ${displayTarget(target)}` : '';
-    return `${source} → ${destination}${protocol}${forwarding}`;
+    const replace = source !== binding.model;
+    return `${modeLabel(replace ? 'replace' : 'add')}: ${replace ? `${source} → ${destination}` : destination}${protocol}${forwarding}`;
   }).join('\n');
 }

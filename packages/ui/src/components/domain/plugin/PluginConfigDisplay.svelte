@@ -134,7 +134,7 @@
    */
   function formatFieldValue(field: any, value: any): string {
     if (pluginName === 'codex-router' && field.name === 'models') {
-      return displayModelBindings(value, displayTarget);
+      return displayModelBindings(value, displayTarget, mode => translate(mode === 'add' ? 'editor.addModel' : 'editor.replaceModel'));
     }
 
     if (pluginName === 'codex-router' && field.name === 'collaborationRelay') {
