@@ -1,21 +1,18 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
   import { _ } from '$i18n';
   import { createParser, createFormatter, isVirtualField } from '$utils/field-transform';
+  import CollaborationRelayEditor from '$components/domain/codex-router/CollaborationRelayEditor.svelte';
   import CodexModelsEditor from '$components/domain/codex-router/CodexModelsEditor.svelte';
   import ModelMappingEditor from '$components/domain/model-mapping/ModelMappingEditor.svelte';
   import { Input } from '$components/ui/input';
   import { Textarea } from '$components/ui/textarea';
   import { BCheckbox, BSelect } from '$components/industrial';
 
-  export let schema: any[] = [];
-  export let value: Record<string, any> = {};
-  export let errors: Record<string, string> = {};
-  export let pluginName = '';
+  let { schema = [], value = $bindable({}), errors = $bindable({}), pluginName = '', onchange, onvalidate }:
+    { schema?: any[]; value?: Record<string, any>; errors?: Record<string, string>; pluginName?: string;
+      onchange?: (value: Record<string, any>) => void; onvalidate?: (errors: Record<string, string>) => void } = $props();
 
-  const dispatch = createEventDispatcher();
-
-  $: formattedValues = schema.reduce((acc, field) => {
+  let formattedValues = $derived(schema.reduce((acc, field) => {
     if (field.fieldTransform) {
       const formatter = createFormatter(field.fieldTransform);
       if (formatter) {
@@ -27,7 +24,7 @@
       acc[field.name] = value[field.name];
     }
     return acc;
-  }, {} as Record<string, any>);
+  }, {} as Record<string, any>));
 
   function getFieldValue(field: any) {
     return formattedValues[field.name] ?? '';
@@ -53,10 +50,10 @@
       }
     } else {
       value = { ...value, [fieldName]: newValue };
+      if (newValue === undefined) delete value[fieldName];
     }
 
-    dispatch('value', value);
-    dispatch('change', value);
+    onchange?.(value);
   }
 
   function buildShowIfContext(currentValue: Record<string, any>): Record<string, any> {
@@ -110,14 +107,14 @@
     return matchesShowCondition(field.showIf, context);
   }
 
-  $: showIfContext = buildShowIfContext(value);
+  let showIfContext = $derived(buildShowIfContext(value));
 
-  $: visibleFieldNames = new Set(
+  let visibleFieldNames = $derived(new Set(
     schema
       .filter((field) => shouldShow(field, showIfContext))
       .map((field) => field?.name)
       .filter((name): name is string => typeof name === 'string' && name.length > 0)
-  );
+  ));
 
   function validateField(field: any, val: any): string | null {
     if (isVirtualField(field)) {
@@ -173,8 +170,13 @@
       const { [field.name]: _, ...rest } = errors;
       errors = rest;
     }
-    dispatch('errors', errors);
-    dispatch('validate', errors);
+    onvalidate?.(errors);
+  }
+
+  function handleFieldValidation(fieldName: string, error: string | null) {
+    const { [fieldName]: ignored, ...rest } = errors;
+    errors = error ? { ...rest, [fieldName]: error } : rest;
+    onvalidate?.(errors);
   }
 
   function resolveModelCatalogPlugin(field: any): string {
@@ -206,7 +208,7 @@
   {#each schema as field (field.name)}
     {#if typeof field?.name === 'string' ? visibleFieldNames.has(field.name) : true}
       <div class="space-y-1.5">
-        {#if field.type !== 'boolean'}
+        {#if field.type !== 'boolean' && !(pluginName === 'codex-router' && field.name === 'collaborationRelay')}
           <label class="font-mono text-[11px] uppercase tracking-command text-zinc-400 block" for={field.name}>
             // {$_(field.label)}
             {#if field.required}
@@ -279,6 +281,9 @@
 
         {:else if pluginName === 'codex-router' && field.name === 'models'}
           <CodexModelsEditor value={Array.isArray(formattedValues[field.name]) ? formattedValues[field.name] : []} onchange={models=>handleChange(field.name,models)}/>
+        {:else if pluginName === 'codex-router' && field.name === 'collaborationRelay'}
+          <CollaborationRelayEditor value={formattedValues[field.name]} onchange={relay => handleChange(field.name, relay)}
+            onvalidate={error => handleFieldValidation(field.name, error)} />
         {:else if field.type === 'json'}
           <Textarea
             id={field.name}

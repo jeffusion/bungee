@@ -16,7 +16,7 @@ import {
   type GatewayFixture, type GatewayMasterStartupState, type OwnedMaster, type PortLease,
 } from '../helpers/gateway-runtime';
 import {probeProcessIdentity} from '../../packages/core/src/master-runtime/process-identity';
-import {probeCodexCli, probeCodexChatgptModels, bundledCodexCatalogModel, CLI_TOOL_ROUNDTRIP, CLI_EXEC_MARKER, CLI_MCP_MARKER, CLI_PATCH_MARKER} from '../fixtures/codex-router-cli-probe';
+import {probeCodexCli, probeCodexChatgptModels, bundledCodexCatalogModel, CLI_TOOL_ROUNDTRIP, CLI_EXEC_MARKER, CLI_MCP_MARKER, CLI_PATCH_MARKER, CLI_COLLABORATION} from '../fixtures/codex-router-cli-probe';
 import modelTemplate from '../../plugins/codex-router/server/model-template-0.160.1.json';
 import capturedBase from '../fixtures/codex-requests/captured-app-base.json';
 import capturedPreferences from '../fixtures/codex-requests/captured-app-preferences.json';
@@ -31,6 +31,11 @@ const tools = [
   {type: 'custom', name: 'shell', format: {type: 'text'}},
 ];
 const customInput = 'echo "你好"\n\\$HOME';
+// Deliberately opaque mock input, never evidence of native model decryption.
+const relayTask = '协作任务：读取文件，再改写指定部分。\n"引号" \\ 路径\n```ts\nconst value = "完整任务";\n```';
+const cliChildTask=`${CLI_TOOL_ROUNDTRIP}: execute the three isolated file, command and MCP fixture tools, return the child result.`;
+const agentMessage = (cipher = 'fixture-opaque-agent-task') => ({type:'agent_message', author:'parent-agent', recipient:'child-agent',
+  content:[{type:'input_text',text:'Task from parent'}, {type:'encrypted_content',encrypted_content:cipher}]});
 const history = [
   {role: 'developer', content: ' preserve the complete history '},
   {role: 'user', content: [{type: 'input_text', text: '中文🙂'.repeat(10000)}]},
@@ -81,6 +86,8 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
   const accountQueries: string[] = [];
   type ToolRoundTrip={firstRequestId?:string;followupRequestId?:string;wires?:Record<string,string>;outputs?:any[]};
   const cliToolRoundTrips=new Map<string,ToolRoundTrip>();
+  let collaborationChildModel='org/chat';
+  const collaborationCalls:string[]=[];
   let management = '', proxy = '', revision = 0, aggregate: any;
   let token = '', otherToken = '', firstId = '', firstPid = 0;
   let workers: Worker[] = [];
@@ -113,12 +120,136 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         // This fixture implements only accounts/config and model inference.
         if (request.method !== 'POST') return Response.json({error: 'fixture_not_found'}, {status: 404});
         const body: any = await request.json(); const call = capture(request.headers, path, body, 'http');
+        if (body.tools?.[0]?.name === 'relay_external_agent_payload') {
+          expect(body.tools).toHaveLength(1);
+          expect(body.tool_choice).toEqual({type:'function',name:'relay_external_agent_payload'});
+          expect(body.input).toHaveLength(1);
+          expect(body.input[0].type).toBe('agent_message');
+          expect(body.model).toBe('native-relay-model');
+          const cipher=body.input[0].content.find((part:any)=>part.type==='encrypted_content')?.encrypted_content;
+          if (cipher === 'fixture-relay-denied') return Response.json({error:'fixture-denial'}, {status:401});
+          const args=JSON.stringify({payload:cipher==='fixture-native-cli-task'?cliChildTask:relayTask});
+          const item={type:'function_call',id:'relay-item',call_id:'relay-call',name:'relay_external_agent_payload',status:'completed',arguments:args};
+          const result={...response(`relay-${calls.length}`,body.model),output:[item]};
+          const stream=sse([
+            {type:'response.created',response:{...result,status:'in_progress',output:[]}},
+            {type:'response.output_item.added',output_index:0,item:{...item,status:'in_progress',arguments:''}},
+            ...[args.slice(0,9),args.slice(9)].map(delta=>({type:'response.function_call_arguments.delta',output_index:0,item_id:item.id,delta})),
+            {type:'response.function_call_arguments.done',output_index:0,item_id:item.id,arguments:args},
+            {type:'response.output_item.done',output_index:0,item},
+            {type:'response.completed',response:result},
+          ]);
+          stream.headers.set('content-type','application/octet-stream');
+          return stream;
+        }
+        if (JSON.stringify(body.input ?? body.messages).includes(CLI_COLLABORATION)) {
+          const native=path.endsWith('/responses'),anthropic=path.endsWith('/messages');
+          const available=native?body.tools.flatMap((tool:any)=>tool.type==='namespace'?tool.tools.map((item:any)=>({...item,namespace:tool.name})): [tool])
+            :body.tools.map((tool:any)=>anthropic?{...tool,parameters:tool.input_schema}:tool.function);
+          const logical=native?body.input:body.messages;
+          const returned=native?logical.filter((item:any)=>item.type==='function_call_output').length
+            :anthropic?logical.flatMap((item:any)=>Array.isArray(item.content)?item.content:[]).filter((item:any)=>item.type==='tool_result').length
+              :logical.filter((item:any)=>item.role==='tool').length;
+          const names=['spawn_agent','send_message','followup_task','wait_agent'];
+          if(returned>=names.length) {
+            // A wait wakes the parent only after the child result enters its input.
+            if(!JSON.stringify(logical).includes('chat answer') && !JSON.stringify(logical).includes('anthropic answer'))return Response.json({error:'fixture_child_result_missing'},{status:400});
+            if(native) {
+              const item={...message('parent verified child result'),id:'parent-summary',status:'completed'};
+              const final={...response('parent-completed',body.model),output:[item]};
+              return sse([{type:'response.output_item.added',output_index:0,item:{...item,status:'in_progress',content:[]}},
+                {type:'response.output_text.delta',output_index:0,content_index:0,item_id:item.id,delta:'parent verified child result'},
+                {type:'response.output_item.done',output_index:0,item},{type:'response.completed',response:final}]);
+            }
+            return sse(anthropic?anthropicEvents():chatEvents());
+          }
+          const name=names[returned]!;
+          if(name==='send_message')await waitUntil(()=>Boolean(cliToolRoundTrips.get(collaborationChildModel==='org/chat'?CODEX_CHAT_MODEL:CODEX_ANTHROPIC_MODEL)?.followupRequestId),
+            'child did not return its actual file/MCP tools before the next collaboration task',10000);
+          const tool=available.find((item:any)=>native?item.namespace==='collaboration'&&item.name===name:
+            item.description?.includes(`Original tool identity: ${JSON.stringify({name,namespace:'collaboration'})}\n`));
+          if(!tool)throw new Error(`fixture missing ${name}: ${JSON.stringify(available.map((item:any)=>({name:item.name,description:item.description,properties:Object.keys(item.parameters?.properties??{})})))}`);
+          collaborationCalls.push(name);
+          const args=name==='spawn_agent'?{task_name:'isolated_child',fork_turns:'none',model:collaborationChildModel,message:native?'fixture-native-cli-task':cliChildTask}
+            :name==='wait_agent'?{timeout_ms:10000}:{target:'isolated_child',message:native?'fixture-native-cli-task':cliChildTask};
+          const argumentText=JSON.stringify(args),id=`collaboration-${returned}`;
+          if(native) {
+            const item={type:'function_call',namespace:'collaboration',name,id,call_id:id,status:'completed',arguments:argumentText};
+            const result={...response(`parent-${returned}`,body.model),output:[item]};
+            return sse([{type:'response.output_item.added',output_index:0,item:{...item,status:'in_progress',arguments:''}},
+              {type:'response.function_call_arguments.delta',output_index:0,item_id:id,delta:argumentText},
+              {type:'response.function_call_arguments.done',output_index:0,item_id:id,arguments:argumentText},
+              {type:'response.output_item.done',output_index:0,item},{type:'response.completed',response:result}]);
+          }
+          if(anthropic)return sse([{type:'message_start',message:{id,usage:{input_tokens:4,output_tokens:0}}},
+            {type:'content_block_start',index:0,content_block:{type:'tool_use',id,name:tool.name,input:{}}},
+            {type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:argumentText}},
+            {type:'content_block_stop',index:0},{type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:2}},{type:'message_stop'}]);
+          return sse([{choices:[{index:0,delta:{tool_calls:[{index:0,id,type:'function',function:{name:tool.name,arguments:argumentText}}]},finish_reason:null}]},
+            {choices:[{index:0,delta:{},finish_reason:'tool_calls'}]},{choices:[],usage:{prompt_tokens:4,completion_tokens:2,total_tokens:6}}]);
+        }
+        const collaborationTool=body.tools?.find((tool:any)=>(tool.function?.parameters ?? tool.input_schema)?.properties?.message);
+        if (collaborationTool && JSON.stringify(body.messages).includes('fixture-plaintext-collaboration')) {
+          const name=collaborationTool.function?.name ?? collaborationTool.name;
+          const args={message:relayTask};
+          if(path.endsWith('/messages'))return body.stream?sse([
+            {type:'message_start',message:{id:'collaboration',usage:{input_tokens:4,output_tokens:0}}},
+            {type:'content_block_start',index:0,content_block:{type:'tool_use',id:'collaboration-call',name,input:{}}},
+            {type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:JSON.stringify(args)}},
+            {type:'content_block_stop',index:0},{type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:2}}, {type:'message_stop'},
+          ]):Response.json({id:'collaboration',type:'message',role:'assistant',model:body.model,
+            content:[{type:'tool_use',id:'collaboration-call',name,input:args}],stop_reason:'tool_use',usage:{input_tokens:4,output_tokens:2}});
+          const tool={id:'collaboration-call',type:'function',function:{name,arguments:JSON.stringify(args)}};
+          return body.stream?sse([
+            {choices:[{index:0,delta:{tool_calls:[{index:0,...tool}]},finish_reason:null}]},
+            {choices:[{index:0,delta:{},finish_reason:'tool_calls'}]},
+            {choices:[],usage:{prompt_tokens:4,completion_tokens:2,total_tokens:6}},
+          ]):Response.json({id:'collaboration',object:'chat.completion',model:body.model,
+            choices:[{index:0,message:{role:'assistant',content:null,tool_calls:[tool]},finish_reason:'tool_calls'}],
+            usage:{prompt_tokens:4,completion_tokens:2,total_tokens:6}});
+        }
         if (JSON.stringify(body).includes('fixture-hold-')) {
           pending.add(call.requestId);
           return new Response(new ReadableStream<Uint8Array>({
             start(controller) {controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(chatEvents()[0])}\n\n`));},
             cancel() {pending.delete(call.requestId); aborted.add(call.requestId);},
           }), {headers: {'content-type': 'text/event-stream'}});
+        }
+        if ((path.endsWith('/chat/completions') || path.endsWith('/messages')) && JSON.stringify(body.messages).includes(cliChildTask)) {
+          const anthropic=path.endsWith('/messages');
+          const declared=body.tools.map((tool:any)=>anthropic?{...tool,parameters:tool.input_schema}:tool.function);
+          const exec=declared.find((tool:any)=>tool.parameters?.properties?.cmd);
+          const patch=declared.find((tool:any)=>tool.parameters?.properties?.input && tool.description?.includes('Original input format:'));
+          const echo=declared.find((tool:any)=>tool.parameters?.properties?.fixture_echo);
+          const roundTrip=cliToolRoundTrips.get(body.model) ?? {};
+          cliToolRoundTrips.set(body.model,roundTrip);
+          roundTrip.outputs=anthropic?body.messages.flatMap((message:any)=>Array.isArray(message.content)?message.content:[])
+            .filter((part:any)=>part.type==='tool_result').map((part:any)=>({callId:part.tool_use_id,content:part.content}))
+            :body.messages.filter((message:any)=>message.role==='tool').map((message:any)=>({callId:message.tool_call_id,content:message.content}));
+          const content=(id:string)=>JSON.stringify(roundTrip.outputs!.find(item=>item.callId===id)?.content);
+          let requested:any[];
+          if(!roundTrip.outputs.length) {
+            roundTrip.firstRequestId=call.requestId;
+            requested=[{id:'call_fixture_exec',tool:exec,arguments:{cmd:`cat fixture-patched.txt; printf '${CLI_EXEC_MARKER}\\n'`,login:false,yield_time_ms:1000,max_output_tokens:1000}}];
+          } else if(roundTrip.outputs.length===1) {
+            if(!content('call_fixture_exec')?.includes('pending') || !content('call_fixture_exec')?.includes(CLI_EXEC_MARKER))return Response.json({error:'fixture_initial_read_missing'},{status:400});
+            requested=[{id:'call_fixture_patch',tool:patch,arguments:{input:`*** Begin Patch\n*** Update File: fixture-patched.txt\n@@\n-pending\n+${CLI_PATCH_MARKER}\n*** End Patch\n`}},
+              {id:'call_fixture_mcp',tool:echo,arguments:{fixture_echo:CLI_MCP_MARKER}}];
+          } else if(roundTrip.outputs.length===3) {
+            if(!content('call_fixture_patch')?.includes('Success') || !content('call_fixture_mcp')?.includes(CLI_MCP_MARKER))return Response.json({error:'fixture_modification_or_mcp_missing'},{status:400});
+            requested=[{id:'call_fixture_readback',tool:exec,arguments:{cmd:'cat fixture-patched.txt',login:false,yield_time_ms:1000,max_output_tokens:1000}}];
+          } else {
+            if(roundTrip.outputs.length!==4 || !content('call_fixture_readback')?.includes(CLI_PATCH_MARKER))return Response.json({error:'fixture_readback_missing'},{status:400});
+            roundTrip.followupRequestId=call.requestId;
+            return sse(anthropic?anthropicEvents():chatEvents());
+          }
+          if(requested.some(item=>!item.tool))return Response.json({error:'fixture_tool_declaration_missing'},{status:400});
+          if(anthropic)return sse([{type:'message_start',message:{id:'child-tools',usage:{input_tokens:4,output_tokens:0}}},
+            ...requested.flatMap((item,index)=>[{type:'content_block_start',index,content_block:{type:'tool_use',id:item.id,name:item.tool.name,input:{}}},
+              {type:'content_block_delta',index,delta:{type:'input_json_delta',partial_json:JSON.stringify(item.arguments)}},{type:'content_block_stop',index}]),
+            {type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:2}},{type:'message_stop'}]);
+          return sse([{choices:[{index:0,delta:{tool_calls:requested.map((item,index)=>({index,id:item.id,type:'function',function:{name:item.tool.name,arguments:JSON.stringify(item.arguments)}}))},finish_reason:null}]},
+            {choices:[{index:0,delta:{},finish_reason:'tool_calls'}]},{choices:[],usage:{prompt_tokens:4,completion_tokens:2,total_tokens:6}}]);
         }
         if ((path.endsWith('/chat/completions') || path.endsWith('/messages')) && JSON.stringify(body.messages).includes(CLI_TOOL_ROUNDTRIP)) {
           const anthropic=path.endsWith('/messages');
@@ -231,7 +362,9 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
   }
   async function publish(onServing?: () => Promise<void>) {
     const mutation = randomUUID();
-    const result = await control('/api/config', 'PUT', {expected_revision: revision, mutation_id: mutation, aggregate});
+    const result = await control('/api/config', 'PUT', {expected_revision: revision, mutation_id: mutation, aggregate}).catch(async error => {
+      throw new Error(`Codex configuration publication failed: ${String(error)}; ${await master!.diagnostics?.()}`, {cause: error});
+    });
     expect(result.response.status).toBe(202);
     if (onServing) {
       await waitUntil(async () => {
@@ -398,7 +531,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       await waitUntil(() => {
         const db = new Database(fixture!.accessDbPath, {readonly: true});
         try {
-          const row: any = db.query("SELECT j.value FROM access_logs, json_each(access_logs.processing_steps) AS j WHERE json_extract(j.value,'$.step')='codex_router_conversion' AND json_extract(j.value,'$.detail.requestId')=?").get(requestId);
+          const row: any = db.query("SELECT j.value FROM access_logs, json_each(access_logs.processing_steps) AS j WHERE json_extract(j.value,'$.step')='dispatch_conversion' AND json_extract(j.value,'$.detail.requestId')=?").get(requestId);
           return row && JSON.parse(row.value).detail.diagnostics.some((item: any) => item.param === 'tools[28]' && item.reason === 'optional_hosted_web_search_unavailable' && item.action === 'omitted');
         } finally { db.close(); }
       }, 'optional hosted search diagnostic was not logged', 12000);
@@ -419,7 +552,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       await waitUntil(()=>{
         const db=new Database(fixture!.accessDbPath,{readonly:true});
         try{
-          const row:any=db.query("SELECT j.value FROM access_logs, json_each(access_logs.processing_steps) AS j WHERE json_extract(j.value,'$.step')='codex_router_conversion' AND json_extract(j.value,'$.detail.requestId')=?").get(conversionId);
+          const row:any=db.query("SELECT j.value FROM access_logs, json_each(access_logs.processing_steps) AS j WHERE json_extract(j.value,'$.step')='dispatch_conversion' AND json_extract(j.value,'$.detail.requestId')=?").get(conversionId);
           const step=row?.value && JSON.parse(row.value);
           return step?.detail?.diagnostics?.some((item:any)=>item.param==='stream_options.reasoning_summary_delivery');
         }finally{db.close();}
@@ -593,6 +726,115 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       }
     } finally {await socket.close();}
   }, 120000);
+
+  test('built plaintext collaboration preserves three tool identities in JSON, SSE/WS and subsequent cross-model history', async () => {
+    const start=calls.length;
+    for(const model of ['org/chat','org/anthropic'])for(const name of ['spawn_agent','send_message','followup_task']) {
+      const declared=[{type:'namespace',name:'collaboration',tools:[{type:'function',name,
+        parameters:{type:'object',properties:{message:{type:'string',encrypted:true}},required:['message'],additionalProperties:false}}]}];
+      const request={model,input:'fixture-plaintext-collaboration',tools:declared};
+      const json=await post(request);
+      expect(json.status).toBe(200);
+      expect(json.body.output).toContainEqual(expect.objectContaining({type:'function_call',namespace:'collaboration',name,
+        call_id:'collaboration-call',encrypted_function_args:[],arguments:JSON.stringify({message:relayTask})}));
+      const socket=await openSocket();
+      try {
+        const events=await socket.create(request);
+        const item=events.find(event=>event.type==='response.output_item.done')?.item;
+        expect(item).toMatchObject({namespace:'collaboration',name,encrypted_function_args:[],call_id:'collaboration-call'});
+        expect(events.at(-1).response.output).toContainEqual(expect.objectContaining({namespace:'collaboration',name,encrypted_function_args:[]}));
+      } finally {await socket.close();}
+      const next=await post({model:model==='org/chat'?'org/anthropic':'org/chat',input:[
+        {type:'agent_message',author:'parent-agent',recipient:'child-agent',content:[{type:'input_text',text:relayTask}]},
+        {role:'user',content:'continue the task'},
+      ]});
+      expect(next.status).toBe(200);
+      const texts=calls.at(-1)!.body.messages.flatMap((item:any)=>typeof item.content==='string'?[item.content]:item.content.map((part:any)=>part.text ?? ''));
+      expect(texts.some((text:string)=>text.includes(relayTask))).toBe(true);
+      expect(calls.slice(start).some(call=>call.body.tools?.[0]?.name==='relay_external_agent_payload')).toBe(false);
+    }
+    await assertMetered(calls.slice(start));
+  },60000);
+
+  test('built native auxiliary relay uses shared cache across workers, isolates identity and counts actual calls', async () => {
+    const saved=structuredClone(aggregate),start=calls.length;
+    try {
+      aggregate.logical_configuration.routes[0].plugins.find((p:any)=>p.name==='codex-router').options.collaborationRelay={
+        target:{type:'route',id:NATIVE,protocol:'responses'},model:'native-relay-model'};
+      await publish();
+      const request={model:'org/chat',input:[agentMessage(),{role:'user',content:'execute restored task'}]};
+      const first=await post(request);expect(first.status).toBe(200);
+      expect(calls.slice(start)).toHaveLength(2);
+      const relayed=calls[start]!;
+      expect(relayed.body.input).toEqual([agentMessage()]);
+      const restored=calls[start+1]!.body.messages.find((item:any)=>item.role==='user').content;
+      expect(restored.map((part:any)=>part.text)).toContain(relayTask);
+      const observed=new Set([calls[start+1]!.pid]);
+      for(let i=0;i<16 && observed.size<2;i++) {
+        const result=await post(request);expect(result.status).toBe(200);observed.add(calls.at(-1)!.pid);
+      }
+      expect(observed).toEqual(new Set(workers.map(worker=>worker.pid)));
+      expect(calls.slice(start).filter(call=>call.body.tools?.[0]?.name==='relay_external_agent_payload')).toHaveLength(1);
+      const socket=await openSocket();
+      try {
+        const before=calls.length;
+        const events=await socket.create({...request,model:'org/anthropic'});
+        expect(events.at(-1).type).toBe('response.completed');
+        expect(events.some(event=>event.item?.name==='relay_external_agent_payload')).toBe(false);
+        expect(calls.slice(before)).toHaveLength(1);
+        expect(JSON.stringify(calls.at(-1)!.body.messages)).not.toContain('fixture-opaque-agent-task');
+      } finally {await socket.close();}
+      const other=calls.length;expect((await post(request,otherToken)).status).toBe(200);
+      expect(calls.slice(other)).toHaveLength(2);
+      const failure=calls.length;
+      const failed=await post({...request,input:[agentMessage('fixture-relay-denied')]});
+      expect(failed.status).toBe(401);expect(failed.body.error).toBe('llm_adapter_relay_upstream_failed');
+      expect(calls.slice(failure)).toHaveLength(1);
+      expect(calls.at(-1)!.body.tools[0].name).toBe('relay_external_agent_payload');
+      await assertMetered(calls.slice(start,failure));
+      await waitUntil(() => {
+        const db = new Database(fixture!.accessDbPath, {readonly:true});
+        try {
+          const rows = db.query<{detail:string}, []>("SELECT json_extract(j.value,'$.detail') AS detail FROM access_logs,json_each(access_logs.processing_steps) AS j WHERE json_extract(j.value,'$.step')='auxiliary_resolution'").all();
+          const resolutions = rows.map(row => JSON.parse(row.detail));
+          return [true,false].every(reused => resolutions.some(item => item.model === 'native-relay-model' && item.reused === reused && typeof item.upstreamId === 'string' && Object.keys(item).sort().join(',') === 'model,reused,upstreamId'));
+        } finally {db.close();}
+      }, 'safe actual model and reuse diagnostics were not logged', 12000);
+      console.info(`codex_collaboration_relay ${JSON.stringify({workers:[...observed],successfulRelayCalls:2,
+        cachedAcrossWorkers:true,identityIsolated:true,failedFinalCalls:0})}`);
+    } finally {aggregate=saved;await publish();}
+  },90000);
+
+  test.skipIf(process.env.BUNGEE_CODEX_CLI_PROBE!=='1')('isolated CLI children execute tools and return results through plaintext and native relay paths',async()=>{
+    const saved=structuredClone(aggregate);
+    try {
+      aggregate.logical_configuration.routes[0].plugins.find((p:any)=>p.name==='codex-router').options.collaborationRelay={target:{type:'route',id:NATIVE,protocol:'responses'},model:'native-relay-model'};
+      await publish();
+      for(const [parent,child] of [['org/chat','org/chat'],['org/chat','org/anthropic'],['org/native','org/chat']]) {
+        collaborationChildModel=child!;collaborationCalls.length=0;cliToolRoundTrips.clear();
+        const before=calls.length;
+        const report=await probeCodexChatgptModels({root:fixture!.root,baseUrl:`${proxy}/codex`,mockUrl:`http://127.0.0.1:${upstream!.port}`,token,
+          model:parent!,toolRoundTrip:true,collaboration:true});
+        if(!report.patchedContent){
+          const db=new Database(fixture!.accessDbPath,{readonly:true});
+          try {console.info('codex_collaboration_rejections',JSON.stringify(db.query("SELECT status,json_extract(j.value,'$.detail') AS detail FROM access_logs,json_each(access_logs.processing_steps) AS j WHERE json_extract(j.value,'$.step')='request_rejected'").all()));}
+          finally {db.close();}
+        }
+        console.info(`codex_collaboration_cli ${JSON.stringify({parent,child,report:{notifications:report.notifications,patchedContent:report.patchedContent,mcpAudit:report.mcpAudit,selectedModel:report.selectedModel},tools:collaborationCalls,upstream:calls.slice(before).map(call=>({model:call.body.model,path:call.path}))})}`);
+        expect(collaborationCalls).toEqual(['spawn_agent','send_message','followup_task','wait_agent']);
+        expect(report.notifications.some((event:any)=>event.method==='turn/completed'&&event.parentThread&&event.status==='completed')).toBe(true);
+        expect(report.notifications.some((event:any)=>event.method==='item/completed'&&event.parentThread&&event.itemType==='agentMessage'&&event.text)).toBe(true);
+        expect(report.patchedContent).toBe(`${CLI_PATCH_MARKER}\n`);
+        expect(report.mcpAudit.some((event:any)=>event.event==='tools/call'&&event.text===CLI_MCP_MARKER)).toBe(true);
+        const roundTrip=cliToolRoundTrips.get(child==='org/chat'?CODEX_CHAT_MODEL:CODEX_ANTHROPIC_MODEL)!;
+        expect(roundTrip.outputs?.map(item=>item.callId).sort()).toEqual(['call_fixture_exec','call_fixture_mcp','call_fixture_patch','call_fixture_readback']);
+        const auxiliary=calls.slice(before).filter(call=>call.body.tools?.[0]?.name==='relay_external_agent_payload');
+        // spawn/send/followup carry distinct complete agent_message identities.
+        expect(auxiliary.length).toBe(parent==='org/native'?3:0);
+        await assertMetered(calls.slice(before),false);
+      }
+    } finally {aggregate=saved;await publish();}
+  },180000);
 
   test('busy/cancel and disconnect abort real pending upstreams; later generation remains usable without duplicate statistics', async () => {
     const socket = await openSocket(); const start = calls.length;

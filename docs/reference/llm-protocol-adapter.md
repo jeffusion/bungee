@@ -38,7 +38,7 @@
 
 | 服务 | 进程/类型 | 职责 |
 |---|---|---|
-| `llm-protocol-adapter.conversion.v1`，version 1 | control/local、worker/local | `describe()` 返回矩阵和 rulesVersion；`resolveCapabilities()` 返回能力快照；worker `createSession()` 创建请求级转换会话 |
+| `llm-protocol-adapter.conversion.v1`，version 1 | control/local、worker/local | `describe()` 返回矩阵和 rulesVersion；`resolveCapabilities()` 返回能力快照；worker `createSession()` 创建请求级转换会话；`inspectAgentMessages()`、`replaceAgentMessageEncryptedContent()` 检查及替换协作内容；worker `relayAgentMessage()` 执行受宿主约束的原生中继 |
 | `llm-protocol-adapter.history.v1`，version 1 | control/RPC | 提供作用域隔离的临时规范历史，供 worker 续聊共享 |
 | `models-dev.capabilities.v1`，version 1 | control/local、worker/local，adapter 消费 | 精确 provider/model 的能力与 reasoning_options 读取 |
 
@@ -47,6 +47,10 @@ control 侧消费已加载目录并发布转换描述/能力服务，不执行�
 临时历史由 control 管理，进程重启即丢失，不写 SQL/插件存储。键由 scope 和响应 ID 组成，不同作用域不能互读。默认 TTL 10 分钟，上限 512 条、总计 32 MiB、单条 8 MiB；按最旧记录淘汰，30 秒周期清理。RPC 以不超过 8192 字符的有序片段传输，最多 1024 片，总正文仍受 8 MiB 限制；未完成上传有 30 秒期限和全局 8 MiB 限制。仅完整、成功完成的逻辑生成进入可续聊历史；失败、取消、截断/incomplete 不作为成功历史。
 
 Codex Router 负责模型目录替换、绑定选择、dispatch 和 HTTP/WS 传输决定。它消费 adapter 的公共转换与历史服务，不拥有 codec 或缓存实现。Responses WS 的目标为 Chat/Anthropic 时使用统一 HTTP/SSE 转换；原生 Responses 保持原生传输。
+
+转换会话显式选择 `agentMessageDelivery: 'plaintext'` 后，可以规范化明文 `agent_message` 并为三类 collaboration 调用设置空的加密参数标记；缺省仍严格检查。实际密文必须先通过协作检查和精确字段替换，不能按字符串外观猜成明文。原生中继、缓存隔离和额外消耗见 [Codex Router](../../plugins/codex-router/README.md#agent-协作与原生中继)。
+
+中继解析使用共享 BodyHandle 的 JSON/SSE 视图，要求成功完成、唯一的指定 function_call 以及只含字符串 payload 的参数；允许原生 reasoning 事件，但不把它作为任务内容。缺失参数、多个调用、普通答案、拒绝、截断、未知事件或异常终态均失败。缓存复用现有临时历史 RPC，转换正文不走控制进程 RPC；共享操作通过 provider 的后台授权帧和租约管理，dispose 取消在途工作。
 
 ## 严格语义和生命周期
 

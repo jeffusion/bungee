@@ -1,7 +1,8 @@
 <script lang="ts">
   import PluginEditor from '$components/domain/plugin/PluginEditor.svelte';
   import { switchLocale } from '$i18n';
-  let plugins = $state([]);
+  import type { EditorPluginBinding } from '$api/config-adapters';
+  let plugins = $state<Array<EditorPluginBinding | string>>(JSON.parse(new URLSearchParams(window.location.search).get('plugins') ?? '[]'));
 </script>
 <main class="nx-page py-6" data-testid="protocol-adapter-fixture">
   <button onclick={() => switchLocale('zh-CN')}>中文</button>
