@@ -5,24 +5,26 @@
   import CodexTargetPicker from './CodexTargetPicker.svelte';
   import { loadCodexGatewayTargets, type CodexGatewayTarget } from './gateway-targets';
   import { requestPluginControl } from '$api/client';
-  import { BSelect, BCheckbox, LoadingIndicator, PanelCard } from '$components/industrial';
+  import { BSelect, BCheckbox, LoadingIndicator, PanelCard, SegmentedControl } from '$components/industrial';
   import { Input } from '$components/ui/input';
   import { NumberInput } from '$components/ui/number-input';
   import { Label } from '$components/ui/label';
   import { Button } from '$components/ui/button';
   import PriceModelPicker from '@plugins/token-stats/ui/PriceModelPicker.svelte';
   import type { ModelsDevProviderSummary, ModelsDevCatalogStatus } from '@plugins/models-dev/contract';
-  import type { ModelBinding as SavedModelBinding } from '@plugins/codex-router/server/config';
+  import { bindingSource, parseBindings, type ModelBinding as SavedModelBinding } from '@plugins/codex-router/server/config';
 
   // Drafts may omit the protocol until the user selects it; published bindings require it.
   type ModelBinding = Omit<SavedModelBinding, 'target'> & { target: Omit<SavedModelBinding['target'], 'protocol'> & { protocol?: SavedModelBinding['target']['protocol'] } };
 
-  let { value = $bindable([]), onchange }: { value?: ModelBinding[]; onchange?: (value: ModelBinding[]) => void } = $props();
+  let { value = $bindable([]), onchange, onvalidate }: { value?: ModelBinding[]; onchange?: (value: ModelBinding[]) => void; onvalidate?: (error: string | null) => void } = $props();
   const componentId = `codex-bindings-${Math.random().toString(36).slice(2, 10)}`;
   let rowIds = $state<number[]>(untrack(() => value.map((_, index) => index))), nextRowId = untrack(() => value.length);
   let manualSources = $state<Record<number, boolean>>({});
-  const catalogDrafts = new Map<number, { source: string; provider?: string }>();
+  const catalogDrafts = new Map<number, string>();
   const manualDrafts = new Map<number, string>();
+  const replacementDrafts = new Map<number, { source: string; sourceProvider?: string }>();
+  let modes = $state<Record<number, 'add' | 'replace'>>({});
   let providers = $state<ModelsDevProviderSummary[]>([]);
   let catalogVersion = $state<number | null>(null);
   let modelCount = $state(0), loading = $state(true), catalogError = $state(false), targetsError = $state(false), targetsLoading = $state(true);
@@ -30,45 +32,72 @@
   let alive = false;
   const controller = new AbortController();
   const t = (key: string) => $isLoading ? '' : getPluginText(`editor.${key}`, 'codex-router', (id, options) => $_(id, options));
-  let providerOptions = $derived(providers.map(provider => ({ value: provider.provider, label: `${provider.name} · ${provider.provider}` })));
+  let providerOptions = $derived(providers.filter(provider => provider.provider !== 'openai').map(provider => ({ value: provider.provider, label: `${provider.name} · ${provider.provider}` })));
   const protocolOptions = [{ value: 'responses', label: 'Responses' }, { value: 'chat_completions', label: 'Chat Completions' }, { value: 'anthropic_messages', label: 'Anthropic Messages' }];
+  const modeOptions = $derived([{ value: 'add', label: t('addModel') }, { value: 'replace', label: t('replaceModel') }]);
+  $effect(() => {
+    if ($isLoading) return;
+    let error: string | null = null;
+    try { parseBindings($state.snapshot(value)); }
+    catch (cause) { error = t(cause instanceof Error && cause.message === 'codex_router_model_conflict' ? 'modelConflict' : 'bindingInvalid'); }
+    untrack(() => onvalidate?.(error));
+  });
   $effect(() => { if (rowIds.length !== value.length) rowIds = value.map((_, index) => rowIds[index] ?? nextRowId++); });
 
   function publish(next: ModelBinding[]) { value = next; onchange?.(value); }
+  function mode(index: number): 'add' | 'replace' {
+    return modes[rowIds[index]] ?? (bindingSource(value[index]) === value[index].model ? 'add' : 'replace');
+  }
   function update(index: number, patch: Partial<ModelBinding>) {
     publish(value.map((binding, i) => {
       if (i !== index) return binding;
-      const { alias, ...rest } = binding;
-      return { ...rest, source: binding.source ?? alias ?? binding.model, ...patch };
+      const next = { ...binding, ...patch };
+      if (mode(index) === 'add') next.source = next.model;
+      return next;
     }));
+  }
+  function changeMode(index: number, nextMode: string) {
+    if (nextMode === mode(index)) return;
+    const binding = value[index], rowId = rowIds[index];
+    if (nextMode === 'add') replacementDrafts.set(rowId, { source: binding.source ?? '', sourceProvider: binding.sourceProvider });
+    modes = { ...modes, [rowId]: nextMode as 'add' | 'replace' };
+    const { alias, ...rest } = binding;
+    const draft = replacementDrafts.get(rowId);
+    publish(value.map((entry, i) => i === index ? { ...rest,
+      source: nextMode === 'add' ? binding.model : draft?.source ?? '',
+      sourceProvider: nextMode === 'add' ? undefined : draft ? draft.sourceProvider : 'openai',
+    } : entry));
   }
   function limit(index: number, key: keyof NonNullable<ModelBinding['capabilityOverrides']>, next: boolean | number | undefined) {
     const overrides = { ...value[index].capabilityOverrides };
     if (next === undefined) delete overrides[key]; else (overrides as Record<string, unknown>)[key] = next;
     update(index, { capabilityOverrides: overrides });
   }
-  function add() {
-    rowIds = [...rowIds, nextRowId++];
-    publish([...value, { source: '', sourceProtocol: 'responses', provider: '', model: '', target: { type: 'route', id: '' } }]);
+  function add(nextMode: 'add' | 'replace') {
+    const rowId = nextRowId++;
+    rowIds = [...rowIds, rowId];
+    modes = { ...modes, [rowId]: nextMode };
+    publish([...value, { sourceProvider: nextMode === 'replace' ? 'openai' : undefined, source: '', sourceProtocol: 'responses', provider: '', model: '', target: { type: 'route', id: '' } }]);
   }
   function remove(index: number) {
+    delete modes[rowIds[index]]; replacementDrafts.delete(rowIds[index]);
     delete manualSources[rowIds[index]]; catalogDrafts.delete(rowIds[index]); manualDrafts.delete(rowIds[index]);
     rowIds = rowIds.filter((_, i) => i !== index);
     publish(value.filter((_, i) => i !== index));
   }
   function manualSource(binding: ModelBinding, rowId: number) {
-    return manualSources[rowId] ?? Boolean((binding.source ?? binding.alias ?? binding.model) && !binding.sourceProvider);
+    return manualSources[rowId] ?? Boolean((binding.source ?? '') && !binding.sourceProvider);
   }
   function toggleSource(index: number, rowId: number, manual: boolean) {
     manualSources = { ...manualSources, [rowId]: manual };
     const binding = value[index];
     if (manual) {
-      catalogDrafts.set(rowId, { source: binding.source ?? binding.alias ?? binding.model, provider: binding.sourceProvider });
-      update(index, { source: manualDrafts.get(rowId) ?? binding.source ?? binding.alias ?? binding.model, sourceProvider: undefined });
+      catalogDrafts.set(rowId, binding.source ?? '');
+      update(index, { source: manualDrafts.get(rowId) ?? binding.source ?? '', sourceProvider: undefined });
     } else {
-      manualDrafts.set(rowId, binding.source ?? binding.alias ?? binding.model);
+      manualDrafts.set(rowId, binding.source ?? '');
       const draft = catalogDrafts.get(rowId);
-      update(index, { source: draft?.source ?? '', sourceProvider: draft?.provider });
+      update(index, { source: draft ?? '', sourceProvider: 'openai' });
     }
   }
   async function loadCatalog() {
@@ -110,6 +139,10 @@
           <Button variant="ghost" class="h-[44px] shrink-0 px-2 text-xs sm:h-[40px]" onclick={() => remove(index)}>{t('remove')}</Button>
         {/snippet}
         <div class="min-w-0 space-y-6">
+          <SegmentedControl options={modeOptions} value={mode(index)} ariaLabel={t('mode')}
+            class="max-w-full [&>button]:h-[44px] [&>button]:px-3 [&>button]:py-0 sm:[&>button]:h-[32px]"
+            onchange={nextMode => changeMode(index, nextMode)} />
+          {#if mode(index) === 'replace'}
           <div class="min-w-0 space-y-3" data-testid="codex-binding-source">
             <div class="flex flex-wrap items-center justify-between gap-2">
               <span class="nx-label">{t('match')}</span>
@@ -118,16 +151,11 @@
             {#if manualSource(binding, rowIds[index])}
               <div class="space-y-1.5">
                 <Label class="block" for={`${id}-source`}>{t('source')}</Label>
-                <Input id={`${id}-source`} aria-label={t('source')} value={binding.source ?? binding.alias ?? binding.model} maxlength={512} placeholder={t('sourcePlaceholder')} required oninput={event => update(index, { source: event.currentTarget.value })} />
+                <Input id={`${id}-source`} aria-label={t('source')} value={binding.source ?? ''} maxlength={512} placeholder={t('sourcePlaceholder')} required oninput={event => update(index, { source: event.currentTarget.value })} />
               </div>
             {:else}
-              <div class="grid min-w-0 gap-3 sm:grid-cols-2">
-                <div class="min-w-0 space-y-1.5"><Label class="block" for={`${id}-source-provider`}>{t('sourceProvider')}</Label>
-                  <BSelect id={`${id}-source-provider`} searchable searchLabels={{ empty: t('noOptions') }} value={binding.sourceProvider ?? ''} options={providerOptions} ariaLabel={t('sourceProvider')} placeholder={t('sourceProvider')} disabled={loading || catalogError} onchange={provider => update(index, { sourceProvider: String(provider), source: '' })} />
-                </div>
-                <div class="min-w-0 space-y-1.5"><Label class="block" for={`${id}-source`}>{t('source')}</Label>
-                  <PriceModelPicker id={`${id}-source`} value={binding.source ?? binding.alias ?? binding.model} provider={binding.sourceProvider ?? ''} {catalogVersion} catalogPlugin="codex-router" catalogPath="/catalog" disabled={!binding.sourceProvider || !modelCount} label={t('source')} placeholder={t('source')} searchLabel={t('search')} emptyLabel={t('empty')} loadingLabel={t('loading')} errorLabel={t('error')} retryLabel={t('retry')} loadedLabel={t('loaded')} completeLabel={t('complete')} loadMoreLabel={t('loadMore')} onchange={source => update(index, { source })} />
-                </div>
+              <div class="min-w-0 space-y-1.5"><Label class="block" for={`${id}-source`}>{t('source')}</Label>
+                <PriceModelPicker id={`${id}-source`} value={binding.source ?? ''} provider="openai" {catalogVersion} catalogPlugin="codex-router" catalogPath="/catalog" disabled={loading || !modelCount} label={t('source')} placeholder={t('source')} searchLabel={t('search')} emptyLabel={t('empty')} loadingLabel={t('loading')} errorLabel={t('error')} retryLabel={t('retry')} loadedLabel={t('loaded')} completeLabel={t('complete')} loadMoreLabel={t('loadMore')} onchange={source => update(index, { source, sourceProvider: 'openai' })} />
               </div>
             {/if}
             <div class="space-y-1.5">
@@ -135,7 +163,8 @@
               <BSelect id={`${id}-source-protocol`} searchable searchLabels={{ empty: t('noOptions') }} value={binding.sourceProtocol ?? 'responses'} options={protocolOptions.slice(0, 1)} ariaLabel={t('sourceProtocol')} onchange={() => update(index, { sourceProtocol: 'responses' })} />
             </div>
           </div>
-          <div class="min-w-0 space-y-3 border-t border-carbon-600 pt-6">
+          {/if}
+          <div class="min-w-0 space-y-3" class:border-t={mode(index) === 'replace'} class:border-carbon-600={mode(index) === 'replace'} class:pt-6={mode(index) === 'replace'}>
             <span class="nx-label block">{t('forward')}</span>
             <div class="grid min-w-0 gap-3 sm:grid-cols-2" data-testid="codex-binding-destination">
               <div class="min-w-0 space-y-1.5"><Label class="block" for={`${id}-provider`}>{t('provider')}</Label>
@@ -174,5 +203,8 @@
       </PanelCard>
     </div>
   {/each}
-  <Button variant="outline" disabled={value.length >= 100} onclick={add}>{t('add')}</Button>
+  <div class="flex flex-wrap gap-3">
+    <Button variant="outline" disabled={value.length >= 100} onclick={() => add('add')}>{t('addModel')}</Button>
+    <Button variant="outline" disabled={value.length >= 100} onclick={() => add('replace')}>{t('addReplacement')}</Button>
+  </div>
 </div>

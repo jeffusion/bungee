@@ -237,7 +237,6 @@
       "editor.error": "目录不可用，请检查 models.dev 或重试。",
       "editor.targetsError": "无法读取转发目标，请重试。",
       "editor.retry": "重试",
-      "editor.add": "添加模型绑定",
       "editor.remove": "移除",
       "editor.noBindings": "尚未配置模型绑定。",
       "editor.noCatalog": "目录为空，请先启用 models.dev 并刷新目录。",
@@ -263,7 +262,13 @@
       "relay.modelPlaceholder": "选择 OpenAI 模型",
       "relay.modelInvalid": "请选择有效的中继模型。",
       "relay.targetRequired": "请选择可用的中继路由或服务。",
-      "relay.protocolInvalid": "中继目标接收协议必须为 Responses。"
+      "relay.protocolInvalid": "中继目标接收协议必须为 Responses。",
+      "editor.mode": "绑定方式",
+      "editor.addModel": "新增模型",
+      "editor.replaceModel": "替换模型",
+      "editor.addReplacement": "添加模型替换",
+      "editor.bindingInvalid": "请填写有效的模型、转发目标和协议。",
+      "editor.modelConflict": "模型绑定重复，请修改模型或移除重复绑定。"
     },
     "en": {
       "editor.loaded": "Loaded",
@@ -293,7 +298,6 @@
       "editor.error": "Catalog unavailable. Check models.dev or retry.",
       "editor.targetsError": "Unable to load forwarding targets. Please retry.",
       "editor.retry": "Retry",
-      "editor.add": "Add model binding",
       "editor.remove": "Remove",
       "editor.noBindings": "No model bindings configured.",
       "editor.noCatalog": "The catalog is empty. Enable models.dev and refresh it first.",
@@ -319,7 +323,13 @@
       "relay.modelPlaceholder": "Select an OpenAI model",
       "relay.modelInvalid": "Select a valid relay model.",
       "relay.targetRequired": "Select an available relay route or service.",
-      "relay.protocolInvalid": "The relay target must receive Responses."
+      "relay.protocolInvalid": "The relay target must receive Responses.",
+      "editor.mode": "Binding mode",
+      "editor.addModel": "Add model",
+      "editor.replaceModel": "Replace model",
+      "editor.addReplacement": "Add model replacement",
+      "editor.bindingInvalid": "Select valid models, a forwarding target and a protocol.",
+      "editor.modelConflict": "Duplicate model binding. Change the model or remove the duplicate."
     }
   },
   "uiExtensionMode": "none"
