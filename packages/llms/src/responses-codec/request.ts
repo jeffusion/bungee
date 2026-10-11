@@ -1,5 +1,6 @@
+import { validateAgentMessage, validateEncryptedFunctionArgs } from './agent-messages';
 import { OpenAIProtocolConversion } from '../providers/openai/protocol-conversion';
-import { argumentObject, atParam, bounded, fail, limits, list, record, serialized, string,
+import { isCollaborationFunction, argumentObject, atParam, bounded, fail, limits, list, record, serialized, string,
   type JsonRecord, type ResponsesCodecCapabilities, type ResponsesConversionDiagnostic, type ResponsesProtocol, type ResponsesToolName, type ResponsesToolNames } from './common';
 import { applyResponsesPreferences } from './request-preferences';
 import { validateWebSearch } from './web-search';
@@ -23,6 +24,7 @@ function definitionKey(value: unknown): string {
 /** Converts only self-contained history. Reference resolution belongs to the caller. */
 export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol, capabilities: ResponsesCodecCapabilities = {}): DecodedResponsesRequest {
   const body = record(raw, 'Responses request');
+  if (capabilities.agentMessageDelivery !== undefined && capabilities.agentMessageDelivery !== 'plaintext') fail('invalid_payload', 'Unknown agent message delivery policy', 'agentMessageDelivery');
   const budget = limits(capabilities.limits);
   serialized(body, budget.maxRequestBytes, 'request');
   const supported = new Set(['model', 'input', 'instructions', 'tools', 'tool_choice', 'reasoning', 'text',
@@ -104,9 +106,20 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     }
     const wire = register(name, namespace, custom);
     definitions.set(key, signature);
-    const parameters = custom
+    let parameters = custom
       ? { type: 'object', properties: { input: { type: 'string' } }, required: ['input'], additionalProperties: false }
       : record(tool.parameters ?? { type: 'object', properties: {} }, 'tool parameters');
+    if (capabilities.agentMessageDelivery === 'plaintext' && isCollaborationFunction(name, namespace, custom)) {
+      const properties = parameters.properties;
+      if (properties && typeof properties === 'object' && !Array.isArray(properties)) {
+        const message = (properties as JsonRecord).message;
+        if (message && typeof message === 'object' && !Array.isArray(message) && (message as JsonRecord).encrypted === true) {
+          const { encrypted: _encrypted, ...plaintext } = message as JsonRecord;
+          parameters = { ...parameters, properties: { ...properties, message: plaintext } };
+          diagnostics.push({ param: `${path}.parameters.properties.message.encrypted`, action: 'omitted', reason: 'collaboration_message_plaintext_delivery' });
+        }
+      }
+    }
     const declaredDescription = tool.description === undefined ? undefined : string(tool.description, 'tool description');
     const identityHint = capabilities.preserveToolIdentityDescription ? `Original tool identity: ${JSON.stringify({ name, ...(namespace ? { namespace } : {}) })}` : undefined;
     const description = [identityHint, namespaceDescription, declaredDescription].filter(value => value !== undefined).join('\n') || undefined;
@@ -190,7 +203,16 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     messageParam = `input[${inputIndex}]`;
     const item = record(rawItem, 'input item');
     if (item.type === 'additional_tools') return;
-    if (item.encrypted_content != null || item.type === 'compaction') fail('unsupported_content', 'Encrypted reasoning and compaction cannot be restored');
+    if (item.type === 'agent_message') {
+      validateAgentMessage(item, messageParam, capabilities.limits);
+      if (capabilities.agentMessageDelivery !== 'plaintext') fail('unsupported_content', 'Agent messages require explicit plaintext delivery', messageParam);
+      if (pendingReasoning) fail('unsupported_reasoning', 'Reasoning must precede an assistant item', messageParam);
+      addMessage({ role: 'user', content: [{ type: 'text', text: `[Agent message metadata: ${JSON.stringify({ author: item.author, recipient: item.recipient })}]\n` }, ...(item.content as JsonRecord[]).map(part => ({ type: 'text', text: part.text }))] });
+      diagnostics.push({ param: messageParam, action: 'mapped', reason: 'agent_message_plaintext_delivery' });
+      return;
+    }
+    if (item.encrypted_content != null) fail('unsupported_content', 'Encrypted content cannot cross protocols', `${messageParam}.encrypted_content`);
+    if (item.type === 'compaction') fail('unsupported_content', 'Encrypted reasoning and compaction cannot be restored');
     if (item.type === 'item_reference') fail('unresolved_reference', 'Input item references must be resolved before conversion');
     if (item.type === 'reasoning') {
       if (protocol !== 'chat_completions' || !(capabilities.reasoningHistory || capabilities.reasoningEffort)) fail('unsupported_reasoning', 'Reasoning history requires an explicit compatible reasoning capability');
@@ -201,6 +223,7 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     }
     if (item.type === 'function_call' || item.type === 'custom_tool_call') {
       const custom = item.type === 'custom_tool_call';
+      validateEncryptedFunctionArgs(item, capabilities.agentMessageDelivery, messageParam);
       const id = string(item.call_id, 'call_id', true);
       if (callIds.has(id)) fail('invalid_tool_history', 'Duplicate tool call identifier');
       callIds.add(id);

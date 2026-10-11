@@ -1,3 +1,4 @@
+import { validateAgentMessage } from '../responses-codec/agent-messages';
 import { decodeResponsesRequest } from '../responses-codec';
 import { argumentObject, fail, list, record, string, type JsonRecord } from '../responses-codec/common';
 import { fields, integer, bool, textParts } from './validation';
@@ -320,7 +321,7 @@ export function canonicalRequest(raw: unknown, protocol: LLMProtocol, model: str
   }
   return out;
 }
-function validateCanonical(b: JsonRecord): void {
+function validateCanonical(b: JsonRecord, context: ProtocolSessionContext): void {
   for (const key of ['stream', 'parallel_tool_calls', 'store', 'background'])
     if (b[key] !== undefined)
       bool(b[key], key);
@@ -350,7 +351,8 @@ function validateCanonical(b: JsonRecord): void {
   const input = typeof b.input === 'string' ? [] : list(b.input, 'input');
   for (const [i, raw] of input.entries()) {
     const t = record(raw, 'input item'), p = `input[${i}]`;
-    const allowed = t.type === 'function_call' ? ['type', 'id', 'status', 'call_id', 'name', 'namespace', 'arguments'] : t.type === 'custom_tool_call' ? ['type', 'id', 'status', 'call_id', 'name', 'namespace', 'input'] :
+    if (t.type === 'agent_message') { validateAgentMessage(t, p, context.capabilities?.limits); continue; }
+    const allowed = t.type === 'function_call' ? ['type', 'id', 'status', 'call_id', 'name', 'namespace', 'arguments', 'encrypted_function_args'] : t.type === 'custom_tool_call' ? ['type', 'id', 'status', 'call_id', 'name', 'namespace', 'input'] :
       t.type === 'function_call_output' || t.type === 'custom_tool_call_output' ? ['type', 'id', 'call_id', 'output', 'is_error'] : t.type === 'reasoning' ? ['type', 'id', 'status', 'summary', 'content', 'encrypted_content', 'internal_chat_message_metadata_passthrough'] :
         t.type === 'additional_tools' ? ['type', 'id', 'role', 'tools'] : ['type', 'id', 'status', 'role', 'content', 'internal_chat_message_metadata_passthrough'];
     fields(t, [...allowed,'internal_chat_message_metadata_passthrough'], p, 'unsupported_content');
@@ -396,8 +398,8 @@ function validateCanonical(b: JsonRecord): void {
 export function convertProtocolRequest(raw: unknown, context: ProtocolSessionContext): ProtocolRequestConversion {
   const b = canonicalRequest(raw, context.sourceProtocol, context.model);
   if(context.streaming!==undefined){bool(context.streaming,'context.streaming');if(b.stream!==undefined&&b.stream!==context.streaming)fail('invalid_payload','Request stream mode disagrees with transport context','stream');b.stream=context.streaming;}
-  validateCanonical(b);
-  const cap = { ...context.capabilities, omitOptionalWebSearch: true, preserveToolIdentityDescription: true, preserveRefusalContent: true }, policy = context.reasoningPolicy;
+  validateCanonical(b, context);
+  const cap = { ...context.capabilities, agentMessageDelivery: context.agentMessageDelivery ?? context.capabilities?.agentMessageDelivery, omitOptionalWebSearch: true, preserveToolIdentityDescription: true, preserveRefusalContent: true }, policy = context.reasoningPolicy;
   const reasoning = b.reasoning === undefined ? undefined : record(b.reasoning, 'reasoning');
   const sourceThinking = b.sourceThinking;
   delete b.sourceThinking;

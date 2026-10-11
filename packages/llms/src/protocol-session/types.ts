@@ -19,6 +19,8 @@ export interface ProtocolSessionCapabilities extends ResponsesCodecCapabilities 
   geminiJsonSchema?: boolean;
 }
 export interface ProtocolSessionContext {
+  /** Request-scoped opt-in; absence preserves strict collaboration handling. */
+  agentMessageDelivery?: ResponsesCodecCapabilities['agentMessageDelivery'];
   sourceProtocol: LLMProtocol;
   targetProtocol: LLMProtocol;
   /** Target model; caller owns routing and source URL validation. */

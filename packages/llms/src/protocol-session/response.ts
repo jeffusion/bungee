@@ -1,3 +1,4 @@
+import { validateEncryptedFunctionArgs } from '../responses-codec/agent-messages';
 import { ResponsesEventEncoder, encodeResponsesResult } from '../responses-codec';
 import { argumentObject, fail, list, record, string, serialized, limits, type JsonRecord, type ResponsesToolNames } from '../responses-codec/common';
 import { fields, integer } from './validation';
@@ -80,7 +81,7 @@ export function validateCanonicalResponse(raw: unknown, context: ProtocolSession
     const t = record(rawItem, 'output item'), path = `output[${i}]`;
     if (t.status !== undefined && !['in_progress', 'completed', 'incomplete'].includes(String(t.status))) fail('unsupported_response', 'Unknown item status', `${path}.status`);
     if (b.status === 'completed' && t.status !== undefined && t.status !== 'completed') fail('invalid_stream', 'Completed response contains an unfinished item', `${path}.status`);
-    fields(t, t.type === 'message' ? ['type', 'id', 'role', 'status', 'content'] : t.type === 'reasoning' ? ['type', 'id', 'summary', 'status', 'encrypted_content', 'content'] : t.type === 'function_call' ? ['type', 'id', 'status', 'name', 'namespace', 'call_id', 'arguments'] : ['type', 'id', 'status', 'name', 'namespace', 'call_id', 'input'], path, 'unsupported_content');
+    fields(t, t.type === 'message' ? ['type', 'id', 'role', 'status', 'content'] : t.type === 'reasoning' ? ['type', 'id', 'summary', 'status', 'encrypted_content', 'content'] : t.type === 'function_call' ? ['type', 'id', 'status', 'name', 'namespace', 'call_id', 'arguments', 'encrypted_function_args'] : ['type', 'id', 'status', 'name', 'namespace', 'call_id', 'input'], path, 'unsupported_content');
     if (t.type === 'message') {
       if (t.role !== 'assistant')
         fail('unsupported_content', 'Output message must be assistant', `${path}.role`);
@@ -109,6 +110,7 @@ export function validateCanonicalResponse(raw: unknown, context: ProtocolSession
       }
     }
     else if (t.type === 'function_call' || t.type === 'custom_tool_call') {
+      validateEncryptedFunctionArgs(t, context.capabilities?.agentMessageDelivery, path);
       const id = string(t.call_id, 'call_id', true);
       if (ids.has(id))
         fail('invalid_tool_arguments', 'Duplicate output tool call id', path);
@@ -319,7 +321,7 @@ export function canonicalResponse(raw: unknown, context: ProtocolSessionContext,
     return record(events.at(-1)?.response, 'response');
   }
   validateProviderResponse(raw, context.targetProtocol);
-  const result = encodeResponsesResult(raw, context.targetProtocol, context.responseModel ?? context.model, names, context.capabilities?.limits);
+  const result = encodeResponsesResult(raw, context.targetProtocol, context.responseModel ?? context.model, names, context.capabilities?.limits, { agentMessageDelivery: context.capabilities?.agentMessageDelivery });
   if (result.status === 'failed')
     result.error = safeProtocolError();
   // Preserve cache-write accounting instead of folding it irreversibly into input_tokens.

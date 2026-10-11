@@ -1,4 +1,5 @@
-import { argumentObject, bounded, bytes, customInput, customInputPrefix, fail, limits, list, normalizeUsage, record, responsePayload, restoreTool, serialized, string, terminal, toolItem,
+import type { AgentMessageDelivery } from './agent-messages';
+import { plaintextCollaborationCall, argumentObject, bounded, bytes, customInput, customInputPrefix, fail, limits, list, normalizeUsage, record, responsePayload, restoreTool, serialized, string, terminal, toolItem,
   type JsonRecord, type ResponsesCodecLimits, type ResponsesProtocol, type ResponsesToolName, type ResponsesToolNames, type Terminal } from './common';
 
 interface OutputState {
@@ -33,7 +34,7 @@ export class ResponsesEventEncoder {
 
   constructor(readonly protocol: ResponsesProtocol, readonly model: string,
     readonly toolNames: ResponsesToolNames = new Map(), configuredLimits?: Partial<ResponsesCodecLimits>,
-    private readonly options: { preserveContentOrder?: boolean } = {}) {
+    private readonly options: { preserveContentOrder?: boolean; agentMessageDelivery?: AgentMessageDelivery } = {}) {
     this.budget = limits(configuredLimits);
   }
   private contentState(kind: 'text' | 'reasoning' | 'refusal'): OutputState {
@@ -68,11 +69,11 @@ export class ResponsesEventEncoder {
   }
   private item(state: OutputState, status: string, strict = false): JsonRecord {
     if (state.kind === 'tool') {
-      if (strict) return { ...toolItem(state.callId, state.name, state.args || '{}', this.toolNames, status), id: state.id };
+      if (strict) return { ...toolItem(state.callId, state.name, state.args || '{}', this.toolNames, status, this.options.agentMessageDelivery), id: state.id };
       const original = state.original ?? restoreTool(state.name, this.toolNames);
-      return { id: state.id, type: original.custom ? 'custom_tool_call' : 'function_call', call_id: state.callId,
+      return plaintextCollaborationCall({ id: state.id, type: original.custom ? 'custom_tool_call' : 'function_call', call_id: state.callId,
         name: original.name, ...(original.namespace ? { namespace: original.namespace } : {}), status,
-        ...(original.custom ? { input: state.emittedInput } : { arguments: state.args }) };
+        ...(original.custom ? { input: state.emittedInput } : { arguments: state.args }) }, this.options.agentMessageDelivery);
     }
     if (state.kind === 'reasoning') return { id: state.id, type: 'reasoning', summary: status === 'in_progress' ? [] : [{ type: 'summary_text', text: state.text }] };
     return { id: state.id, type: 'message', role: 'assistant', status,

@@ -1,14 +1,15 @@
+import type { AgentMessageDelivery } from './agent-messages';
 import { fail, list, record, serialized, limits, responsePayload, type JsonRecord, type ResponsesCodecLimits, type ResponsesProtocol, type ResponsesToolNames } from './common';
 import { ResponsesEventEncoder } from './events';
 
 /** JSON and SSE share the same validation and item/terminal semantics. */
 export function encodeResponsesResult(raw: unknown, protocol: ResponsesProtocol, model: string,
-  toolNames: ResponsesToolNames = new Map(), configuredLimits?: Partial<ResponsesCodecLimits>): JsonRecord {
+  toolNames: ResponsesToolNames = new Map(), configuredLimits?: Partial<ResponsesCodecLimits>, options: { agentMessageDelivery?: AgentMessageDelivery } = {}): JsonRecord {
   const body = record(raw, 'upstream response');
   const budget = limits(configuredLimits);
   serialized(body, budget.maxOutputBytes, 'upstream response');
   if (body.error !== undefined || body.type === 'error') return responsePayload(`resp_${crypto.randomUUID().replaceAll('-', '')}`, model, [], { status: 'failed', reason: 'upstream_error' }, {}, record(body.error, 'upstream error'));
-  const encoder = new ResponsesEventEncoder(protocol, model, toolNames, configuredLimits);
+  const encoder = new ResponsesEventEncoder(protocol, model, toolNames, configuredLimits, options);
   if (protocol === 'chat_completions') {
     const choices = list(body.choices, 'choices');
     if (choices.length !== 1) fail('unsupported_response', 'Exactly one response choice is required');

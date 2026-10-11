@@ -21,6 +21,9 @@ export function createProtocolSession(context: ProtocolSessionContext): Protocol
     ...context, capabilities: context.capabilities ? { ...context.capabilities, limits: context.capabilities.limits ? { ...context.capabilities.limits } : undefined } : undefined,
     reasoningPolicy: context.reasoningPolicy ? { ...context.reasoningPolicy, effortMap: context.reasoningPolicy.effortMap ? { ...context.reasoningPolicy.effortMap } : undefined } : undefined
   };
+  const delivery = context.agentMessageDelivery ?? context.capabilities?.agentMessageDelivery;
+  if (delivery !== undefined && delivery !== 'plaintext') fail('invalid_payload', 'Unknown agent message delivery policy', 'agentMessageDelivery');
+  context.capabilities = { ...context.capabilities, agentMessageDelivery: delivery };
   if (!LLM_PROTOCOLS.includes(context.sourceProtocol) || !LLM_PROTOCOLS.includes(context.targetProtocol))
     fail('unsupported_protocol', 'Unknown protocol');
   if (typeof context.model !== 'string' || !context.model)
@@ -59,7 +62,7 @@ export function createProtocolSession(context: ProtocolSessionContext): Protocol
     else if (context.targetProtocol === 'gemini_generate_content')
       encoder = new GeminiCanonicalDecoder(context, names);
     else
-      encoder = new ResponsesEventEncoder(context.targetProtocol, context.responseModel ?? context.model, names, context.capabilities?.limits, { preserveContentOrder: true });
+      encoder = new ResponsesEventEncoder(context.targetProtocol, context.responseModel ?? context.model, names, context.capabilities?.limits, { preserveContentOrder: true, agentMessageDelivery: context.capabilities?.agentMessageDelivery });
     validator = context.targetProtocol === 'responses' ? undefined : new CanonicalStreamValidator(context);
     renderer = new CanonicalStreamRenderer(context.sourceProtocol, context);
   };
