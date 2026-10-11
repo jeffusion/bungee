@@ -1,3 +1,4 @@
+import type { AgentMessageDelivery } from './agent-messages';
 export type ResponsesProtocol = 'chat_completions' | 'anthropic_messages';
 export type JsonRecord = Record<string, unknown>;
 export interface ResponsesToolName { name: string; namespace?: string; custom: boolean }
@@ -16,6 +17,8 @@ export const DEFAULT_RESPONSES_CODEC_LIMITS: Readonly<ResponsesCodecLimits> = Ob
   maxItems: 1024,
 });
 export interface ResponsesCodecCapabilities {
+  /** Explicit caller policy for plaintext collaboration across protocols. */
+  agentMessageDelivery?: AgentMessageDelivery;
   reasoningEffort?: boolean;
   /** Plain reasoning history support is independent of effort parameter mapping. */
   reasoningHistory?: boolean;
@@ -143,12 +146,19 @@ export function normalizeUsage(raw: unknown, protocol: ResponsesProtocol, prior:
     input_tokens_details: { cached_tokens: cacheRead, ...(cacheWrite ? { cache_creation_tokens: cacheWrite } : {}) },
     output_tokens_details: { reasoning_tokens: tokens(reasoning ?? (prior.output_tokens_details as JsonRecord | undefined)?.reasoning_tokens, 'reasoning_tokens') } };
 }
-export function toolItem(id: string, name: string, args: string, names: ResponsesToolNames, status = 'completed'): JsonRecord {
+export function isCollaborationFunction(name: unknown, namespace: unknown, custom = false): boolean {
+  return !custom && namespace === 'collaboration' && typeof name === 'string' && ['spawn_agent', 'send_message', 'followup_task'].includes(name);
+}
+export function plaintextCollaborationCall(item: JsonRecord, delivery?: AgentMessageDelivery): JsonRecord {
+  return delivery === 'plaintext' && item.type === 'function_call' && isCollaborationFunction(item.name, item.namespace)
+    ? { ...item, encrypted_function_args: [] } : item;
+}
+export function toolItem(id: string, name: string, args: string, names: ResponsesToolNames, status = 'completed', agentMessageDelivery?: AgentMessageDelivery): JsonRecord {
   const original = restoreTool(name, names);
   const item: JsonRecord = { id: `fc_${id}`, type: original.custom ? 'custom_tool_call' : 'function_call', call_id: id, name: original.name, status };
   if (original.namespace) item.namespace = original.namespace;
   if (original.custom) item.input = customInput(args); else { argumentObject(args); item.arguments = args; }
-  return item;
+  return plaintextCollaborationCall(item, agentMessageDelivery);
 }
 export function responsePayload(id: string, model: string, output: JsonRecord[], end: Terminal, usage: JsonRecord, error?: unknown, createdAt = Math.floor(Date.now() / 1000)): JsonRecord {
   const result: JsonRecord = { id, object: 'response', created_at: createdAt, model, status: end.status, output, usage: Object.keys(usage).length ? usage : null };
