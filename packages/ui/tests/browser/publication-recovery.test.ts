@@ -18,6 +18,8 @@ try {
     const context = await browser.newContext({ viewport: { width, height: 1000 } });
     await context.addInitScript(language => localStorage.setItem('locale', language), locale);
     const page = await context.newPage();
+    // Recovery behavior does not depend on a remote font service.
+    await page.route('https://fonts.googleapis.com/**', route => route.fulfill({status:200,contentType:'text/css',body:''}));
     page.on('pageerror', error => errors.push(`page: ${error.message}`));
     page.on('console', message => { if (message.type() === 'error') errors.push(`console: ${message.text()}`); });
     page.on('requestfailed', request => errors.push(`network: ${request.url()} ${request.failure()?.errorText}`));
