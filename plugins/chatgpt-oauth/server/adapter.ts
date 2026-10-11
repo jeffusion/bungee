@@ -30,10 +30,19 @@ export {
 } from './constants';
 
 export const CHAT_COMPLETIONS_PATH = '/v1/chat/completions';
-export const RESPONSES_PATH = '/v1/responses';
+export const RESPONSES_PATH = '/responses';
+const SIWC_RESPONSES_PATH = '/v1/responses';
 export const MODELS_PATH = '/v1/models';
 export const CODEX_RESPONSES_PATH = '/backend-api/codex/responses';
 export const CODEX_MODELS_PATH = '/backend-api/codex/models';
+export function isResponsesRequest(url: URL): boolean {
+  return url.pathname === RESPONSES_PATH;
+}
+export function assertResponsesEntryPath(path: string): void {
+  if (path === SIWC_RESPONSES_PATH) {
+    throw new CodexProtocolError('invalid_response', 'Responses requests must use /responses; the plugin supplies the upstream prefix');
+  }
+}
 const MAX_PROFILE_HEADER_VALUE_BYTES = 8192;
 const CHATGPT_ORIGIN = 'https://chatgpt.com';
 const SIWC_ORIGIN = 'https://api.openai.com';
@@ -386,18 +395,19 @@ export class ChatgptOauthAdapter {
   constructor() {}
 
   beforeRequest(context: MutableRequestContext): MutableRequestContext {
+    assertResponsesEntryPath(context.url.pathname);
     const target = (context.url.pathname === MODELS_PATH || (context.originalUrl.searchParams.has('client_version') && context.url.pathname === '/models'))
       ? 'models'
       : context.url.pathname === CHAT_COMPLETIONS_PATH
       ? 'chat'
-      : context.url.pathname === RESPONSES_PATH ? 'responses' : undefined;
+      : isResponsesRequest(context.url) ? 'responses' : undefined;
     if (context.url.origin === SIWC_ORIGIN) {
       if (target === undefined) return context;
       const input = target === 'models' ? undefined : record(context.body);
       const stream = input?.stream === true;
       const includeUsage = input ? streamIncludesUsage(input) : false;
       context.body = input ? normalizeSiwcRequest(input, target as 'chat' | 'responses') : undefined;
-      if (target !== 'models') context.url.pathname = RESPONSES_PATH;
+      if (target !== 'models') context.url.pathname = SIWC_RESPONSES_PATH;
       setSiwcHeaders(context, target);
       this.requests.set(context.requestId, Object.freeze({
         // SIWC Responses can return a valid SSE body without Content-Type.
@@ -461,7 +471,7 @@ export class ChatgptOauthAdapter {
 
   reconcileOutboundRequest(context: MutableRequestContext): MutableRequestContext {
     if (context.url.origin === SIWC_ORIGIN) {
-      if (context.url.pathname === RESPONSES_PATH) {
+      if (context.url.pathname === SIWC_RESPONSES_PATH) {
         context.body = normalizeSiwcRequest(record(context.body), 'responses');
         setSiwcHeaders(context, 'responses');
       } else if (context.url.pathname === MODELS_PATH) setSiwcHeaders(context, 'models');

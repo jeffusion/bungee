@@ -1049,9 +1049,9 @@ describe('proxy credential regressions', () => {
       .map((name) => [name.toLowerCase(), `late-${label}-${name}`]));
     const cases = [
       { label: 'models-attempt', path: '/v1/models', method: 'GET', body: undefined, expected: modelsHeaders },
-      { label: 'responses-false', path: '/v1/responses', method: 'POST', body: { model: 'codex', service_tier: 'priority', input: 'hello', stream: false, prompt_cache_key: 'prompt-session' }, sessionId: 'explicit-session', expected: { ...responseStatic, ...expectedDynamic('responses-false'), 'session-id': 'explicit-session' } },
-      { label: 'responses-true', path: '/v1/responses', method: 'POST', body: { model: 'codex', input: 'hello', stream: true, prompt_cache_key: 'prompt-session-true' }, expected: { ...responseStatic, 'x-codex-routing-hint': 'model=codex', ...expectedDynamic('responses-true'), 'session-id': 'prompt-session-true' } },
-      { label: 'responses-lite', path: '/v1/responses', method: 'POST', body: { model: 'codex', input: 'hello lite', stream: false, client_metadata: { ws_request_header_x_openai_internal_codex_responses_lite: true } }, expected: { ...responseStatic, 'x-codex-routing-hint': 'model=codex', ...expectedDynamic('responses-lite'), 'x-openai-internal-codex-responses-lite': 'true' } },
+      { label: 'responses-false', path: '/responses', method: 'POST', body: { model: 'codex', service_tier: 'priority', input: 'hello', stream: false, prompt_cache_key: 'prompt-session' }, sessionId: 'explicit-session', expected: { ...responseStatic, ...expectedDynamic('responses-false'), 'session-id': 'explicit-session' } },
+      { label: 'responses-true', path: '/responses', method: 'POST', body: { model: 'codex', input: 'hello', stream: true, prompt_cache_key: 'prompt-session-true' }, expected: { ...responseStatic, 'x-codex-routing-hint': 'model=codex', ...expectedDynamic('responses-true'), 'session-id': 'prompt-session-true' } },
+      { label: 'responses-lite', path: '/responses', method: 'POST', body: { model: 'codex', input: 'hello lite', stream: false, client_metadata: { ws_request_header_x_openai_internal_codex_responses_lite: true } }, expected: { ...responseStatic, 'x-codex-routing-hint': 'model=codex', ...expectedDynamic('responses-lite'), 'x-openai-internal-codex-responses-lite': 'true' } },
       { label: 'chat-false', path: '/v1/chat/completions', method: 'POST', body: { model: 'codex', service_tier: 'priority', messages: [{ role: 'user', content: 'hello' }], stream: false }, expected: { ...responseStatic, ...expectedDynamic('chat-false') } },
       { label: 'chat-true', path: '/v1/chat/completions', method: 'POST', body: { model: 'codex', messages: [{ role: 'user', content: 'hello' }], stream: true, prompt_cache_key: 'chat-prompt-session' }, expected: { ...responseStatic, 'x-codex-routing-hint': 'model=codex', ...expectedDynamic('chat-true'), 'session-id': 'chat-prompt-session' } },
       { label: 'chat-model-mapping', path: '/v1/chat/completions', method: 'POST', body: { model: 'codex-alias', messages: [{ role: 'user', content: 'mapped' }], stream: false }, expected: { ...responseStatic, 'x-codex-routing-hint': 'model=canonical-codex-v2', ...expectedDynamic('chat-model-mapping') } },
@@ -1143,13 +1143,17 @@ describe('proxy credential regressions', () => {
 
       const fetchCount = fetches.length;
       const credentialCount = credentialCalls.length;
+      const prefixedPathError = await run('/v1/responses', 'POST', { model: 'codex', input: 'unsupported-prefix', stream: false }, 'unsupported-prefix').catch((error) => error);
+      expect(prefixedPathError.message).toContain('must use /responses');
+      expect(fetches).toHaveLength(fetchCount);
+      expect(credentialCalls).toHaveLength(credentialCount);
       mutation = 'path';
-      const pathError = await run('/v1/responses', 'POST', { model: 'codex', input: 'late-path', stream: false }, 'late-path').catch((error) => error);
+      const pathError = await run('/responses', 'POST', { model: 'codex', input: 'late-path', stream: false }, 'late-path').catch((error) => error);
       expect(isManagedUpstreamAccessError(pathError)).toBe(true);
       expect(fetches).toHaveLength(fetchCount);
       expect(credentialCalls).toHaveLength(credentialCount);
       mutation = 'origin';
-      const originError = await run('/v1/responses', 'POST', { model: 'codex', input: 'late-origin', stream: false }, 'late-origin').catch((error) => error);
+      const originError = await run('/responses', 'POST', { model: 'codex', input: 'late-origin', stream: false }, 'late-origin').catch((error) => error);
       expect(isManagedUpstreamAccessError(originError)).toBe(true);
       expect(fetches).toHaveLength(fetchCount);
       expect(credentialCalls).toHaveLength(credentialCount);

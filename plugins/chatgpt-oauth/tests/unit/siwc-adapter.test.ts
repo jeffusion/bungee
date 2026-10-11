@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import type { MutableRequestContext, RawResponseContext } from '../../../../packages/core/src/hooks';
 
 
-function request(path = '/v1/responses', body: Record<string, unknown> = { model: 'test-model', input: 'hello' }): MutableRequestContext {
+function request(path = '/responses', body: Record<string, unknown> = { model: 'test-model', input: 'hello' }): MutableRequestContext {
   return {
     requestId: crypto.randomUUID(), clientIP: '127.0.0.1', method: path === '/v1/models' ? 'GET' : 'POST',
     originalUrl: new URL(`http://localhost${path}`), url: new URL(`https://api.openai.com${path}`),
@@ -24,7 +24,7 @@ const sse = [
 
 describe('SIWC public API adapter', () => {
   test('accepts SIWC SSE without Content-Type for streaming and aggregated Responses and chat', async () => {
-    for (const path of ['/v1/responses', '/v1/chat/completions']) {
+    for (const path of ['/responses', '/v1/chat/completions']) {
       for (const stream of [true, false]) {
         const adapter = new ChatgptOauthAdapter();
         const context = request(path, { model: 'test-model', input: 'hello', messages: [{ role: 'user', content: 'hello' }], stream });
@@ -49,7 +49,7 @@ describe('SIWC public API adapter', () => {
   test('missing Content-Type still requires valid SSE and a terminal event', async () => {
     for (const body of ['{"secret":"not SSE"}', '<html>not SSE</html>', 'data: {"type":"response.created","response":{"id":"r"}}\n\n']) {
       for (const stream of [true, false]) {
-        const adapter = new ChatgptOauthAdapter(), context = request('/v1/responses', { input: 'hello', stream });
+        const adapter = new ChatgptOauthAdapter(), context = request('/responses', { input: 'hello', stream });
         adapter.beforeRequest(context);
         const result = await adapter.rawResponse({ response: new Response(new Blob([body]).stream()), completion: completed() }, rawContext(context));
         try { await result.response.text(); } catch { /* streaming protocol failure */ }
@@ -60,7 +60,7 @@ describe('SIWC public API adapter', () => {
 
   test('still rejects explicitly incompatible content types and models without Content-Type', async () => {
     for (const [path, response] of [
-      ['/v1/responses', new Response(sse, { headers: { 'content-type': 'application/json' } })],
+      ['/responses', new Response(sse, { headers: { 'content-type': 'application/json' } })],
       ['/v1/models', new Response(new Blob(['{"models":[]}']).stream())],
     ] as const) {
       const adapter = new ChatgptOauthAdapter(), context = request(path);
@@ -126,7 +126,7 @@ describe('SIWC public API adapter', () => {
   test('keeps Responses public, normalizes input and removes forbidden fields without modifying the caller body', () => {
     const forbidden = ['background', 'conversation', 'max_output_tokens', 'max_tool_calls', 'metadata', 'moderation', 'multi_agent', 'prompt', 'prompt_cache_retention', 'safety_identifier', 'temperature', 'top_logprobs', 'top_p', 'truncation', 'user'];
     const original = { model: 'test-model', input: [{ role: 'system', content: 'rules' }, { role: 'user', content: 'hello' }], store: true, stream: false, ...Object.fromEntries(forbidden.map(key => [key, 'unsupported'])) };
-    const context = request('/v1/responses', original);
+    const context = request('/responses', original);
     const adapter = new ChatgptOauthAdapter();
     adapter.beforeRequest(context);
     expect(context.url.href).toBe('https://api.openai.com/v1/responses');
@@ -165,14 +165,14 @@ describe('SIWC public API adapter', () => {
 
   test('rejects server-side history and unsupported hosted tools at both request passes', () => {
     const adapter = new ChatgptOauthAdapter();
-    expect(() => adapter.beforeRequest(request('/v1/responses', { input: [], previous_response_id: 'previous' }))).toThrow('full conversation');
-    expect(() => adapter.beforeRequest(request('/v1/responses', { input: { role: 'user', content: 'hello' } }))).toThrow('array');
+    expect(() => adapter.beforeRequest(request('/responses', { input: [], previous_response_id: 'previous' }))).toThrow('full conversation');
+    expect(() => adapter.beforeRequest(request('/responses', { input: { role: 'user', content: 'hello' } }))).toThrow('array');
     for (const type of ['mcp', 'tool_search', 'computer', 'computer_use_preview', 'image_generation', 'file_search', 'code_interpreter']) {
-      expect(() => adapter.beforeRequest(request('/v1/responses', { input: [], tools: [{ type }] }))).toThrow('function and custom');
+      expect(() => adapter.beforeRequest(request('/responses', { input: [], tools: [{ type }] }))).toThrow('function and custom');
       expect(() => adapter.beforeRequest(request('/v1/chat/completions', { messages: [], tools: [{ type }] }))).toThrow('function and custom');
       expect(() => adapter.reconcileOutboundRequest(request('/v1/responses', { input: [], tool_choice: { type } }))).toThrow('function and custom');
     }
-    expect(() => adapter.beforeRequest(request('/v1/responses', { input: [{ type: 'mcp_call' }] }))).toThrow('unsupported item');
+    expect(() => adapter.beforeRequest(request('/responses', { input: [{ type: 'mcp_call' }] }))).toThrow('unsupported item');
   });
 
   test('does not rewrite SIWC models or backend paths to Codex', () => {
@@ -210,7 +210,7 @@ describe('SIWC public API adapter', () => {
   });
 
   test('reuses terminal aggregation for nonstream Responses and chat', async () => {
-    for (const path of ['/v1/responses', '/v1/chat/completions']) {
+    for (const path of ['/responses', '/v1/chat/completions']) {
       const adapter = new ChatgptOauthAdapter(), context = request(path, { model: 'test-model', input: 'hello', messages: [{ role: 'user', content: 'hello' }], stream: false });
       adapter.beforeRequest(context);
       expect(context.body.stream).toBe(true);
@@ -232,9 +232,9 @@ describe('SIWC public API adapter', () => {
     expect(await result.completion).toEqual({ status: 'completed' });
   });
 
-  test('leaves legacy Codex behavior in its original branch', () => {
+  test('adapts the relative Codex Responses path independently of the SIWC public API', () => {
     const context = request();
-    context.url = new URL('https://chatgpt.com/v1/responses');
+    context.url = new URL('https://chatgpt.com/responses');
     new ChatgptOauthAdapter().beforeRequest(context);
     expect(context.url.pathname).toBe('/backend-api/codex/responses');
     expect(context.headers['user-agent']).toContain('codex-tui');

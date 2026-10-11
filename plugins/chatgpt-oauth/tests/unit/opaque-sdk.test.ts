@@ -5,8 +5,9 @@ import { responseBodyFixture } from '../helpers/shared-body-fixture';
 import { bodyMetrics } from '../../../../packages/core/src/gateway/body-resources';
 import { ChatgptOauthAdapter } from '../../server/adapter';
 import ChatgptOauthPlugin from '../../server';
+import { createPluginHooks } from '../../../../packages/core/src/hooks';
 
-function request(path = '/v1/responses', stream = true): MutableRequestContext {
+function request(path = '/responses', stream = true): MutableRequestContext {
   return {
     method: 'POST', originalUrl: new URL(`http://localhost${path}`), url: new URL(`https://api.openai.com${path}`),
     requestId: crypto.randomUUID(), clientIP: '127.0.0.1', headers: {}, body: { model: 'test', input: [], messages: [], stream },
@@ -20,6 +21,44 @@ function rawContext(context: MutableRequestContext, response: Response): RawResp
 const completed = () => Promise.resolve({ status: 'completed' as const });
 const custom = { id: 'custom-1', type: 'custom_tool_call', call_id: 'call-1', name: 'execute', input: 'print(1)' };
 const payload = `data: ${JSON.stringify({ type: 'response.output_item.done', output_index: 0, item: custom })}\n\ndata: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed', output: [custom] } })}\n\ndata: [DONE]\n\n`;
+
+test('relative Responses requests declare writable bodies and adapt HTTP and WS paths', async () => {
+  for (const path of ['/responses', '/backend-api/codex/responses']) {
+    const plugin = new ChatgptOauthPlugin({});
+    expect(plugin.bodyRequirements({requestId:'relative-responses',method:'POST',url:new URL(`https://chatgpt.com${path}`),stage:'selected'}))
+      .toEqual({request:'json-write',response:path === '/responses' ? ['json','sse-json'] : []});
+    const hooks = createPluginHooks(); plugin.register(hooks);
+    const context = request(path);context.url = new URL(`https://chatgpt.com${path}`);
+    const input = [{type:'agent_message',author:'parent',recipient:'child',content:[{type:'encrypted_content',encrypted_content:'fixture-cipher'}]}];
+    context.body = {model:'relay-model',input,stream:true,store:false};
+    const converted = await hooks.onBeforeRequest.promise(context);
+    expect(converted.url.href).toBe('https://chatgpt.com/backend-api/codex/responses');
+    expect(converted.body.input).toEqual(input);
+    expect(converted.headers['x-codex-routing-hint']).toBe('model=relay-model');
+    const handshake = await hooks.onWebSocketHandshake.promise({url:new URL(`https://chatgpt.com${path}`),headers:{}} as any);
+    expect(handshake.url.href).toBe('https://chatgpt.com/backend-api/codex/responses');
+  }
+});
+
+test('OAuth accounts share the Responses entry path and reject upstream prefixes', async () => {
+  for (const [origin, upstreamPath] of [['https://chatgpt.com', '/backend-api/codex/responses'], ['https://api.openai.com', '/v1/responses']]) {
+    const plugin = new ChatgptOauthPlugin({});
+    const hooks = createPluginHooks(); plugin.register(hooks);
+    const context = request('/responses');context.url = new URL(`${origin}/responses?test=1`);
+    expect(plugin.bodyRequirements({requestId:context.requestId,method:'POST',url:context.url,stage:'selected'}))
+      .toEqual({request:'json-write',response:['json','sse-json']});
+    const converted = await hooks.onBeforeRequest.promise(context);
+    expect(converted.url.href).toBe(`${origin}${upstreamPath}?test=1`);
+    expect(converted.body.stream).toBe(true);
+    expect(converted.body.store).toBe(false);
+    const handshake = await hooks.onWebSocketHandshake.promise({url:new URL(`${origin}/responses?test=1`),headers:{}} as any);
+    expect(handshake.url.href).toBe(`${origin}${upstreamPath}?test=1`);
+    const prefixed = request();prefixed.url = new URL(`${origin}/v1/responses`);
+    expect(plugin.bodyRequirements({requestId:prefixed.requestId,method:'POST',url:prefixed.url,stage:'selected'})).toEqual({request:'none'});
+    await expect(hooks.onBeforeRequest.promise(prefixed)).rejects.toThrow('must use /responses');
+    await expect(hooks.onWebSocketHandshake.promise({url:new URL(`${origin}/v1/responses`),headers:{}} as any)).rejects.toThrow('must use /responses');
+  }
+});
 
 test('gzip and zstd SIWC responses use host decoding and preserve custom tools', async () => {
   for (const coding of ['gzip', 'zstd']) {
@@ -93,7 +132,7 @@ test('none request demand and an unadapted compressed response remain transparen
 test('one compressed representation shares parsed frozen SSE events with an observer', async () => {
   for (const coding of ['gzip', 'zstd']) {
     const adapter = new ChatgptOauthAdapter();
-    const context = request('/v1/responses', true);
+    const context = request('/responses', true);
     adapter.beforeRequest(context);
     const wire = coding === 'gzip' ? gzipSync(Buffer.from(payload)) : zstdCompressSync(Buffer.from(payload));
     const response = new Response(new Uint8Array(wire), { headers: { 'content-type': 'text/event-stream', 'content-encoding': coding } });
@@ -167,7 +206,7 @@ test('HTTP error capture deadline cancels the central reader and returns the ori
 test('attempt cancellation interrupts nonstream event aggregation and releases the owner', async () => {
   let cancelled = 0;
   const adapter = new ChatgptOauthAdapter();
-  const context = request('/v1/responses', false);
+  const context = request('/responses', false);
   adapter.beforeRequest(context);
   const response = new Response(new ReadableStream<Uint8Array>({ cancel() { cancelled++; } }), { headers: { 'content-type': 'text/event-stream' } });
   const controller = new AbortController();

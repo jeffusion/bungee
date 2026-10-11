@@ -26,7 +26,9 @@ SIWC 会话使用 PKCE、state 和 nonce；插件验证回调及身份后才保�
 
 ## 请求与用量边界
 
-SIWC 支持客户端的 `/v1/responses` 和 `/v1/chat/completions` 请求；后者转为公共 `/v1/responses`。上游请求固定 `store:false`、`stream:true`，客户端仍可选择接收流式结果或聚合后的 JSON。
+两类账号统一使用 Responses 入口 `/responses`，HTTP 请求和 WebSocket 握手遵循同一规则。Codex OAuth 上游配置为 `https://chatgpt.com`，插件改写为 `/backend-api/codex/responses`；SIWC 上游配置为 `https://api.openai.com`，插件改写为 `/v1/responses`。客户端 base URL 和上游地址不添加 `/v1`；入口 `/v1/responses` 明确拒绝。原生 `/backend-api/codex/responses` 请求保持原生处理。
+
+SIWC 支持客户端的 `/responses` 和 `/v1/chat/completions` 请求；插件将两者转为公共 `/v1/responses`。上游请求固定 `store:false`、`stream:true`，客户端仍可选择接收流式结果或聚合后的 JSON。
 
 客户端需发送完整对话。字符串 `input` 转为用户消息数组，system 消息转为 developer，`previous_response_id` 被拒绝。其他不支持的后台、对话句柄、输出上限、采样、元数据等字段被移除，具体列表见 `server/adapter.ts`。工具限定为 function 和 custom；不支持托管 MCP、tool search、原生 computer、image generation、file search、code interpreter 等工具。
 
