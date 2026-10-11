@@ -5,7 +5,7 @@
   import CodexTargetPicker from './CodexTargetPicker.svelte';
   import { loadCodexGatewayTargets, type CodexGatewayTarget } from './gateway-targets';
   import { requestPluginControl } from '$api/client';
-  import { BSelect, BCheckbox, LoadingIndicator } from '$components/industrial';
+  import { BSelect, BCheckbox, LoadingIndicator, PanelCard } from '$components/industrial';
   import { Input } from '$components/ui/input';
   import { NumberInput } from '$components/ui/number-input';
   import { Label } from '$components/ui/label';
@@ -96,79 +96,83 @@
   });
 </script>
 
-  <div class="space-y-5" data-testid="codex-model-bindings">
-    <p class="text-sm text-zinc-400">{t('description')}</p>
-    {#if loading}<LoadingIndicator label={t('loading')} />{/if}
-    {#if catalogError}<p role="alert" class="text-sm text-red-400">{t('error')}</p><Button variant="outline" onclick={() => void loadCatalog()}>{t('retry')}</Button>
-    {:else if !loading && !modelCount}<p role="status" class="text-sm text-amber-400">{t('noCatalog')}</p>{/if}
-    {#if targetsError}<p role="alert" class="text-sm text-red-400">{t('targetsError')}</p><Button variant="outline" onclick={() => void loadTargets()}>{t('retry')}</Button>{/if}
-    {#if !value.length}<p class="text-sm text-zinc-400">{t('noBindings')}</p>{/if}
-    {#each value as binding, index (rowIds[index])}
-      {@const id = `${componentId}-${rowIds[index]}`}
-      <div class="min-w-0 space-y-4 border border-carbon-600 p-4" data-testid="codex-model-binding">
-        <div class="flex items-center justify-between gap-3 border-b border-carbon-600 pb-3">
-          <span class="text-xs font-medium text-zinc-300">{t('binding')} {index + 1}</span>
-          <Button variant="ghost" class="h-7 shrink-0 px-2 text-xs" onclick={() => remove(index)}>{t('remove')}</Button>
-        </div>
-        <div class="min-w-0 space-y-3" data-testid="codex-binding-source">
-          <div class="flex flex-wrap items-center justify-between gap-2">
-            <span class="text-xs font-medium text-zinc-300">{t('match')}</span>
-            <Button variant="ghost" class="h-7 px-2 text-xs" onclick={() => toggleSource(index, rowIds[index], !manualSource(binding, rowIds[index]))}>{manualSource(binding, rowIds[index]) ? t('fromCatalog') : t('manual')}</Button>
-          </div>
-          {#if manualSource(binding, rowIds[index])}
-            <div class="space-y-2">
-              <Label class="block" for={`${id}-source`}>{t('source')}</Label>
-              <Input id={`${id}-source`} aria-label={t('source')} value={binding.source ?? binding.alias ?? binding.model} maxlength={512} placeholder={t('sourcePlaceholder')} required oninput={event => update(index, { source: event.currentTarget.value })} />
+<div class="space-y-5" data-testid="codex-model-bindings">
+  {#if loading}<LoadingIndicator label={t('loading')} />{/if}
+  {#if catalogError}<p role="alert" class="text-sm text-red-400">{t('error')}</p><Button variant="outline" onclick={() => void loadCatalog()}>{t('retry')}</Button>
+  {:else if !loading && !modelCount}<p role="status" class="text-sm text-amber-400">{t('noCatalog')}</p>{/if}
+  {#if targetsError}<p role="alert" class="text-sm text-red-400">{t('targetsError')}</p><Button variant="outline" onclick={() => void loadTargets()}>{t('retry')}</Button>{/if}
+  {#if !value.length}<p class="text-sm text-zinc-400">{t('noBindings')}</p>{/if}
+  {#each value as binding, index (rowIds[index])}
+    {@const id = `${componentId}-${rowIds[index]}`}
+    <div class="min-w-0" data-testid="codex-model-binding">
+      <PanelCard title={`${t('binding')} ${index + 1}`} variant="flat" corners={false} stripe="zinc">
+        {#snippet actions()}
+          <Button variant="ghost" class="h-[44px] shrink-0 px-2 text-xs sm:h-[40px]" onclick={() => remove(index)}>{t('remove')}</Button>
+        {/snippet}
+        <div class="min-w-0 space-y-6">
+          <div class="min-w-0 space-y-3" data-testid="codex-binding-source">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <span class="nx-label">{t('match')}</span>
+              <Button variant="ghost" class="px-2 text-xs" onclick={() => toggleSource(index, rowIds[index], !manualSource(binding, rowIds[index]))}>{manualSource(binding, rowIds[index]) ? t('fromCatalog') : t('manual')}</Button>
             </div>
-          {:else}
-            <div class="grid min-w-0 gap-4 sm:grid-cols-2">
-              <div class="min-w-0 space-y-2"><Label class="block">{t('sourceProvider')}</Label>
-                <BSelect searchable searchLabels={{ empty: t('noOptions') }} value={binding.sourceProvider ?? ''} options={providerOptions} ariaLabel={t('sourceProvider')} placeholder={t('sourceProvider')} disabled={loading || catalogError} onchange={provider => update(index, { sourceProvider: String(provider), source: '' })} />
+            {#if manualSource(binding, rowIds[index])}
+              <div class="space-y-1.5">
+                <Label class="block" for={`${id}-source`}>{t('source')}</Label>
+                <Input id={`${id}-source`} aria-label={t('source')} value={binding.source ?? binding.alias ?? binding.model} maxlength={512} placeholder={t('sourcePlaceholder')} required oninput={event => update(index, { source: event.currentTarget.value })} />
               </div>
-              <div class="min-w-0 space-y-2"><Label class="block">{t('source')}</Label>
-                <PriceModelPicker value={binding.source ?? binding.alias ?? binding.model} provider={binding.sourceProvider ?? ''} {catalogVersion} catalogPlugin="codex-router" catalogPath="/catalog" disabled={!binding.sourceProvider || !modelCount} label={t('source')} placeholder={t('source')} searchLabel={t('search')} emptyLabel={t('empty')} loadingLabel={t('loading')} errorLabel={t('error')} retryLabel={t('retry')} loadedLabel={t('loaded')} completeLabel={t('complete')} loadMoreLabel={t('loadMore')} onchange={source => update(index, { source })} />
+            {:else}
+              <div class="grid min-w-0 gap-3 sm:grid-cols-2">
+                <div class="min-w-0 space-y-1.5"><Label class="block" for={`${id}-source-provider`}>{t('sourceProvider')}</Label>
+                  <BSelect id={`${id}-source-provider`} searchable searchLabels={{ empty: t('noOptions') }} value={binding.sourceProvider ?? ''} options={providerOptions} ariaLabel={t('sourceProvider')} placeholder={t('sourceProvider')} disabled={loading || catalogError} onchange={provider => update(index, { sourceProvider: String(provider), source: '' })} />
+                </div>
+                <div class="min-w-0 space-y-1.5"><Label class="block" for={`${id}-source`}>{t('source')}</Label>
+                  <PriceModelPicker id={`${id}-source`} value={binding.source ?? binding.alias ?? binding.model} provider={binding.sourceProvider ?? ''} {catalogVersion} catalogPlugin="codex-router" catalogPath="/catalog" disabled={!binding.sourceProvider || !modelCount} label={t('source')} placeholder={t('source')} searchLabel={t('search')} emptyLabel={t('empty')} loadingLabel={t('loading')} errorLabel={t('error')} retryLabel={t('retry')} loadedLabel={t('loaded')} completeLabel={t('complete')} loadMoreLabel={t('loadMore')} onchange={source => update(index, { source })} />
+                </div>
+              </div>
+            {/if}
+            <div class="space-y-1.5">
+              <Label class="block" for={`${id}-source-protocol`}>{t('sourceProtocol')}</Label>
+              <BSelect id={`${id}-source-protocol`} searchable searchLabels={{ empty: t('noOptions') }} value={binding.sourceProtocol ?? 'responses'} options={protocolOptions.slice(0, 1)} ariaLabel={t('sourceProtocol')} onchange={() => update(index, { sourceProtocol: 'responses' })} />
+            </div>
+          </div>
+          <div class="min-w-0 space-y-3 border-t border-carbon-600 pt-6">
+            <span class="nx-label block">{t('forward')}</span>
+            <div class="grid min-w-0 gap-3 sm:grid-cols-2" data-testid="codex-binding-destination">
+              <div class="min-w-0 space-y-1.5"><Label class="block" for={`${id}-provider`}>{t('provider')}</Label>
+                <BSelect id={`${id}-provider`} searchable searchLabels={{ empty: t('noOptions') }} value={binding.provider} options={providerOptions} ariaLabel={t('provider')} placeholder={t('provider')} disabled={loading || catalogError} onchange={provider => update(index, { provider: String(provider), model: '' })} />
+              </div>
+              <div class="min-w-0 space-y-1.5"><Label class="block" for={`${id}-model`}>{t('model')}</Label>
+                <PriceModelPicker id={`${id}-model`} value={binding.model} provider={binding.provider} {catalogVersion} catalogPlugin="codex-router" catalogPath="/catalog" disabled={!binding.provider || !modelCount} label={t('model')} placeholder={t('model')} searchLabel={t('search')} emptyLabel={t('empty')} loadingLabel={t('loading')} errorLabel={t('error')} retryLabel={t('retry')} loadedLabel={t('loaded')} completeLabel={t('complete')} loadMoreLabel={t('loadMore')} onchange={model => update(index, { model })} />
               </div>
             </div>
-          {/if}
-          <p class="text-xs leading-relaxed text-zinc-400">{t('sourceHint')}</p>
-          <div class="space-y-2">
-            <Label class="block">{t('sourceProtocol')}</Label>
-            <BSelect searchable searchLabels={{ empty: t('noOptions') }} value={binding.sourceProtocol ?? 'responses'} options={protocolOptions.slice(0, 1)} ariaLabel={t('sourceProtocol')} onchange={() => update(index, { sourceProtocol: 'responses' })} />
-          </div>
-        </div>
-        <div class="grid min-w-0 gap-4 border-t border-carbon-600 pt-4 sm:grid-cols-2" data-testid="codex-binding-destination">
-          <div class="min-w-0 space-y-2"><Label class="block" id={`${id}-provider-label`}>{t('provider')}</Label>
-            <BSelect searchable searchLabels={{ empty: t('noOptions') }} value={binding.provider} options={providerOptions} ariaLabel={t('provider')} placeholder={t('provider')} disabled={loading || catalogError} onchange={provider => update(index, { provider: String(provider), model: '' })} />
-          </div>
-          <div class="min-w-0 space-y-2"><Label class="block" id={`${id}-model-label`}>{t('model')}</Label>
-            <PriceModelPicker value={binding.model} provider={binding.provider} {catalogVersion} catalogPlugin="codex-router" catalogPath="/catalog" disabled={!binding.provider || !modelCount} label={t('model')} placeholder={t('model')} searchLabel={t('search')} emptyLabel={t('empty')} loadingLabel={t('loading')} errorLabel={t('error')} retryLabel={t('retry')} loadedLabel={t('loaded')} completeLabel={t('complete')} loadMoreLabel={t('loadMore')} onchange={model => update(index, { model })} />
-          </div>
-        </div>
-        <div class="min-w-0 space-y-2" data-testid="codex-binding-target">
-          <CodexTargetPicker id={`${id}-target`} label={t('target')} value={binding.target} {targets} loading={targetsLoading} error={targetsError}
-            onchange={target => update(index, { target: { ...binding.target, ...target } })} />
-        </div>
-        <div class="space-y-2">
-          <Label class="block">{t('targetProtocol')}</Label>
-          <BSelect searchable searchLabels={{ empty: t('noOptions') }} value={binding.target.protocol ?? ''} options={protocolOptions} ariaLabel={t('targetProtocol')} placeholder={t('targetProtocolPlaceholder')} onchange={protocol => update(index, { target: { ...binding.target, protocol: String(protocol) as ModelBinding['target']['protocol'] } })} />
-        </div>
-        <details class="border-t border-carbon-600 pt-3">
-          <summary class="cursor-pointer text-xs text-zinc-400 focus-visible:outline focus-visible:outline-nexus-500">{t('advanced')}</summary>
-          <div class="mt-4 space-y-4">
-            <div class="space-y-2"><Label class="block" for={`${id}-context`}>{t('context')}</Label>
-              <NumberInput id={`${id}-context`} min={1} max={Number.MAX_SAFE_INTEGER}
-                bind:value={() => binding.capabilityOverrides?.contextWindow, next => limit(index, 'contextWindow', next)}
-                increaseLabel={t('increase')} decreaseLabel={t('decrease')} invalidMessage={t('contextInvalid')} />
-              <p class="text-xs text-zinc-400">{t('contextHint')}</p>
+            <div class="min-w-0" data-testid="codex-binding-target">
+              <CodexTargetPicker id={`${id}-target`} label={t('target')} value={binding.target} {targets} loading={targetsLoading} error={targetsError}
+                onchange={target => update(index, { target: { ...binding.target, ...target } })} />
             </div>
-            <div class="grid gap-3 sm:grid-cols-2">
-              <BCheckbox label={t('toolsOff')} bind:checked={() => binding.capabilityOverrides?.tools === false, checked => limit(index, 'tools', checked ? false : undefined)} />
-              <BCheckbox label={t('imagesOff')} bind:checked={() => binding.capabilityOverrides?.images === false, checked => limit(index, 'images', checked ? false : undefined)} />
-              <BCheckbox label={t('reasoningOff')} bind:checked={() => binding.capabilityOverrides?.reasoning === false, checked => limit(index, 'reasoning', checked ? false : undefined)} />
+            <div class="space-y-1.5">
+              <Label class="block" for={`${id}-target-protocol`}>{t('targetProtocol')}</Label>
+              <BSelect id={`${id}-target-protocol`} searchable searchLabels={{ empty: t('noOptions') }} value={binding.target.protocol ?? ''} options={protocolOptions} ariaLabel={t('targetProtocol')} placeholder={t('targetProtocolPlaceholder')} onchange={protocol => update(index, { target: { ...binding.target, protocol: String(protocol) as ModelBinding['target']['protocol'] } })} />
             </div>
           </div>
-        </details>
-      </div>
-    {/each}
-    <Button variant="outline" disabled={value.length >= 100} onclick={add}>{t('add')}</Button>
-  </div>
+          <details class="border-t border-carbon-600 pt-3">
+            <summary class="cursor-pointer text-xs text-zinc-400 focus-visible:outline focus-visible:outline-nexus-500">{t('advanced')}</summary>
+            <div class="mt-3 space-y-3">
+              <div class="space-y-1.5"><Label class="block" for={`${id}-context`}>{t('context')}</Label>
+                <NumberInput id={`${id}-context`} min={1} max={Number.MAX_SAFE_INTEGER}
+                  bind:value={() => binding.capabilityOverrides?.contextWindow, next => limit(index, 'contextWindow', next)}
+                  increaseLabel={t('increase')} decreaseLabel={t('decrease')} invalidMessage={t('contextInvalid')} />
+                <p class="text-xs text-zinc-400">{t('contextHint')}</p>
+              </div>
+              <div class="grid gap-3 sm:grid-cols-2">
+                <BCheckbox label={t('toolsOff')} bind:checked={() => binding.capabilityOverrides?.tools === false, checked => limit(index, 'tools', checked ? false : undefined)} />
+                <BCheckbox label={t('imagesOff')} bind:checked={() => binding.capabilityOverrides?.images === false, checked => limit(index, 'images', checked ? false : undefined)} />
+                <BCheckbox label={t('reasoningOff')} bind:checked={() => binding.capabilityOverrides?.reasoning === false, checked => limit(index, 'reasoning', checked ? false : undefined)} />
+              </div>
+            </div>
+          </details>
+        </div>
+      </PanelCard>
+    </div>
+  {/each}
+  <Button variant="outline" disabled={value.length >= 100} onclick={add}>{t('add')}</Button>
+</div>
