@@ -1,6 +1,6 @@
 import { expect, test, describe } from 'bun:test';
-import { createProtocolSession, describeProtocolConversion, LLM_PROTOCOLS, type LLMProtocol, type ProtocolSessionContext } from '../src/protocol-session';
-import { ResponsesCodecError, ResponsesEventEncoder } from '../src/responses-codec';
+import { createProtocolSession, describeProtocolConversion, LLM_PROTOCOLS, type LLMProtocol, type ProtocolSessionContext } from '../../src/protocol-session';
+import { ResponsesCodecError, ResponsesEventEncoder } from '../../src/responses-codec';
 const model = 'fixture-model';
 const request = (p: LLMProtocol): any => {
   if (p === 'responses')

@@ -201,7 +201,7 @@ Documentation index: [docs/README.md](docs/README.md)
 
 - [Plugin System](./docs/reference/plugin-api.md)
 - [Plugin Development](./docs/guides/plugin-development.md)
-- [AI Provider Conversion](./docs/reference/ai-protocol-conversion.md)
+- [LLM Protocol Adapter](./docs/reference/llm-protocol-adapter.md)
 
 ---
 

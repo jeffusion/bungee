@@ -4,7 +4,7 @@ import { parsePluginManifestText } from '../../src/plugin-manifest-catalog/manif
 import { buildPluginManifestCatalog } from '../../src/plugin-manifest-catalog';
 import { ConfigRepository, ConfigRepositoryError, parseNormalizeCompile, parseNormalizeCompileAggregate } from '../../src/config-storage';
 import { createMasterPluginCatalogApi } from '../../src/master-runtime/master-plugin-catalog-api';
-import { cleanupCatalogRoots, manifest, tempRoot, writePlugin } from './plugin-manifest-catalog-fixtures';
+import { cleanupCatalogRoots, manifest, tempRoot, writePlugin } from '../helpers/plugin-manifest-catalog';
 
 const schema = ['source','target'].map(name=>({name,type:'select',label:name,required:true,options:['a','b','c'].map(value=>({label:value,value}))}));
 const constraints: readonly PluginConfigConstraint[] = [{type:'allowed-tuples',fields:['source','target'],tuples:[['a','b'],['b','c']],message:'Unsupported conversion'}];

@@ -1,6 +1,6 @@
 # 协议转换开发
 
-遵循[根指引](../../AGENTS.md)。先读取[包说明](README.md)及[协议转换参考](../../docs/reference/ai-protocol-conversion.md)。
+遵循[根指引](../../AGENTS.md)。先读取[包说明](README.md)及[协议转换参考](../../docs/reference/llm-protocol-adapter.md)。
 
 - 对插件暴露 `@jeffusion/bungee-llms/plugin-api` 门面，不导入宿主私有运行模块。
 - 转换保持请求、响应与流事件的协议语义；不将未支持的字段写成无损转换能力。

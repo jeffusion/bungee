@@ -1,4 +1,4 @@
-import { definePlugin, DataAdmissionError, logger, type Plugin, type PluginHooks, type PluginInitContext, type PluginConfigField } from '@jeffusion/bungee-core/plugin';
+import { definePlugin, createPluginHooks, DataAdmissionError, logger, type Plugin, type PluginHooks, type PluginInitContext, type PluginConfigField } from '@jeffusion/bungee-core/plugin';
 import { MODELS_DEV_CAPABILITIES_SERVICE_ID, MODELS_DEV_CAPABILITIES_CONTRACT_VERSION, type ModelsDevCapabilitiesService } from '../../models-dev/contract';
 import { CONVERSION_SERVICE_ID, CONVERSION_VERSION, type LLMProtocol, type ConversionService, type AdapterSession } from '../contract';
 import { conversionService } from './service';
@@ -97,7 +97,7 @@ export default definePlugin(class implements Plugin {
                 if (!value)
                     return name === 'onResponse' || name === 'onFlushStream' ? args[0] : undefined;
                 // A new facade contains hooks only, it never invokes another plugin's lifecycle.
-                const local = (await import('@jeffusion/bungee-core/plugin')).createPluginHooks();
+                const local = createPluginHooks();
                 value.handler.register(local);
                 return (local[name] as any).promise(...args);
             });

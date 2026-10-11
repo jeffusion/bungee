@@ -98,4 +98,4 @@ Streaming and non-streaming responses are both supported in plugin hooks.
 
 This design supports provider protocol adaptation and chunk-shape transformations.
 
-For provider-specific conversion contracts, see [AI Provider Conversion](../reference/ai-protocol-conversion.md).
+For provider-specific conversion contracts, see [LLM Protocol Adapter](../reference/llm-protocol-adapter.md).

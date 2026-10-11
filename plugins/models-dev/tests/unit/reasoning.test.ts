@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { parseReasoningOptions } from '../server/reasoning';
+import { parseReasoningOptions } from '../../server/reasoning';
 
 describe('models.dev reasoning_options validation', () => {
   test('distinguishes missing, invalid, and valid empty metadata', () => {

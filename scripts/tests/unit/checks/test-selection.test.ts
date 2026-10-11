@@ -55,6 +55,30 @@ describe('test scope selection', () => {
   test('LLMS includes direct SDK consumers and reverse dependencies', () => {
     expect(plan(['packages/llms/src/index.ts']).files.integration).toEqual(['packages/llms','plugins/a','plugins/b','plugins/c','packages/core','root'].map(m => entry(m,'integration')).sort());
   });
+  test('adapter and catalog changes retain Router process coverage through the actual declared dependency chain', async () => {
+    const snapshot: Snapshot = {};
+    for (const plugin of ['models-dev','llm-protocol-adapter','codex-router']) {
+      const path = `plugins/${plugin}/manifest.json`;
+      snapshot[path] = await Bun.file(new URL(`../../../../${path}`, import.meta.url)).text();
+    }
+    const paths = [
+      'plugins/models-dev/tests/integration/manager.test.ts',
+      'plugins/llm-protocol-adapter/tests/unit/service.test.ts',
+      'plugins/codex-router/tests/unit/history-protocol.test.ts',
+      'packages/core/tests/integration/plugins/llm-protocol-adapter.test.ts',
+      'tests/integration/codex-router-real-process.test.ts',
+      'tests/browser/dashboard.test.ts',
+    ];
+    const relations = buildRelations(snapshot);
+    expect([...relations.reversePlugins.get('plugins/llm-protocol-adapter')!]).toContain('plugins/codex-router');
+    for (const changed of ['plugins/models-dev/server/reasoning.ts','plugins/llm-protocol-adapter/server/service.ts']) {
+      const result = plan([changed], {paths, relations});
+      expect(result.mode).toBe('affected');
+      expect(result.files.integration).toContain('packages/core/tests/integration/plugins/llm-protocol-adapter.test.ts');
+      expect(result.files.integration).toContain('tests/integration/codex-router-real-process.test.ts');
+      expect(result.files.unit).toContain('plugins/llm-protocol-adapter/tests/unit/service.test.ts');
+    }
+  });
   test('direct tests select that entry with all units; deleted tests cannot become execution paths', () => {
     expect(plan([entry('plugins/b','browser')]).files.browser).toEqual([entry('plugins/b','browser')]);
     expect(plan(['plugins/b/tests/integration/removed.test.ts']).files.integration).toEqual([]);

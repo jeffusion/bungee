@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { buildCatalogIndex } from '../server/catalog';
-import { CatalogView, capabilitiesServiceOf, reconcileCatalogView } from '../server/local';
+import { buildCatalogIndex } from '../../server/catalog';
+import { CatalogView, capabilitiesServiceOf, reconcileCatalogView } from '../../server/local';
 
 function catalog(reasoningOptions?: unknown) {
   return { fixture: { name: 'Fixture', models: { model: {

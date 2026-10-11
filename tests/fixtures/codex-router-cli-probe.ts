@@ -4,7 +4,7 @@ import {mkdir, readFile, writeFile} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 import {captureProcessIdentity, probeProcessIdentity, type CapturedProcessIdentity} from '../../packages/core/src/master-runtime/process-identity';
-import {assertCodexProbeTargets} from './codex-router-gateway-fixture';
+import {assertCodexProbeTargets} from '../helpers/codex-router-gateway-fixture';
 
 export const CLI_TOOL_ROUNDTRIP = 'codex-fixture-real-tool-roundtrip';
 export const CLI_EXEC_MARKER = 'codex-fixture-exec-marker';
