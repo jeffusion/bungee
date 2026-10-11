@@ -1,5 +1,14 @@
 import type { ModelsDevCapabilities } from '../models-dev/contract';
 import type { LLMProtocol, ProtocolSession, ProtocolSessionContext, ProtocolReasoningPolicy, ProtocolSessionCapabilities } from '@jeffusion/bungee-llms/plugin-api';
+import type { AgentMessageInspectionResult, AgentMessagePlaintextReplacement, ResponsesCodecLimits, ResponsesConversionDiagnostic } from '@jeffusion/bungee-llms/plugin-api';
+import type { ExecuteGatewayAuxiliary, GatewayDispatchTarget } from '@jeffusion/bungee-core/plugin';
+export type { AgentMessageInspectionResult, AgentMessagePlaintextReplacement } from '@jeffusion/bungee-llms/plugin-api';
+export interface CollaborationRelay { target: GatewayDispatchTarget & {protocol: 'responses'}; model: string }
+export interface AgentMessageRelayInput {
+    message: unknown; contentIndex: number; param: string;
+    relay: CollaborationRelay; entryScope: string; webSocketConnection?: {readonly id:string;readonly signal:AbortSignal}; scope: string | null; requestId: string;
+    signal: AbortSignal; executeAuxiliary: ExecuteGatewayAuxiliary;
+}
 export type { LLMProtocol, ProtocolSession, ProtocolRequestConversion, ProtocolSessionContext } from '@jeffusion/bungee-llms/plugin-api';
 export const ADAPTER_PLUGIN = 'llm-protocol-adapter';
 export const CONVERSION_SERVICE_ID = 'llm-protocol-adapter.conversion.v1';
@@ -36,6 +45,10 @@ export interface AdapterSession extends ProtocolSession {
     };
 }
 export interface ConversionService {
+    inspectAgentMessages(raw: unknown, options?: {limits?: Partial<ResponsesCodecLimits>}): AgentMessageInspectionResult;
+    replaceAgentMessageEncryptedContent(raw: unknown, replacements: readonly AgentMessagePlaintextReplacement[], options?: {limits?: Partial<ResponsesCodecLimits>}): {body: Record<string, unknown>; diagnostics: ResponsesConversionDiagnostic[]};
+    relayAgentMessage(input: AgentMessageRelayInput): Promise<string>;
+    dispose(): void;
     describe(): {
         rulesVersion: string;
         protocols: readonly string[];

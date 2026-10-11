@@ -62,6 +62,13 @@
         "version": 1,
         "process": "worker",
         "kind": "local"
+      },
+      {
+        "plugin": "llm-protocol-adapter",
+        "id": "llm-protocol-adapter.history.v1",
+        "version": 1,
+        "process": "worker",
+        "kind": "rpc"
       }
     ]
   },

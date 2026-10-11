@@ -22,7 +22,33 @@
 
 入口使用 WebSocket 时开启 route.websocket.enabled。目标接收协议必须在插件绑定的 `target.protocol` 中声明；Responses 目标也开启 websocket 时使用原生 WS 上游，否则使用 HTTP/SSE。缺少协议时拒绝保存，不从 route/service 推断。每个连接串行生成，断开取消活动请求。WS 实现沿用握手限流；需要未支持的逐生成硬预算时，目标生成在连接上游前拒绝。
 
-普通与工具历史可跨 worker/模型重编码；可信身份的临时缓存默认 10 分钟失效，不持久化正文。丢失引用、不可还原的压缩/加密历史要求新建对话；原生加密引用只能回到经验证的相同上游。实现不启用 Anthropic thinking 或模拟服务端搜索，强制搜索明确报错。
+普通与工具历史可跨 worker/模型重编码；可信身份的临时缓存默认 10 分钟失效，不持久化正文。丢失引用、不可还原的压缩/加密历史要求新建对话；原生加密引用只能回到经验证的相同上游。协作任务的处理见下节；强制服务端搜索明确报错。
+
+## Agent 协作与原生中继
+
+外部模型调用 `collaboration.spawn_agent`、`send_message`、`followup_task` 时，转换结果保留 namespace、名称、call_id，并设置 `encrypted_function_args: []`。Codex 因此将任务作为明文交给接收方。仅这些工具的 `message` 参数移除原生加密声明，其它参数约束保持；不改写工具命名空间。JSON、流式 item 和最终 output 使用同一标记。明文 `agent_message` 保留作者、接收方和正文顺序，以普通 user 消息进入外部模型，不获得 system/developer 权限。
+
+OpenAI 主 Agent 已返回真实密文时，可在入口插件中配置独立的中继目标和模型：
+
+```json
+{
+  "models": [{"source":"gpt-native","provider":"zai","model":"glm-5.3-flash","target":{"type":"service","id":"外部模型服务的 UUID","protocol":"chat_completions"}}],
+  "collaborationRelay": {
+    "target": {"type":"route","id":"原生 Codex 路由的 UUID","protocol":"responses"},
+    "model": "原生 Codex 模型标识"
+  }
+}
+```
+
+整个中继配置可省略；一旦配置，target 和 model 均必填。中继目标必须具有能够访问原生 Codex 后端的身份，普通 OpenAI 兼容端点并不具备密文恢复能力。凭据、模型映射及故障处理仍由目标链路管理；插件不默认选择中继模型，也不回退到主 Agent 或子 Agent 的模型。
+
+仅外部转换路径遇到已识别的加密协作消息时启动中继。每条消息只发送自身完整协作项，强制原生模型调用唯一的 `relay_external_agent_payload` 工具取回字符串 payload，然后替换对应内容，再执行外部生成。内部工具事件不发送给客户端。多个协作项按输入顺序处理；同一项包含多个密文块时明确拒绝，避免将无法区分的结果误作无损恢复。原生 Responses 保持透传；加密推理、compaction 和任意私有历史不通过中继恢复。
+
+中继是一次额外的模型推理调用，具有独立授权、准入、usage 和结算，并关联父请求。最终目标未授权或 WS 要求不支持的硬预算时，中继前拒绝；中继失败不执行最终生成。中继成功后最终生成失败，已发生的中继消耗仍结算。本地协议拒绝不计为上游健康故障。中继不是密码学解密接口，也不能保证任意模型普遍逐字还原任务。
+
+成功结果进入适配器的有界临时缓存，默认 10 分钟；隔离键包含可信调用身份、实际原生凭据作用域、入口、配置版本、配置及实际模型、目标/upstream 和协作项摘要。跨 worker 复用已完成结果，同 worker 合并在途调用；跨 worker 同时首次未命中可以各自产生调用。匿名 HTTP 不共享缓存，匿名 WS 仅使用连接内缓存，关闭即清理。401、失败、截断、取消不缓存成功，429 按账户、入口、中继目标及实际模型作用域退避 60 秒，该范围内其他协作任务也等待退避结束。
+
+单个等待者取消只解除自身等待，所有等待者退出才取消共享中继；首个调用的服务端租约保留到共享操作收尾，使回调与缓存写入保持有效。HTTP 和每次 WS 生成使用同一准备流程，WS 预热不启动中继。附属请求不记录正文；`auxiliary_resolution` 日志记录实际模型、upstream 和是否复用结果，不包含账户作用域、任务、密文或凭据。
 
 ## 模型目录与调度
 
@@ -73,6 +99,8 @@ HTTP 上游经共享 SSE BodyHandle 转成 WS JSON；启用 WS 的 Responses 目
 
 ## 来源与验证方法
 
-字段处理参考 cc-switch `b4a079430ce85a604e10d97d4b7530774e00e112` 的工具提取与测试场景；new-api `7aa3531ef4c247ad4891c06cc8ed9d0ffb73fecc` 和 sub2api `3a6fd1c9db07203ca308aaba69e502bc1f35b307` 用于核对转换损耗与历史边界。未复制这些项目的协议源码或增加依赖；移植实质源码时须保留对应许可证。访问模式依据 [OpenAI Daybreak](https://developers.openai.com/api/docs/guides/daybreak)，不授予目标权限。
+字段处理参考 cc-switch `b4a079430ce85a604e10d97d4b7530774e00e112` 的工具提取与测试场景；new-api `7aa3531ef4c247ad4891c06cc8ed9d0ffb73fecc` 和 sub2api `3a6fd1c9db07203ca308aaba69e502bc1f35b307` 用于核对转换损耗与历史边界。未复制这些项目的协议源码或增加依赖。访问模式依据 [OpenAI Daybreak](https://developers.openai.com/api/docs/guides/daybreak)，不授予目标权限。
+
+明文协作标记参考 [OmniRoute 的协作修复](https://github.com/diegosouzapw/OmniRoute/pull/14447)，原生工具中继参考 [codex-router 固定提交](https://github.com/duolahypercho/codex-router/blob/2d2b3d2ee063a16e5172c21176c74058f0be4be4/src/router.mjs#L1964-L2042)。这些参考不替代实际模型恢复任务的验收。
 
 [脱敏 fixtures](../../tests/fixtures/codex-requests/README.md)保留真实请求形状和不可表示约束。[真实进程测试](../../tests/integration/codex-router-real-process.test.ts)经过实际宿主、worker 与 SQLite，但目录和模型上游使用 fixtures，不能证明远端提供商兼容。可选真实 CLI 检查使用 `BUNGEE_CODEX_CLI_PROBE=1`；它需要本地 Codex CLI，隔离配置和凭据，不访问用户实际会话。运行方法及证据边界见[开发指南](../../docs/guides/development.md)。

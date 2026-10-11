@@ -6,10 +6,11 @@ import { HistoryTransport } from './history';
 import { conversionService } from './service';
 export function createControl(host: ControlHostContext): PluginControl {
     const catalog = host.services!.consume<ModelsDevCapabilitiesService>('models-dev', MODELS_DEV_CAPABILITIES_SERVICE_ID, MODELS_DEV_CAPABILITIES_CONTRACT_VERSION);
-    host.services!.publish(CONVERSION_SERVICE_ID, CONVERSION_VERSION, conversionService(catalog, false));
+    const conversion = conversionService(catalog, false);
+    host.services!.publish(CONVERSION_SERVICE_ID, CONVERSION_VERSION, conversion);
     const history = new HistoryTransport(), timer = setInterval(() => history.sweep(), 30000);
     timer.unref?.();
-    const dispose = () => { clearInterval(timer); history.clear(); };
+    const dispose = () => { clearInterval(timer); history.clear(); conversion.dispose(); };
     host.signal.addEventListener('abort', dispose, { once: true });
     host.services!.rpc!.publish(historyRpc, { get: input => history.get(input), put: input => { try {
             return history.put(input);

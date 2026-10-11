@@ -170,6 +170,29 @@
           }
         ]
       }
+    },
+    {
+      "name": "collaborationRelay",
+      "type": "object",
+      "label": "relay.label",
+      "properties": [
+        {
+          "name": "target",
+          "type": "gateway_target",
+          "label": "relay.target",
+          "required": true
+        },
+        {
+          "name": "model",
+          "type": "string",
+          "label": "relay.model",
+          "required": true,
+          "validation": {
+            "trimmed": true,
+            "max": 512
+          }
+        }
+      ]
     }
   ],
   "contributes": {
@@ -231,7 +254,14 @@
       "editor.route": "路由",
       "editor.service": "服务",
       "editor.targetUnavailable": "目标不可用",
-      "editor.noOptions": "没有匹配的选项"
+      "editor.noOptions": "没有匹配的选项",
+      "relay.label": "协作中继",
+      "relay.target": "中继路由 / 服务",
+      "relay.model": "中继模型",
+      "relay.modelPlaceholder": "输入中继模型标识",
+      "relay.modelInvalid": "请输入不含首尾空格的模型标识（最多 512 个字符）。",
+      "relay.targetRequired": "请选择可用的中继路由或服务。",
+      "relay.protocolInvalid": "中继目标接收协议必须为 Responses。"
     },
     "en": {
       "editor.loaded": "Loaded",
@@ -278,7 +308,14 @@
       "editor.route": "Route",
       "editor.service": "Service",
       "editor.targetUnavailable": "Target unavailable",
-      "editor.noOptions": "No matching options"
+      "editor.noOptions": "No matching options",
+      "relay.label": "Collaboration relay",
+      "relay.target": "Relay route / service",
+      "relay.model": "Relay model",
+      "relay.modelPlaceholder": "Enter the relay model ID",
+      "relay.modelInvalid": "Enter a model ID without surrounding spaces (up to 512 characters).",
+      "relay.targetRequired": "Select an available relay route or service.",
+      "relay.protocolInvalid": "The relay target must receive Responses."
     }
   },
   "uiExtensionMode": "none"

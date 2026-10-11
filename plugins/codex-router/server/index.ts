@@ -1,11 +1,11 @@
 import {createHash} from 'node:crypto';
-import {ADAPTER_PLUGIN,CONVERSION_SERVICE_ID,CONVERSION_VERSION,historyRpc,historyClient,type HistoryClient,type ConversionService} from '../../llm-protocol-adapter/contract';
+import {ADAPTER_PLUGIN,CONVERSION_SERVICE_ID,CONVERSION_VERSION,historyRpc,historyClient,type HistoryClient,type ConversionService,type CollaborationRelay} from '../../llm-protocol-adapter/contract';
 import {protocolAdapter} from './protocol';
-import { definePlugin, DataAdmissionError, type Plugin, type PluginInitContext, type PluginHooks } from '@jeffusion/bungee-core/plugin';
+import { definePlugin, DataAdmissionError, type Plugin, type PluginInitContext, type PluginHooks, type DispatchRequestPreparationInput } from '@jeffusion/bungee-core/plugin';
 import { MODELS_DEV_CAPABILITIES_SERVICE_ID, MODELS_DEV_CAPABILITIES_CONTRACT_VERSION, type ModelsDevCapabilitiesService } from '../../models-dev/contract';
 import manifest from '../manifest.json';
 import type { PluginConfigField } from '@jeffusion/bungee-core/plugin';
-import { parseBindings, bindingSource } from './config';
+import { parseBindings, parseCollaborationRelay, bindingSource } from './config';
 import { mergeCatalog, catalogEtag } from './catalog';
 
 export const CodexRouterPlugin = definePlugin(class implements Plugin {
@@ -13,10 +13,11 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
   static readonly version = '1.0.0';
   static readonly configSchema = manifest.configSchema as unknown as PluginConfigField[];
   private readonly bindings;
+  private readonly relay?:CollaborationRelay;
   private history!:HistoryClient;
   private catalog!: ModelsDevCapabilitiesService;
   private conversion!:ConversionService;
-  constructor(options?: { models?: unknown }) { this.bindings = parseBindings(options?.models); }
+  constructor(options?: { models?: unknown; collaborationRelay?: unknown }) { this.bindings = parseBindings(options?.models); this.relay = parseCollaborationRelay(options?.collaborationRelay); }
   async init(context: PluginInitContext) {
     if (context.scope?.type !== 'route') throw new Error('codex_router_requires_route_scope');
     this.history=historyClient(context.services!.rpc!.consume(ADAPTER_PLUGIN,historyRpc));
@@ -28,7 +29,7 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
   }
   register(hooks: PluginHooks) {
     hooks.onWebSocketSessionMode.tap('codex-router.session', url => /\/responses$/.test(url.pathname) ? 'responses' : undefined);
-    hooks.onDispatchRequest.tapPromise('codex-router.binding', async ({context,targets,principal,servingRevision,signal}) => {
+    hooks.onDispatchRequest.tapPromise('codex-router.binding', async ({context,targets}) => {
       if (context.method !== 'POST' || !/\/responses$/.test(context.originalUrl.pathname)) return;
       const binding = this.bindings.find(binding => bindingSource(binding) === context.body?.model);
       if (!binding) return;
@@ -36,8 +37,11 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       const protocol = binding.target.protocol;
       const capabilities=this.conversion.resolveCapabilities({provider:binding.provider,model:binding.model,targetProtocol:protocol,restrictions:binding.capabilityOverrides});
       if(!capabilities || capabilities.contextWindow === null || !capabilities.inputModalities.includes('text'))throw new DataAdmissionError(503,'codex_router_model_unavailable');
-      const scope=principal?.domain !== 'anonymous' && principal?.keyId ? createHash('sha256').update(JSON.stringify([principal,context.routeId,servingRevision ?? null,this.bindings])).digest('hex') : null;
-      const input=structuredClone(context.body);
+      context.body={...context.body,model:binding.model};
+      return {target:binding.target,protocol,prepareRequest:async ({context,principal,servingRevision,signal,executeAuxiliary,webSocketConnection}:DispatchRequestPreparationInput)=>{
+      const entryScope=createHash('sha256').update(JSON.stringify([context.routeId,servingRevision ?? null,this.bindings,this.relay])).digest('hex');
+      const scope=principal?.domain !== 'anonymous' && principal?.keyId ? createHash('sha256').update(JSON.stringify([principal,entryScope])).digest('hex') : null;
+      let input=structuredClone(context.body);
       let requiredUpstreamId:string|undefined;
       let opaqueRestored=false;
       if(input.previous_response_id){
@@ -56,22 +60,37 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       input.model=binding.model;
       let logicalInput=typeof input.input === 'string' ? [{role:'user',content:input.input}] : input.input;
       if(!Array.isArray(logicalInput))throw new DataAdmissionError(422,'codex_router_invalid_history');
-      if(!opaqueRestored && logicalInput.some((item:any)=>item?.encrypted_content || item?.type==='compaction'))throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
+      if(protocol!=='responses' && !opaqueRestored && logicalInput.some((item:any)=>item?.encrypted_content || item?.type==='compaction'))throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
       const hasTools=input.tools?.length || logicalInput.some((item:any)=>item?.type==='additional_tools' && item.tools?.length);
       if(hasTools && (!capabilities.toolCall || binding.capabilityOverrides?.tools===false))throw new DataAdmissionError(422,'codex_router_tools_unsupported');
+      let relayDiagnostics:any[]=[];
+      if(protocol!=='responses') {
+        try {
+          const inspected=this.conversion.inspectAgentMessages(input);
+          for(const message of inspected.messages)if(message.encryptedContents.length>1)throw new DataAdmissionError(422,'llm_adapter_agent_message_multiple_encrypted_blocks',undefined,{param:message.encryptedContents[1].param,message:'Multiple encrypted agent blocks cannot be restored losslessly'});
+          const replacements=[];
+          for(const message of inspected.messages)for(const encrypted of message.encryptedContents) {
+            if(!this.relay)throw new DataAdmissionError(422,'llm_adapter_agent_message_relay_required',undefined,{param:encrypted.param,message:'Encrypted agent content requires a configured relay'});
+            const text=await this.conversion.relayAgentMessage({message:input.input[message.inputIndex],contentIndex:encrypted.contentIndex,param:encrypted.param,relay:this.relay,entryScope,scope,requestId:context.requestId,signal,executeAuxiliary,webSocketConnection});
+            replacements.push({param:encrypted.param,text});
+          }
+          if(replacements.length){const replaced=this.conversion.replaceAgentMessageEncryptedContent(input,replacements);input=replaced.body;relayDiagnostics=replaced.diagnostics;}
+        } catch(error) {const e=error as any;if(typeof e.code==='string' && e.name!=='DataAdmissionError')throw new DataAdmissionError(422,`llm_adapter_${e.code}`,undefined,{message:'Agent message cannot be converted',param:e.param});throw error;}
+      }
       let diagnostics;
       let session;
-      try {session=this.conversion.createSession({sourceProtocol:'responses',targetProtocol:protocol,model:binding.model,responseModel:bindingSource(binding),provider:binding.provider,profile:capabilities,selectedEffort:input.reasoning?.effort});} catch(error) {const e=error as any;if(typeof e.code==='string')throw new DataAdmissionError(422,`llm_adapter_${e.code}`,undefined,{message:e.message,param:e.param});throw error;}
+      try {session=this.conversion.createSession({sourceProtocol:'responses',targetProtocol:protocol,model:binding.model,responseModel:bindingSource(binding),provider:binding.provider,profile:capabilities,selectedEffort:input.reasoning?.effort,...(protocol!=='responses'?{agentMessageDelivery:'plaintext' as const}:{})});} catch(error) {const e=error as any;if(typeof e.code==='string')throw new DataAdmissionError(422,`llm_adapter_${e.code}`,undefined,{message:e.message,param:e.param});throw error;}
       try {
         const decoded=session.convertRequest(input);context.body=structuredClone(decoded.body);
         if(protocol!=='responses')logicalInput=structuredClone(decoded.canonicalHistory);
         // Host logs may flush after the consumer lease is revoked during drain.
-        diagnostics=structuredClone(decoded.diagnostics);
+        diagnostics=structuredClone([...relayDiagnostics,...decoded.diagnostics]);
       } catch(error) {session.dispose();const e=error as any;if(typeof e.code==='string')throw new DataAdmissionError(422,`llm_adapter_${e.code}`,undefined,{message:e.message,param:e.param});throw error;}
       if(protocol!=='responses')context.url.pathname=context.url.pathname.replace(/\/responses$/,protocol==='chat_completions'?'/chat/completions':'/messages');
       const adapter=protocolAdapter({session,protocol,model:bindingSource(binding),signal,
         save:async(response,responseContext)=>{if(scope && typeof response.id==='string')await this.history.put({scope,id:response.id,value:{target:binding.target,origin:{provider:binding.provider,model:binding.model,upstreamId:responseContext?.upstreamId},items:[...logicalInput,...response.output]}},{signal,operationId:crypto.randomUUID()});}});
-      return {target:binding.target,protocol,requiredUpstreamId,adapter,...(protocol!=='responses'?{canonicalInput:logicalInput,diagnostics}:{})};
+      return {requiredUpstreamId,adapter,...(protocol!=='responses'?{canonicalInput:logicalInput,diagnostics}:{})};
+      }};
     });
     hooks.onBeforeRequest.tap('codex-router.catalog-validator', context => {
       if (context.method === 'GET' && /\/models$/.test(context.originalUrl.pathname)) {

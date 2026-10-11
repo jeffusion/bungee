@@ -49,7 +49,7 @@ describe('SDK 3 plugin body demands', () => {
   });
   test('protocol converters only demand matching request paths', async () => {
     const ai = new Adapter({ sourceProtocol: 'anthropic_messages', targetProtocol: 'chat_completions' });
-    await ai.init({scope:{type:'route',routeId:'fixture'},initializationKind:'configured',services:{consume:()=>({model:()=>null}),onDispose(){}}} as any);
+    await ai.init({scope:{type:'route',routeId:'fixture'},initializationKind:'configured',services:{consume:()=>({model:()=>null}),rpc:{consume:()=>({get:async()=>null,put:async()=>null})},runBackground:(run:any)=>run(),onDispose(){}}} as any);
     expect(ai.bodyRequirements(context('/v1/models', 'GET')).request).toBe('none');
     expect(ai.bodyRequirements(context('/upload')).request).toBe('none');
     expect(ai.bodyRequirements(context())).toEqual({ request: 'json-write', response: ['json', 'sse-json'] });

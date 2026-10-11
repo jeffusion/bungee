@@ -1,6 +1,7 @@
-import { createProtocolSession, describeProtocolConversion, ResponsesCodecError, type ProtocolSessionContext } from '@jeffusion/bungee-llms/plugin-api';
+import { createProtocolSession, describeProtocolConversion, inspectAgentMessages, replaceAgentMessageEncryptedContent, ResponsesCodecError, type ProtocolSessionContext } from '@jeffusion/bungee-llms/plugin-api';
 import type { ModelsDevCapabilitiesService } from '../../models-dev/contract';
-import type { CapabilityContext, ConversionService, EffectiveCapabilities, AdapterSession } from '../contract';
+import type { CapabilityContext, ConversionService, EffectiveCapabilities, AdapterSession, HistoryClient } from '../contract';
+import {AgentRelay} from './relay';
 export const REASONING_RULES_VERSION = '2026-10-10.3';
 const concrete = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 /** Verified deployment alias; capability data still comes from the catalog model. */
@@ -46,8 +47,19 @@ function fail(param: string): never { throw new ResponsesCodecError('unsupported
 function wireEffort(body: any, protocol: string): unknown {
     return protocol === 'responses' ? body?.reasoning?.effort : protocol === 'chat_completions' ? body?.reasoning_effort : protocol === 'anthropic_messages' ? body?.output_config?.effort : body?.generationConfig?.thinkingConfig?.thinkingLevel;
 }
-export function conversionService(catalog: ModelsDevCapabilitiesService, worker: boolean): ConversionService {
+export function conversionService(catalog: ModelsDevCapabilitiesService, worker: boolean, history?: HistoryClient, runBackground?: <T>(run:()=>T)=>T): ConversionService {
+    const relay = new AgentRelay(history,Date.now,runBackground);
     return {
+        inspectAgentMessages, replaceAgentMessageEncryptedContent,
+        relayAgentMessage(input) {
+            if (!worker) throw new Error('llm_adapter_conversion_requires_worker');
+            const inspected=inspectAgentMessages({input:[input.message]});
+            const message=inspected.messages[0];
+            if (inspected.messages.length!==1 || message.encryptedContents.length!==1 || message.encryptedContents[0].contentIndex!==input.contentIndex)
+                throw new ResponsesCodecError('unsupported_content','Relay requires exactly one encrypted agent content block',input.param);
+            return relay.relay(input);
+        },
+        dispose() { relay.dispose(); },
         describe() { return { ...describeProtocolConversion(), rulesVersion: REASONING_RULES_VERSION }; },
         resolveCapabilities(context) { return resolveCapabilities(catalog, context); },
         createSession(context) {
