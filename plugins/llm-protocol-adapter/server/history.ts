@@ -4,17 +4,23 @@ export function serializeHistory(value:unknown):string {return JSON.stringify(va
 export class HistoryCache {
   private entries = new Map<string,{text:string;bytes:number;expires:number}>();
   private used=0;
-  constructor(private limits={maxEntries:512,maxBytes:32*1024*1024,maxEntryBytes:8*1024*1024,ttlMs:600_000},private now=Date.now) {}
+  constructor(private limits={maxEntries:512,maxBytes:32*1024*1024,maxEntryBytes:8*1024*1024,ttlMs:600_000},private now=Date.now,private scopeLimits?:{maxEntries:number;maxBytes:number}) {}
   sweep(){for(const [key,entry] of this.entries)if(entry.expires<=this.now()){this.used-=entry.bytes;this.entries.delete(key);}}
   get(scope:string,id:string){this.sweep();const entry=this.entries.get(JSON.stringify([scope,id]));return entry ? JSON.parse(entry.text) : null;}
   readText(scope:string,id:string){this.sweep();return this.entries.get(JSON.stringify([scope,id]))?.text ?? null;}
   put(scope:string,id:string,value:unknown){
     this.sweep();const text=serializeHistory(value);const bytes=Buffer.byteLength(text);if(bytes>this.limits.maxEntryBytes)throw new Error('llm_adapter_history_limit');
     const key=JSON.stringify([scope,id]),old=this.entries.get(key);if(old){this.used-=old.bytes;this.entries.delete(key);}
+    if(this.scopeLimits){
+      if(bytes>this.scopeLimits.maxBytes)throw new Error('llm_adapter_history_limit');
+      const owned=[...this.entries].filter(([key])=>JSON.parse(key)[0]===scope);let scopedBytes=owned.reduce((total,[,entry])=>total+entry.bytes,0);
+      while(owned.length>=this.scopeLimits.maxEntries||scopedBytes+bytes>this.scopeLimits.maxBytes){const [key,entry]=owned.shift()!;this.entries.delete(key);this.used-=entry.bytes;scopedBytes-=entry.bytes;}
+    }
     while(this.entries.size>=this.limits.maxEntries||this.used+bytes>this.limits.maxBytes){const oldest=this.entries.keys().next().value;if(oldest===undefined)throw new Error('llm_adapter_history_limit');const item=this.entries.get(oldest)!;this.used-=item.bytes;this.entries.delete(oldest);}
     this.entries.set(key,{text,bytes,expires:this.now()+this.limits.ttlMs});this.used+=bytes;
   }
   clear(){this.entries.clear();this.used=0;}
+  clearScope(scope:string){for(const [key,entry] of this.entries)if(JSON.parse(key)[0]===scope){this.used-=entry.bytes;this.entries.delete(key);}}
   status(){this.sweep();return {entries:this.entries.size,bytes:this.used};}
 }
 

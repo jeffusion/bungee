@@ -1,5 +1,6 @@
 import {afterAll as afterDataPlaneTests} from 'bun:test';
 import {createDataPlaneRuntime} from '../../helpers/data-plane-runtime';
+import {relayServiceHost} from '../../../../../tests/helpers/llm-protocol-adapter-service-host';
 const dataPlaneRuntime=await createDataPlaneRuntime();
 import {expect,test} from 'bun:test';
 import Adapter from '../../../../../plugins/llm-protocol-adapter/server';
@@ -45,7 +46,7 @@ const streams:any={responses:[{type:'response.completed',response:responses.resp
 const canonicalJson=conversionService(catalog,true).createSession({sourceProtocol:'responses',targetProtocol:'chat_completions',model:'m'});responses.responses=canonicalJson.convertResponse(responses.chat_completions);
 const canonicalStream=conversionService(catalog,true).createSession({sourceProtocol:'responses',targetProtocol:'chat_completions',model:'m'});streams.responses=[...streams.chat_completions.flatMap((e:any)=>canonicalStream.push(e)),...canonicalStream.finish()];
 const path=(protocol:string,stream=false)=>protocol==='responses'?'/v1/responses':protocol==='chat_completions'?'/v1/chat/completions':protocol==='anthropic_messages'?'/v1/messages':`/v1/models/m:${stream?'streamGenerateContent':'generateContent'}`;
-async function adapter(sourceProtocol:any,targetProtocol:any){const plugin=new Adapter({sourceProtocol,targetProtocol});await plugin.init({scope:{type:'route',routeId:'/v1'},initializationKind:'explicit-application',services:{consume:()=>catalog,onDispose(){}}} as any);const hooks=createPluginHooks();plugin.register(hooks);return {plugin,hooks};}
+async function adapter(sourceProtocol:any,targetProtocol:any){const plugin=new Adapter({sourceProtocol,targetProtocol});await plugin.init({scope:{type:'route',routeId:'/v1'},initializationKind:'explicit-application',services:{consume:()=>catalog,rpc:{consume:()=>({get:async()=>null,put:async()=>null})},runBackground:(run:any)=>run(),onDispose(){}}} as any);const hooks=createPluginHooks();plugin.register(hooks);return {plugin,hooks};}
 for(const source of protocols)for(const target of protocols)for(const streaming of [false,true])test(`scoped actual request/shared body/response hooks ${source} → ${target} ${streaming?'SSE':'JSON'}`,async()=>{
   const unsupported=(source==='responses'&&target==='gemini_generate_content')||(source==='gemini_generate_content'&&target==='responses');
   if(unsupported){await expect(adapter(source,target)).rejects.toThrow('invalid_protocol_pair');return;}
@@ -59,8 +60,8 @@ for(const source of protocols)for(const target of protocols)for(const streaming 
   await hooks.onFinally.promise(context);
 });
 test('automatic provider publishes service without request conversion hooks; explicit application requires two protocols',async()=>{
-  const p=new Adapter();let published=false;await p.init({scope:{type:'global'},initializationKind:'automatic-provider',services:{consume:()=>catalog,publish(id:string){published=id===CONVERSION_SERVICE_ID;},onDispose(){}}} as any);const h=createPluginHooks();p.register(h);expect(published).toBe(true);expect(p.bodyRequirements({method:'POST',url:new URL('http://local/v1/responses')})).toEqual({request:'none'});const raw:any={method:'POST',url:new URL('http://local/v1/responses'),body:{provider_secret:true}};expect(await h.onBeforeRequest.promise(raw)).toBe(raw);
-  await expect(new Adapter().init({scope:{type:'route'},services:{consume:()=>catalog,onDispose(){}}} as any)).rejects.toThrow('invalid_protocol_pair');
+  const p=new Adapter();let published=false;await p.init({scope:{type:'global'},initializationKind:'automatic-provider',services:{consume:()=>catalog,rpc:{consume:()=>({get:async()=>null,put:async()=>null})},runBackground:(run:any)=>run(),publish(id:string){published=id===CONVERSION_SERVICE_ID;},onDispose(){}}} as any);const h=createPluginHooks();p.register(h);expect(published).toBe(true);expect(p.bodyRequirements({method:'POST',url:new URL('http://local/v1/responses')})).toEqual({request:'none'});const raw:any={method:'POST',url:new URL('http://local/v1/responses'),body:{provider_secret:true}};expect(await h.onBeforeRequest.promise(raw)).toBe(raw);
+  await expect(new Adapter().init({scope:{type:'route'},services:{consume:()=>catalog,rpc:{consume:()=>({get:async()=>null,put:async()=>null})},runBackground:(run:any)=>run(),onDispose(){}}} as any)).rejects.toThrow('invalid_protocol_pair');
 });
 test('strict scoped conversion rejects unknown inputs/tools/history/structured output before any response or secret leakage',async()=>{
   for(const [field,value,param] of [['secret_field','PRIVATE_REQUEST_BODY','secret_field'],['tools',[{type:'remote_execution',secret:'PRIVATE_REQUEST_BODY'}],'tools[0]'],['previous_response_id','private-id','previous_response_id']] as const){const {hooks}=await adapter('responses','chat_completions');try{await hooks.onBeforeRequest.promise({requestId:crypto.randomUUID(),method:'POST',url:new URL('http://local/v1/responses'),body:{model:'m',input:'hello',[field]:value}} as any);throw new Error('expected refusal');}catch(e:any){expect(e.status).toBe(422);expect(JSON.stringify(e)).not.toContain('PRIVATE_REQUEST_BODY');if(field!=='previous_response_id')expect(e.details?.param??e.param).toBeDefined();}}
@@ -72,14 +73,14 @@ const {handleRequest}=await import('../../../src/worker/request/handler');
 const logging={accessLogWriter:{write(){},updateBodyId(){},updateResponseBodyId(){},updateProtocolOutcome(){}},fileLogWriter:{async write(){}}};
 for(const source of protocols)for(const target of protocols)for(const streaming of [false,true])test(`Gateway scoped adapter ${source} → ${target} ${streaming?'SSE':'JSON'} final wire`,async()=>{
   if((source==='responses'&&target==='gemini_generate_content')||(source==='gemini_generate_content'&&target==='responses'))return;
-  const previous=getScopedPluginRegistry(),fetch=globalThis.fetch;const h=new PluginServiceHost();const provider=h.createContext('models-dev');provider.publish('models-dev.capabilities.v1',1,catalog);h.markReady('models-dev');
+  const previous=getScopedPluginRegistry(),fetch=globalThis.fetch;const serviceHost=relayServiceHost(catalog),h=serviceHost.worker;
   const registry=new ScopedPluginRegistry(import.meta.dir,h);registry.setServiceDependencies(new Map([[ADAPTER_PLUGIN,{'models-dev':'^1.0.0'}]]));
   const config:any={routes:[{id:'adapter',path:'/v1',path_rewrite:{'^/v1':''},plugins:[{name:ADAPTER_PLUGIN,path:new URL('../../../../../plugins/llm-protocol-adapter/server/index.ts',import.meta.url).pathname,options:{sourceProtocol:source,targetProtocol:target}}],endpoints:[{id:'mock',target:'http://upstream.test/v1'}]}]};
   let calls=0,wire:any,url='';globalThis.fetch=Object.assign(async(input:any,init:any)=>{calls++;url=String(input);wire=JSON.parse(await new Response(init.body).text());return streaming?new Response(streams[target].map((e:any)=>`data: ${JSON.stringify(e)}\n\n`).join('')+(target==='chat_completions'?'data: [DONE]\n\n':''),{headers:{'content-type':'text/event-stream'}}):Response.json(responses[target]);},{preconnect(){}}) as any;
   try{expect((await registry.initializeFromConfig(config)).failed).toBe(0);setScopedPluginRegistry(registry);const body=structuredClone(requests[source]);if(source!=='gemini_generate_content')body.stream=streaming;
     const response=await handleRequest(new Request('http://local'+path(source,streaming),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}),config,{logging});expect(response.status).toBe(200);const text=await response.text();expect(text).toContain('answer');expect(calls).toBe(1);expect(new URL(url).pathname).toBe(path(target,streaming));if(source===target)expect(wire).toEqual(body);
     if(streaming&&source==='responses')expect(text).toContain('response.completed');if(streaming&&source==='anthropic_messages')expect(text).toContain('message_stop');if(streaming&&source==='chat_completions')expect(text).toContain('[DONE]');
-  }finally{globalThis.fetch=fetch;setScopedPluginRegistry(previous);await registry.destroy();await h.dispose('models-dev');}
+  }finally{globalThis.fetch=fetch;setScopedPluginRegistry(previous);await registry.destroy();await serviceHost.dispose();}
 });
 
 test('migrated Messages tool history converts losslessly and restores frozen declared tool responses',async()=>{

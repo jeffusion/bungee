@@ -1,5 +1,6 @@
 import {afterAll as afterDataPlaneTests} from 'bun:test';
 import {createDataPlaneRuntime} from '../helpers/data-plane-runtime';
+import {relayServiceHost} from '../../../../tests/helpers/llm-protocol-adapter-service-host';
 const dataPlaneRuntime=await createDataPlaneRuntime();
 import {afterEach,beforeEach,expect,test} from 'bun:test';
 const {handleRequest}=await import('../../src/worker/request/handler');
@@ -7,17 +8,16 @@ import {ScopedPluginRegistry,setScopedPluginRegistry,getScopedPluginRegistry} fr
 import {PluginServiceHost} from '../../src/plugin-services';
 import {CatalogView,capabilitiesServiceOf} from '../../../../plugins/models-dev/server/local';
 
-let host:PluginServiceHost,registry:ScopedPluginRegistry,previous:ReturnType<typeof getScopedPluginRegistry>;
+let serviceHost:ReturnType<typeof relayServiceHost>,host:PluginServiceHost,registry:ScopedPluginRegistry,previous:ReturnType<typeof getScopedPluginRegistry>;
 const originalFetch=globalThis.fetch;
 const calls:{url:string;body:any}[]=[];
 const logging={accessLogWriter:{write(){},updateBodyId(){},updateResponseBodyId(){},updateProtocolOutcome(){}},fileLogWriter:{async write(){}}};
 beforeEach(()=>{
-  calls.length=0;previous=getScopedPluginRegistry();host=new PluginServiceHost();
-  host.createContext('models-dev').publish('models-dev.capabilities.v1',1,capabilitiesServiceOf(new CatalogView()));host.markReady('models-dev');
+  calls.length=0;previous=getScopedPluginRegistry();serviceHost=relayServiceHost(capabilitiesServiceOf(new CatalogView()));host=serviceHost.worker;
   registry=new ScopedPluginRegistry(import.meta.dir,host);registry.setServiceDependencies(new Map([['llm-protocol-adapter',{'models-dev':'^1.0.0'}]]));
   globalThis.fetch=Object.assign(async(input:any,init:any)=>{calls.push({url:String(input),body:init.body?JSON.parse(await new Response(init.body).text()):null});return Response.json({choices:[{message:{content:'answer'},finish_reason:'stop'}]});},{preconnect(){}}) as any;
 });
-afterEach(async()=>{globalThis.fetch=originalFetch;setScopedPluginRegistry(previous);await registry.destroy();await host.dispose('models-dev');});
+afterEach(async()=>{globalThis.fetch=originalFetch;setScopedPluginRegistry(previous);await registry.destroy();await serviceHost.dispose();});
 async function setup(rewrite:Record<string,string>,plugins:any[]=[]){const config:any={routes:[{id:'route',path:'/api',path_rewrite:rewrite,plugins,endpoints:[{id:'mock',target:'http://mock.test'}]}]};expect((await registry.initializeFromConfig(config)).failed).toBe(0);setScopedPluginRegistry(registry);return config;}
 test('path rewrite chooses the first matching rule before proxy forwarding',async()=>{
   const config=await setup({'^/api/v1':'/v1-internal','^/api':''});

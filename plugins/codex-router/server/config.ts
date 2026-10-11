@@ -1,4 +1,14 @@
 import type { LLMProtocol } from '@jeffusion/bungee-types';
+import type { CollaborationRelay } from '../../llm-protocol-adapter/contract';
+
+export function parseCollaborationRelay(value: unknown): CollaborationRelay | undefined {
+  if (value === undefined) return;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('codex_router_invalid_collaboration_relay');
+  const relay = value as Record<string,any>, target = relay.target;
+  if (Object.keys(relay).some(key => !['target','model'].includes(key)) || typeof relay.model !== 'string' || !relay.model || relay.model !== relay.model.trim() || relay.model.length > 512 || /[\x00-\x1f\x7f]/.test(relay.model)
+    || !target || typeof target !== 'object' || Array.isArray(target) || !['route','service'].includes(target.type) || typeof target.id !== 'string' || !target.id || target.id !== target.id.trim() || target.id.length > 512 || /[\x00-\x1f\x7f]/.test(target.id) || target.protocol !== 'responses' || Object.keys(target).some(key=>!['type','id','protocol'].includes(key))) throw new Error('codex_router_invalid_collaboration_relay');
+  return Object.freeze(structuredClone(relay)) as CollaborationRelay;
+}
 
 export interface ModelBinding {
   provider: string;

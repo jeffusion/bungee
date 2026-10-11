@@ -2,6 +2,7 @@ import {expect,test} from 'bun:test';
 import {conversionService} from '../../server/service';
 import {CatalogView,capabilitiesServiceOf} from '../../../models-dev/server/local';
 import {buildCatalogIndex} from '../../../models-dev/server/catalog';
+import AdapterPlugin from '../../server/index';
 function fixture(options?:unknown) {
  if(arguments.length===0)options=[{type:'effort',values:['low','high','max']}];
  const view=new CatalogView();
@@ -74,4 +75,11 @@ test('native passthrough preserves an explicit effort without inventing a conver
  expect(()=>session.validateAttempt({model:'native-model',protocol:'responses',body})).not.toThrow();
  expect(()=>session.validateAttempt({model:'native-model',protocol:'responses',body:{...body,reasoning:{effort:'high'}}})).toThrow();
  expect(()=>session.validateAttempt({model:'unknown-target',protocol:'responses',body:{...body,model:'unknown-target'}})).toThrow();session.dispose();
+});
+test('automatic worker provider consumes its declared history service and disposes the public relay',async()=>{
+ const {view}=fixture();let release!:()=>void,published:any;
+ const consumes:any[]=[];
+ const plugin=new AdapterPlugin();await plugin.init({scope:{type:'global'},initializationKind:'automatic-provider',services:{consume:()=>capabilitiesServiceOf(view),rpc:{consume:(...args:any[])=>{consumes.push(args);return {get:async()=>null,put:async()=>null};}},publish:(...args:any[])=>{published=args;},onDispose:(callback:()=>void)=>release=callback}} as any);
+ expect(consumes[0][0]).toBe('llm-protocol-adapter');expect(consumes[0][1].id).toBe('llm-protocol-adapter.history.v1');expect(published[0]).toBe('llm-protocol-adapter.conversion.v1');
+ release();await expect(published[2].relayAgentMessage({message:{type:'agent_message',author:'a',recipient:'b',content:[{type:'encrypted_content',encrypted_content:'cipher'}]},contentIndex:0,signal:new AbortController().signal,param:'input[0].content[0].encrypted_content'})).rejects.toMatchObject({code:'llm_adapter_relay_disposed'});
 });

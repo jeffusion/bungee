@@ -1,6 +1,6 @@
 import { definePlugin, createPluginHooks, DataAdmissionError, logger, type Plugin, type PluginHooks, type PluginInitContext, type PluginConfigField } from '@jeffusion/bungee-core/plugin';
 import { MODELS_DEV_CAPABILITIES_SERVICE_ID, MODELS_DEV_CAPABILITIES_CONTRACT_VERSION, type ModelsDevCapabilitiesService } from '../../models-dev/contract';
-import { CONVERSION_SERVICE_ID, CONVERSION_VERSION, type LLMProtocol, type ConversionService, type AdapterSession } from '../contract';
+import { ADAPTER_PLUGIN, historyClient, historyRpc, CONVERSION_SERVICE_ID, CONVERSION_VERSION, type LLMProtocol, type ConversionService, type AdapterSession } from '../contract';
 import { conversionService } from './service';
 import { responseHandler, adapterError } from './handler';
 import manifest from '../manifest.json';
@@ -35,13 +35,13 @@ export default definePlugin(class implements Plugin {
     }) { }
     async init(context: PluginInitContext) {
         const catalog = context.services!.consume<ModelsDevCapabilitiesService>('models-dev', MODELS_DEV_CAPABILITIES_SERVICE_ID, MODELS_DEV_CAPABILITIES_CONTRACT_VERSION);
-        this.service = conversionService(catalog, true);
+        this.service = conversionService(catalog, true, historyClient(context.services!.rpc!.consume(ADAPTER_PLUGIN, historyRpc)), context.services!.runBackground!);
         if (context.scope?.type === 'global')
             context.services!.publish(CONVERSION_SERVICE_ID, CONVERSION_VERSION, this.service);
         this.applied = context.initializationKind !== 'automatic-provider';
         if (this.applied && !this.service.describe().matrix.some(p => p.sourceProtocol === this.options?.sourceProtocol && p.targetProtocol === this.options?.targetProtocol && p.mode !== 'unsupported'))
             throw new Error('llm_adapter_invalid_protocol_pair');
-        context.services!.onDispose(() => { for (const value of this.active.values())
+        context.services!.onDispose(() => { this.service.dispose(); for (const value of this.active.values())
             value.session.dispose(); this.active.clear(); });
     }
     bodyRequirements(ctx: {
