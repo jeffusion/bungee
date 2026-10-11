@@ -144,8 +144,13 @@ try {
   const settleDialog = async () => {
     await dialog.waitFor();
     await dialog.evaluate(async element => {
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       await Promise.all(element.getAnimations({ subtree: true }).map(animation => animation.finished));
     });
+    await expect.poll(() => dialog.evaluate(element => {
+      const transform = new DOMMatrixReadOnly(getComputedStyle(element).transform);
+      return transform.a === 1 && transform.d === 1;
+    }), { timeout: 10000 }).toBe(true);
   };
   const standardDialog = async () => {
     await settleDialog();
