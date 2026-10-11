@@ -224,3 +224,26 @@ test('separately bundled access plugin preserves 401 denial across artifact boun
 });
 
 afterDataPlaneTests(() => dataPlaneRuntime.close());
+
+test('signed access-only authorization enforces actual key scopes without planning or debiting and pins publication',async()=>{
+  let plans=0;
+  const h=new DataAdmissionHost({authorizeWorker:()=> 'active',catalogHash:()=>catalogHash,loadPlugin:async entry=>({createIngress:entry==='access'?accessIngress:()=>({bodyRequirements:()=>({request:'none' as const}),plan(){plans++;return {state:1,snapshot:true};}})})});
+  const plugins=[accessPlugin(),{name:'counter',entry:'counter',catalogHash,policy:null}];
+  await h.publish({version:1,plugins});
+  const secret=generateWorkerTransportSecret(),identity={role:'ingress' as const,process_instance_id:randomUUID(),boot_nonce:randomUUID()};
+  const server=Bun.serve({hostname:'127.0.0.1',port:0,fetch:createDataAdmissionRpcServer({host:h,transportSecret:secret,identity,authorizeWorker:()=> 'active'})});
+  try{
+    const rpc=createSignedWorkerRpcClient({transportSecret:secret,worker,expectedServer:identity,url:`http://127.0.0.1:${server.port}${DATA_ADMISSION_RPC_PATH}`});
+    const t=target();
+    expect(await rpc('authorize',{target:t,version:1})).toEqual({policyVersion:1});
+    for(const denied of [{...t,routeId:'other'},{...t,model:'denied'},{...t,entryRouteId:'other'}]){
+      expect(await rpc('inspect',denied)).toMatchObject({policyVersion:1});
+      await expect(rpc('authorize',{target:denied,version:1})).rejects.toMatchObject({status:403,code:'key-access.scope_denied'});
+    }
+    expect(plans).toBe(0);
+    expect(()=>h.beforeAttempt(t,worker)).toThrow('admission_grant_missing');
+    await h.publish({version:2,plugins});
+    await expect(rpc('authorize',{target:t,version:1})).rejects.toMatchObject({status:409,code:'admission_version_changed'});
+    expect(plans).toBe(0);
+  }finally{await server.stop(true);h.dispose();}
+});

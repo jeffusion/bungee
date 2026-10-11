@@ -1488,9 +1488,7 @@ export class ScopedPluginRegistry {
       const invoke=<T>(run:()=>T):T=>context && this.serviceHost.rpc ? this.serviceHost.runInInvocation(context,{purpose:'request',callee,signal:input.signal,lease},run):run();
       const result=await invoke(()=>hooks.onDispatchRequest.promise(input));
       if(!result)continue;
-      if(!result.adapter)return result;
-      const adapter=result.adapter;
-      return {...result,adapter:{bodyRequirements:adapter.bodyRequirements.bind(adapter),register(target){
+      const wrapAdapter=(adapter:import('./plugin.types').Plugin):import('./plugin.types').Plugin=>({bodyRequirements:adapter.bodyRequirements.bind(adapter),register(target){
         const wrapped={...target};
         for(const name of ['onResponse','onStreamChunk','onFlushStream','onRawResponse','onError'] as const){
           const hook=target[name];
@@ -1500,7 +1498,12 @@ export class ScopedPluginRegistry {
           }});
         }
         adapter.register(wrapped);
-      }}};
+      }});
+      return {...result,adapter:result.adapter?wrapAdapter(result.adapter):undefined,
+        prepareRequest:result.prepareRequest?async preparation=>{
+          const prepared=await invoke(()=>result.prepareRequest!(preparation));
+          return {...prepared,adapter:prepared.adapter?wrapAdapter(prepared.adapter):undefined};
+        }:undefined};
     }
   }
 

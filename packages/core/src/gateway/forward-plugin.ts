@@ -1,3 +1,4 @@
+import {auxiliaryCredentialIdentity} from './auxiliary-request';
 import { createBodySource } from './body-factory';
 import { readControlledBody, controlledBodyHandle } from './controlled-views';
 import { ResponseViews } from './response-views';
@@ -73,6 +74,7 @@ export interface ProxyAttemptOptions {
   readonly requestOverride?:GatewayRequestOverride;
   readonly servingRevision?: number;
   readonly attemptId: string;
+  readonly beforeReuse?:(identity:import('./contracts').GatewayAuxiliaryIdentity,target:{url:string;model:string|null;body:unknown})=>Promise<boolean>;
   readonly beforeSend?: (target: { url: string; model: string | null; body: unknown }) => Promise<void>;
   readonly onRequestDispatch?: () => void;
   readonly observeRequest?: (event: AttemptObservationEvent) => Promise<void>;
@@ -1079,6 +1081,16 @@ export async function executeForward(
     let proxyRes: Response;
     try {
       throwIfAttemptCannotDispatch();
+      if(attemptOptions?.beforeReuse){
+        const model=isObjectBody(finalBody)&&typeof finalBody.model==='string'?finalBody.model:'';
+        const identity=auxiliaryCredentialIdentity(fetchHeaders,model,upstream_id,managedCredential?credentialSecrets:undefined);
+        const reused=await attemptOptions.beforeReuse(identity,{url:finalTargetUrl.href,model,body:immutableSnapshot(finalBody)});
+        throwIfAttemptCannotDispatch();
+        if(reused){
+          await cleanup();completion.settle({status:'completed'});transportCompletion.settle({status:'completed'});
+          return {response:new Response(null,{status:204}),completion:completion.promise,upstreamId:upstream_id,shortCircuitedByPlugin:true};
+        }
+      }
       await attemptOptions?.beforeSend?.({ url: finalTargetUrl.href,
         model: null,
         body: immutableSnapshot(finalBody) });
@@ -1224,9 +1236,9 @@ export async function executeForward(
 
     if (attemptOptions?.observeResponse && proxyRes.body && ![204, 205, 304].includes(proxyRes.status)) {
       const contentType = proxyRes.headers.get('content-type')?.toLowerCase() ?? '';
-      // Some managed upstreams omit Content-Type even though the outbound request explicitly asks for SSE.
+      // Some upstreams omit Content-Type or use binary media for explicitly requested SSE.
       const requestedSse = fetchHeaders.get('accept')?.toLowerCase().includes('text/event-stream');
-      const protocol = contentType.includes('text/event-stream') || (!contentType && requestedSse)
+      const protocol = contentType.includes('text/event-stream') || (requestedSse && (!contentType || contentType.includes('application/octet-stream')))
         ? 'sse'
         : /(?:application\/json|\+json)(?:\s*;|$)/i.test(contentType) ? 'json' : undefined;
       if (!protocol) observationCompletions.push(attemptOptions.observeIncomplete?.('raw-response-incomplete', {

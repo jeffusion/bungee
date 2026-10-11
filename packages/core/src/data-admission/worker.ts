@@ -26,6 +26,21 @@ export class WorkerRequestAdmission {
   private grant: AdmissionGrant | null = null;
   private admittedBody: unknown;
   constructor(private readonly plugins: readonly WorkerAdmissionPlugin[], private readonly targetBase: Omit<AdmissionTarget,'attemptId'|'upstreamId'|'url'|'model'|'now'>, private readonly invokeBudget: (plugin: string, method: string, payload: unknown, target: AdmissionTarget) => Promise<unknown>) {}
+  /** Access and transport capability checks without planning, admission or budget reservation. */
+  async inspect(input: {attemptId:string;upstreamId:string;url:string;model:string|null;body:unknown;transport?:'websocket'},signal:AbortSignal):Promise<void> {
+    if (!session) throw new DataAdmissionError(503,'admission_unavailable');
+    signal.throwIfAborted();
+    let model=input.model;
+    for(const plugin of this.plugins) if(plugin.resolveAdmissionModel) model=plugin.resolveAdmissionModel(input);
+    const {body:_body,transport,...target}=input;
+    const authorizationTarget={...this.targetBase,...target,model,now:Date.now()};
+    const result=await session.admission('inspect',authorizationTarget,signal) as {policyVersion:number;requirements:Record<string,{request:'none'|'json-read'}>};
+    if(!result || !Number.isSafeInteger(result.policyVersion) || !result.requirements)throw new DataAdmissionError(503,'admission_inspect_failed');
+    if(transport==='websocket' && Object.values(result.requirements).some(value=>value.request==='json-read'))throw new DataAdmissionError(422,'websocket_budget_unsupported');
+    const authorized=await session.admission('authorize',{target:authorizationTarget,version:result.policyVersion},signal) as {policyVersion:number};
+    if(authorized?.policyVersion!==result.policyVersion)throw new DataAdmissionError(503,'admission_authorize_failed');
+    signal.throwIfAborted();
+  }
   async prepare(input: { attemptId: string; upstreamId: string; url: string; model: string | null; body: unknown; transport?: 'websocket' },signal: AbortSignal, loadBody?: () => Promise<unknown>): Promise<PreparedAdmissionAttempt[]> {
     if (!session) throw new DataAdmissionError(503,'admission_unavailable');
     const {body: _body,transport,...targetInput}=input;

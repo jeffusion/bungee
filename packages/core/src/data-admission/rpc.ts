@@ -84,9 +84,9 @@ export function createSignedWorkerRpcServer(options: {
 export function createDataAdmissionRpcServer(options: { host: DataAdmissionHost; transportSecret: string; identity: RateLimitIngressIdentity; authorizeWorker(worker: RateLimitWorkerIdentity): string }) {
   return createSignedWorkerRpcServer({...options, handle(operation,payload,worker) {
     if (operation === 'release') { const input=object(payload); exact(input,['requestId']); if(typeof input.requestId!=='string') throw new Error('invalid release'); options.host.release(input.requestId,worker); return null; }
-    if (operation === 'admit') { const input=object(payload); exact(input,['target','version']);
+    if (operation === 'admit' || operation === 'authorize') { const input=object(payload); exact(input,['target','version']);
       if (!Number.isSafeInteger(input.version)) throw new Error('invalid admission version');
-      return options.host.admit(parseAdmissionTarget(input.target),worker,false,input.version as number); }
+      return operation === 'authorize' ? options.host.authorize(parseAdmissionTarget(input.target),worker,input.version as number) : options.host.admit(parseAdmissionTarget(input.target),worker,false,input.version as number); }
     const target = parseAdmissionTarget(payload);
     if (operation === 'inspect') return options.host.inspect(target,worker);
     if (operation === 'preview') return options.host.admit(target,worker,true);
@@ -124,4 +124,4 @@ export function createSignedWorkerRpcClient(options: {
     }
   };
 }
-export type DataAdmissionRpc = (operation: 'inspect'|'preview'|'admit'|'attempt'|'release',payload: AdmissionTarget|{requestId:string},signal?:AbortSignal)=>Promise<AdmissionGrant|unknown>;
+export type DataAdmissionRpc = (operation: 'inspect'|'authorize'|'preview'|'admit'|'attempt'|'release',payload: AdmissionTarget|{requestId:string}|{target:AdmissionTarget;version:number},signal?:AbortSignal)=>Promise<AdmissionGrant|unknown>;

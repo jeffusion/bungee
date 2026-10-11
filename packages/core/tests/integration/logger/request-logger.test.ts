@@ -15,6 +15,22 @@ afterEach(() => {
 });
 
 describe('RequestLogger.complete', () => {
+  test('snapshots service-backed processing details before their request owner is revoked', async () => {
+    const entries: any[]=[];
+    const logger=new RequestLogger(new Request('http://localhost/snapshot'),undefined,{
+      accessLogWriter:{write(entry){entries.push(entry);},updateResponseBodyId(){},updateProtocolOutcome(){}},
+      fileLogWriter:{async write(){}},
+    });
+    let revoked=false;
+    const detail={get diagnostics(){if(revoked)throw new Error('revoked');return [{param:'tools[0]',reason:'mapped'}];}};
+    logger.addStep('conversion',detail);
+    logger.addStepWithDuration('validation',1,detail);
+    logger.addSteps([{step:'prepared',detail,timestamp:Date.now()}]);
+    revoked=true;
+    await logger.complete(200);
+    expect(JSON.parse(JSON.stringify(entries[0])).processingSteps.filter((step:any)=>['conversion','validation','prepared'].includes(step.step)))
+      .toHaveLength(3);
+  });
   test.each(['failed', 'incomplete'] as const)('retains early %s diagnostics when replacing an in-progress record', async outcome => {
     const entries: Record<string, any>[] = [];
     const files: Record<string, any>[] = [];

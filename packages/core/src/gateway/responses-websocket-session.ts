@@ -15,6 +15,7 @@ const TERMINALS = new Set(['response.completed','response.incomplete','response.
 /** One connection owns one active logical generation; the transport owns all queues. */
 export class ResponsesWebSocketSession {
   private active:AbortController|undefined;
+  private readonly connectionId=randomUUID();
   private readonly history=new Map<string,History>();
   private readonly historyLease=new BodyBufferLease();
   private historyBytes=0;
@@ -83,7 +84,7 @@ export class ResponsesWebSocketSession {
       const id=randomUUID();
       const request=new Request(this.input.request.url,{method:'POST',headers,body:JSON.stringify(body),signal});
       deriveWorkerRequestIdentity(this.input.request,request,id);
-      const response=await runWithGatewayHooks(this.hooks,()=>runGatewayRequest(request,this.input.config,{servingRevision:this.input.servingRevision,transport:'websocket',websocketBridge:this.input.bridge,skipEntryRate:true,logging:this.input.logging,onCanonicalInput(input){logicalInput=[...input];}}));
+      const response=await runWithGatewayHooks(this.hooks,()=>runGatewayRequest(request,this.input.config,{servingRevision:this.input.servingRevision,webSocketConnection:{id:this.connectionId,signal:session.signal},transport:'websocket',websocketBridge:this.input.bridge,skipEntryRate:true,logging:this.input.logging,onCanonicalInput(input){logicalInput=[...input];}}));
       source=createBodySource(response.body,this.input.bridge.limits.maxMessageBytes,response.headers.get('content-encoding')??'',signal,{requestId:id,attemptId:id,direction:'response',stage:'client-response',version:1,contentType:response.headers.get('content-type')??'',contentEncoding:response.headers.get('content-encoding')??''});
       const wire=response.body && bodySourceFor(response.body)===source ? response.body : source.take() as ReadableStream<Uint8Array>|null;
       const handle:BodyHandle=controlledBodyHandle(source,wire,source.handle(),signal);

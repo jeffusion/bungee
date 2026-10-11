@@ -19,7 +19,7 @@ export function normalizeAdmissionError(error: unknown): DataAdmissionError | nu
   if (error instanceof DataAdmissionError) return error;
   if (!(error instanceof Error) || error.name !== 'DataAdmissionError') return null;
   const value = error as Error & {status?: unknown; code?: unknown; retryAfter?: unknown; details?: DataAdmissionErrorDetails};
-  if (typeof value.status !== 'number' || ![401,403,409,422,429,503].includes(value.status)
+  if (typeof value.status !== 'number' || ![401,403,409,422,429,502,503].includes(value.status)
     || typeof value.code !== 'string' || !/^[a-zA-Z0-9_.-]{1,128}$/.test(value.code)
     || (value.retryAfter !== undefined && (typeof value.retryAfter !== 'number' || !Number.isFinite(value.retryAfter) || value.retryAfter < 0))) return null;
   return new DataAdmissionError(value.status,value.code,value.retryAfter as number | undefined,value.details);

@@ -26,6 +26,8 @@ export type GatewayCorsArguments = [response:Response,cors:CorsConfig|undefined,
 export type GatewayQueryRuleArguments = [params:URLSearchParams,rules:ModificationRules['query'],context:ExpressionContext,requestLog:any];
 export interface GatewayDispatchTarget { readonly type: 'route' | 'service'; readonly id: string }
 export interface DispatchRequestInput {
+  /** Trusted host metadata, never client headers or message metadata. */
+  readonly webSocketConnection?:{readonly id:string;readonly signal:AbortSignal};
   readonly context: import('../hooks').MutableRequestContext;
   readonly targets: readonly GatewayDispatchTarget[];
   readonly principal?: import('../plugin-extensions').DataPrincipal;
@@ -33,7 +35,34 @@ export interface DispatchRequestInput {
   readonly servingRevision?: number;
 }
 export interface DispatchConversionDiagnostic {readonly param:string;readonly action:'mapped'|'omitted';readonly reason:string}
-export interface DispatchRequestDecision { readonly target: GatewayDispatchTarget; readonly protocol?: LLMProtocol; readonly requiredUpstreamId?: string; readonly adapter?: import('../plugin.types').Plugin; /** Canonical logical input after a protocol conversion; absent for native passthrough. */ readonly canonicalInput?: readonly unknown[]; readonly diagnostics?: readonly DispatchConversionDiagnostic[] }
+export interface GatewayAuxiliaryIdentity { readonly scope: string | null; readonly model: string; readonly upstreamId: string }
+export interface GatewayAuxiliaryRequest {
+  readonly target: GatewayDispatchTarget; readonly protocol: 'responses'; readonly model: string; readonly body: unknown;
+  /** Explicit aggregate signal replaces parent cancellation; absent means parent-owned lifetime. */
+  readonly signal?: AbortSignal;
+  /** Null scope requires caller-owned local isolation and cannot identify a shared account cache. */
+  readonly reuse?: (identity: GatewayAuxiliaryIdentity) => Promise<unknown | undefined>;
+}
+export type GatewayAuxiliaryResult =
+  | {readonly kind:'response'; readonly status:number; readonly bodyHandle:import('./body-contracts').BodyHandle;
+     readonly completion:Promise<import('../plugin-control/contracts').RawResponseCompletion>; readonly identity:GatewayAuxiliaryIdentity;
+     readonly requestId:string; dispose():void}
+  | {readonly kind:'reused'; readonly value:unknown; readonly identity:GatewayAuxiliaryIdentity};
+export type ExecuteGatewayAuxiliary = (input:GatewayAuxiliaryRequest)=>Promise<GatewayAuxiliaryResult>;
+export interface DispatchRequestPreparationInput {
+  readonly webSocketConnection?:{readonly id:string;readonly signal:AbortSignal};
+  readonly context:import('../hooks').MutableRequestContext; readonly principal?:import('../plugin-extensions').DataPrincipal;
+  readonly servingRevision?:number; readonly signal:AbortSignal; readonly executeAuxiliary:ExecuteGatewayAuxiliary;
+}
+export interface DispatchRequestPreparationResult {
+  readonly requiredUpstreamId?:string;
+  readonly adapter?:import('../plugin.types').Plugin; readonly canonicalInput?:readonly unknown[];
+  readonly diagnostics?:readonly DispatchConversionDiagnostic[];
+}
+export interface DispatchRequestDecision extends DispatchRequestPreparationResult {
+  readonly target:GatewayDispatchTarget; readonly protocol?:LLMProtocol; readonly requiredUpstreamId?:string;
+  readonly prepareRequest?:(input:DispatchRequestPreparationInput)=>Promise<DispatchRequestPreparationResult>;
+}
 export interface GatewayDispatchInput extends Omit<DispatchRequestInput,'targets'> { readonly config: AppConfig; readonly entry: RouteConfig }
 export interface GatewayDispatchDecision {
   readonly route: RouteConfig; readonly effective: EffectiveRouteConfig;
@@ -41,6 +70,7 @@ export interface GatewayDispatchDecision {
   readonly entryRouteId?: string; readonly target?: GatewayDispatchTarget; readonly requiredUpstreamId?: string; readonly protocol?: LLMProtocol; readonly adapter?: import('../plugin.types').Plugin;
   readonly canonicalInput?: readonly unknown[];
   readonly diagnostics?: readonly DispatchConversionDiagnostic[];
+  readonly prepareRequest?:DispatchRequestDecision['prepareRequest'];
 }
 export interface GatewayRouteInput { readonly request: Request; readonly config: AppConfig }
 export interface GatewayRouteDecision { readonly route?: RouteConfig; readonly effective?: EffectiveRouteConfig; readonly response?: Response; readonly responseKind?: 'rule' | 'local' }

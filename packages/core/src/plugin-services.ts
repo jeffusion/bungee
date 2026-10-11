@@ -247,41 +247,79 @@ export class PluginServiceHost {
     const assertActive = (target = owner) => {
       if (target.revoked || (target.retiring && !target.cleaning && !owner.cleaning && target.leases === 0 && target.pending.size === 0)) throw new Error(`Plugin service handle revoked: ${target.plugin}`);
     };
-    const wrap = (value: unknown, provider: Owner, receiver?: object): any => {
+    const signals = new WeakMap<AbortSignal, WeakMap<Owner, AbortSignal>>();
+    const track = <T>(pending: Promise<T>, provider: Owner): Promise<T> => {
+      owner.pending.add(pending); provider.pending.add(pending);
+      void pending.finally(() => {
+        owner.pending.delete(pending); provider.pending.delete(pending);
+        this.notify(owner); this.notify(provider);
+      }).catch(() => {});
+      return pending;
+    };
+    // These handles stay in-process. RPC retains its separate data-only wire contract.
+    const wrap = (value: unknown, provider: Owner, receiver?: object, argument = false): any => {
+      const active = (): void => { assertActive(); assertActive(provider); };
       if (typeof value === 'function') return (...args: unknown[]) => {
-        assertActive(); assertActive(provider);
-        const guardArgument = (arg: unknown): unknown => {
-          if (typeof arg === 'function') return (...callbackArgs: unknown[]) => {
-            assertActive(); assertActive(provider);
-            const result = Reflect.apply(arg, undefined, callbackArgs);
-            if (result && typeof result.then === 'function') {
-              const pending = Promise.resolve(result);
-              owner.pending.add(pending); provider.pending.add(pending);
-              void pending.finally(() => { owner.pending.delete(pending); provider.pending.delete(pending); this.notify(owner); this.notify(provider); }).catch(() => {});
-              return pending;
-            }
-            return result;
-          };
-          if (Array.isArray(arg)) return Object.freeze(arg.map(guardArgument));
-          if (arg && typeof arg === 'object') return Object.freeze(Object.fromEntries(Object.entries(arg).map(([key, value]) => [key, guardArgument(value)])));
-          return arg;
-        };
-        const guarded = args.map(guardArgument);
-        const result = Reflect.apply(value, receiver, guarded);
-        if (result && typeof result.then === 'function') {
-          const pending = Promise.resolve(result).then(output => { assertActive(); assertActive(provider); return wrap(output, provider); });
-          owner.pending.add(pending); provider.pending.add(pending);
-          void pending.finally(() => { owner.pending.delete(pending); provider.pending.delete(pending); this.notify(owner); this.notify(provider); }).catch(() => {});
-          return pending;
-        }
-        return wrap(result, provider);
+        active();
+        return wrap(Reflect.apply(value, receiver, args.map(arg => wrap(arg, provider, undefined, !argument))), provider, undefined, argument);
       };
-      if (Array.isArray(value)) return Object.freeze(value.map(item => wrap(item, provider)));
+      if (value instanceof AbortSignal) {
+        active();
+        let projections = signals.get(value);
+        if (!projections) signals.set(value, projections = new WeakMap());
+        const existing = projections.get(provider);
+        if (existing) return existing;
+        const controller = new AbortController();
+        const detach = (): void => {
+          value.removeEventListener('abort', abort);
+          owner.cleanups.delete(revoke); provider.cleanups.delete(revoke);
+        };
+        const abort = (): void => { detach(); controller.abort(value.reason); };
+        const revoke = (): void => { detach(); controller.abort(new Error('Plugin service handle revoked')); };
+        projections.set(provider, controller.signal);
+        if (value.aborted) abort();
+        else {
+          value.addEventListener('abort', abort, { once: true });
+          owner.cleanups.add(revoke); provider.cleanups.add(revoke);
+        }
+        return controller.signal;
+      }
+      if (value instanceof Promise) {
+        active();
+        return track(value.then(output => { active(); return wrap(output, provider, undefined, argument); }), provider);
+      }
+      if (value instanceof Uint8Array) return new Uint8Array(value);
+      if (value instanceof ArrayBuffer) return ArrayBuffer.prototype.slice.call(value,0);
+      if (value && typeof value === 'object' && typeof (value as AsyncIterable<unknown>)[Symbol.asyncIterator] === 'function') {
+        return Object.freeze({ [Symbol.asyncIterator]: () => {
+          active();
+          const iterator = (value as AsyncIterable<unknown>)[Symbol.asyncIterator]();
+          const invoke = (method: 'next' | 'return' | 'throw', args: unknown[]): Promise<unknown> => {
+            active();
+            const operation = iterator[method];
+            if (!operation) return method === 'throw' ? Promise.reject(args[0]) : Promise.resolve({ done: true, value: args[0] });
+            return wrap(Promise.resolve(Reflect.apply(operation, iterator, args.map(arg => wrap(arg, provider, undefined, !argument)))), provider, undefined, argument);
+          };
+          const facade = Object.freeze({
+            next: (...args: unknown[]) => invoke('next', args),
+            return: (...args: unknown[]) => invoke('return', args),
+            throw: (...args: unknown[]) => invoke('throw', args),
+            [Symbol.asyncIterator]: () => { active(); return facade; },
+          });
+          return facade;
+        } });
+      }
+      if (Array.isArray(value)) return Object.freeze(value.map(item => wrap(item, provider, undefined, argument)));
       if (value && typeof value === 'object') {
+        if (argument) {
+          const prototype = Object.getPrototypeOf(value);
+          if (prototype !== Object.prototype && prototype !== null) throw new TypeError('Unsupported plugin service argument handle');
+          return Object.freeze(Object.fromEntries(Object.entries(value).map(([key, item]) => [key, wrap(item, provider, value, true)])));
+        }
         // A fresh facade prevents access to implementation identity or mutable provider fields.
         const facade: Record<string, unknown> = {};
         for (const key of Object.keys(value)) Object.defineProperty(facade, key, {
-          enumerable: true, get: () => { assertActive(); assertActive(provider); return wrap((value as any)[key], provider, value as object); },
+          enumerable: true, get: () => { active(); return wrap((value as any)[key], provider, value as object); },
         });
         return Object.freeze(facade);
       }
