@@ -1,3 +1,27 @@
+## [5.21.1](https://github.com/jeffusion/bungee/compare/v5.21.0...v5.21.1) (2026-10-11)
+
+
+### Bug Fixes
+
+* **test:** account for generated build sources in plan identity ([a9cbcfc](https://github.com/jeffusion/bungee/commit/a9cbcfc756122dea1227532013000a03f8d76973))
+* **test:** await dialog scale completion before geometry checks ([05aba47](https://github.com/jeffusion/bungee/commit/05aba47db6dc2da8ec9e6a5e136ba62a001b8ced))
+* **test:** await reset confirmation dismissal before next action ([484325d](https://github.com/jeffusion/bungee/commit/484325da9321b26c43af22346e2208767d27263b))
+* **test:** check UI style boundaries per file ([27f1027](https://github.com/jeffusion/bungee/commit/27f102729ff749023994d1a362e73d8775f064c8))
+* **test:** fence status responses during OAuth notice checks ([488e12f](https://github.com/jeffusion/bungee/commit/488e12f42b6fbd6d1b8281bd2c3582fd74706ec7))
+* **test:** isolate configuration recovery timer stub ([8451e70](https://github.com/jeffusion/bungee/commit/8451e70933e2116cb97aa1bc0ad17435aeb7cea0))
+* **test:** resolve repository aliases for plan outputs ([70ecb78](https://github.com/jeffusion/bungee/commit/70ecb78fcc4e0b549fbd00bed68ad7ca45cd419d))
+* **test:** synchronize remote RPC cancellation ([c488a61](https://github.com/jeffusion/bungee/commit/c488a617a1dfed90cf815fc74a8da1b67202cd22))
+* **test:** synchronize responsive widgets and platform shortcuts ([c3be9f2](https://github.com/jeffusion/bungee/commit/c3be9f23edf6803aca9cfc04e009f67bcc57e39a))
+* **test:** wait for dialog autofocus before focus assertions ([3537911](https://github.com/jeffusion/bungee/commit/3537911a7756079a639045792e0d6111ae7ff4fc))
+* **test:** wait for native touch scrolling before assertions ([a6f4a28](https://github.com/jeffusion/bungee/commit/a6f4a284a41c855911942511b4ea354eaf992096))
+* **test:** wait for responsive header layout ([9d79b6a](https://github.com/jeffusion/bungee/commit/9d79b6a7832cc562ff783f13c417657687f37871))
+* **test:** warm fixture entries before browser navigation ([5c53f3d](https://github.com/jeffusion/bungee/commit/5c53f3d713805aefaafc600d55711e3c40a32f93))
+
+
+### Performance Improvements
+
+* **test:** select affected suites and shard browser CI ([041d8f5](https://github.com/jeffusion/bungee/commit/041d8f5341c09e847f8988045abc28778d2abc7f))
+
 # [5.21.0](https://github.com/jeffusion/bungee/compare/v5.20.0...v5.21.0) (2026-10-09)
 
 
