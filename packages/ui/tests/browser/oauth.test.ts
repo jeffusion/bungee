@@ -726,8 +726,9 @@ try {
       await page.screenshot({ path: `/tmp/bungee-dialog-${kind}-close-${state}.png`, clip });
     };
     await opener.click(); await dialog.waitFor(); await settleDialog();
+    await expect(closeButton).toBeFocused();
     if (kind === 'industrial') {
-      const focus = await closeStyle(); assert(focus.focused && !focus.focusVisible); assertIndustrial(focus);
+      const focus = await closeStyle(); assert(focus.focused && !focus.focusVisible, JSON.stringify(focus)); assertIndustrial(focus);
       await closeScreenshot('focus');
       await closeButton.evaluate(element => (element as HTMLElement).blur());
       const idle = await closeStyle(); assert(!idle.focused); assertIndustrial(idle, false);
@@ -778,6 +779,7 @@ try {
     assert(await opener.evaluate(element => element === document.activeElement));
     for (const key of ['Enter', 'Space']) {
       await opener.click(); await dialog.waitFor(); await settleDialog();
+      await expect(closeButton).toBeFocused();
       await page.keyboard.press('Tab');
       assert((await closeStyle()).focusVisible);
       await page.keyboard.press(key); await dialog.waitFor({ state: 'hidden' });
