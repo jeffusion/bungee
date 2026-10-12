@@ -1,3 +1,10 @@
+## [5.23.2](https://github.com/jeffusion/bungee/compare/v5.23.1...v5.23.2) (2026-10-12)
+
+
+### Bug Fixes
+
+* **model-mapping:** validate explicit catalog identities ([c0e3167](https://github.com/jeffusion/bungee/commit/c0e31675266541eeb46e21cc0887323780916126))
+
 ## [5.23.1](https://github.com/jeffusion/bungee/compare/v5.23.0...v5.23.1) (2026-10-12)
 
 
