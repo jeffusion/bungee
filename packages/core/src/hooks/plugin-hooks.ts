@@ -81,6 +81,8 @@ export interface ResponseContext extends RequestContext {
 
 /** Strict raw response boundary. Unlike legacy response hooks, failures propagate. */
 export interface RawResponseContext extends RequestContext {
+  /** Actual selected upstream URL after request hooks and rewrites. */
+  readonly upstreamUrl?: string;
   readonly bodyHandle?: BodyHandle;
   readonly signal: AbortSignal;
   readonly attemptId: string;

@@ -1,4 +1,4 @@
-import {requestServiceDeclared} from '../plugin-control/request-service-authority';
+import {requestServiceDeclared, RequestRouteProtections} from '../plugin-control/request-service-authority';
 import { PluginJournalRecovery } from './plugin-journal-recovery';
 import type { DaemonMetadataV1, Sha256Digest } from '@jeffusion/bungee-types';
 import type { AsyncConfigRepository, AsyncConfigRepositoryOptions } from '../config-storage/async-config-repository';
@@ -570,6 +570,7 @@ export async function startMasterComposition(
       return found;
     };
     let publishPolicy: () => Promise<boolean> = async () => false;
+    const requestRouteProtections = new RequestRouteProtections();
     const managementOrigin = parseManagementOrigin(process.env.BUNGEE_PUBLIC_ORIGIN);
     const trustedProxyAddresses = parseTrustedManagementProxies(process.env.BUNGEE_TRUSTED_MANAGEMENT_PROXIES);
     const stateCall = new AsyncLocalStorage<string>();
@@ -655,8 +656,10 @@ export async function startMasterComposition(
           const snapshot=cachedSnapshot({revision:status.revision,content_hash:status.content_hash,plugin_catalog_hash:status.plugin_catalog_hash});
           const route=snapshot?.aggregate.logical_configuration.routes.find(route=>route.id===target.routeId);
           if(!route || metadata.caller.subject!==`${caller}@route:${route.path}` || !route.plugins.some(binding=>binding.name===caller && binding.enabled) || !snapshot?.aggregate.plugin_activations.some(activation=>activation.plugin_name===caller))throw new Error('request_binding_invalid');
-          let verified=false;
-          for(const activation of snapshot.aggregate.plugin_activations)if(await resources.pluginControl!.verifyDataPrincipal(activation.plugin_name,target.principal)){verified=true;break;}
+          let verified = target.principal.domain === 'anonymous' && requestRouteProtections.allowsAnonymous(target);
+          if (target.principal.domain !== 'anonymous') {
+            for(const activation of snapshot.aggregate.plugin_activations)if(await resources.pluginControl!.verifyDataPrincipal(activation.plugin_name,target.principal)){verified=true;break;}
+          }
           if(!verified || signal.aborted)throw new Error('request_principal_invalid');
           return Object.freeze({kind:'gateway-request',revision:host.revision,target,worker:identity});
         }
@@ -783,6 +786,7 @@ export async function startMasterComposition(
     let runtimeVersion = 0;
     let publicationTail: Promise<unknown> = Promise.resolve();
     const publishDataState = (snapshot?: RepositorySnapshot, sequence?: number, unblock?: DataAdmissionPublication['unblock']): Promise<boolean> => {
+      const publication = requestRouteProtections.beginPublication();
       const task = publicationTail.catch(() => undefined).then(async () => {
         const controller = resources.ingressController;
         if (!controller || !durableState) return false;
@@ -799,9 +803,11 @@ export async function startMasterComposition(
             ? [{name:record.name,entry:record.ingressPath,catalogHash:catalog.hash,policy:handle.control.policy().value}] : [];
         });
         await refreshRouteProtections();
+        const routeRequirements = protections.requirements();
         await controller.publishRuntimeState({version:runtimeVersion,admissionSequence:sequence ?? active?.admission_sequence,
-          routeRequirements:protections.requirements(),plugins,...(unblock ? {unblock} : {})});
+          routeRequirements,plugins,...(unblock ? {unblock} : {})});
         const confirmed = await controller.queryRuntimeState() as {version:number};
+        if (confirmed.version === runtimeVersion) requestRouteProtections.confirmPublication(publication, routeRequirements);
         return confirmed.version === runtimeVersion;
       });
       publicationTail = task; return task;
@@ -986,6 +992,7 @@ export async function startMasterComposition(
     };
     const recoveryGateTokens = new Map<number, number>();
     const onNewBootAccepted = (event: Extract<MasterIngressRecoveryEvent, { readonly kind: 'new_boot' }>): void => {
+      requestRouteProtections.beginPublication();
       const generation = ingressBootRecoveryGate.activate();
       if (!ingressBootRecoveryGate.isCurrent(generation)) return;
       recoveryGateTokens.clear();
@@ -1864,6 +1871,7 @@ export async function startMasterComposition(
     let runtimePublicationEligible = false;
     const runtimePublicationAbort = new AbortController();
     const revokeRuntimePublication = (): void => {
+      requestRouteProtections.beginPublication();
       runtimePublicationEligible = false;
       runtimePublicationAbort.abort('master runtime stopping');
     };

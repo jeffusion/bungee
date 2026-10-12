@@ -29,7 +29,7 @@ export const ChatgptOauthPlugin = definePlugin(
     bodyRequirements(context: import('@jeffusion/bungee-core/plugin').PluginBodyRequirementContext): import('@jeffusion/bungee-core/plugin').PluginBodyRequirements {
       const path = context.url.pathname;
       if (path === '/v1/models' && context.method.toUpperCase() === 'GET') return { request: 'none', response: ['json'] };
-      return context.method.toUpperCase() === 'POST' && (isResponsesRequest(context.url) || ['/v1/chat/completions', '/backend-api/codex/responses'].includes(path)) ? { request: 'json-write', response: path === '/backend-api/codex/responses' ? [] : ['json', 'sse-json'] } : { request: 'none' };
+      return context.method.toUpperCase() === 'POST' && (isResponsesRequest(context.url) || ['/v1/chat/completions', '/backend-api/codex/responses'].includes(path)) ? { request: 'json-write', response: ['json', 'sse-json'] } : { request: 'none' };
     }
 
     register(hooks: PluginHooks): void {

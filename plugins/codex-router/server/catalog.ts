@@ -46,7 +46,7 @@ export function mergeCatalog(native: unknown, bindings: readonly ModelBinding[],
   return {...body, [rich ? 'models' : 'data']: [...existing.filter((entry: any) => !unavailable.has(rich ? entry.slug : entry.id))
     .map((entry: any) => replacements.get(rich ? entry.slug : entry.id) ?? entry), ...added]};
 }
-/** No shared identity cache: the upstream's per-request catalog is merged on demand. */
-export function catalogEtag(body: unknown, version: number | null, clientVersion: string): string {
-  return `"${createHash('sha256').update(JSON.stringify([body,version,clientVersion])).digest('hex')}"`;
+/** Hash exactly the serialized UTF-8 representation returned to the client. */
+export function catalogEtag(body: string): string {
+  return `"${createHash('sha256').update(body, 'utf8').digest('hex')}"`;
 }

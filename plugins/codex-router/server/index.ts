@@ -2,11 +2,12 @@ import {createHash} from 'node:crypto';
 import {ADAPTER_PLUGIN,CONVERSION_SERVICE_ID,CONVERSION_VERSION,historyRpc,historyClient,type HistoryClient,type ConversionService,type CollaborationRelay} from '../../llm-protocol-adapter/contract';
 import {protocolAdapter} from './protocol';
 import { definePlugin, DataAdmissionError, type Plugin, type PluginInitContext, type PluginHooks, type DispatchRequestPreparationInput } from '@jeffusion/bungee-core/plugin';
-import { MODELS_DEV_CAPABILITIES_SERVICE_ID, MODELS_DEV_CAPABILITIES_CONTRACT_VERSION, type ModelsDevCapabilitiesService } from '../../models-dev/contract';
 import manifest from '../manifest.json';
 import type { PluginConfigField } from '@jeffusion/bungee-core/plugin';
 import { parseBindings, parseCollaborationRelay, bindingSource } from './config';
 import { mergeCatalog, catalogEtag } from './catalog';
+import { catalogValidatorsClient } from '../contract';
+import { catalogValidatorKey } from './catalog-validators';
 
 export const CodexRouterPlugin = definePlugin(class implements Plugin {
   static readonly name = 'codex-router';
@@ -15,24 +16,34 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
   private readonly bindings;
   private readonly relay?:CollaborationRelay;
   private history!:HistoryClient;
-  private catalog!: ModelsDevCapabilitiesService;
+  private validators?: ReturnType<typeof catalogValidatorsClient>;
+  private readonly catalogRequests = new Map<string, {key: string; signal: AbortSignal}>();
   private conversion!:ConversionService;
   constructor(options?: { models?: unknown; collaborationRelay?: unknown }) { this.bindings = parseBindings(options?.models); this.relay = parseCollaborationRelay(options?.collaborationRelay); }
   async init(context: PluginInitContext) {
     if (context.scope?.type !== 'route') throw new Error('codex_router_requires_route_scope');
     this.history=historyClient(context.services!.rpc!.consume(ADAPTER_PLUGIN,historyRpc));
     this.conversion=context.services!.consume(ADAPTER_PLUGIN,CONVERSION_SERVICE_ID,CONVERSION_VERSION);
-    this.catalog = context.services!.consume('models-dev', MODELS_DEV_CAPABILITIES_SERVICE_ID, MODELS_DEV_CAPABILITIES_CONTRACT_VERSION);
+    try { this.validators = catalogValidatorsClient(context.services!); } catch { /* Optional notification state must not block generation. */ }
+    context.services!.onDispose?.(() => this.catalogRequests.clear());
   }
   bodyRequirements(context: { method: string; url: URL }) {
     return {request:context.method === 'POST' && /\/responses$/.test(context.url.pathname) ? 'json-write' as const : 'none' as const, response: context.method === 'GET' && /\/models$/.test(context.url.pathname) ? ['json' as const] : []};
   }
   register(hooks: PluginHooks) {
     hooks.onWebSocketSessionMode.tap('codex-router.session', url => /\/responses$/.test(url.pathname) ? 'responses' : undefined);
+    hooks.onDispatchRequest.tap('codex-router.catalog-identity', input => {
+      const key = catalogValidatorKey(input, this.bindings);
+      if (key) this.catalogRequests.set(input.context.requestId, {key, signal: input.signal});
+    });
     hooks.onDispatchRequest.tapPromise('codex-router.binding', async ({context,targets}) => {
       if (context.method !== 'POST' || !/\/responses$/.test(context.originalUrl.pathname)) return;
       const binding = this.bindings.find(binding => bindingSource(binding) === context.body?.model);
       if (!binding) return;
+      // The final route does not run entry finally hooks. Transfer ownership to
+      // the per-request dispatch adapter before validation/preparation can fail.
+      const notification = this.catalogRequests.get(context.requestId);
+      this.catalogRequests.delete(context.requestId);
       if (!targets.some(target => target.type === binding.target.type && target.id === binding.target.id)) throw new DataAdmissionError(422,'codex_router_target_unavailable');
       const protocol = binding.target.protocol;
       const capabilities=this.conversion.resolveCapabilities({provider:binding.provider,model:binding.model,targetProtocol:protocol,restrictions:binding.capabilityOverrides});
@@ -86,8 +97,15 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
         // Host logs may flush after the consumer lease is revoked during drain.
         diagnostics=structuredClone([...relayDiagnostics,...decoded.diagnostics]);
       } catch(error) {session.dispose();const e=error as any;if(typeof e.code==='string')throw new DataAdmissionError(422,`llm_adapter_${e.code}`,undefined,{message:e.message,param:e.param});throw error;}
-      const adapter=protocolAdapter({session,protocol,model:bindingSource(binding),signal,
+      const converted=protocolAdapter({session,protocol,model:bindingSource(binding),signal,
         save:async(response,responseContext)=>{if(scope && typeof response.id==='string')await this.history.put({scope,id:response.id,value:{target:binding.target,origin:{provider:binding.provider,model:binding.model,upstreamId:responseContext?.upstreamId},items:[...logicalInput,...response.output]}},{signal,operationId:crypto.randomUUID()});}});
+      const adapter: Plugin = {bodyRequirements: converted.bodyRequirements.bind(converted), register: hooks => {
+        converted.register(hooks);
+        hooks.onRawResponse.tapPromise('codex-router.catalog-notification', async result => {
+          await this.rewriteCatalogNotification(result.response, notification);
+          return result;
+        });
+      }};
       return {requiredUpstreamId,adapter,...(protocol!=='responses'?{canonicalInput:logicalInput,diagnostics}:{})};
       }};
     });
@@ -97,17 +115,40 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       }
       return context;
     });
+    hooks.onRawResponse.tapPromise('codex-router.catalog-notification', async (result, context) => {
+      if (context.method === 'POST' && /\/responses$/.test(context.originalUrl.pathname)) {
+        await this.rewriteCatalogNotification(result.response, this.catalogRequests.get(context.requestId));
+      }
+      return result;
+    });
     hooks.onResponse.tapPromise('codex-router.catalog', async (response, context) => {
+      const record = this.catalogRequests.get(context.requestId);
       if (context.method !== 'GET' || !/\/models$/.test(context.originalUrl.pathname) || !response.ok) return response;
       const native = await context.bodyHandle!.json({id:'codex-router.catalog',mandatory:true});
-      const body = mergeCatalog(native,this.bindings,this.conversion);
+      const body = JSON.stringify(mergeCatalog(native,this.bindings,this.conversion));
+      const etag = catalogEtag(body);
       const headers = new Headers(response.headers);
       for (const key of ['content-length','content-encoding','etag','last-modified']) headers.delete(key);
       headers.set('content-type','application/json');
       headers.set('cache-control','private, no-store');
-      headers.set('etag', catalogEtag(body,this.catalog.status().version,context.originalUrl.searchParams.get('client_version') ?? ''));
-      return new Response(JSON.stringify(body), {status:response.status,headers});
+      headers.set('etag', etag);
+      if (record && this.validators) {
+        try { await this.validators.put({key: record.key, etag}, {signal: record.signal, timeoutMs: 1000, operationId: crypto.randomUUID()}); }
+        catch { /* Directory delivery does not depend on transient notification state. */ }
+      }
+      return new Response(body, {status:response.status,headers});
     });
+    hooks.onFinally.tap('codex-router.catalog-cleanup', context => { this.catalogRequests.delete(context.requestId); });
   }
+  private async rewriteCatalogNotification(response: Response, record?: {key: string; signal: AbortSignal}) {
+    response.headers.delete('x-models-etag');
+    if (record && this.validators) {
+      try {
+        const etag = await this.validators.get({key: record.key}, {signal: record.signal, timeoutMs: 1000});
+        if (etag && !record.signal.aborted) response.headers.set('x-models-etag', etag);
+      } catch { /* Missing/shared-state failures leave the generation body untouched. */ }
+    }
+  }
+  reset() { this.catalogRequests.clear(); }
 });
 export default CodexRouterPlugin;

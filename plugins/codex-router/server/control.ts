@@ -1,8 +1,16 @@
 import type { ControlHostContext, PluginControl, ControlPlugin } from '@jeffusion/bungee-core/plugin';
 import { MODELS_DEV_CATALOG_SERVICE_ID, MODELS_DEV_CATALOG_CONTRACT_VERSION, MODELS_DEV_CAPABILITIES_SERVICE_ID, MODELS_DEV_CAPABILITIES_CONTRACT_VERSION, type ModelsDevCatalogService, type ModelsDevCapabilitiesService } from '../../models-dev/contract';
+import { catalogValidatorsRpc } from '../contract';
+import { CatalogValidators } from './catalog-validators';
 export function createControl(host: ControlHostContext): PluginControl {
+  const validators = new CatalogValidators();
+  host.services!.rpc!.publish(catalogValidatorsRpc, {
+    get: ({key}) => validators.get(key), put: ({key, etag}) => validators.put(key, etag),
+  });
+  host.services!.onDispose(() => validators.clear());
+  host.signal.addEventListener('abort', () => validators.clear(), {once: true});
   return {
-    rpc:[], start() {}, async dispose() {},
+    rpc:[], start() {}, async dispose() { validators.clear(); },
     api:[{path:'/catalog', methods:['GET'], handler:'getCatalog', invoke:async ({request}) => {
       if (host.signal.aborted) return Response.json({error:'inactive'},{status:503});
       const params = new URL(request.url).searchParams;

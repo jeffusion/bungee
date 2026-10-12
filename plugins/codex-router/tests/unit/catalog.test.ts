@@ -25,9 +25,15 @@ test('aliases are optional, duplicate and native-conflicting identifiers fail cl
   expect(()=>mergeCatalog({models:[{slug:'org/model'}]},bindings,service)).toThrow('conflict');
   const alias=parseBindings([{...bindings[0],alias:'my-model'}]);expect((mergeCatalog({models:[]},alias,service) as any).models[0]).toMatchObject({slug:'my-model',display_name:'Model'});
 });
-test('catalog validators reject malformed inputs and ETag includes catalog/client versions',()=>{
+test('catalog validators reject malformed inputs and ETag hashes the exact serialized body',()=>{
   expect(()=>parseBindings([{...bindings[0],capabilityOverrides:{images:'yes'}}])).toThrow();
-  expect(catalogEtag({},1,'a')).not.toBe(catalogEtag({},2,'a'));expect(catalogEtag({},1,'a')).not.toBe(catalogEtag({},1,'b'));
+  expect(catalogEtag('{}')).toBe('"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"');
+  expect(catalogEtag('{}')).toBe(catalogEtag('{}'));
+  expect(catalogEtag('{}')).not.toBe(catalogEtag('{ }'));
+  const native={models:[{slug:'native'}]};
+  const before=catalogEtag(JSON.stringify(mergeCatalog(native,bindings,service)));
+  view.apply(buildCatalogIndex({version:2,fetchedAt:2,catalog:{lab:{models:{'org/model':{name:'Model',limit:{context:32000,output:4000},tool_call:true,reasoning:true,modalities:{input:['text','image']}}}}}}));
+  expect(catalogEtag(JSON.stringify(mergeCatalog(native,bindings,service)))).toBe(before);
 });
 test('explicit source replaces one native model using target capabilities while preserving other entries',()=>{
   const binding=parseBindings([{...bindings[0],source:'gpt-native'}]);

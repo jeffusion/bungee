@@ -26,7 +26,7 @@ test('relative Responses requests declare writable bodies and adapt HTTP and WS 
   for (const path of ['/responses', '/backend-api/codex/responses']) {
     const plugin = new ChatgptOauthPlugin({});
     expect(plugin.bodyRequirements({requestId:'relative-responses',method:'POST',url:new URL(`https://chatgpt.com${path}`),stage:'selected'}))
-      .toEqual({request:'json-write',response:path === '/responses' ? ['json','sse-json'] : []});
+      .toEqual({request:'json-write',response:['json','sse-json']});
     const hooks = createPluginHooks(); plugin.register(hooks);
     const context = request(path);context.url = new URL(`https://chatgpt.com${path}`);
     const input = [{type:'agent_message',author:'parent',recipient:'child',content:[{type:'encrypted_content',encrypted_content:'fixture-cipher'}]}];

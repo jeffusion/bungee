@@ -61,7 +61,7 @@ const message = (text: string) => ({type: 'message', role: 'assistant', content:
 function response(id: string, model: string) {return {id, object: 'response', status: 'completed', model,
   output: [message('fixture answer')], usage: {input_tokens: 4, output_tokens: 2, total_tokens: 6}};}
 function sse(events: any[]) {return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(''),
-  {headers: {'content-type': 'text/event-stream'}});}
+  {headers: {'content-type': 'text/event-stream', 'x-models-etag': 'W/"fixture-upstream-directory"', 'x-fixture-response': 'keep'}});}
 function chatEvents(text='chat answer') {return [
   {choices: [{index: 0, delta: {content: text}, finish_reason: null}]},
   {choices: [{index: 0, delta: {}, finish_reason: 'stop'}]},
@@ -82,7 +82,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
   const startup: GatewayMasterStartupState = {attempted: false, errors: []};
   const calls: Call[] = [], sockets = new Set<Socket>();
   const pending = new Set<string>(), aborted = new Set<string>();
-  const modelQueries: Array<{path: string; clientVersion: string | null}> = [];
+  const modelQueries: Array<{path: string; clientVersion: string | null; pid: number}> = [];
   const accountQueries: string[] = [];
   type ToolRoundTrip={firstRequestId?:string;followupRequestId?:string;wires?:Record<string,string>;outputs?:any[]};
   const cliToolRoundTrips=new Map<string,ToolRoundTrip>();
@@ -113,8 +113,8 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
           return new Response('upgrade failed', {status: 400});
         }
         if (path.endsWith('/models')) {
-          modelQueries.push({path, clientVersion: new URL(request.url).searchParams.get('client_version')});
-          return Response.json({models: [nativeCatalogModel]});
+          modelQueries.push({path, clientVersion: new URL(request.url).searchParams.get('client_version'), pid: Number(request.headers.get('x-codex-fixture-pid'))});
+          return Response.json({models: [nativeCatalogModel]}, {headers: {etag: 'W/"fixture-upstream-directory"'}});
         }
         // app-server probes unrelated ChatGPT plugin/settings APIs during init.
         // This fixture implements only accounts/config and model inference.
@@ -307,13 +307,16 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
           content: [{type: 'text', text: 'anthropic answer'}], stop_reason: 'end_turn', usage: {input_tokens: 4, output_tokens: 2},
         });
         if (path.endsWith('/responses')) {
+          if (body.input === 'fixture-sse-rate-limit') return new Response('event: error\ndata: {"error":"rate_limit"}\n\n', {
+            status: 429, headers: {'content-type': 'text/event-stream', 'retry-after': '5', 'x-models-etag': 'upstream-unrelated'},
+          });
           const result = response(`resp_fixture_${calls.length}`, body.model);
           const itemId = `msg_fixture_${calls.length}`;
           return body.stream ? sse([{type: 'response.created', response: {...result, status: 'in_progress', output: []}},
             {type: 'response.output_item.added', output_index: 0, item: {...result.output[0], id: itemId, status: 'in_progress', content: []}},
             {type: 'response.output_text.delta', item_id: itemId, output_index: 0, content_index: 0, delta: 'fixture answer'},
             {type: 'response.output_item.done', output_index: 0, item: {...result.output[0], id: itemId, status: 'completed'}},
-            {type: 'response.completed', response: result}]) : Response.json(result);
+            {type: 'response.completed', response: result}]) : Response.json(result, {headers: {'x-models-etag': 'W/"fixture-upstream-directory"', 'x-fixture-response': 'keep'}});
         }
         return Response.json({error: 'fixture_wrong_path'}, {status: 404});
       },
@@ -456,6 +459,96 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       }
     }
   },90000);
+
+  async function validateCatalogNotifications(headers: Record<string, string>) {
+    const original = nativeCatalogModel;
+    let clientEtag: string | null = null;
+    const beforeQueries = modelQueries.length;
+    async function refreshCatalog() {
+      const result = await fetch(`${proxy}/codex/models?client_version=0.162.1`, {headers, signal: AbortSignal.timeout(20000)});
+      expect(result.status).toBe(200);
+      const bytes = await result.arrayBuffer();
+      // Independent byte-level check, including non-ASCII native catalog fields.
+      expect(result.headers.get('etag')).toBe(`"${new Bun.CryptoHasher('sha256').update(bytes).digest('hex')}"`);
+      expect(result.headers.get('cache-control')).toBe('private, no-store');
+      clientEtag = result.headers.get('etag');
+      return JSON.parse(new TextDecoder().decode(bytes));
+    }
+    async function generateCatalogIdentity(model: string, stream: boolean, overrides: Record<string, string> = {}) {
+      const result = await fetch(`${proxy}/codex/responses`, {method: 'POST', headers: {...headers, ...overrides, 'content-type': 'application/json'},
+        body: JSON.stringify({model, stream, input: 'validator generation'}), signal: AbortSignal.timeout(20000)});
+      expect(result.status).toBe(200);
+      const text = await result.text();
+      if (stream) expect(text).toContain('response.completed'); else expect(JSON.parse(text).status).toBe('completed');
+      expect(result.headers.get('x-fixture-response')).toBe(model === 'native-only' || model === 'org/native' || stream ? 'keep' : null);
+      return result.headers.get('x-models-etag');
+    }
+    try {
+      expect(await generateCatalogIdentity('native-only', true)).toBeNull();
+      await refreshCatalog();
+      const directoryPid = modelQueries.at(-1)!.pid;
+      const limited = await fetch(`${proxy}/codex/responses`, {method: 'POST', headers: {...headers, 'content-type': 'application/json'},
+        body: JSON.stringify({model: 'native-only', stream: true, input: 'fixture-sse-rate-limit'}), signal: AbortSignal.timeout(20000)});
+      expect(limited.status).toBe(429);
+      expect(limited.headers.get('x-models-etag')).toBe(clientEtag);
+      expect(limited.headers.get('retry-after')).toBe('5');
+      expect(await limited.text()).toBe('event: error\ndata: {"error":"rate_limit"}\n\n');
+      expect(workers.map(worker => worker.pid)).toContain(directoryPid);
+      const generationPids = new Set<number>();
+      for (let i = 0; i < 3; i++) {
+        const notification = await generateCatalogIdentity('native-only', i % 2 === 0);
+        // Codex compares exact strings; it fetches only on a nonempty mismatch.
+        if (notification && notification !== clientEtag) await refreshCatalog();
+        expect(notification).toBe(clientEtag);
+        generationPids.add(calls.at(-1)!.pid);
+      }
+      expect(modelQueries.length - beforeQueries).toBe(1);
+      for (let i = 0; i < 24 && ![...generationPids].some(pid => pid !== directoryPid); i++) {
+        expect(await generateCatalogIdentity('native-only', false)).toBe(clientEtag);
+        generationPids.add(calls.at(-1)!.pid);
+      }
+      expect([...generationPids].some(pid => pid !== directoryPid)).toBe(true);
+      for (const model of ['org/native', 'org/chat', 'org/anthropic']) for (const stream of [false, true]) {
+        expect(await generateCatalogIdentity(model, stream)).toBe(clientEtag);
+      }
+      for (const overrides of [
+        {authorization: `Bearer ${otherToken}`}, {'chatgpt-account-id': 'another-account'}, {version: '0.160.1'}, {version: ''},
+      ]) expect(await generateCatalogIdentity('native-only', false, overrides)).toBeNull();
+      expect(modelQueries.length - beforeQueries).toBe(1);
+      const oldEtag = clientEtag;
+      nativeCatalogModel = {...original, display_name: 'Updated directory 中文🙂'};
+      // An upstream change is discovered by normal directory refresh, not generation.
+      expect(await generateCatalogIdentity('native-only', true)).toBe(oldEtag);
+      expect(modelQueries.length - beforeQueries).toBe(1);
+      expect((await refreshCatalog()).models[0].display_name).toBe('Updated directory 中文🙂');
+      expect(clientEtag).not.toBe(oldEtag);
+      expect(await generateCatalogIdentity('org/chat', true)).toBe(clientEtag);
+      await refreshCatalog();
+      expect(await generateCatalogIdentity('native-only', false)).toBe(clientEtag);
+      expect(modelQueries.length - beforeQueries).toBe(3);
+    } finally { nativeCatalogModel = original; }
+  }
+
+  test('actual catalog validators cross workers, suppress per-generation refresh and update on explicit catalog refresh', async () => {
+    const anonymousHeaders = {'chatgpt-account-id': 'validator-account', version: '0.162.1'};
+    try {
+      expect((await control('/api/plugins/key-access/control/routes', 'PUT', {protectedRouteIds: []})).response.status).toBe(200);
+      await validateCatalogNotifications(anonymousHeaders);
+      expect((await control('/api/plugins/key-access/control/routes', 'PUT', {protectedRouteIds: [ENTRY]})).response.status).toBe(200);
+      const before = calls.length;
+      for (const headers of [anonymousHeaders, {...anonymousHeaders, authorization: 'Bearer invalid'}]) {
+        const deniedCatalog = await fetch(`${proxy}/codex/models?client_version=0.162.1`, {headers, signal: AbortSignal.timeout(20000)});
+        const deniedGeneration = await fetch(`${proxy}/codex/responses`, {method: 'POST', headers: {...headers, 'content-type': 'application/json'},
+          body: JSON.stringify({model: 'native-only', input: 'denied generation'}), signal: AbortSignal.timeout(20000)});
+        expect(deniedCatalog.status).toBe(401); await deniedCatalog.text();
+        expect(deniedGeneration.status).toBe(401); await deniedGeneration.text();
+      }
+      expect(calls).toHaveLength(before);
+      await validateCatalogNotifications({...anonymousHeaders, authorization: `Bearer ${token}`});
+    } finally {
+      expect((await control('/api/plugins/key-access/control/routes', 'PUT', {protectedRouteIds: [ENTRY]})).response.status).toBe(200);
+    }
+  }, 120000);
 
   test('public models retain metadata; long tool history crosses real workers via canonical RPC and rejects another identity', async () => {
     const catalog = await fetch(`${proxy}/codex/models?client_version=0.160.1`, {headers: {authorization: `Bearer ${token}`}});
@@ -956,11 +1049,16 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     try {
       const first = await socket.create({model: 'org/chat', input: 'before revision'}); expect(first.at(-1).type).toBe('response.completed');
       const saved = await post({model: 'org/native', input: 'old-revision history'}); expect(saved.status).toBe(200);
+      const directory = await fetch(`${proxy}/codex/models?client_version=0.162.1`, {headers: {authorization: `Bearer ${token}`}});
+      expect(directory.status).toBe(200); await directory.text();
       await publish(() => socket.close());
       expect(workers.every(worker => !oldWorkers.some(old => old.pid === worker.pid))).toBe(true);
       const before = calls.length;
       const denied = await post({model: 'org/native', previous_response_id: saved.body.id, input: 'new revision'});
       expect(denied.status).toBe(422); expect(JSON.stringify(denied.body)).toContain('history_missing'); expect(calls).toHaveLength(before);
+      const generated = await fetch(`${proxy}/codex/responses`, {method: 'POST', headers: {authorization: `Bearer ${token}`, version: '0.162.1', 'content-type': 'application/json'},
+        body: JSON.stringify({model: 'native-only', input: 'new revision directory validator'})});
+      expect(generated.status).toBe(200); expect(generated.headers.has('x-models-etag')).toBe(false); await generated.text();
       // The replacement revision serves new traffic; the retained old connection was closed before waiting for full convergence.
       await waitUntil(async () => {
         const states = await Promise.all(oldWorkers.map(worker => probeProcessIdentity(master!.workers.get(worker.worker_instance_id)!.identity!)));

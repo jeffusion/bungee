@@ -39,23 +39,9 @@
       },
       {
         "plugin": "models-dev",
-        "id": "models-dev.catalog.v1",
-        "version": 1,
-        "process": "worker",
-        "kind": "local"
-      },
-      {
-        "plugin": "models-dev",
         "id": "models-dev.capabilities.v1",
         "version": 1,
         "process": "control",
-        "kind": "local"
-      },
-      {
-        "plugin": "models-dev",
-        "id": "models-dev.capabilities.v1",
-        "version": 1,
-        "process": "worker",
         "kind": "local"
       },
       {
@@ -78,9 +64,23 @@
         "version": 1,
         "process": "worker",
         "kind": "rpc"
+      },
+      {
+        "plugin": "codex-router",
+        "id": "codex-router.catalog-validators.v1",
+        "version": 1,
+        "process": "worker",
+        "kind": "rpc"
       }
     ],
-    "provides": []
+    "provides": [
+      {
+        "id": "codex-router.catalog-validators.v1",
+        "version": 1,
+        "process": "control",
+        "kind": "rpc"
+      }
+    ]
   },
   "configSchema": [
     {
