@@ -317,6 +317,7 @@ export class ScopedPluginRegistry {
   private dispatchConfig?: {routes?: any[];services?: Service[]};
   private readonly rpcContexts = new Map<string, import('./plugin-services').PluginServices>();
   private readonly requestLeases = new AsyncLocalStorage<ReadonlyMap<string, () => void>>();
+  private readonly dispatchInvocations = new WeakMap<() => void, {callee: unknown; signal: AbortSignal}>();
 
   /** Host request entry: async credential work reuses the original owner lease. */
   runWithRequestLeases<T>(leases: ReadonlyMap<string, () => void>, run: () => T): T {
@@ -1238,7 +1239,26 @@ export class ScopedPluginRegistry {
         continue;
       }
       registeredNames.add(instance.handler.pluginName);
-      instance.handler.register(hooks);
+      const ownerKey = `${instance.handler.pluginName}\0${getScopeKey(instance.scope)}`;
+      const registered = {...hooks};
+      // Response RPCs reuse the host-authenticated dispatch scope and the
+      // existing request lease; a scoped owner cannot issue background peer RPC.
+      for (const name of ['onResponse', 'onRawResponse'] as const) {
+        const hook = hooks[name];
+        (registered as any)[name] = new Proxy(hook, {get: (object, key) => {
+          if (key === 'tap' || key === 'tapPromise') return (label: string, callback: (...args: any[]) => any) =>
+            (object[key] as any).call(object, label, (...args: any[]) => {
+              const lease = this.requestLeases.getStore()?.get(ownerKey);
+              const invocation = lease ? this.dispatchInvocations.get(lease) : undefined;
+              const context = this.rpcContexts.get(ownerKey);
+              return context && invocation && this.serviceHost.rpc
+                ? this.serviceHost.runInInvocation(context, {...invocation, purpose: 'request', lease}, () => callback(...args))
+                : callback(...args);
+            });
+          const value = Reflect.get(object, key); return typeof value === 'function' ? value.bind(object) : value;
+        }});
+      }
+      instance.handler.register(registered);
       handlers.push(instance.handler);
     }
 
@@ -1485,6 +1505,7 @@ export class ScopedPluginRegistry {
       if(!hooks.onDispatchRequest.hasCallbacks())continue;
       const context=this.rpcContexts.get(`${instance.handler.pluginName}\0${getScopeKey(instance.scope)}`);
       const lease=this.requestLeases.getStore()?.get(`${instance.handler.pluginName}\0${getScopeKey(instance.scope)}`);
+      if (lease) this.dispatchInvocations.set(lease, {callee, signal: input.signal});
       const invoke=<T>(run:()=>T):T=>context && this.serviceHost.rpc ? this.serviceHost.runInInvocation(context,{purpose:'request',callee,signal:input.signal,lease},run):run();
       const result=await invoke(()=>hooks.onDispatchRequest.promise(input));
       if(!result)continue;

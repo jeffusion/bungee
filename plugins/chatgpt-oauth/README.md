@@ -56,4 +56,6 @@ bun test plugins/chatgpt-oauth/tests/unit/siwc-adapter.test.ts \
 
 插件 server 只依赖公开 `@jeffusion/bungee-core/plugin` SDK。代理返回的模型列表和 HTTP 错误使用宿主 `bodyHandle.json()`；Codex/SIWC 的流式转换和非流式聚合共同使用 `bodyHandle.events()`。解压、SSE 分帧和 JSON 解析由宿主完成，插件只校验 Codex 事件与终态。模型正文限额继承宿主 `bodyHandle.maxBytes`，日志保存限额独立。缺少共享正文视图会返回固定错误，不自行创建读流器。
 
+原生 Codex Responses 使用共享事件视图保留原始事件正文、工具及加密字段，并识别显式协议终态；其 HTTP 错误保留原生正文和响应头。流式响应支持 `text/event-stream`、`application/octet-stream` 及缺少 Content-Type，输出使用 `text/event-stream` 并清除解码前的实体长度和编码。收到合法 `response.completed` 后，客户端关闭连接可同时记录 `protocol_outcome=completed`、`transport_outcome=cancelled`；`response.incomplete` 和 `response.failed` 保留各自协议结果。完成事件到达前断开记录协议取消，EOF 或 `[DONE]` 本身不能证明协议完成。
+
 OAuth 令牌交换、账户用量/额度 RPC、模型目录缓存和管理 API 输入是独立辅助网络入口，其限额和 reader 不用于代理正文。

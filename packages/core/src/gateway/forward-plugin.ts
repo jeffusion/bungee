@@ -1313,6 +1313,7 @@ export async function executeForward(
       || phaseAwareHooks.servicePhase?.hasRawResponseCallbacks
       || phaseAwareHooks.routePhase.hasRawResponseCallbacks
       || phaseAwareHooks.globalPrecompiled?.hasRawResponseCallbacks
+      || phaseAwareHooks.dispatchAdapter?.hasRawResponseCallbacks
     ));
     if (hasRawResponseCallbacks && phaseAwareHooks) {
       // A declared decoded consumer must fail before exposing a lazy response.
@@ -1332,7 +1333,7 @@ export async function executeForward(
         proxyRes=ownedResponse;rawResponse={...rawResponse,response:ownedResponse};
       }
       const rawViews=new ResponseViews(proxyRes,rawView,requestSnapshot.bodySource?.maxBytes ?? 50*1024*1024,attemptSignal,responseBodyOwners,true,rawBodyOwner);
-      const rawContext=rawViews.context({method:requestSnapshot.method,originalUrl,clientIP,requestId,routeId,upstreamId:upstream_id,
+      const rawContext=rawViews.context({method:requestSnapshot.method,originalUrl,upstreamUrl:finalTargetUrl.href,clientIP,requestId,routeId,upstreamId:upstream_id,
         attemptId:attemptOptions?.attemptId ?? requestId,signal:attemptSignal,redactDiagnostic:(message:string)=>sanitizeMessage(message,credentialSecrets)});
       rawResponse = await abortable(phaseAwareHooks.inbound.onRawResponse!({...rawResponse,response:rawViews.input()},rawContext),attemptSignal,
         lateResult=>{if(lateResult.response.body)void lateResult.response.body.cancel('request aborted').catch(()=>undefined);});
@@ -1345,6 +1346,7 @@ export async function executeForward(
     }
 
     const rawBodyWasLeftUnconsumed = instrumentedRawResponse
+      && rawRepresentationChanged
       && rawResponse.response !== instrumentedRawResponse
       && !instrumentedRawResponse.bodyUsed;
     const rawObservationCompletion = rawBodyWasLeftUnconsumed
@@ -1440,6 +1442,7 @@ export async function executeForward(
 
     // Safe raw HTTP error replacements are intentionally non-stream only.
     if (hasRawResponseCallbacks
+      && (rawRepresentationChanged || rawResponse.completion !== transportCompletion.promise || rawResponse.response.status !== originalStatus)
       && (rawResponse.response.status < 200 || rawResponse.response.status >= 300)
       && isStreamingResponse(proxyRes)) {
       throw new Error('streaming raw HTTP error replacement requires strict failure');

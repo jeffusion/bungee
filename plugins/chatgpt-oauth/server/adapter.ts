@@ -47,6 +47,9 @@ const MAX_PROFILE_HEADER_VALUE_BYTES = 8192;
 const CHATGPT_ORIGIN = 'https://chatgpt.com';
 const SIWC_ORIGIN = 'https://api.openai.com';
 const CODEX_ROUTING_HINT_HEADER = 'X-Codex-Routing-Hint';
+// The host refreshes Response views between scopes but retains completion
+// identity. Do not parse an already converted representation as native Codex.
+const convertedCompletions = new WeakSet<Promise<RawResponseCompletion>>();
 const SIWC_FORBIDDEN_FIELDS = [
   'background', 'conversation', 'max_output_tokens', 'max_completion_tokens', 'max_tool_calls',
   'metadata', 'moderation', 'multi_agent', 'prompt', 'prompt_cache_retention', 'safety_identifier',
@@ -64,6 +67,7 @@ type AdaptedRequest = Readonly<{
   attemptId?: string;
   adaptedResponses: WeakSet<Response>;
   preserveModels?: boolean;
+  native?: boolean;
 }>;
 
 function record(value: unknown): JsonObject {
@@ -211,6 +215,14 @@ function responseHeaders(response: Response, contentType: string): Headers {
   return headers;
 }
 
+function nativeResponseHeaders(response: Response): Headers {
+  const headers = new Headers(response.headers);
+  // The shared event view supplies decoded frames, so wire entity headers no longer apply.
+  for (const name of ['content-encoding', 'content-length', 'transfer-encoding']) headers.delete(name);
+  headers.set('content-type', 'text/event-stream');
+  return headers;
+}
+
 function errorBody(error?: RawResponseError, fallbackCode = 'upstream_error') {
   return { message: error?.message ?? 'Upstream response could not be adapted', type: error?.type ?? 'upstream_error', code: error?.code ?? fallbackCode };
 }
@@ -306,8 +318,32 @@ function serialize(event: CodexSSEEvent): string {
   if (envelope?.id !== undefined) lines.push(`id: ${envelope.id}`);
   if (envelope?.retry !== undefined) lines.push(`retry: ${envelope.retry}`);
   const data = event.type === 'done' ? '[DONE]' : envelope?.data ?? JSON.stringify(event.data);
-  lines.push(...data.split('\n').map(line => `data: ${line}`));
+  if (envelope?.hasData !== false) lines.push(...data.split('\n').map(line => `data: ${line}`));
   return `${lines.join('\n')}\n\n`;
+}
+
+/** Native payloads stay opaque; only the explicit protocol terminal is inspected. */
+async function* nativeCodexEvents(handle: BodyHandle, signal: AbortSignal): AsyncGenerator<CodexSSEEvent> {
+  for await (const envelope of handle.events(bodyConsumer(signal))) {
+    const data = envelope.json && typeof envelope.json === 'object' && !Array.isArray(envelope.json)
+      ? envelope.json as JsonObject : {};
+    yield { type: typeof data.type === 'string' ? data.type : undefined, data, envelope };
+  }
+}
+
+function nativeTerminal(event: CodexSSEEvent): RawResponseCompletion | undefined {
+  if (event.envelope?.truncated || event.envelope?.hasData === false) return;
+  if (event.type === 'error') return { status: 'failed', code: 'upstream_error' };
+  const status = event.type === 'response.completed' ? 'completed'
+    : event.type === 'response.incomplete' ? 'incomplete'
+    : event.type === 'response.failed' ? 'failed' : undefined;
+  if (!status) return;
+  const response = event.data.response;
+  if (!response || typeof response !== 'object' || Array.isArray(response)
+    || response.status !== status || !Array.isArray(response.output)
+    || (status === 'completed' && response.error != null))
+    return { status: 'failed', code: 'invalid_response' };
+  return status === 'completed' ? { status } : { status, code: status === 'failed' ? 'upstream_error' : 'incomplete' };
 }
 
 function protocolStreamBody(
@@ -317,6 +353,7 @@ function protocolStreamBody(
   signal: AbortSignal,
   redact?: RawResponseContext['redactDiagnostic'],
   preserveCustomTools = false,
+  native = false,
 ): { body: ReadableStream<Uint8Array>; completion: Promise<RawResponseCompletion> } {
   const protocolController = new AbortController();
   const onAbort = () => protocolController.abort(signal.reason ?? 'cancelled');
@@ -330,15 +367,19 @@ function protocolStreamBody(
     resolveCompletion(result);
   };
   const completion = new Promise<RawResponseCompletion>((resolve) => { resolveCompletion = resolve; });
-  const processor = new CodexResponseProcessor({ target, includeUsage, redactDiagnostic: redact, preserveCustomTools });
+  const processor = native ? undefined : new CodexResponseProcessor({ target, includeUsage, redactDiagnostic: redact, preserveCustomTools });
   let terminalOutcome: RawResponseCompletion | undefined;
-  const events = parseCodexSSE(handle.events(bodyConsumer(protocolController.signal)), { signal: protocolController.signal });
+  const events = native ? nativeCodexEvents(handle, protocolController.signal)
+    : parseCodexSSE(handle.events(bodyConsumer(protocolController.signal)), { signal: protocolController.signal });
   const iterator = (async function* (): AsyncGenerator<string> {
     try {
       for await (const event of events) {
-        const output = processor.process(event);
-        if (event.type === 'response.completed' || event.type === 'response.incomplete') {
-          const final = processor.finish();
+        const output = processor?.process(event) ?? [];
+        if (native) {
+          const outcome = nativeTerminal(event);
+          if (outcome) { terminalOutcome = outcome; settle(outcome); }
+        } else if (event.type === 'response.completed' || event.type === 'response.incomplete') {
+          const final = processor!.finish();
           terminalOutcome = final.terminal === 'completed'
             ? { status: 'completed' }
             : { status: 'incomplete', code: 'incomplete' };
@@ -349,14 +390,15 @@ function protocolStreamBody(
         if (target === 'responses') yield serialize(event);
         else for (const chunk of output) yield `data: ${JSON.stringify(chunk)}\n\n`;
       }
-      const final = processor.finish();
-      const outcome = final.terminal === 'completed' ? { status: 'completed' as const } : { status: 'incomplete' as const, code: 'incomplete' };
+      const final = processor?.finish();
+      const outcome = native ? terminalOutcome ?? { status: 'failed' as const, code: 'unexpected_eof' }
+        : final!.terminal === 'completed' ? { status: 'completed' as const } : { status: 'incomplete' as const, code: 'incomplete' };
       if (target === 'chat') yield 'data: [DONE]\n\n';
       settle(outcome);
     } catch (error) {
       const outcome = completionFromError(error, redact);
       settle(outcome.status === 'cancelled' ? terminalOutcome ?? outcome : outcome);
-      if (outcome.status === 'failed' && outcome.error) {
+      if (!native && outcome.status === 'failed' && outcome.error) {
         // A terminal error frame makes the reason observable to clients and the
         // response capture. Completion stays failed, even though HTTP is 200.
         const safe = errorBody(outcome.error, outcome.code);
@@ -385,12 +427,13 @@ function protocolStreamBody(
       protocolController.abort(reason ?? 'cancelled');
       void Promise.resolve(iterator.return?.(reason)).catch(() => undefined);
     },
-  });
+  }, { highWaterMark: 0 });
   return { body, completion };
 }
 
 export class ChatgptOauthAdapter {
   private readonly requests = new Map<string, AdaptedRequest>();
+  private readonly nativeResponses = new WeakSet<Response>();
 
   constructor() {}
 
@@ -485,24 +528,53 @@ export class ChatgptOauthAdapter {
   }
 
   async rawResponse(result: RawResponseResult, context: RawResponseContext): Promise<RawResponseResult> {
-    const current = this.requests.get(context.requestId);
+    if (convertedCompletions.has(result.completion)) {
+      const pending = this.requests.get(context.requestId);
+      const cleanup = () => {
+        if (this.requests.get(context.requestId) === pending) this.requests.delete(context.requestId);
+      };
+      void result.completion.then(cleanup, cleanup);
+      return result;
+    }
+    if (this.nativeResponses.has(result.response)) return result;
+    const upstreamUrl = context.upstreamUrl ? new URL(context.upstreamUrl) : undefined;
+    const current: AdaptedRequest | undefined = this.requests.get(context.requestId) ?? (upstreamUrl?.origin === CHATGPT_ORIGIN
+      && upstreamUrl.pathname === CODEX_RESPONSES_PATH && context.method.toUpperCase() === 'POST'
+      ? Object.freeze({ target: 'responses' as const, stream: true, includeUsage: false,
+          allowMissingContentType: true, native: true, adaptedResponses: new WeakSet<Response>() }) : undefined);
     if (current === undefined || current.adaptedResponses.has(result.response)) return result;
     current.adaptedResponses.add(result.response);
+    if (current.native) this.nativeResponses.add(result.response);
     const state = current.attemptId === undefined
       ? Object.freeze({ ...current, attemptId: context.attemptId })
       : current;
     if (state !== current && this.requests.get(context.requestId) === current) this.requests.set(context.requestId, state);
     const cleanup = () => { if (this.requests.get(context.requestId) === state) this.requests.delete(context.requestId); };
-    const mark = (response: Response): Response => { current.adaptedResponses.add(response); return response; };
+    const trackCompletion = (completion: Promise<RawResponseCompletion>) => {
+      if (!state.native) convertedCompletions.add(completion);
+      void completion.then(cleanup, cleanup);
+    };
+    const mark = (response: Response): Response => {
+      current.adaptedResponses.add(response);
+      if (current.native) this.nativeResponses.add(response);
+      return response;
+    };
     const errorResponse = (status: number, completion: Promise<RawResponseCompletion>, error?: RawResponseError): RawResponseResult => {
       const response = mark(new Response(JSON.stringify({ error: errorBody(error) }), {
         status,
         statusText: result.response.statusText,
         headers: responseHeaders(result.response, 'application/json; charset=utf-8'),
       }));
-      void completion.then(cleanup, cleanup);
+      trackCompletion(completion);
       return { response, completion };
     };
+
+    if (state.native && !result.response.ok) {
+      // Native clients consume provider-specific quota/error fields and headers.
+      // HTTP failure handling remains with the host; only successful SSE needs terminal proof.
+      void result.completion.then(cleanup, cleanup);
+      return result;
+    }
 
     // The host owns wire reading, decompression, framing and JSON caching.
     // Adaptation requires that explicit shared view; there is no private reader fallback.
@@ -538,7 +610,7 @@ export class ChatgptOauthAdapter {
           statusText: result.response.statusText,
           headers: responseHeaders(result.response, 'application/json; charset=utf-8'),
         }));
-        void completion.then(cleanup, cleanup);
+        trackCompletion(completion);
         return { response, completion };
       } catch (error) {
         const failure = completionFromError(error, context.redactDiagnostic);
@@ -547,7 +619,8 @@ export class ChatgptOauthAdapter {
     }
 
     const contentType = result.response.headers.get('content-type');
-    const hasEventStream = contentType?.split(';', 1)[0].trim().toLowerCase() === 'text/event-stream';
+    const media = contentType?.split(';', 1)[0].trim().toLowerCase();
+    const hasEventStream = media === 'text/event-stream' || (state.native === true && media === 'application/octet-stream');
     const allowMissingContentType = state.allowMissingContentType && contentType === null;
     if ((!hasEventStream && !allowMissingContentType) || !result.response.body) {
       const bodyCompletion = !hasEventStream && !allowMissingContentType
@@ -557,7 +630,7 @@ export class ChatgptOauthAdapter {
       return errorResponse(502, joinCompletion(result.completion, bodyCompletion, context.signal));
     }
     if (state.stream) {
-      const converted = protocolStreamBody(context.bodyHandle, state.target, state.includeUsage, context.signal, context.redactDiagnostic, state.siwc);
+      const converted = protocolStreamBody(context.bodyHandle, state.target, state.includeUsage, context.signal, context.redactDiagnostic, state.siwc, state.native);
       // A validated terminal is proof before transport EOF. An already failed
       // upstream must still settle even if its body never reaches a terminal.
       const streamCompletion = Promise.race([
@@ -565,9 +638,10 @@ export class ChatgptOauthAdapter {
         result.completion.then(upstream => upstream.status === 'failed' ? upstream : converted.completion,
           () => ({ status: 'failed' as const, code: 'upstream_completion' })),
       ]);
-      void streamCompletion.then(cleanup, cleanup);
+      trackCompletion(streamCompletion);
       return {
-        response: mark(new Response(converted.body, { status: result.response.status, statusText: result.response.statusText, headers: responseHeaders(result.response, 'text/event-stream') })),
+        response: mark(new Response(converted.body, { status: result.response.status, statusText: result.response.statusText,
+          headers: state.native ? nativeResponseHeaders(result.response) : responseHeaders(result.response, 'text/event-stream') })),
         completion: streamCompletion,
       };
     }
@@ -583,7 +657,7 @@ export class ChatgptOauthAdapter {
         stateResult.terminal === 'completed' ? { status: 'completed' } : { status: 'incomplete', code: 'incomplete' },
       );
       const nonStreamCompletion = joinCompletion(result.completion, protocolCompletion, context.signal);
-      void nonStreamCompletion.then(cleanup, cleanup);
+      trackCompletion(nonStreamCompletion);
       return { response: mark(new Response(JSON.stringify(body), { status: result.response.status, statusText: result.response.statusText, headers: responseHeaders(result.response, 'application/json; charset=utf-8') })), completion: nonStreamCompletion };
     } catch (error) {
       const failure = completionFromError(error, context.redactDiagnostic);

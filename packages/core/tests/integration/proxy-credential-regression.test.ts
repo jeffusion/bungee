@@ -1124,20 +1124,19 @@ describe('proxy credential regressions', () => {
       writeSessionHeader = true;
       const firstRetry = await run('/v1/chat/completions', 'POST', { model: 'codex', messages: [{ role: 'user', content: 'retry' }], stream: true }, 'retry-1');
       const secondRetry = await run('/v1/chat/completions', 'POST', { model: 'codex', messages: [{ role: 'user', content: 'retry' }], stream: true }, 'retry-2');
-      await read(firstRetry);
+      expect(await read(firstRetry)).toContain('"object":"chat.completion.chunk"');
       expect(received.slice(beforeRetryRequests).map(({ businessHeaders, matchesLease, matchesAccount }) => ({ businessHeaders, matchesLease, matchesAccount }))).toEqual([
         { businessHeaders: { ...responseStatic, 'x-codex-routing-hint': 'model=codex', ...expectedDynamic('retry-1', true) }, matchesLease: true, matchesAccount: true },
         { businessHeaders: { ...responseStatic, 'x-codex-routing-hint': 'model=codex', ...expectedDynamic('retry-2', true) }, matchesLease: true, matchesAccount: true },
       ]);
+      expect(await read(secondRetry)).toContain('"object":"chat.completion.chunk"');
       const probe = await hooks.inbound.onRawResponse!({
         response: new Response('data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n', { headers: { 'content-type': 'text/event-stream' } }),
         completion: Promise.resolve({ status: 'completed' }),
       }, { requestId: stableRequestId, attemptId: 'retry-probe', signal: new AbortController().signal } as any);
-      // Reading the first complete response now runs its finalization. It must
-      // not remove the second attempt's state, which is proven by its actual
-      // converted response below; an unprepared probe has no conversion state.
+      // Both streams have delivered their protocol terminals and finalized.
+      // An unprepared probe must now have no remaining conversion state.
       expect(await probe.response.text()).toContain('"type":"response.completed"');
-      await read(secondRetry);
       expect(credentialCalls.filter(({ method }) => method === 'getCredential').map(({ attemptId }) => attemptId)).toContain('retry-1');
       expect(credentialCalls.filter(({ method }) => method === 'getCredential').map(({ attemptId }) => attemptId)).toContain('retry-2');
 

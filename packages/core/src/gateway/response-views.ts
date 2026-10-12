@@ -26,7 +26,9 @@ export class ResponseViews {
   }
   private handle():BodyHandle|undefined {
     const type=this.value.headers.get('content-type')??'';
-    if(!isJsonMediaType(type) && !/^text\/event-stream(?:\s*;|$)/i.test(type) && type)return undefined;
+    // An explicitly supplied owner represents declared body demand, including
+    // native event streams served as application/octet-stream.
+    if(!this.owner && !isJsonMediaType(type) && !/^text\/event-stream(?:\s*;|$)/i.test(type) && type)return undefined;
     if(!this.owner && this.wire.body){
       const existing=bodySourceFor(this.wire.body);
       this.owner=existing??createBodySource(this.wire.body,this.maxBytes,this.wire.headers.get('content-encoding')??'',this.signal,this.viewIdentity());
