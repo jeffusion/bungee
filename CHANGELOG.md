@@ -1,3 +1,11 @@
+## [5.23.1](https://github.com/jeffusion/bungee/compare/v5.23.0...v5.23.1) (2026-10-12)
+
+
+### Bug Fixes
+
+* **codex-router:** stabilize catalog etags and response completion ([2e6e467](https://github.com/jeffusion/bungee/commit/2e6e467b5a468895885502267f1aada8c3205d91))
+* **gateway:** resolve dispatch paths from target protocols ([3d71fd4](https://github.com/jeffusion/bungee/commit/3d71fd475ce5cdff6023fdb8cc4fd6e7b597e4ca))
+
 # [5.23.0](https://github.com/jeffusion/bungee/compare/v5.22.0...v5.23.0) (2026-10-11)
 
 
