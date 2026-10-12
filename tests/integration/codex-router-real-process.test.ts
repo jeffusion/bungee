@@ -405,10 +405,11 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     try {return db.query<Attempt, []>('SELECT request_id, attempt_id, input_tokens, output_tokens, outcome FROM token_stats_attempts').all();} finally {db.close();}
   }
   async function assertMetered(selected: Call[], completed = true) {
+    let rows: Attempt[] = [];
     await waitUntil(() => {
-      const rows = attempts(); return selected.every(call => rows.some(row => row.request_id === call.requestId));
+      rows = attempts().filter(row => selected.some(call => call.requestId === row.request_id));
+      return selected.every(call => rows.some(row => row.request_id === call.requestId));
     }, 'per-generation token-stats observations did not settle', 12000);
-    const rows = attempts().filter(row => selected.some(call => call.requestId === row.request_id));
     expect(rows).toHaveLength(selected.length);
     expect(new Set(selected.map(call => call.requestId)).size).toBe(selected.length);
     expect(new Set(rows.map(row => row.attempt_id)).size).toBe(selected.length);
