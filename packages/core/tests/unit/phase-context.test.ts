@@ -23,6 +23,7 @@ describe('phase context utilities', () => {
           messages: [{ role: 'user', content: 'hello' }],
           options: { temperature: 0.2 },
         },
+        annotations: { trace: { stages: ['route', 'service'], detail: { value: 'baseline' } } },
         query: {
           model: 'test',
           stream: 'false',
@@ -37,6 +38,7 @@ describe('phase context utilities', () => {
       expect(clone.headers).not.toBe(original.headers);
       expect(clone.body).not.toBe(original.body);
       expect(clone.query).not.toBe(original.query);
+      expect(clone.annotations).not.toBe(original.annotations);
 
       expect(clone.url.pathname).toBe('/v1/chat');
       expect(clone.url.search).toBe('?model=test');
@@ -47,12 +49,20 @@ describe('phase context utilities', () => {
       clone.headers.authorization = 'Bearer clone';
       clone.body.messages[0].content = 'changed';
       clone.query!.model = 'other';
+      (clone.annotations!.trace as any).stages.push('upstream');
+      (clone.annotations!.trace as any).detail.value = 'attempt';
 
       expect(original.url.pathname).toBe('/v1/chat');
       expect(original.headers.authorization).toBe('Bearer original');
       expect(original.body.messages[0].content).toBe('hello');
       expect(original.query?.model).toBe('test');
+      expect(original.annotations).toEqual({ trace: { stages: ['route', 'service'], detail: { value: 'baseline' } } });
+      expect(cloneMutableRequestContext(original).annotations).toEqual(original.annotations);
     });
+  });
+
+  it('keeps absent annotations absent when cloning', () => {
+    expect(cloneMutableRequestContext({ url: new URL('http://local/'), method: 'GET', headers: {} }).annotations).toBeUndefined();
   });
 
   describe('rebaseToUpstream', () => {

@@ -610,6 +610,7 @@ export async function executeForward(
       routeId,
       serviceName: route.service,
     };
+  if (requestOverride) attemptContext.annotations = requestOverride.annotations !== undefined ? structuredClone(requestOverride.annotations) : undefined;
   if (attemptContext.body === undefined && requestSnapshot.is_json_body) attemptContext.body = structuredClone(requestSnapshot.body);
   attemptContext.url = routeRelativeUrl;
   rebaseToUpstream(attemptContext, upstream);
@@ -686,6 +687,7 @@ export async function executeForward(
       url: new URL(targetUrlForRequest.href),
       headers: headersObj,
       body: finalBody,
+      annotations: attemptContext.annotations,
       bodyHandle:requestWrite ? undefined:requestSnapshot.bodySource?.handle({requestId,attemptId:attemptOptions?.attemptId ?? requestId,direction:'request',stage:'outbound-request',version:0,contentType:requestSnapshot.content_type,contentEncoding:requestSnapshot.headers['content-encoding'] ?? ''}),
       clientIP,
       requestId,
@@ -711,6 +713,7 @@ export async function executeForward(
     attemptContext.url = targetUrlForRequest;
     attemptContext.headers = { ...result.headers };
     attemptContext.body = finalBody;
+    attemptContext.annotations = result.annotations;
 
     // 记录 plugin onBeforeRequest 执行（带耗时）
     if (reqLogger && upstreamPhase.metadata.pluginCount > 0) {
@@ -756,6 +759,7 @@ export async function executeForward(
       url: new URL(targetUrlForRequest.href),
       headers: headersObj,
       body: finalBody,
+      annotations: attemptContext.annotations,
       bodyHandle:requestWrite ? undefined:requestSnapshot.bodySource?.handle({requestId,attemptId:attemptOptions?.attemptId ?? requestId,direction:'request',stage:'outbound-request',version:0,contentType:requestSnapshot.content_type,contentEncoding:requestSnapshot.headers['content-encoding'] ?? ''}),
       clientIP,
       requestId,
@@ -766,6 +770,7 @@ export async function executeForward(
     const interceptStartTime = performance.now();
     const interceptResult = await upstreamPhase.hooks.onInterceptRequest.promise(ctx);
     const interceptDuration = performance.now() - interceptStartTime;
+    attemptContext.annotations = ctx.annotations;
 
     if (interceptResult?.action === 'respond') {
       // 记录 plugin 拦截（带耗时）
@@ -797,7 +802,7 @@ export async function executeForward(
   const validation = Object.freeze({method:requestSnapshot.method, originalUrl,
     clientIP, requestId, routeId, upstreamId:upstream_id, url:targetUrlForRequest.href,
     model:isObjectBody(finalBody) && typeof finalBody.model==='string' ? finalBody.model : null,
-    body:immutableSnapshot(finalBody), attemptId:attemptOptions?.attemptId??requestId, signal:requestSignal});
+    body:immutableSnapshot(finalBody), annotations:immutableSnapshot(attemptContext.annotations), attemptId:attemptOptions?.attemptId??requestId, signal:requestSignal});
   for(const phase of [phaseAwareHooks?.routePhase,phaseAwareHooks?.servicePhase,phaseAwareHooks?.upstreamPhase,phaseAwareHooks?.dispatchAdapter]) {
     await phase?.hooks.onValidateOutbound.promise(validation);
   }
@@ -1417,7 +1422,7 @@ export async function executeForward(
         throwIfAttemptCannotDispatch();
         const headers=headersToRecord(fetchHeaders);
         if(managedCredential)for(const name of managedCredential.policy.allowedHeaderNames)delete headers[name.toLowerCase()];
-        repairRetry={action:error,request:{url:finalTargetUrl.href,headers,body:error.body}};
+        repairRetry={action:error,request:{url:finalTargetUrl.href,headers,body:error.body,annotations:validation.annotations !== undefined ? structuredClone(validation.annotations) : undefined}};
         transformed=views.input();
       }
       proxyRes=views.materialize(views.accept(transformed));pluginBodyOwner=views.source();restoredPluginWire=true;pluginRepresentationChanged=views.changed;

@@ -90,7 +90,7 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       }
       let diagnostics;
       let session;
-      try {session=this.conversion.createSession({sourceProtocol:'responses',targetProtocol:protocol,model:binding.model,responseModel:bindingSource(binding),provider:binding.provider,profile:capabilities,selectedEffort:input.reasoning?.effort,...(protocol!=='responses'?{agentMessageDelivery:'plaintext' as const}:{})});} catch(error) {const e=error as any;if(typeof e.code==='string')throw new DataAdmissionError(422,`llm_adapter_${e.code}`,undefined,{message:e.message,param:e.param});throw error;}
+      try {session=this.conversion.createSession({sourceProtocol:'responses',targetProtocol:protocol,model:binding.model,responseModel:bindingSource(binding),provider:binding.provider,profile:capabilities,restrictions:binding.capabilityOverrides,selectedEffort:input.reasoning?.effort,...(protocol!=='responses'?{agentMessageDelivery:'plaintext' as const}:{})});} catch(error) {const e=error as any;if(typeof e.code==='string')throw new DataAdmissionError(422,`llm_adapter_${e.code}`,undefined,{message:e.message,param:e.param});throw error;}
       try {
         const decoded=session.convertRequest(input);context.body=structuredClone(decoded.body);
         if(protocol!=='responses')logicalInput=structuredClone(decoded.canonicalHistory);

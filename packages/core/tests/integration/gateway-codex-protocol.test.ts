@@ -99,12 +99,29 @@ for(const [name,effort,mutation,expected] of [
   ['unsupported selection','medium',undefined,'llm_adapter_unsupported_reasoning'],
   ['last-plugin effort rewrite','high',{effort:'low'},'llm_adapter_unsupported_reasoning'],
   ['last-plugin model mapping','high',{model:'unverified-fallback'},'llm_adapter_unsupported_reasoning'],
+  ['invalid model identity','high',{identity:{wireModel:'glm-5.3-flash',catalogModel:{provider:'zai'}}},'llm_adapter_invalid_model_identity'],
+  ['mismatched model identity','high',{identity:{wireModel:'OTHER',catalogModel:{provider:'zai',model:'glm-5.3-flash'}}},'llm_adapter_model_identity_mismatch'],
+  ['unknown model identity','high',{identity:{wireModel:'glm-5.3-flash',catalogModel:{provider:'missing',model:'glm-5.3-flash'}}},'llm_adapter_model_identity_unavailable'],
   ['last-plugin protocol URL rewrite','high',{path:'/v1/messages'},'llm_adapter_target_protocol_mismatch'],
 ] as const)test(`final ${name} fails with 422 before an upstream connection`,async()=>{
   const config:any={routes:[{id:'e',path:'/codex',plugins:[{name:'codex-router',path,options:{models:[{source:'client',provider:'zai',model:'glm-5.3-flash',target:{type:'route',id:'t',protocol:'chat_completions'}}]}}],endpoints:[{target:'http://unused'}]},
     {id:'t',path:'/target',path_rewrite:{'^/target':''},plugins:mutation?[{name:'codex-router',path,options:{models:[],outboundMutation:mutation}}]:[],endpoints:[{id:'actual',target:'http://upstream.test'}]}]};
   const registry=new ScopedPluginRegistry(import.meta.dir);expect((await registry.initializeFromConfig(config)).failed).toBe(0);setScopedPluginRegistry(registry);let calls=0;globalThis.fetch=Object.assign(async()=>{calls++;return Response.json({});},{preconnect(){}}) as any;
   try{const response=await handleRequest(new Request('http://local/codex/responses',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'client',input:'PRIVATE_BODY_TEXT',reasoning:{effort},metadata:{secret:'PRIVATE_SECRET'}})}),config,{logging});expect(response.status).toBe(422);const error:any=await response.json();expect(error.error).toBe(expected);expect(JSON.stringify(error)).not.toContain('PRIVATE_BODY_TEXT');expect(JSON.stringify(error)).not.toContain('PRIVATE_SECRET');expect(calls).toBe(0);}finally{await registry.destroy();}
+});
+
+for(const [model,wire] of [['glm-5.3','GLM-5.3'],['glm-5.3-flash','GLM-5.3-Flash']])for(const effort of ['low','high','max'])test(`service mapping declares ${model} for ${effort} without leaking annotations`,async()=>{
+  const mappingPath=new URL('../../../../plugins/model-mapping/server/index.ts',import.meta.url).pathname;
+  const config:any={routes:[{id:'entry',path:'/codex',plugins:[{name:'codex-router',path,options:{models:[{source:'client',provider:'zai',model,target:{type:'service',id:'service',protocol:'chat_completions'}}]}}],endpoints:[{target:'http://unused'}]}],
+    services:[{id:'service',name:'service',plugins:[{name:'model-mapping',path:mappingPath,options:{modelMappings:[{source:model,target:wire,catalogModel:{provider:'zai',model}}]}}],endpoints:[{target:'http://upstream.test'}]}]};
+  const registry=new ScopedPluginRegistry(import.meta.dir,emptyCatalogServiceHost());expect((await registry.initializeFromConfig(config)).failed).toBe(0);setScopedPluginRegistry(registry);
+  const calls:any[]=[];globalThis.fetch=Object.assign(async(url:any,init:any)=>{calls.push({url:String(url),body:JSON.parse(await new Response(init.body).text())});return Response.json({choices:[{message:{role:'assistant',content:'answer'},finish_reason:'stop'}]});},{preconnect(){}}) as any;
+  try {
+    const response=await handleRequest(new Request('http://local/codex/responses',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'client',input:'hello',reasoning:{effort}})}),config,{logging});
+    expect(response.status).toBe(200);await response.text();expect(calls).toHaveLength(1);
+    expect(calls[0].body).toMatchObject({model:wire,reasoning_effort:effort,thinking:{type:'enabled'}});
+    expect(calls[0].body).not.toHaveProperty('annotations');expect(JSON.stringify(calls[0].body)).not.toContain('catalogModel');
+  } finally {await registry.destroy();}
 });
 
 afterDataPlaneTests(() => dataPlaneRuntime.close());

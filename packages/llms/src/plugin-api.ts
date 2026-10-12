@@ -9,4 +9,4 @@ export type { CanonicalTokenAccountingEventV2 } from './token-accounting/types';
 
 export * from './responses-codec';
 export * from './protocol-session';
-export { protocolRequestPath } from './protocol-session/endpoint';
+export { protocolRequestPath, protocolRequestModel } from './protocol-session/endpoint';

@@ -359,7 +359,7 @@
               {editingPluginIndex !== null ? $_('plugin.update') : $_('common.add')}
             </Button>
 {/snippet}
-<IndustrialDialog bind:open={showAddDialog} width="42rem" scrollBody={selectedPluginName === 'codex-router'}
+<IndustrialDialog bind:open={showAddDialog} width="42rem" scrollBody={selectedPluginName === 'codex-router' || selectedPluginSchema.some(field => field.type === 'model_mapping')}
   title={editingPluginIndex !== null ? $_('plugin.editPlugin') : $_('plugin.addPlugin')}
   description={$_('plugin.pluginConfiguration')} closeLabel={$_('common.close')}
   returnFocus={dialogOpener} body={editorBody} footer={editorFooter}

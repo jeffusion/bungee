@@ -19,7 +19,7 @@ afterEach(()=>{globalThis.fetch=originalFetch;setScopedPluginRegistry(previous);
 test.each(['success','credential','http-error','network-error','cancel','deadline'] as const)('repair is a managed attempt with original-error fallback: %s',async(mode)=>{
   const success=mode==='success'||mode==='credential';const credentials:any[]=[];
   const key=`repair-${crypto.randomUUID()}`;
-  const state={conversions:0,repairs:0,events:[] as any[],admissions:[] as any[],admissionResults:[] as any[],finalBody:undefined};(globalThis as any)[key]=state;
+  const state={conversions:0,repairs:0,events:[] as any[],admissions:[] as any[],admissionResults:[] as any[],validations:[] as any[],finalBody:undefined};(globalThis as any)[key]=state;
   const path=new URL('../fixtures/repair-attempt-plugin.ts',import.meta.url).pathname;
   const plugin=(pluginMode:string)=>({name:'repair-attempt-fixture',path,options:{key,mode:pluginMode}});
   const config={plugins:[plugin('admission')],routes:[{path:'/repair',path_rewrite:{'^/repair':'/rewritten'},request:{body:{add:{rule:true}}},
@@ -70,6 +70,13 @@ test.each(['success','credential','http-error','network-error','cancel','deadlin
     }
     const until=Date.now()+1000;while(!state.events.some(event=>event.phase==='request-end')&&Date.now()<until)await Bun.sleep(1);
     expect(sent).toHaveLength(2);expect(state.conversions).toBe(1);
+    expect(state.validations).toHaveLength(2);
+    for(const context of state.validations){
+      expect(context.annotations).toEqual({trace:{converted:true,stages:['before','intercept']}});
+      expect(Object.isFrozen(context.annotations)).toBe(true);expect(Object.isFrozen(context.annotations.trace)).toBe(true);
+      expect(Object.isFrozen(context.annotations.trace.stages)).toBe(true);
+    }
+    expect(state.validations[0].annotations).not.toBe(state.validations[1].annotations);
     expect(sent.map(request=>new URL(request.url).pathname)).toEqual(['/converted','/converted']);
     expect(sent[0].body).toEqual({input:'hello',rule:true,conversions:1});expect(sent[1].body).toEqual({...sent[0].body,repaired:true});
     for(const request of sent){expect(request.headers.get('content-encoding')).toBeNull();expect(request.headers.get('content-length')).toBe(String(request.length));expect(request.headers.get('content-type')).toBe('application/json');}

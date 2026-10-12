@@ -11,8 +11,12 @@ export default definePlugin(class {
     if(this.options.mode==='admission')return;
     hooks.onBeforeRequest.tap('convert',context=>{
       this.state.conversions++;context.body={...context.body,conversions:this.state.conversions};context.url.pathname='/converted';
-      this.state.finalBody=structuredClone(context.body);return context;
+      this.state.finalBody=structuredClone(context.body);return {...context,annotations:{trace:{converted:true,stages:['before']}}};
     });
+    hooks.onInterceptRequest.tap('annotate',context=>{
+      context.annotations={trace:{...context.annotations!.trace as object,stages:['before','intercept']}};
+    });
+    hooks.onValidateOutbound.tap('validate-annotations',context=>{this.state.validations.push(context);return context;});
     hooks.onAttemptObservation.tapPromise('observe',async event=>{this.state.events.push(event);});
     hooks.onResponse.tapPromise('repair',async(response,context)=>{
       if(response.ok)return response;

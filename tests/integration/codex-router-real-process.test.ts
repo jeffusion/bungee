@@ -980,7 +980,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     } finally {await socket.close();}
   }, 45000);
 
-  test('built model mapping preserves verified effort; bundled HTTP/WS refusals never poison the shared upstream', async () => {
+  test('built model mapping identity preserves verified effort; bundled HTTP/WS refusals never poison the shared upstream', async () => {
     const saved = structuredClone(aggregate);
     let socket: Socket | undefined;
     try {
@@ -988,7 +988,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       const service = aggregate.logical_configuration.services[0];
       service.failover = {enabled:true,retry_on:['>400'],passive_health:{consecutive_failures:3},recovery:{backoff_base_ms:300000}};
       service.plugins = [{id:uuid(31),position:1,name:'model-mapping',enabled:true,options:{modelMappings:[
-        {source:CODEX_CHAT_MODEL,target:'GLM-5.3-Flash'}, {source:'glm-5.3',target:'unverified-wire-model'},
+        {source:CODEX_CHAT_MODEL,target:'GLM-5.3-Flash',catalogModel:{provider:'zai',model:CODEX_CHAT_MODEL}}, {source:'glm-5.3',target:'unverified-wire-model'},
       ]}}];
       aggregate.logical_configuration.routes[0].plugins.find((p:any)=>p.name==='codex-router').options.models.push({
         provider:'zai',source:'org/unverified',model:'glm-5.3',target:{type:'service',id:CHAT,protocol:'chat_completions'},

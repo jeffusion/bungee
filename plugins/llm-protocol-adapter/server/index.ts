@@ -1,6 +1,8 @@
 import { definePlugin, createPluginHooks, DataAdmissionError, logger, type Plugin, type PluginHooks, type PluginInitContext, type PluginConfigField } from '@jeffusion/bungee-core/plugin';
 import { MODELS_DEV_CAPABILITIES_SERVICE_ID, MODELS_DEV_CAPABILITIES_CONTRACT_VERSION, type ModelsDevCapabilitiesService } from '../../models-dev/contract';
 import { ADAPTER_PLUGIN, historyClient, historyRpc, CONVERSION_SERVICE_ID, CONVERSION_VERSION, type LLMProtocol, type ConversionService, type AdapterSession } from '../contract';
+import { protocolRequestModel } from '@jeffusion/bungee-llms/plugin-api';
+import { readModelIdentity } from '../contract';
 import { conversionService } from './service';
 import { responseHandler, adapterError } from './handler';
 import manifest from '../manifest.json';
@@ -48,7 +50,7 @@ export default definePlugin(class implements Plugin {
         method: string;
         url: URL;
     }) {
-        return this.applied && ctx.method === 'POST' && protocolForPath(ctx.url.pathname) !== null ? { request: 'json-write' as const, response: ['json' as const, 'sse-json' as const] } : { request: 'none' as const };
+        return this.applied && ctx.method === 'POST' && protocolForPath(ctx.url.pathname) !== null ? { request: 'json-write' as const, ...(this.options?.sourceProtocol !== this.options?.targetProtocol ? { response: ['json' as const, 'sse-json' as const] } : {}) } : { request: 'none' as const };
     }
     register(hooks: PluginHooks) {
         if (!this.applied)
@@ -64,28 +66,32 @@ export default definePlugin(class implements Plugin {
             }
             if (source !== this.options!.sourceProtocol)
                 throw new DataAdmissionError(422, 'llm_adapter_source_protocol_mismatch');
-            if (source === this.options!.targetProtocol)
-                return ctx;
-            if (this.active.has(ctx.requestId))
+            if (this.active.has(ctx.requestId)) {
+                // Endpoint hooks run again on ordinary attempts; keep the generation snapshot.
+                if (source === this.options!.targetProtocol) return ctx;
                 throw new DataAdmissionError(422, 'llm_adapter_duplicate_conversion');
-            const model = source === 'gemini_generate_content' ? decodeURIComponent(ctx.url.pathname.match(/\/models\/([^/]+):/)![1]) : ctx.body?.model;
-            if (typeof model !== 'string' || !model)
-                throw new DataAdmissionError(422, 'llm_adapter_model_required');
-            const session = this.service.createSession({ sourceProtocol: source, targetProtocol: this.options!.targetProtocol, model, ...(source === 'gemini_generate_content' ? { streaming: ctx.url.pathname.endsWith(':streamGenerateContent') } : {}) });
-            try {
-                const result = session.convertRequest(ctx.body);
-                if (result.diagnostics.length)
-                    logger.info({ requestId: ctx.requestId, diagnostics: structuredClone(result.diagnostics) }, 'llm_adapter_request_diagnostics');
-                ctx.body = structuredClone(result.body);
-                ctx.url.pathname = targetPath(ctx.url.pathname, this.options!.targetProtocol, model, result.streaming);
-                if (this.options!.targetProtocol === 'gemini_generate_content' && result.streaming)
-                    ctx.url.searchParams.set('alt', 'sse');
             }
-            catch (error) {
-                session.dispose();
+            let session: AdapterSession | undefined;
+            let model: string;
+            try {
+                model = protocolRequestModel(source, ctx.body, ctx.url);
+                session = this.service.createSession({ sourceProtocol: source, targetProtocol: this.options!.targetProtocol, model,
+                    modelIdentity: readModelIdentity(ctx.annotations),
+                    ...(source === 'gemini_generate_content' ? { streaming: ctx.url.pathname.endsWith(':streamGenerateContent') } : {}) });
+                const result = session.convertRequest(ctx.body);
+                if (source !== this.options!.targetProtocol) {
+                    if (result.diagnostics.length)
+                        logger.info({ requestId: ctx.requestId, diagnostics: structuredClone(result.diagnostics) }, 'llm_adapter_request_diagnostics');
+                    ctx.body = structuredClone(result.body);
+                    ctx.url.pathname = targetPath(ctx.url.pathname, this.options!.targetProtocol, model, result.streaming);
+                    if (this.options!.targetProtocol === 'gemini_generate_content' && result.streaming) ctx.url.searchParams.set('alt', 'sse');
+                }
+            } catch (error) {
+                session?.dispose();
                 adapterError(error);
             }
-            const handler = responseHandler({ session, sourceProtocol: source, targetProtocol: this.options!.targetProtocol, model });
+            const handler = responseHandler({ session, sourceProtocol: source, targetProtocol: this.options!.targetProtocol, model,
+                validationOnly: source === this.options!.targetProtocol });
             this.active.set(ctx.requestId, { handler, session });
             return ctx;
         });

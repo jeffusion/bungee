@@ -1,4 +1,4 @@
-import type { ModelsDevCapabilities } from '../models-dev/contract';
+import { MODEL_IDENTITY_ANNOTATION_KEY, type ModelsDevCapabilities, type CatalogModelReference, type ModelIdentityDeclaration } from '../models-dev/contract';
 import type { LLMProtocol, ProtocolSession, ProtocolSessionContext, ProtocolReasoningPolicy, ProtocolSessionCapabilities } from '@jeffusion/bungee-llms/plugin-api';
 import type { AgentMessageInspectionResult, AgentMessagePlaintextReplacement, ResponsesCodecLimits, ResponsesConversionDiagnostic } from '@jeffusion/bungee-llms/plugin-api';
 import type { ExecuteGatewayAuxiliary, GatewayDispatchTarget } from '@jeffusion/bungee-core/plugin';
@@ -37,8 +37,10 @@ export interface AdapterSession extends ProtocolSession {
         protocol: LLMProtocol;
         body: unknown;
         url?: string;
+        modelIdentity?: ModelIdentityDeclaration;
     }): {
         model: string;
+        catalogModel: CatalogModelReference | null;
         effort: string | null;
         catalogVersion: number | null;
         rulesVersion: string;
@@ -63,6 +65,8 @@ export interface ConversionService {
         profile?: EffectiveCapabilities;
         provider?: string;
         selectedEffort?: string;
+        modelIdentity?: ModelIdentityDeclaration;
+        restrictions?: CapabilityContext['restrictions'];
     }): AdapterSession;
 }
 /** Escape surrogate units before bounded RPC slicing. */
@@ -117,4 +121,9 @@ export function historyClient(rpc: any): HistoryClient {
             }
         },
     };
+}
+
+/** Read only host-owned annotations, never client headers or body. */
+export function readModelIdentity(annotations?: Readonly<Record<string, unknown>>): ModelIdentityDeclaration | undefined {
+    return annotations?.[MODEL_IDENTITY_ANNOTATION_KEY] as ModelIdentityDeclaration | undefined;
 }

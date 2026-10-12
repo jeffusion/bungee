@@ -15,7 +15,7 @@ import {
   AsyncSeriesMapHook,
 } from './impl';
 import type { PluginServices } from '../plugin-services';
-import type { PluginStorage, SSEEnvelope } from '../plugin.types';
+import type { PluginStorage, SSEEnvelope, PluginConfigValue } from '../plugin.types';
 import type { InterceptResult, PluginPhase } from '@jeffusion/bungee-types';
 import type { RawResponseResult } from '../plugin-control/contracts';
 import type { GatewayBodyArguments, GatewayRequestArguments, GatewayForwardArguments, GatewayResponseRuleArguments, GatewayBodyRuleArguments, GatewayQueryRuleArguments, GatewayHeaderRuleArguments, GatewayCorsArguments, GatewayRouteInput, GatewayRouteDecision, GatewayDispatchInput, GatewayDispatchDecision, DispatchRequestInput, DispatchRequestDecision, GatewayAdmissionInput, GatewayAdmissionDecision, GatewayAdmissionSessionInput, GatewayAdmissionPrepareInput, GatewaySelectInput, GatewaySelectDecision, GatewayFailoverInput, GatewayRetryInput, GatewayLogInput, GatewayLogResult } from '../gateway/contracts';
@@ -57,6 +57,8 @@ export interface MutableRequestContext extends RequestContext {
   headers: Record<string, string>;
   /** 请求体（可修改） */
   body: any;
+  /** Plugin-owned JSON metadata carried through request phases and isolated per attempt. */
+  annotations?: Record<string, PluginConfigValue>;
 }
 
 /** Immutable final attempt boundary, after all rewrites and before upstream connection. */
@@ -64,6 +66,8 @@ export interface OutboundValidationContext extends RequestContext {
   readonly url: string;
   readonly model: string | null;
   readonly body: unknown;
+  /** Deep-frozen snapshot of the final attempt annotations. */
+  readonly annotations?: Readonly<Record<string, PluginConfigValue>>;
   readonly attemptId: string;
   readonly signal?: AbortSignal;
 }

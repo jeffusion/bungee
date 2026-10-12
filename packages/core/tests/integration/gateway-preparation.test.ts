@@ -232,3 +232,19 @@ test('reuse rechecks real access policy after credential selection and cannot us
   try{const response=await env.send();expect(response.status).toBe(409);await response.text();expect(auxiliaryInspections).toBe(2);expect(reused).toBe(0);expect(env.calls).toHaveLength(0);expect(env.budgets).toHaveLength(0);
   }finally{await env.close();host.dispose();}
 });
+
+test('auxiliary requests start without parent annotations and cannot mutate the parent declaration',async()=>{
+ const seen:any[]=[];
+ const env=gatewayPreparationFixture({onAnnotations:context=>{
+   seen.push({routeId:context.routeId,annotations:structuredClone(context.annotations)});
+   if(context.routeId==='/aux')context.annotations={child:{value:'independent'}};
+ },prepare:async input=>{
+   input.context.annotations={identity:{wireModel:'main-model',catalog:{provider:'p',model:'main'}}};
+   const result=await input.executeAuxiliary(auxiliary);if(result.kind!=='response')throw Error('expected auxiliary response');
+   try{await result.bodyHandle.json();await result.completion;}finally{result.dispose();}
+   expect(input.context.annotations).toEqual({identity:{wireModel:'main-model',catalog:{provider:'p',model:'main'}}});return {};
+ }});
+ try{const response=await env.send();expect(response.status).toBe(200);await response.text();
+   expect(seen).toEqual([{routeId:'/aux',annotations:undefined},{routeId:'/final',annotations:{identity:{wireModel:'main-model',catalog:{provider:'p',model:'main'}}}}]);
+ }finally{await env.close();}
+});

@@ -1,12 +1,28 @@
-import { createProtocolSession, describeProtocolConversion, inspectAgentMessages, replaceAgentMessageEncryptedContent, ResponsesCodecError, type ProtocolSessionContext } from '@jeffusion/bungee-llms/plugin-api';
-import type { ModelsDevCapabilitiesService } from '../../models-dev/contract';
+import { createProtocolSession, describeProtocolConversion, inspectAgentMessages, replaceAgentMessageEncryptedContent, ResponsesCodecError, protocolRequestModel, type ProtocolSessionContext } from '@jeffusion/bungee-llms/plugin-api';
+import type { ModelIdentityDeclaration, ModelsDevCapabilitiesService } from '../../models-dev/contract';
 import type { CapabilityContext, ConversionService, EffectiveCapabilities, AdapterSession, HistoryClient } from '../contract';
 import {AgentRelay} from './relay';
-export const REASONING_RULES_VERSION = '2026-10-10.3';
+export const REASONING_RULES_VERSION = '2026-10-12.1';
 const concrete = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
-/** Verified deployment alias; capability data still comes from the catalog model. */
-function catalogModel(provider: string | undefined, model: string): string {
-    return provider === 'zai' && model === 'GLM-5.3-Flash' ? 'glm-5.3-flash' : model;
+function identityError(code: string, message: string): never {
+    throw new ResponsesCodecError(code, message, 'modelIdentity');
+}
+function parseModelIdentity(value: unknown): ModelIdentityDeclaration | undefined {
+    if (value === undefined) return undefined;
+    const object = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
+    const identifier = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v === v.trim();
+    if (!object(value) || Object.keys(value).length !== 2 || !Object.keys(value).every(key => ['wireModel', 'catalogModel'].includes(key)) || !identifier(value.wireModel)
+        || !object(value.catalogModel) || Object.keys(value.catalogModel).length !== 2
+        || !Object.keys(value.catalogModel).every(key => ['provider', 'model'].includes(key))
+        || !identifier(value.catalogModel.provider) || !identifier(value.catalogModel.model))
+        throw new ResponsesCodecError('invalid_model_identity', 'Model identity declaration is invalid', 'modelIdentity');
+    return { wireModel: value.wireModel, catalogModel: { provider: value.catalogModel.provider, model: value.catalogModel.model } };
+}
+function checkedIdentity(value: unknown, model: string): ModelIdentityDeclaration | undefined {
+    const identity = parseModelIdentity(value);
+    if (identity && identity.wireModel !== model)
+        identityError('model_identity_mismatch', 'Declared wire model differs from the actual target');
+    return identity;
 }
 /** Interface restrictions/defaults, not a second model capability catalog.
  * Sources: docs.z.ai/api-reference/llm/chat-completion and
@@ -24,13 +40,12 @@ function rule(provider: string, model: string, protocol: string) {
     return null;
 }
 export function resolveCapabilities(catalog: ModelsDevCapabilitiesService, context: CapabilityContext): EffectiveCapabilities | null {
-    context = { ...context, model: catalogModel(context.provider, context.model) };
     const info = catalog.model(context);
     if (!info)
         return null;
     const mapping = rule(context.provider, context.model, context.targetProtocol), restrictions = context.restrictions;
-    const candidates = info.reasoningOptionsStatus === 'known' ? info.reasoningOptions?.flatMap(option => option.type === 'effort' ? option.values.filter((value): value is string => typeof value === 'string' && concrete.has(value)) : []) ?? [] : [];
-    const selected = mapping && info.reasoning && restrictions?.reasoning !== false ? [...new Set(candidates)].filter(v => mapping.values.includes(v)) : [];
+    const candidates = info.reasoningOptionsStatus === 'known' ? info.reasoningOptions?.flatMap(option => option.type === 'effort' ? option.values.filter((value): value is Exclude<typeof value, null> => typeof value === 'string' && concrete.has(value)) : []) ?? [] : [];
+    const selected: string[] = mapping && info.reasoning && restrictions?.reasoning !== false ? [...new Set(candidates)].filter(v => mapping.values.includes(v)) : [];
     // A selector also needs a documented default that actually belongs to its set.
     const supportedEfforts = mapping && selected.includes(mapping.default) ? selected : [];
     const defaultEffort = supportedEfforts.length ? mapping!.default : null;
@@ -65,8 +80,15 @@ export function conversionService(catalog: ModelsDevCapabilitiesService, worker:
         createSession(context) {
             if (!worker)
                 throw new Error('llm_adapter_conversion_requires_worker');
-            const info = context.profile ?? catalog.model({ provider: context.provider, model: catalogModel(context.provider, context.model) });
-            const profile = context.profile ? structuredClone(context.profile) : info ? resolveCapabilities(catalog, { provider: info.provider, model: context.model, targetProtocol: context.targetProtocol }) : undefined;
+            const declaration = checkedIdentity(context.modelIdentity, context.model);
+            const restrictions = context.restrictions ? structuredClone(context.restrictions) : undefined;
+            const reference = declaration?.catalogModel ?? { provider: context.provider, model: context.model };
+            const info = context.profile ?? catalog.model(reference);
+            let profile = context.profile ? structuredClone(context.profile) : info ? resolveCapabilities(catalog, { provider: info.provider, model: info.model, targetProtocol: context.targetProtocol, restrictions }) : null;
+            if (declaration && (!profile || profile.provider !== reference.provider || profile.model !== reference.model))
+                identityError('model_identity_unavailable', 'Declared catalog model is unavailable');
+            const entryProfile = profile;
+            let catalogVersion = profile?.catalogVersion ?? null;
             let selected = context.selectedEffort;
             const passthrough = context.sourceProtocol === context.targetProtocol;
             if (!passthrough && selected !== undefined && (!profile || !profile.supportedEfforts.includes(selected)))
@@ -91,29 +113,45 @@ export function conversionService(catalog: ModelsDevCapabilitiesService, worker:
                     disposed = true;
                     engine.dispose();
                 } },
-                validateAttempt({ model, protocol, body, url }) {
-                    if (disposed)
-                        throw new Error('llm_adapter_session_disposed');
+                validateAttempt({ model, protocol, body, url, modelIdentity }) {
+                    if (disposed) throw new Error('llm_adapter_session_disposed');
                     if (protocol !== context.targetProtocol)
                         throw new ResponsesCodecError('target_protocol_mismatch', 'Actual target protocol differs from the session', 'url');
                     if (url) {
-                        const path = new URL(url).pathname;
+                        let path: string;
+                        try { path = new URL(url).pathname; }
+                        catch { throw new ResponsesCodecError('target_protocol_mismatch', 'Actual target URL is invalid', 'url'); }
                         const valid = protocol === 'responses' ? /\/responses$/.test(path) : protocol === 'chat_completions' ? /\/chat\/completions$/.test(path) : protocol === 'anthropic_messages' ? /\/messages$/.test(path) : /:(?:streamGenerateContent|generateContent)$/.test(path);
-                        if (!valid)
-                            throw new ResponsesCodecError('target_protocol_mismatch', 'Actual target URL does not implement the session protocol', 'url');
+                        if (!valid) throw new ResponsesCodecError('target_protocol_mismatch', 'Actual target URL does not implement the session protocol', 'url');
                     }
-                    const actual = profile && profile.model === catalogModel(profile.provider, model) ? profile : profile ? resolveCapabilities(catalog, { provider: profile.provider, model, targetProtocol: protocol }) : null;
+                    const actualModel = protocolRequestModel(protocol, body, url);
+                    const identity = checkedIdentity(modelIdentity, actualModel);
+                    if (model !== actualModel) identityError('model_identity_mismatch', 'Model argument differs from the actual target');
+                    model = actualModel;
+                    const reference = identity?.catalogModel ?? { provider: profile?.provider ?? context.provider, model };
+                    const sameIdentity = !!profile && reference.provider === profile.provider && reference.model === profile.model;
+                    const info = sameIdentity ? profile : catalog.model(reference);
+                    const actual = sameIdentity ? profile : info ? resolveCapabilities(catalog, { provider: info.provider, model: info.model, targetProtocol: protocol, restrictions }) : null;
+                    if (identity && !actual) identityError('model_identity_unavailable', 'Declared catalog model is unavailable');
+                    if (actual && catalogVersion !== null && actual.catalogVersion !== catalogVersion)
+                        identityError('model_identity_catalog_changed', 'Target catalog version differs from the generation snapshot');
+                    const sameNativeIdentity = entryProfile
+                        ? !!actual && actual.provider === entryProfile.provider && actual.model === entryProfile.model
+                        : !identity && model === context.model;
                     if (selected !== undefined) {
-                        if (passthrough && model === context.model && wireEffort(body, protocol) === selected)
-                            return { model, effort: selected, catalogVersion: profile?.catalogVersion ?? null, rulesVersion: REASONING_RULES_VERSION };
-                        if (!actual || actual.catalogVersion !== profile?.catalogVersion || actual.rulesVersion !== profile?.rulesVersion || !actual.supportedEfforts.includes(selected) || wireEffort(body, protocol) !== selected)
-                            fail('reasoning.effort');
-                        if (protocol === 'anthropic_messages' && (body as any)?.thinking?.type !== 'adaptive')
-                            fail('thinking.type');
-                        if (protocol === 'chat_completions' && profile?.provider === 'zai' && (body as any)?.thinking?.type !== 'enabled')
-                            fail('thinking.type');
+                        if (!(passthrough && sameNativeIdentity && wireEffort(body, protocol) === selected)) {
+                            if (!entryProfile || !actual || actual.rulesVersion !== entryProfile.rulesVersion || !actual.supportedEfforts.includes(selected) || wireEffort(body, protocol) !== selected)
+                                fail('reasoning.effort');
+                            if (protocol === 'anthropic_messages' && (body as any)?.thinking?.type !== 'adaptive') fail('thinking.type');
+                            if (protocol === 'chat_completions' && actual.provider === 'zai' && (body as any)?.thinking?.type !== 'enabled') fail('thinking.type');
+                        }
+                    } else if (!profile && actual && identity) {
+                        // The first valid declaration can lock an otherwise unknown generation.
+                        profile = structuredClone(actual);
+                        catalogVersion = actual.catalogVersion;
                     }
-                    return { model, effort: selected ?? null, catalogVersion: profile?.catalogVersion ?? null, rulesVersion: REASONING_RULES_VERSION };
+                    return { model, catalogModel: actual ? { provider: actual.provider, model: actual.model } : null,
+                        effort: selected ?? null, catalogVersion, rulesVersion: REASONING_RULES_VERSION };
                 },
             };
             return session;

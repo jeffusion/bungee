@@ -265,6 +265,7 @@ async function executePreFailoverPhase(
     ctx.url = result.url;
     ctx.headers = { ...result.headers };
     ctx.body = result.body;
+    ctx.annotations = result.annotations;
   }
 
   if (!phase.hasInterceptCallbacks) {
@@ -1032,6 +1033,7 @@ async function executeHttpRequestInternal(
     const scopedRegistry = requestRegistry;
     const requestPhaseHooks = scopedRegistry?.getPrecompiledHooks(currentRouteId, undefined, routeServiceName, dispatch.adapter) ?? null;
     const phaseContext = createPhaseContext(requestSnapshot, requestId, currentRouteId, routeServiceName);
+    phaseContext.annotations = dispatch.context.annotations !== undefined ? structuredClone(dispatch.context.annotations) : undefined;
     phaseContext.bodyWrite = !!dispatch.target || routeDemand.request === 'json-write';
     if (dispatch.target) phaseContext.url = new URL(dispatch.context.url);
     phaseContext.bodyRequirements = routeDemand;

@@ -35,7 +35,10 @@ describe('catalog-backed plugin option validation', () => {
       id: BINDING_ID, name: 'model-mapping', options: { modelMappings: [{ source: 'a', target: 'b' }] },
     }] }, options).ok).toBe(true);
 
+    expect(parseNormalizeCompile({plugins:[{id:BINDING_ID,name:'model-mapping',options:{modelMappings:[{source:'glm-5.3',target:'GLM-5.3',catalogModel:{provider:'zai',model:'glm-5.3'}}]}}]},options).ok).toBe(true);
     for (const modelMappings of [
+      [{source:'a',target:'b',catalogModel:null}],
+      ...[{}, {provider:'p'}, {provider:'p',model:' m'}, {provider:' ',model:'m'}, {provider:'p',model:'m',extra:true}].map(catalogModel=>[{source:'a',target:'b',catalogModel}]),
       {}, [{ source: 'a' }], [{ source: 'a', target: 'b', extra: true }],
       [{ source: '', target: 'b' }], [{ source: 'a', target: 1 }],
     ]) {

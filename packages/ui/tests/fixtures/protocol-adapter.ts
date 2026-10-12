@@ -4,8 +4,9 @@ import '$i18n';
 import '../../src/app.css';
 import text from '@plugins/llm-protocol-adapter/manifest.json?raw';
 import codexText from '@plugins/codex-router/manifest.json?raw';
+import mappingText from '@plugins/model-mapping/manifest.json?raw';
 import Fixture from './ProtocolAdapterFixture.svelte';
-for (const manifest of [JSON.parse(text), JSON.parse(codexText)]) {
+for (const manifest of [JSON.parse(text), JSON.parse(codexText), JSON.parse(mappingText)]) {
 for (const [language, messages] of Object.entries(manifest.translations)) {
   const nested: Record<string, any> = {};
   for (const [key, value] of Object.entries(messages as Record<string, string>)) {
