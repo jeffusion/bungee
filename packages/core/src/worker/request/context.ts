@@ -1,3 +1,4 @@
+import type { PluginConfigValue } from '../../plugin.types';
 import type { Endpoint } from '@jeffusion/bungee-types';
 
 /**
@@ -33,6 +34,7 @@ export interface MutableRequestContext {
   method: string;
   headers: Record<string, string>;
   body?: any;
+  annotations?: Record<string, PluginConfigValue>;
   query?: Record<string, string>;
   upstreamId?: string;
   routeId?: string;
@@ -51,6 +53,7 @@ export function cloneMutableRequestContext(ctx: MutableRequestContext): MutableR
     url: new URL(ctx.url.toString()),
     headers: { ...ctx.headers },
     body: ctx.body !== undefined ? structuredClone(ctx.body) : undefined,
+    annotations: ctx.annotations !== undefined ? structuredClone(ctx.annotations) : undefined,
     query: ctx.query ? { ...ctx.query } : undefined,
   };
 }

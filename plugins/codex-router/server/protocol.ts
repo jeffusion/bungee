@@ -1,4 +1,6 @@
 import { logger, protocolSSEOutput, DataAdmissionError, type Plugin, type PluginHooks } from '@jeffusion/bungee-core/plugin';
+import { protocolRequestModel } from '@jeffusion/bungee-llms/plugin-api';
+import { readModelIdentity } from '../../llm-protocol-adapter/contract';
 import type { AdapterSession, LLMProtocol } from '../../llm-protocol-adapter/contract';
 /** Codex transport integration only; all codec and state-machine methods are public service calls. */
 export function protocolAdapter(input: {
@@ -25,7 +27,7 @@ export function protocolAdapter(input: {
         if (event.type === 'response.completed')
             nativeTerminal = event.response; };
     return { bodyRequirements() { return { request: 'none', response: ['json', 'sse-json'] }; }, register(hooks: PluginHooks) {
-            hooks.onValidateOutbound.tapPromise('codex-router.target', async (context) => { input.signal.throwIfAborted(); const result = convert(() => input.session.validateAttempt({ model: context.model ?? input.model, protocol: input.protocol, body: context.body, url: context.url })); logger.info({ requestId: context.requestId, attemptId: context.attemptId, ...result }, 'llm_adapter_target_validated'); return context; });
+            hooks.onValidateOutbound.tapPromise('codex-router.target', async (context) => { input.signal.throwIfAborted(); const result = convert(() => input.session.validateAttempt({ model: protocolRequestModel(input.protocol, context.body, context.url), modelIdentity: readModelIdentity(context.annotations), protocol: input.protocol, body: context.body, url: context.url })); logger.info({ requestId: context.requestId, attemptId: context.attemptId, ...result }, 'llm_adapter_target_validated'); return context; });
             hooks.onResponse.tapPromise('codex-router.protocol', async (response, context) => {
                 if (!response.ok || !response.headers.get('content-type')?.includes('json'))
                     return response;

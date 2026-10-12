@@ -207,6 +207,8 @@ behavior remain unchanged. Table/list pagination remains explicit.
 
 - Search is typed in the field itself. The popup contains candidates and a
   subtle loading/count/retry footer, never a second search input or page buttons.
+  An optional `searchHeader` snippet can supply domain filters above the candidates;
+  the shared renderer owns its boundary and padding and does not interpret the filter.
   Opening clears the search and starts page 1, preserving the confirmed value
   as the placeholder; closing restores the confirmed value.
 - Nonempty remote searches debounce by 250ms and cancel previous work
@@ -246,6 +248,15 @@ enable switch belongs in the panel header; disabled relay shows only the header.
 Relay models reuse the catalog selector filtered to OpenAI; arbitrary typed
 names cannot be confirmed. Its Responses protocol is fixed internally and has
 no form field.
+
+Model mapping rules use flat, headless PanelCard containers with a compact rule
+toolbar. Request and upstream names align on one row with a directional arrow;
+source provider filtering belongs inside the source search popup. An optional
+capability catalog association appears below as a readable provider/model summary,
+with associate/change and clear actions. Its provider/model picker opens only on
+request; confirmation closes it, cancellation preserves the declaration, and neither
+action changes the upstream name. Narrow layouts stack the names and turn the arrow
+downward. Field labels and required help retain the standard readable text roles.
 
 The shared renderer knows no provider or API. Domain adapters supply options,
 page status, translated labels and search/cancel callbacks, reusing the existing

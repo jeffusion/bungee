@@ -310,8 +310,8 @@
             catalogPlugin={resolveModelCatalogPlugin(field)}
             sourceCatalogProvider={resolveModelCatalogProvider(field, 'sourceCatalogProviderField')}
             targetCatalogProvider={resolveModelCatalogProvider(field, 'targetCatalogProviderField')}
-            on:change={(event) => {
-              handleChange(field.name, event.detail);
+            onchange={(mappings) => {
+              handleChange(field.name, mappings);
               handleBlur(field);
             }}
           />

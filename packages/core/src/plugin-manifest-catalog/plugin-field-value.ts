@@ -10,7 +10,11 @@ function modelMappings(value: PluginConfigValue): boolean {
   return Array.isArray(value) && value.every((item) => {
     if (!objectValue(item)) return false;
     const keys = Object.keys(item);
-    return keys.length === 2 && keys.includes('source') && keys.includes('target')
+    const identity = item.catalogModel;
+    const validIdentity = identity === undefined || objectValue(identity)
+      && Object.keys(identity).length === 2 && Object.keys(identity).every(key => ['provider', 'model'].includes(key))
+      && ['provider', 'model'].every(key => typeof identity[key] === 'string' && identity[key].length > 0 && identity[key] === identity[key].trim());
+    return keys.every(key => ['source', 'target', 'catalogModel'].includes(key)) && keys.includes('source') && keys.includes('target') && validIdentity
       && typeof item.source === 'string' && item.source.length > 0 && item.source === item.source.trim()
       && typeof item.target === 'string' && item.target.length > 0 && item.target === item.target.trim();
   });

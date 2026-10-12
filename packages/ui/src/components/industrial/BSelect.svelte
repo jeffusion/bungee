@@ -3,6 +3,7 @@
 	import ChevronDown from "lucide-svelte/icons/chevron-down";
 	import Loader2 from "lucide-svelte/icons/loader-2";
 	import BSearchSelect from "./BSearchSelect.svelte";
+	import type { Snippet } from "svelte";
 	import type { SelectRemoteSearch, SelectSearchLabels } from "./select-search";
 	import * as Select from "$components/ui/select";
 	import { cn } from "$utils";
@@ -22,6 +23,7 @@
 		creatable = false,
 		searchable = false,
 		remoteSearch,
+		searchHeader,
 		searchLabels = {},
 		id,
 		maxLength = 512,
@@ -50,6 +52,7 @@
 		creatable?: boolean;
 		searchable?: boolean;
 		remoteSearch?: SelectRemoteSearch;
+		searchHeader?: Snippet;
 		searchLabels?: Partial<SelectSearchLabels>;
 		id?: string;
 		maxLength?: number;
@@ -242,7 +245,7 @@
 	onmouseleave={() => (hovering = false)}
 >
 	{#if !isMultiple && (isCreatableSingle || searchable || remoteSearch)}
-		<BSearchSelect {id} {value} options={dedupedOptions} {remoteSearch} {disabled} {loading} {creatable} {allowClear}
+		<BSearchSelect {id} {value} options={dedupedOptions} {remoteSearch} {searchHeader} {disabled} {loading} {creatable} {allowClear}
 			label={ariaLabel} {placeholder} {size} {status} {maxLength} {rootTestId} {searchTestId}
 			labels={{ search: 'Search options', loading: 'Loading', error: 'Unable to load options', empty: 'No matching options',
 				retry: 'Retry', custom: 'Create', loaded: 'Loaded', complete: 'All loaded', loadMore: 'Load more', clear: 'Clear selection', ...searchLabels }}

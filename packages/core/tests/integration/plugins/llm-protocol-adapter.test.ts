@@ -92,4 +92,18 @@ test('migrated terminal/transport contracts reject missing terminal and preserve
   const errorAdapter=await adapter('responses','chat_completions');const errorCtx:any={requestId:'provider-error',method:'POST',url:new URL('http://local/v1/responses'),body:requests.responses};await errorAdapter.hooks.onBeforeRequest.promise(errorCtx);const denied=Response.json({error:{code:'rate_limit'}},{status:429});expect(await errorAdapter.hooks.onResponse.promise(denied,errorCtx)).toBe(denied);await errorAdapter.hooks.onFinally.promise(errorCtx);
 });
 
+test('endpoint native adapter reuses its generation session across ordinary 503 retries',async()=>{
+  const previous=getScopedPluginRegistry(),fetch=globalThis.fetch,serviceHost=relayServiceHost(catalog);
+  const registry=new ScopedPluginRegistry(import.meta.dir,serviceHost.worker);registry.setServiceDependencies(new Map([[ADAPTER_PLUGIN,{'models-dev':'^1.0.0'}]]));
+  const config:any={routes:[{id:'retry',path:'/v1',path_rewrite:{'^/v1':''},retry:{enabled:true,retry_on:[503],max_retries:1},endpoints:[{id:'mock',target:'http://upstream.test/v1',plugins:[{name:ADAPTER_PLUGIN,path:new URL('../../../../../plugins/llm-protocol-adapter/server/index.ts',import.meta.url).pathname,options:{sourceProtocol:'chat_completions',targetProtocol:'chat_completions'}}]}]}]};
+  let calls=0;const bodies:any[]=[];
+  globalThis.fetch=Object.assign(async(_url:any,init:any)=>{calls++;bodies.push(JSON.parse(await new Response(init.body).text()));return calls===1?Response.json({error:'temporary'},{status:503}):Response.json({choices:[],native:'preserved'});},{preconnect(){}}) as any;
+  try{
+    expect((await registry.initializeFromConfig(config)).failed).toBe(0);setScopedPluginRegistry(registry);
+    const raw={model:'native-unlisted',messages:[{role:'user',content:'hello'}],reasoning_effort:'high'};
+    const result=await handleRequest(new Request('http://local/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(raw)}),config,{logging});
+    expect(result.status).toBe(200);expect(await result.json()).toEqual({choices:[],native:'preserved'});expect(calls).toBe(2);expect(bodies).toEqual([raw,raw]);
+  }finally{globalThis.fetch=fetch;setScopedPluginRegistry(previous);await registry.destroy();await serviceHost.dispose();}
+});
+
 afterDataPlaneTests(()=>dataPlaneRuntime.close());

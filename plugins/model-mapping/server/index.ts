@@ -1,11 +1,12 @@
 import type { Plugin } from '@jeffusion/bungee-core/plugin';
-import { definePlugin } from '@jeffusion/bungee-core/plugin';
+import { DataAdmissionError, definePlugin } from '@jeffusion/bungee-core/plugin';
 import type { MutableRequestContext, PluginHooks, PluginInitContext } from '@jeffusion/bungee-core/plugin';
 import { logger } from '@jeffusion/bungee-core/plugin';
-import { MODELS_DEV_CATALOG_CONTRACT_VERSION, MODELS_DEV_CATALOG_SERVICE_ID, type ModelsDevCatalogService } from '../../models-dev/contract';
+import { MODELS_DEV_CATALOG_CONTRACT_VERSION, MODELS_DEV_CATALOG_SERVICE_ID, MODEL_IDENTITY_ANNOTATION_KEY, type CatalogModelReference, type ModelsDevCatalogService } from '../../models-dev/contract';
 
+interface ModelMappingRule { source: string; target: string; catalogModel?: CatalogModelReference }
 interface ModelMappingOptions {
-  modelMappings?: Array<{ source: string; target: string }> | Record<string, string>;
+  modelMappings?: ModelMappingRule[] | Record<string, string>;
 }
 
 const MODEL_MAPPING_PLUGIN_NAME = 'model-mapping';
@@ -14,7 +15,7 @@ class ModelMappingPluginImpl implements Plugin {
   static readonly name = MODEL_MAPPING_PLUGIN_NAME;
   static readonly version = '1.0.0';
 
-  private readonly modelMappingMap: Map<string, string>;
+  private readonly modelMappingMap: Map<string, ModelMappingRule>;
   private knownProviderPrefixes = new Set<string>();
 
   constructor(options?: ModelMappingOptions) {
@@ -46,15 +47,15 @@ class ModelMappingPluginImpl implements Plugin {
     );
   }
 
-  private buildModelMappingMap(input: ModelMappingOptions['modelMappings']): Map<string, string> {
-    const map = new Map<string, string>();
+  private buildModelMappingMap(input: ModelMappingOptions['modelMappings']): Map<string, ModelMappingRule> {
+    const map = new Map<string, ModelMappingRule>();
     if (!input) return map;
 
     if (Array.isArray(input)) {
       for (const item of input) {
         const source = typeof item?.source === 'string' ? item.source.trim() : '';
         const target = typeof item?.target === 'string' ? item.target.trim() : '';
-        if (source && target) map.set(source, target);
+        if (source && target) map.set(source, { source, target, ...(item.catalogModel ? { catalogModel: structuredClone(item.catalogModel) } : {}) });
       }
       return map;
     }
@@ -62,7 +63,7 @@ class ModelMappingPluginImpl implements Plugin {
     for (const [source, target] of Object.entries(input)) {
       const sourceKey = source.trim();
       const targetValue = typeof target === 'string' ? target.trim() : '';
-      if (sourceKey && targetValue) map.set(sourceKey, targetValue);
+      if (sourceKey && targetValue) map.set(sourceKey, { source: sourceKey, target: targetValue });
     }
     return map;
   }
@@ -73,17 +74,22 @@ class ModelMappingPluginImpl implements Plugin {
     if (!modelInfo) return;
 
     const { model: currentModel, source } = modelInfo;
-    const mappedModel = this.resolveMappedModel(currentModel);
-    if (!mappedModel || mappedModel === currentModel) return;
-
-    const normalizedMappedModel = this.normalizeMappedTargetModel(mappedModel);
-    if (!normalizedMappedModel || normalizedMappedModel === currentModel) return;
+    const rule = this.resolveMappedModel(currentModel);
+    if (!rule) return;
+    const normalizedMappedModel = this.normalizeMappedTargetModel(rule.target);
 
     if (source === 'body' && ctx.body && typeof ctx.body === 'object') {
       (ctx.body as Record<string, unknown>).model = normalizedMappedModel;
     } else if (source === 'url') {
-      this.updateModelInUrlPath(ctx.url, currentModel, normalizedMappedModel);
+      this.updateModelInUrlPath(ctx.url, normalizedMappedModel);
     }
+    if (rule.catalogModel) {
+      ctx.annotations ??= {};
+      ctx.annotations[MODEL_IDENTITY_ANNOTATION_KEY] = {
+        wireModel: normalizedMappedModel,
+        catalogModel: { provider: rule.catalogModel.provider, model: rule.catalogModel.model },
+      };
+    } else if (ctx.annotations) delete ctx.annotations[MODEL_IDENTITY_ANNOTATION_KEY];
 
     logger.debug({ fromModel: currentModel, toModel: normalizedMappedModel, source }, 'Model mapping applied');
   }
@@ -100,20 +106,16 @@ class ModelMappingPluginImpl implements Plugin {
   }
 
   private extractModelFromUrlPath(pathname: string): string | null {
-    const match = pathname.match(/^\/v1(?:beta)?\/models\/([^/:]+)(?::|(?:\/(?:generateContent|streamGenerateContent)))/);
+    const match = pathname.match(/\/models\/([^/]+)(?::|\/)(?:generateContent|streamGenerateContent)$/);
     if (!match) return null;
-    try { return decodeURIComponent(match[1]); } catch { return match[1]; }
+    try { return decodeURIComponent(match[1]); } catch { throw new DataAdmissionError(422, 'model_mapping_invalid_model_url'); }
   }
 
-  private updateModelInUrlPath(url: URL, oldModel: string, newModel: string): void {
-    const encodedNewModel = encodeURIComponent(newModel);
-    const encodedOldModel = encodeURIComponent(oldModel);
-    url.pathname = url.pathname.includes(encodedOldModel)
-      ? url.pathname.replace(encodedOldModel, encodedNewModel)
-      : url.pathname.replace(oldModel, encodedNewModel);
+  private updateModelInUrlPath(url: URL, newModel: string): void {
+    url.pathname = url.pathname.replace(/(\/models\/)[^/]+((?::|\/)(?:generateContent|streamGenerateContent))$/, `$1${encodeURIComponent(newModel)}$2`);
   }
 
-  private resolveMappedModel(currentModel: string): string | undefined {
+  private resolveMappedModel(currentModel: string): ModelMappingRule | undefined {
     const exactMappedModel = this.modelMappingMap.get(currentModel);
     if (exactMappedModel) return exactMappedModel;
 
@@ -132,15 +134,20 @@ class ModelMappingPluginImpl implements Plugin {
       ?? (strippedModel !== currentModel ? this.findLongestPrefixMappedModel(strippedModel) : undefined);
   }
 
-  private findCanonicalSuffixMappedModel(model: string): string | undefined {
-    let candidate: string | undefined;
+  private findCanonicalSuffixMappedModel(model: string): ModelMappingRule | undefined {
+    let candidate: ModelMappingRule | undefined;
     for (const [source, target] of this.modelMappingMap.entries()) {
       const canonicalSource = this.parseCanonicalModelId(source);
       if (!canonicalSource || canonicalSource.model !== model) continue;
       if (candidate === undefined) candidate = target;
-      else if (candidate !== target) return undefined;
+      else if (this.ruleIdentity(candidate) !== this.ruleIdentity(target))
+        throw new DataAdmissionError(422, 'model_mapping_ambiguous');
     }
     return candidate;
+  }
+
+  private ruleIdentity(rule: ModelMappingRule): string {
+    return JSON.stringify([this.normalizeMappedTargetModel(rule.target), rule.catalogModel?.provider ?? null, rule.catalogModel?.model ?? null]);
   }
 
   private stripModelRevisionSuffix(model: string): string {
@@ -148,9 +155,9 @@ class ModelMappingPluginImpl implements Plugin {
     return matched?.[1] || model.trim();
   }
 
-  private findLongestPrefixMappedModel(model: string): string | undefined {
+  private findLongestPrefixMappedModel(model: string): ModelMappingRule | undefined {
     let matchedSource = '';
-    let mappedModel: string | undefined;
+    let mappedModel: ModelMappingRule | undefined;
     for (const [source, target] of this.modelMappingMap.entries()) {
       if (!source || source === model || !model.startsWith(`${source}-`)) continue;
       if (source.length > matchedSource.length) {

@@ -69,6 +69,7 @@ interface Plugin {
 | --- | --- | --- |
 | `onRequestInit` | 并行初始化 | 不改写请求 |
 | `onBeforeRequest` | 串行瀑布 | 返回修改后的 MutableRequestContext |
+| `onValidateOutbound` | 串行瀑布 | 读取最终深冻结的 OutboundValidationContext，发送前校验 |
 | `onInterceptRequest` | 串行 Bail | 返回 InterceptResult 或不拦截 |
 | `onResponse` | 串行瀑布，参数为 Response、ResponseContext | 返回 Response |
 | `onRawResponse` | 原始响应边界 | 返回 RawResponseResult；严格完成／错误契约见类型 |
@@ -81,6 +82,14 @@ interface Plugin {
 网关阶段 Hook（`onGateway*`）、准入与 attempt 观察的全部签名见 Hook 定义。平台装配要求必需网关阶段恰好一个 provider；普通 scoped 插件不应重复注册核心阶段提供者。
 
 URL 可改 pathname、search、hash，不能改 protocol、host 或 port。Headers 在请求上下文中为普通记录，不是 Headers 实例。对冻结 JSON／事件进行转换时创建新对象，不能修改共享视图。
+
+## 内部请求注解
+
+`MutableRequestContext.annotations?: Record<string, PluginConfigValue>` 为插件拥有的内部 JSON 元数据。核心只负责传递、复制和冻结，不解释键或模型语义。dispatch 到最终 route/service、返回新上下文的请求 hook 和上游 hook 均传递注解。
+
+每个故障切换 attempt 从 route/service 基线深复制注解；`OutboundValidationContext.annotations` 是最终注解的深冻结快照，attempt 之间不共享可变对象。修复重试保存当次最终注解，跳过已完成转换后重新校验。辅助请求和每次 WebSocket generation 都从新上下文开始，不继承父请求或上次生成的注解。
+
+注解不从客户端正文或请求头加载，不写入上游请求、历史缓存或持久化数据。业务契约由相应插件的公开 contract 定义，例如[模型目录身份](llm-protocol-adapter.md#最终模型身份校验)。
 
 ## 正文与 SSE
 

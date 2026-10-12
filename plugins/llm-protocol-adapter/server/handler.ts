@@ -1,4 +1,6 @@
 import { logger, protocolSSEOutput, type Plugin, type PluginHooks, DataAdmissionError } from '@jeffusion/bungee-core/plugin';
+import { protocolRequestModel } from '@jeffusion/bungee-llms/plugin-api';
+import { readModelIdentity } from '../contract';
 import type { AdapterSession, LLMProtocol } from '../contract';
 export function adapterError(error: unknown): never {
     const e = error as {
@@ -17,6 +19,7 @@ export function responseHandler(input: {
     targetProtocol: LLMProtocol;
     signal?: AbortSignal;
     model: string;
+    validationOnly?: boolean;
     save?: (response: any, context: any) => Promise<void>;
     log?: (data: unknown) => void;
 }): Plugin {
@@ -32,7 +35,7 @@ export function responseHandler(input: {
             hooks.onValidateOutbound.tapPromise('llm-adapter.target', async (outbound) => {
                 check();
                 try {
-                    const result = input.session.validateAttempt({ model: outbound.model ?? input.model, protocol: input.targetProtocol, body: outbound.body, url: outbound.url });
+                    const result = input.session.validateAttempt({ model: protocolRequestModel(input.targetProtocol, outbound.body, outbound.url), modelIdentity: readModelIdentity(outbound.annotations), protocol: input.targetProtocol, body: outbound.body, url: outbound.url });
                     logger.info({ requestId: outbound.requestId, attemptId: outbound.attemptId, ...result }, 'llm_adapter_target_validated');
                     input.log?.(result);
                 }
@@ -41,6 +44,7 @@ export function responseHandler(input: {
                 }
                 return outbound;
             });
+            if (input.validationOnly) return;
             hooks.onResponse.tapPromise('llm-adapter.response', async (response, ctx) => {
                 context = ctx;
                 if (!response.ok || !response.headers.get('content-type')?.includes('json'))

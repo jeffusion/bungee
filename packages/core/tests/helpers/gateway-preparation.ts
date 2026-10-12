@@ -1,3 +1,4 @@
+import {createPluginHooks, type MutableRequestContext} from '../../src/hooks';
 import {randomUUID} from 'node:crypto';
 import {createGatewayHooks,runGatewayRequest} from '../../src/gateway/runtime';
 import {getScopedPluginRegistry,setScopedPluginRegistry} from '../../src/scoped-plugin-registry';
@@ -9,7 +10,7 @@ import type {RequestLoggerDependencies} from '../../src/logger/request-logger';
 import type {DispatchRequestPreparationInput,DispatchRequestPreparationResult} from '../../src/gateway/contracts';
 
 /** A real Gateway/HTTP fixture; admission RPC is deterministic and records all debits and settlements. */
-export function gatewayPreparationFixture(options:{prepare:(input:DispatchRequestPreparationInput)=>Promise<DispatchRequestPreparationResult>;deniedRoute?:string;wsBudget?:boolean;upstream?:(request:Request)=>Promise<Response>|Response;credential?:string;logging?:RequestLoggerDependencies;bodyLogging?:boolean;admissionHost?:import('../../src/data-admission/host').DataAdmissionHost;dispatchModel?:string;onInspection?:(target:import('../../src/plugin-extensions').AdmissionTarget)=>Promise<void>}) {
+export function gatewayPreparationFixture(options:{prepare:(input:DispatchRequestPreparationInput)=>Promise<DispatchRequestPreparationResult>;deniedRoute?:string;wsBudget?:boolean;upstream?:(request:Request)=>Promise<Response>|Response;credential?:string;logging?:RequestLoggerDependencies;bodyLogging?:boolean;admissionHost?:import('../../src/data-admission/host').DataAdmissionHost;dispatchModel?:string;onAnnotations?:(context:MutableRequestContext)=>void;onInspection?:(target:import('../../src/plugin-extensions').AdmissionTarget)=>Promise<void>}) {
   const previous=getScopedPluginRegistry();const hooks=createGatewayHooks();
   const calls:{path:string;body:any}[]=[];const operations:{operation:string;target:any}[]=[];
   const budgets:{requestId:string;attemptId:string}[]=[];const settlements:{requestId:string;sent:boolean;outcome:string}[]=[];
@@ -31,8 +32,14 @@ export function gatewayPreparationFixture(options:{prepare:(input:DispatchReques
     if(payload.routeId===options.deniedRoute)throw new DataAdmissionError(403,'scope_denied');
     return {policyVersion:1,requirements:options.wsBudget?{fixture:{request:'json-read'}}:{}};
   }if(operation==='authorize')return {policyVersion:1};return {version:1,principal,snapshots:{fixture:{}}};}});
+  const annotationHooks=createPluginHooks();
+  annotationHooks.onBeforeRequest.tap('fixture.annotations',context=>{options.onAnnotations?.(context);return context;});
+  const emptyHooks=createPluginHooks();
+  const phase=(phaseHooks:ReturnType<typeof createPluginHooks>)=>({handlers:[],hooks:phaseHooks,hasStreamCallbacks:false,hasResponseCallbacks:false,hasRawResponseCallbacks:false,hasInterceptCallbacks:false,metadata:{createdAt:0,pluginCount:0,pluginNames:[],scope:'fixture'}});
+  const annotationPhases={routePhase:phase(annotationHooks),servicePhase:null,upstreamPhase:phase(emptyHooks),globalPrecompiled:null,routePrecompiled:null,
+    inbound:{onResponse:async(response:Response)=>response,onStreamChunk:async(chunk:any)=>[chunk],onFlushStream:async(chunks:any[])=>chunks,onError:async()=>{}}};
   const registry:any={getGatewayHooks:()=>hooks,getRoutePrecompiledHooks:()=>({hooks:{onDispatchRequest:{hasCallbacks:()=>true}}}),
-    getDeclaredDispatchTargets:()=>[{type:'route',id:'final'},{type:'route',id:'aux'}],getRoutePluginOwners:()=>[],getPrecompiledHooks:()=>null,
+    getDeclaredDispatchTargets:()=>[{type:'route',id:'final'},{type:'route',id:'aux'}],getRoutePluginOwners:()=>[],getPrecompiledHooks:()=>options.onAnnotations?annotationPhases:null,
     getGlobalAdmissionHandlers:()=>[{pluginName:'fixture',resolveAdmissionModel:({body}:any)=>body?.model??null,prepareAdmissionAttempt:async({target}:any)=>{
       budgets.push({requestId:target.requestId,attemptId:target.attemptId});return {onResult:async(result:any)=>{settlements.push({...result,requestId:target.requestId});}};
     }}],invokeAdmissionRpc:async()=>undefined,runWithRequestLeases:(_leases:any,run:any)=>run(),dispatchRequest:async(_route:any,input:any)=>{

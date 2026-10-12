@@ -176,8 +176,11 @@
           return typeof mapping.source === 'string' && typeof mapping.target === 'string';
         })
         .map((item) => {
-          const mapping = item as { source: string; target: string };
-          return `${mapping.source} → ${mapping.target}`;
+          const mapping = item as { source: string; target: string; catalogModel?: { provider: string; model: string } };
+          const identity = mapping.catalogModel;
+          const catalog = identity && typeof identity.provider === 'string' && typeof identity.model === 'string'
+            ? ` · ${translate('modelMapping.catalogLabel')}: ${identity.provider}/${identity.model}` : '';
+          return `${mapping.source} → ${mapping.target}${catalog}`;
         })
         .join(', ');
     }

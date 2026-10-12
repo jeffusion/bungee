@@ -109,7 +109,7 @@ export interface GatewayRetryInput {
   readonly recordAttempt?: (result:ProxyRequestResult) => Promise<void>;
 }
 /** Final outbound representation: a repair attempt skips already completed request conversions. */
-export interface GatewayRequestOverride {readonly url:string;readonly headers:Readonly<Record<string,string>>;readonly body:unknown}
+export interface GatewayRequestOverride {readonly url:string;readonly headers:Readonly<Record<string,string>>;readonly body:unknown;readonly annotations?:Readonly<Record<string,import('../plugin.types').PluginConfigValue>>}
 export type GatewayLogInput =
   | { readonly phase: 'create'; readonly request: Request; readonly options?: ConstructorParameters<typeof RequestLogger>[1]; readonly dependencies?: RequestLoggerDependencies }
   | { readonly phase: 'complete' | 'root'; readonly logger: RequestLogger; readonly status: number; readonly options: RequestLogCompletionOptions };

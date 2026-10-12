@@ -14,6 +14,17 @@
 /** Provider plugin name. Must match the manifest. */
 export const MODELS_DEV_PLUGIN_NAME = 'models-dev';
 
+/** Explicit catalog identity, independent from the provider's wire model name. */
+export interface CatalogModelReference {
+  readonly provider: string;
+  readonly model: string;
+}
+export interface ModelIdentityDeclaration {
+  readonly wireModel: string;
+  readonly catalogModel: CatalogModelReference;
+}
+export const MODEL_IDENTITY_ANNOTATION_KEY = 'models-dev.model-identity';
+
 /** The single upstream source; models-dev is the only component allowed to fetch it. */
 export const MODELS_DEV_SOURCE_URL = 'https://models.dev/api.json';
 

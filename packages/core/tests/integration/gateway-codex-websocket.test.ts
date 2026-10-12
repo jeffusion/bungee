@@ -8,7 +8,7 @@ const path=new URL('../fixtures/codex-dispatch-plugin.ts',import.meta.url).pathn
 const previous=getScopedPluginRegistry();afterEach(()=>setScopedPluginRegistry(previous));
 async function waitUntil(predicate:()=>boolean){for(let i=0;i<200;i++){if(predicate())return;await Bun.sleep(10);}throw new Error('Timeout');}
 async function setup(endpoints:any[], bindModels=true){
-  const config:any={logging:{enabled:false},routes:[{id:'e',path:'/codex',websocket:{enabled:true},path_rewrite:{'^/codex':''},plugins:[{name:'codex-router',path,options:{models:!bindModels?[]:endpoints.map((endpoint,index)=>({source:`m${index}`,provider:endpoint.provider??'p',model:endpoint.model ?? `m${index}`,target:{type:'route',id:`t${index}`,protocol:endpoint.protocol}}))}}],endpoints:[{target:endpoints[0].target}]},...endpoints.map((endpoint,index)=>({id:`t${index}`,path:`/target${index}`,path_rewrite:{[`^/target${index}`]:''},websocket:{enabled:endpoint.ws===true},endpoints:[{id:`u${index}`,target:endpoint.target}]}))]};
+  const config:any={logging:{enabled:false},routes:[{id:'e',path:'/codex',websocket:{enabled:true},path_rewrite:{'^/codex':''},plugins:[{name:'codex-router',path,options:{models:!bindModels?[]:endpoints.map((endpoint,index)=>({source:`m${index}`,provider:endpoint.provider??'p',model:endpoint.model ?? `m${index}`,target:{type:'route',id:`t${index}`,protocol:endpoint.protocol}}))}}],endpoints:[{target:endpoints[0].target}]},...endpoints.map((endpoint,index)=>({id:`t${index}`,path:`/target${index}`,plugins:endpoint.plugins??[],path_rewrite:{[`^/target${index}`]:''},websocket:{enabled:endpoint.ws===true},endpoints:[{id:`u${index}`,target:endpoint.target}]}))]};
   const registry=new ScopedPluginRegistry(import.meta.dir);expect((await registry.initializeFromConfig(config)).failed).toBe(0);setScopedPluginRegistry(registry);
   const bridge=createWebSocketBridge({closeTimeoutMs:200});const completions=new Set<Promise<void>>();
   const server=Bun.serve({hostname:'127.0.0.1',port:0,websocket:bridge.websocket,async fetch(request,server){if(!isWebSocketUpgradeRequest(request))return new Response('no');const result=await runGatewayWebSocket({request,nativeRequest:request,server,config,bridge,servingRevision:1,retain(promise){completions.add(promise);void promise.finally(()=>completions.delete(promise));}});return result.response;}});
@@ -94,4 +94,16 @@ for (const bound of [false,true]) test(`native WS reference continuation retains
     expect(calls[0].input[0]).toEqual(carrier);expect(calls[1].input[0]).toEqual(carrier);
     expect(calls[1].input.map((item:any)=>item.type??item.role)).toEqual(['additional_tools','user','message','user']);
   }finally{await env.close();upstream.stop(true);}
+});
+
+test('each WS generation starts with an independent model identity declaration',async()=>{
+ const bodies:any[]=[];const upstream=Bun.serve({hostname:'127.0.0.1',port:0,async fetch(request){bodies.push(await request.json());return sse(chat('answer'));}});
+ const target=`http://127.0.0.1:${upstream.port}`;
+ const identity={wireModel:'GLM-5.3',catalogModel:{provider:'zai',model:'glm-5.3'}};
+ const env=await setup([{protocol:'chat_completions',provider:'zai',model:'glm-5.3',target,plugins:[{name:'codex-router',path,options:{models:[],outboundMutation:{model:'GLM-5.3',identity}}}]},
+   {protocol:'chat_completions',provider:'zai',model:'glm-5.3',target}]);
+ try{
+   for(const model of ['m0','m1']){const start=env.events.length;env.client.send(JSON.stringify({type:'response.create',model,input:'hello',reasoning:{effort:'high'}}));expect((await env.terminal(start)).at(-1).type).toBe('response.completed');await Bun.sleep(20);}
+   expect(bodies.map(body=>body.model)).toEqual(['GLM-5.3','glm-5.3']);expect(bodies.every(body=>!('annotations' in body))).toBe(true);
+ }finally{await env.close();upstream.stop(true);}
 });

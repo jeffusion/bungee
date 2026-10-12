@@ -1,6 +1,6 @@
 <script lang="ts">
   // Shared editable single-select renderer for BSelect; adapters own remote I/O.
-  import { onMount, tick, untrack } from 'svelte';
+  import { onMount, tick, untrack, type Snippet } from 'svelte';
   import { on } from 'svelte/events';
   import { autoUpdate, computePosition, offset, flip, shift } from '@floating-ui/dom';
   import ChevronDown from 'lucide-svelte/icons/chevron-down';
@@ -11,11 +11,12 @@
 
   let { id, value, options, remoteSearch, labels, disabled = false, loading = false,
     creatable = false, allowClear = false, label, placeholder, size = 'middle', status,
-    maxLength = 512, rootTestId = 'search-select', searchTestId, onchange }: {
+    maxLength = 512, rootTestId = 'search-select', searchTestId, searchHeader, onchange }: {
     id?: string; value: string; options: SelectSearchOption[]; remoteSearch?: SelectRemoteSearch;
     labels: SelectSearchLabels; disabled?: boolean; loading?: boolean; creatable?: boolean;
     allowClear?: boolean; label?: string; placeholder: string; size?: 'small' | 'middle' | 'large';
     status?: 'error' | 'warning'; maxLength?: number; rootTestId?: string; searchTestId?: string;
+    searchHeader?: Snippet;
     onchange: (value: string) => void;
   } = $props();
   const componentId = $props.id(), listId = `${componentId}-list`, popupId = `${componentId}-popup`;
@@ -161,6 +162,9 @@
       <div id={popupId} bind:this={popup} role="presentation" use:listen={{ keydown: escape }}
         class="fixed z-[200] max-w-[calc(100vw-2rem)] border border-carbon-600 bg-carbon-800 shadow-industrial"
         style:width={`${width}px`} style:left={`${x}px`} style:top={`${y}px`} style:visibility={positioned ? 'visible' : 'hidden'}>
+        {#if searchHeader}
+          <div class="border-b border-carbon-600 px-3 py-3">{@render searchHeader()}</div>
+        {/if}
         <div class="max-h-52 overflow-y-auto p-1" tabindex="-1" bind:this={viewport} data-testid="search-select-viewport" use:listen={{ scroll }}>
           <div id={listId} role="listbox" aria-label={label} aria-busy={busy}>
             {#each visible as option, index (option.value)}
