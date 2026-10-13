@@ -220,9 +220,10 @@ export function probeExistingProcessLifetimeGuard(value: unknown): ProcessLifeti
   let fd: number | undefined;
   try {
     if (facts.host_boot_id !== processLifetimeHostBootId()) return { kind: 'unknown', reason: 'domain' };
-    if (!trustedFilesystem(facts.path)) return { kind: 'unknown', reason: 'filesystem' };
     fd = openSync(facts.path, constants.O_RDWR | constants.O_NOFOLLOW);
     closeOnExec(fd);
+    // Classify a missing file before Darwin's filesystem probe returns false.
+    if (!trustedFilesystem(facts.path)) return { kind: 'unknown', reason: 'filesystem' };
     if (!descriptorMatches(fd, facts)) return { kind: 'unknown', reason: 'replaced' };
     const stored = readFacts(fd);
     if (canonicalJson(stored) !== canonicalJson(facts)) return { kind: 'unknown', reason: 'replaced' };
