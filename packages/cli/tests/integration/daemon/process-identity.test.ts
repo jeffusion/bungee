@@ -105,6 +105,33 @@ describe('CLI process identity parsing', () => {
     })).toBe('none');
   });
 
+  if (process.platform === 'linux' || process.platform === 'darwin') {
+    test('Unix marker queries inspect a process list larger than a single-process buffer', async () => {
+      const nonce = randomUUID();
+      const child = Bun.spawn([process.execPath, '-e', 'setInterval(() => {}, 3_600_000)', '--',
+        'x'.repeat(80 * 1024), `--bungee-daemon-boot=${nonce}`], { stdout: 'ignore', stderr: 'ignore' });
+      try {
+        expect(await probeProcessAlive(child.pid)).toBe('alive');
+        // Exercise the Unix ps path on Linux as well as on Darwin.
+        const options = { platform: 'darwin' as const };
+        expect(await findExactDaemonProcessDetailed(nonce, undefined, options)).toEqual({ status: 'found', reason: null });
+        expect(await findExactDaemonProcessDetailed(randomUUID(), undefined, options)).toEqual({ status: 'none', reason: null });
+      } finally {
+        child.kill();
+        await child.exited;
+      }
+    });
+  }
+
+  test('Unix marker query failures preserve bounded diagnostic reasons', async () => {
+    for (const [code, reason] of [['ERR_CHILD_PROCESS_STDIO_MAXBUFFER', 'incomplete'], ['ENOENT', 'spawn_error'],
+      ['ETIMEDOUT', 'query_timeout'], ['EACCES', 'access_denied'], ['1', 'query_exit']] as const) {
+      expect(await findExactDaemonProcessDetailed(BOOT, undefined, {
+        platform: 'darwin', execFile: async () => { throw Object.assign(new Error('query failed'), { code }); },
+      })).toEqual({ status: 'unknown', reason });
+    }
+  });
+
   test('filters Windows marker candidates by the expected executable name', async () => {
     const expected = { executable: 'C:\\Program Files\\bun.exe', entrypoint: null } as const;
     const unrelated = { Name: 'System.exe', ExecutablePath: 'C:\\Windows\\System32\\System.exe', CommandLine: null };

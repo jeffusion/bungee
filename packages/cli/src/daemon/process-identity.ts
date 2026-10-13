@@ -9,6 +9,8 @@ const execFile = promisify(nodeExecFile);
 const PROBE_TIMEOUT_MS = 5_000;
 const EXEC_OPTIONS = { timeout: PROBE_TIMEOUT_MS, killSignal: 'SIGKILL' as const, maxBuffer: 64 * 1024, windowsHide: true };
 const PS_OPTIONS = { ...EXEC_OPTIONS, env: { ...process.env, LC_ALL: 'C', LANG: 'C' } };
+// A host-wide listing needs more bounded output space than a single-PID probe.
+const PROCESS_LIST_EXEC_OPTIONS = { ...PS_OPTIONS, maxBuffer: 1024 * 1024 };
 const MARKER_PREFIX = '--bungee-daemon-boot=';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const TARGET_PROCESS_MISSING_SENTINEL = '__BUNGEE_TARGET_PROCESS_MISSING__';
@@ -279,6 +281,7 @@ function markerResult(status: MarkerProbe, reason: MarkerProbeReason = null): Ma
 function markerQueryErrorReason(error: unknown): Exclude<MarkerProbeReason, null> {
   const value = error as { readonly code?: unknown; readonly killed?: unknown; readonly signal?: unknown; readonly stderr?: unknown };
   const stderr = typeof value.stderr === 'string' ? value.stderr.toLowerCase() : '';
+  if (value.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return 'incomplete';
   if (value.killed === true || value.code === 'ETIMEDOUT' || value.signal === 'SIGKILL') return 'query_timeout';
   if (value.code === 'EACCES' || value.code === 'EPERM' || value.code === 5 || value.code === '5'
     || stderr.includes('access denied') || stderr.includes('access is denied')) return 'access_denied';
@@ -342,9 +345,9 @@ export async function findExactDaemonProcessDetailed(
       return markerResult(results.includes(true) ? 'found' : 'none');
     }
     if (platform === 'win32') return await windowsMarkerProcess(bootNonce, expected, options);
-    const { stdout } = await (options.execFile ?? execFile)('ps', ['-ww', '-axo', 'command='], EXEC_OPTIONS);
+    const { stdout } = await (options.execFile ?? execFile)('ps', ['-ww', '-axo', 'command='], PROCESS_LIST_EXEC_OPTIONS);
     return markerResult(stdout.toString().split('\n').some((line: string) => exactBootMarker(parseCommandLine(line.trim(), platform), bootNonce)) ? 'found' : 'none');
-  } catch { return markerResult('unknown'); }
+  } catch (error) { return markerResult('unknown', markerQueryErrorReason(error)); }
 }
 
 export async function findExactDaemonProcess(bootNonce: string, options: ProcessIdentityProbeOptions = {}): Promise<MarkerProbe> {
