@@ -27,7 +27,7 @@ Keys, administrator sessions and plugin ledgers are durable runtime state outsid
 | Read current revision | `GET /api/config` |
 | Replace aggregate | `PUT /api/config` |
 | Poll publication | `GET /api/config/operations/:id` |
-| Retry degraded publication | `POST /api/config/operations/:id/retry` |
+| Retry degraded publication or stopped active cleanup | `POST /api/config/operations/:id/retry` |
 | Export snapshot | `GET /api/config/export` |
 | Import snapshot | `POST /api/config/import` |
 | Runtime workers | `GET /api/config/runtime` |
@@ -40,7 +40,11 @@ If a save response is lost, the editor queries its original operation ID rather 
 
 For a retry, send exactly `{"request_id":"<lowercase UUID>","expected_revision":<positive safe integer>}`. The response is a durable recovery record; active recoveries return `202`, terminal records return `200`, and retrying the same request ID with the same operation and revision is idempotent.
 
+For stopped cleanup of an active `draining` operation, the same endpoint returns `202` with `request_id`, `source_mutation_id`, `target_revision` and `status: "accepted"`. Acceptance is durable and idempotent; it retries the frozen retirement proof without starting another worker attempt or resetting deadlines. Poll runtime facts to observe the resulting cleanup state.
+
 `GET /api/config/runtime` includes authoritative `publication` state: the current operation and recovery records, `retryable`, `serving_complete`, `serving_revision`, and `target_revision`.
+
+The response also includes typed dependency freshness, component recovery budget and retirement cleanup facts. Current serving health is independent of historical terminal publication errors; stale observations are not treated as current health. Physical exit and cleanup success are separate member fields.
 
 ### Aggregate schema
 

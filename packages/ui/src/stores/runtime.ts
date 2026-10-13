@@ -36,12 +36,13 @@ export type PublicationRecoveryState = {
 };
 
 export function unresolvedPublication(publication: ConfigurationPublication | null): boolean {
-  return publication?.operation?.state === 'degraded' && servingStatus(publication, true) !== 'confirmed';
+  return publication?.operation?.state === 'draining' && publication.cleanup?.state === 'stopped'
+    || publication?.operation?.state === 'degraded' && servingStatus(publication, true) !== 'confirmed';
 }
 
 export function publicationInProgress(publication: ConfigurationPublication | null): boolean {
   const state = publication?.operation?.state;
-  return state === 'committed' || state === 'publishing' || state === 'draining';
+  return publication?.cleanup?.active === true || state === 'committed' || state === 'publishing' || state === 'draining';
 }
 
 export function publicationRetryKey(operationId: string, revision: number): string {
@@ -55,6 +56,7 @@ export function createPublicationRecoveryStore({ staleAfterMs = 8000, readTimeou
   let stopped = true;
   let paused = false;
   let readHeaders: Headers | undefined;
+  let cleanupAccepted = false;
   let timer: ReturnType<typeof setTimeout>;
   let expiry: ReturnType<typeof setTimeout>;
   let controller: AbortController | undefined;
@@ -87,6 +89,7 @@ export function createPublicationRecoveryStore({ staleAfterMs = 8000, readTimeou
       const { publication } = runtime;
       if (stopped || current.signal.aborted) return;
       const nextPublication = publication ?? null;
+      cleanupAccepted = false;
       const previousPublication = state.publication;
       const identityChanged = previousPublication?.operation?.operation_id !== nextPublication?.operation?.operation_id
         || previousPublication?.target_revision !== nextPublication?.target_revision;
@@ -110,8 +113,9 @@ export function createPublicationRecoveryStore({ staleAfterMs = 8000, readTimeou
   async function retry() {
     const publication = state.publication;
     const recovery = state.accepted ?? publication?.recovery;
-    if (stopped || !state.fresh || state.pending || state.accepted !== null || !publication?.operation || !unresolvedPublication(publication)
-      || !publication.retryable || recovery?.state !== 'stopped'
+    const cleanupRetry = publication?.operation?.state==='draining' && publication.cleanup?.state==='stopped';
+    if (stopped || !state.fresh || state.pending || cleanupAccepted || state.accepted !== null || !publication?.operation || !unresolvedPublication(publication)
+      || !publication.retryable || (!cleanupRetry && recovery?.state !== 'stopped')
       || publication.operation.error_code === 'old_worker_drain_failed') return;
     const { operation_id } = publication.operation;
     const revision = publication.target_revision;
@@ -131,7 +135,8 @@ export function createPublicationRecoveryStore({ staleAfterMs = 8000, readTimeou
       const accepted = await retryConfigurationPublication(operation_id, requestId, revision);
       try { sessionStorage.removeItem(key); } catch { /* The ACK remains useful without cleanup. */ }
       if (state.publication?.operation?.operation_id === operation_id && state.publication.target_revision === revision) {
-        update({ accepted });
+        if('status' in accepted) cleanupAccepted = true;
+        else update({ accepted });
       }
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {

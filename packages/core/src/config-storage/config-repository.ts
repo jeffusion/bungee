@@ -1,3 +1,5 @@
+import * as retirementStore from './retirement-store';
+import * as runtimeRecoveryBudget from './runtime-recovery-budget';
 import { Database } from 'bun:sqlite';
 import type { Sha256Digest } from '@jeffusion/bungee-types';
 import { mkdirSync } from 'node:fs';
@@ -89,6 +91,8 @@ function runRepositoryAction<Result>(action: () => Result): Result {
   }
 }
 
+type TailParameters<F extends (...args: any[]) => unknown> = Parameters<F> extends [unknown, ...infer Rest] ? Rest : never;
+
 export class ConfigRepository {
   private readonly schemaObjects: string;
   private constructor(
@@ -112,6 +116,7 @@ export class ConfigRepository {
       const repository = new ConfigRepository(db, options, freezeSnapshot(readRepositorySnapshot(db)));
       repository.getSnapshot();
       repository.getSupervisionState();
+      repository.getRuntimeRecoveryBudget();
       return repository;
     } catch (error) {
       db?.close(true);
@@ -303,6 +308,8 @@ export class ConfigRepository {
     updatedAt: number,
   ): ConfigurationOperationWorker {
     return runRepositoryAction(() => this.publicationTransaction(mutationId, () => {
+      const current = readOperationWorkers(this.db, mutationId).find(target => target.worker_slot === workerSlot);
+      if (current?.attempt_no === previousAttemptNo) retirementStore.assertPublicationServingAttemptsExited(this.db, mutationId);
       const worker = beginOperationWorkerAttempt(
         this.db, mutationId, workerSlot, previousAttemptNo, reason, updatedAt,
       );
@@ -316,6 +323,9 @@ export class ConfigRepository {
     updatedAt: number,
   ): ConfigurationOperation {
     return runRepositoryAction(() => this.publicationTransaction(mutationId, () => {
+      if (readOperation(this.db, mutationId)?.drain_recovery_generation === previousGeneration) {
+        retirementStore.assertPublicationServingAttemptsExited(this.db, mutationId);
+      }
       const operation = beginOperationDrainingRecovery(this.db, mutationId, previousGeneration, updatedAt);
       return operation;
     }));
@@ -375,10 +385,83 @@ export class ConfigRepository {
     }));
   }
 
+  getPublicationServingSet(...args: TailParameters<typeof retirementStore.readPublicationServingSet>): ReturnType<typeof retirementStore.readPublicationServingSet> {
+    return runRepositoryAction(() => withConsistentRead(this.db, () => retirementStore.readPublicationServingSet(this.db, ...args)));
+  }
+
+  freezePublicationServingSet(...args: TailParameters<typeof retirementStore.freezePublicationServingSet>): ReturnType<typeof retirementStore.freezePublicationServingSet> {
+    return runRepositoryAction(() => this.mutationTransaction(() => retirementStore.freezePublicationServingSet(this.db, ...args)));
+  }
+
+  confirmPublicationServingMemberExit(...args: TailParameters<typeof retirementStore.confirmPublicationServingMemberExit>): ReturnType<typeof retirementStore.confirmPublicationServingMemberExit> {
+    return runRepositoryAction(() => this.mutationTransaction(() => retirementStore.confirmPublicationServingMemberExit(this.db, ...args)));
+  }
+
+  getRetirementDescriptorCleanupState(workerInstanceId: string): 'absent' | 'pending' | 'terminal' {
+    return runRepositoryAction(() => withConsistentRead(this.db, () => retirementStore.readRetirementDescriptorCleanupState(this.db, workerInstanceId)));
+  }
+
+  getRetiredWorkerInstanceIds(): readonly string[] {
+    return runRepositoryAction(() => withConsistentRead(this.db, () => retirementStore.readRetiredWorkerInstanceIds(this.db)));
+  }
+
+  getPublicationRetirement(...args: TailParameters<typeof retirementStore.readPublicationRetirement>): ReturnType<typeof retirementStore.readPublicationRetirement> {
+    return runRepositoryAction(() => withConsistentRead(this.db, () => retirementStore.readPublicationRetirement(this.db, ...args)));
+  }
+
+  freezePublicationRetirement(...args: TailParameters<typeof retirementStore.freezePublicationRetirement>): ReturnType<typeof retirementStore.freezePublicationRetirement> {
+    return runRepositoryAction(() => this.publicationTransaction(args[0], () => retirementStore.freezePublicationRetirement(this.db, ...args)));
+  }
+
+  recordPublicationRetirementEvidence(...args: TailParameters<typeof retirementStore.recordPublicationRetirementEvidence>): ReturnType<typeof retirementStore.recordPublicationRetirementEvidence> {
+    return runRepositoryAction(() => this.mutationTransaction(() => retirementStore.recordPublicationRetirementEvidence(this.db, ...args)));
+  }
+
+  stopPublicationRetirement(...args: TailParameters<typeof retirementStore.stopPublicationRetirement>): ReturnType<typeof retirementStore.stopPublicationRetirement> {
+    return runRepositoryAction(() => this.mutationTransaction(() => retirementStore.stopPublicationRetirement(this.db, ...args)));
+  }
+
+  retryPublicationRetirement(...args: TailParameters<typeof retirementStore.retryPublicationRetirement>): ReturnType<typeof retirementStore.retryPublicationRetirement> {
+    return runRepositoryAction(() => this.mutationTransaction(() => retirementStore.retryPublicationRetirement(this.db, ...args)));
+  }
+  freezePublicationRetirementDrainStart(...args:TailParameters<typeof retirementStore.freezePublicationRetirementDrainStart>):ReturnType<typeof retirementStore.freezePublicationRetirementDrainStart> {
+    return runRepositoryAction(()=>this.mutationTransaction(()=>retirementStore.freezePublicationRetirementDrainStart(this.db,...args)));
+  }
+  getPublicationRetirementRetry(...args: TailParameters<typeof retirementStore.readPublicationRetirementRetry>): ReturnType<typeof retirementStore.readPublicationRetirementRetry> {
+    return runRepositoryAction(()=>withConsistentRead(this.db,()=>retirementStore.readPublicationRetirementRetry(this.db,...args)));
+  }
+  requestPublicationRetirementRetry(...args: TailParameters<typeof retirementStore.requestPublicationRetirementRetry>): ReturnType<typeof retirementStore.requestPublicationRetirementRetry> {
+    return runRepositoryAction(()=>this.mutationTransaction(()=>{
+      if(this.snapshot.revision!==args[2]) throw new ConfigRepositoryError('cas_conflict','retirement retry revision changed');
+      return retirementStore.requestPublicationRetirementRetry(this.db,...args);
+    }));
+  }
+
+  markPublicationRetirementReleased(...args: TailParameters<typeof retirementStore.markPublicationRetirementReleased>): ReturnType<typeof retirementStore.markPublicationRetirementReleased> {
+    return runRepositoryAction(() => this.mutationTransaction(() => retirementStore.markPublicationRetirementReleased(this.db, ...args)));
+  }
+
+  getRuntimeRecoveryBudget(...args: TailParameters<typeof runtimeRecoveryBudget.readRuntimeRecoveryBudget>): ReturnType<typeof runtimeRecoveryBudget.readRuntimeRecoveryBudget> {
+    return runRepositoryAction(() => withConsistentRead(this.db, () => runtimeRecoveryBudget.readRuntimeRecoveryBudget(this.db, ...args)));
+  }
+
+  consumeRuntimeRecoveryRestartTicket(...args: TailParameters<typeof runtimeRecoveryBudget.consumeRuntimeRecoveryRestartTicket>): ReturnType<typeof runtimeRecoveryBudget.consumeRuntimeRecoveryRestartTicket> {
+    return runRepositoryAction(() => this.mutationTransaction(() => runtimeRecoveryBudget.consumeRuntimeRecoveryRestartTicket(this.db, ...args)));
+  }
+
+  getRuntimeRecoveryStartupGate(...args: TailParameters<typeof runtimeRecoveryBudget.readRuntimeRecoveryStartupGate>): ReturnType<typeof runtimeRecoveryBudget.readRuntimeRecoveryStartupGate> {
+    return runRepositoryAction(() => withConsistentRead(this.db, () => runtimeRecoveryBudget.readRuntimeRecoveryStartupGate(this.db, ...args)));
+  }
+
+  observeRuntimeRecoveryHealth(...args: TailParameters<typeof runtimeRecoveryBudget.observeRuntimeRecoveryHealth>): ReturnType<typeof runtimeRecoveryBudget.observeRuntimeRecoveryHealth> {
+    return runRepositoryAction(() => this.mutationTransaction(() => runtimeRecoveryBudget.observeRuntimeRecoveryHealth(this.db, ...args)));
+  }
+
   /** Startup/explicit verification may audit the complete repository. */
   verify(): void {
     verifyRepositoryIntegrity(this.db);
     readRepositorySnapshot(this.db);
+    this.getRuntimeRecoveryBudget();
   }
 
   /** Internal execution endpoint. The client consumes the lock capability before IPC. */

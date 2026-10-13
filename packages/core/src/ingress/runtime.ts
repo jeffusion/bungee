@@ -1,3 +1,4 @@
+import { holdInheritedProcessLifetimeGuard, writeProcessLifetimeHeldAck } from '../supervision/process-lifetime-guard';
 import { DataAdmissionHost } from '../data-admission/host';
 import { createDataAdmissionRpcServer, DATA_ADMISSION_RPC_PATH } from '../data-admission/rpc';
 import { resolve } from 'node:path';
@@ -52,6 +53,9 @@ export async function startIngressProcess(options: IngressRuntimeOptions): Promi
   port(options.publicPort, 'publicPort');
   port(options.supervisionPort, 'supervisionPort');
   if (options.publicHost.length === 0 || options.instanceLockPath.length === 0) throw new Error('ingress paths are invalid');
+  const lifetimeGuard = holdInheritedProcessLifetimeGuard(process.env, options.credential.identity.process_instance_id);
+  if (process.env.BUNGEE_ROLE === 'ingress' && lifetimeGuard === null && process.platform !== 'win32') throw new Error('ingress lifetime guard is required; offline conversion is required for older launch formats');
+  if (lifetimeGuard !== null) writeProcessLifetimeHeldAck(`${options.instanceLockPath}.held`, lifetimeGuard, options.credential.identity.boot_nonce, options.credential.process_key);
   const lock = await (options.acquireLock ?? acquireInstanceLock)(options.instanceLockPath);
   activeLocks.add(lock);
   let control: ReturnType<typeof Bun.serve> | null = null;

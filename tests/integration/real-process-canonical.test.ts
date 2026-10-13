@@ -1688,7 +1688,13 @@ describe.serial('A core lifecycle', () => {
     expect(await adoptedManaged.text()).toBe('A');
     expect(await readFile(state.fixture.controlAuditPath, 'utf8').catch(() => '')).toContain(`rpc:${state.second?.pid}`);
     state.competitor = spawnCore(state.fixture, state.lease, 1);
-    expect((await childExit(state.competitor)).code).not.toBe(0);
+    const competitor=state.competitor;
+    await waitUntil(async()=>childOutput.get(competitor)?.join('').includes('instance lock is held')===true,
+      'concurrent owner was not rejected',{signal:state.polling.signal});
+    expect(competitor.exitCode).toBeNull();
+    expect(durableController(state.fixture.dbPath)?.controllerId).not.toBe(state.firstController.controllerId);
+    competitor.kill('SIGTERM');
+    expect((await childExit(competitor)).code).toBe(0);
     expect((await publish(state.lease.base, state.upstream.port!, randomUUID(), 1)).status).toBe(409);
     expect(durableRevision(state.fixture.dbPath)).toBe(2);
     const staleIngress = await ingressClientForStaleAuthorityTest(state.lease, state.fixture.dbPath);

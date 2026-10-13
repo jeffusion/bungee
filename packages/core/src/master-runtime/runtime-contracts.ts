@@ -118,6 +118,8 @@ export type MasterRuntimeOptions = {
     dispose(): Promise<void>;
   };
   readonly onFatal?: (error: Error) => void | Promise<void>;
+  /** The instance owner fences and budgets a fatal transition before cleanup starts. */
+  readonly onFailure?: (error: Error) => void;
 };
 
 export type MasterRuntimeErrorCode =

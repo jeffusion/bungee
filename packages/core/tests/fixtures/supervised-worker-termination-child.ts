@@ -1,3 +1,4 @@
+import { holdInheritedProcessLifetimeGuard, writeProcessLifetimeHeldAck } from '../../src/supervision/process-lifetime-guard';
 import { createConfigWorkerRuntimeController } from '../../src/config-publication/worker-runtime';
 import type { ConfigProcessIdentity } from '../../src/config-publication/types';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed } from '../../src/supervision/protocol';
@@ -14,6 +15,8 @@ const authority = {
 const rootKey = Uint8Array.from(Buffer.from(seedText, 'base64'));
 const seed = deriveWorkerSupervisionSeed(rootKey, identity.master_generation, identity.worker_instance_id, identity.worker_slot);
 const credential = deriveWorkerSupervisionCredential(seed, bootNonce);
+const lifetimeGuard = holdInheritedProcessLifetimeGuard(process.env, identity.worker_instance_id);
+if (lifetimeGuard !== null) writeProcessLifetimeHeldAck(`${process.env.BUNGEE_WORKER_DESCRIPTOR_PATH}.held`, lifetimeGuard, bootNonce, credential.process_key);
 const kernelBootId = await readKernelDeadlineClockId();
 
 function event(name: string, extra: Record<string, unknown> = {}): void {
@@ -106,6 +109,7 @@ async function shutdown(): Promise<void> {
 
 supervision = new WorkerSupervisionHttpServer({
   credential,
+  lifetimeGuard: lifetimeGuard ?? undefined,
   identity,
   runtime,
   masterControlPort: 3011,

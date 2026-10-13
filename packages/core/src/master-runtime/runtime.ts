@@ -113,6 +113,10 @@ export class MasterRuntime {
       this.phase = 'started';
       this.supervisor.started();
     } catch (error) {
+      if (this.options.onFailure !== undefined) {
+        this.options.onFailure(error instanceof Error ? error : new Error(String(error)));
+        throw error;
+      }
       this.phase = 'stopping';
       this.options.publicListener.stopAccepting?.();
       const cleanupErrors = await cleanupAfterStartupFailure(
@@ -157,6 +161,11 @@ export class MasterRuntime {
   }
 
   private asynchronousFailed(error: MasterRuntimeError): void {
+    if (this.options.onFailure !== undefined && (this.phase === 'starting' || this.phase === 'started')) {
+      if (this.phase === 'starting') this.startupSupervisionFailure = error;
+      this.options.onFailure(error);
+      return;
+    }
     if (this.phase === 'starting') {
       this.options.stopAcceptingRecovery?.();
       this.startupSupervisionFailure = error;

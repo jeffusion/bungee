@@ -248,4 +248,48 @@ export class AsyncConfigRepository {
   verify(...args: Parameters<ConfigRepository['verify']>): Promise<ReturnType<ConfigRepository['verify']>> {
     return this.rpc('verify', ...args);
   }
+  getPublicationServingSet(...args: Parameters<ConfigRepository['getPublicationServingSet']>): Promise<ReturnType<ConfigRepository['getPublicationServingSet']>> { return this.rpc('getPublicationServingSet', ...args); }
+  freezePublicationServingSet(...args: Parameters<ConfigRepository['freezePublicationServingSet']>): Promise<ReturnType<ConfigRepository['freezePublicationServingSet']>> { return this.rpc('freezePublicationServingSet', ...args); }
+  confirmPublicationServingMemberExit(...args: Parameters<ConfigRepository['confirmPublicationServingMemberExit']>): Promise<ReturnType<ConfigRepository['confirmPublicationServingMemberExit']>> { return this.rpc('confirmPublicationServingMemberExit', ...args); }
+  getRetirementDescriptorCleanupState(workerInstanceId: string): Promise<'absent' | 'pending' | 'terminal'> { return this.rpc('getRetirementDescriptorCleanupState', workerInstanceId); }
+  getRetiredWorkerInstanceIds(): Promise<readonly string[]> { return this.rpc('getRetiredWorkerInstanceIds'); }
+  getPublicationRetirement(...args: Parameters<ConfigRepository['getPublicationRetirement']>): Promise<ReturnType<ConfigRepository['getPublicationRetirement']>> {
+    return this.rpc('getPublicationRetirement', ...args);
+  }
+  freezePublicationRetirement(...args: Parameters<ConfigRepository['freezePublicationRetirement']>): Promise<ReturnType<ConfigRepository['freezePublicationRetirement']>> {
+    return this.rpc('freezePublicationRetirement', ...args);
+  }
+  recordPublicationRetirementEvidence(...args: Parameters<ConfigRepository['recordPublicationRetirementEvidence']>): Promise<ReturnType<ConfigRepository['recordPublicationRetirementEvidence']>> {
+    return this.rpc('recordPublicationRetirementEvidence', ...args);
+  }
+  stopPublicationRetirement(...args: Parameters<ConfigRepository['stopPublicationRetirement']>): Promise<ReturnType<ConfigRepository['stopPublicationRetirement']>> {
+    return this.rpc('stopPublicationRetirement', ...args);
+  }
+  retryPublicationRetirement(...args: Parameters<ConfigRepository['retryPublicationRetirement']>): Promise<ReturnType<ConfigRepository['retryPublicationRetirement']>> {
+    return this.rpc('retryPublicationRetirement', ...args);
+  }
+  freezePublicationRetirementDrainStart(...args:Parameters<ConfigRepository['freezePublicationRetirementDrainStart']>):Promise<ReturnType<ConfigRepository['freezePublicationRetirementDrainStart']>> {
+    return this.rpc('freezePublicationRetirementDrainStart',...args);
+  }
+  getPublicationRetirementRetry(...args:Parameters<ConfigRepository['getPublicationRetirementRetry']>):Promise<ReturnType<ConfigRepository['getPublicationRetirementRetry']>> {
+    return this.rpc('getPublicationRetirementRetry',...args);
+  }
+  requestPublicationRetirementRetry(...args:Parameters<ConfigRepository['requestPublicationRetirementRetry']>):Promise<ReturnType<ConfigRepository['requestPublicationRetirementRetry']>> {
+    return this.rpc('requestPublicationRetirementRetry',...args);
+  }
+  markPublicationRetirementReleased(...args: Parameters<ConfigRepository['markPublicationRetirementReleased']>): Promise<ReturnType<ConfigRepository['markPublicationRetirementReleased']>> {
+    return this.rpc('markPublicationRetirementReleased', ...args);
+  }
+  getRuntimeRecoveryBudget(...args: Parameters<ConfigRepository['getRuntimeRecoveryBudget']>): Promise<ReturnType<ConfigRepository['getRuntimeRecoveryBudget']>> {
+    return this.rpc('getRuntimeRecoveryBudget', ...args);
+  }
+  consumeRuntimeRecoveryRestartTicket(...args: Parameters<ConfigRepository['consumeRuntimeRecoveryRestartTicket']>): Promise<ReturnType<ConfigRepository['consumeRuntimeRecoveryRestartTicket']>> {
+    return this.rpc('consumeRuntimeRecoveryRestartTicket', ...args);
+  }
+  getRuntimeRecoveryStartupGate(...args: Parameters<ConfigRepository['getRuntimeRecoveryStartupGate']>): Promise<ReturnType<ConfigRepository['getRuntimeRecoveryStartupGate']>> {
+    return this.rpc('getRuntimeRecoveryStartupGate', ...args);
+  }
+  observeRuntimeRecoveryHealth(...args: Parameters<ConfigRepository['observeRuntimeRecoveryHealth']>): Promise<ReturnType<ConfigRepository['observeRuntimeRecoveryHealth']>> {
+    return this.rpc('observeRuntimeRecoveryHealth', ...args);
+  }
 }

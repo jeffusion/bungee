@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { retainAccepted, forgetDispatch, submissionLocked, isTerminal, queryFailure, replacementSummary, drainSummary } from '../../../../../src/components/domain/config/publication-state';
+import { retainAccepted, forgetDispatch, submissionLocked, isTerminal, queryFailure, replacementSummary, publicationMessage, historicalDrainFailure, runtimeHealthFault } from '../../../../../src/components/domain/config/publication-state';
 import { readPendingPublication, pendingPublicationKey } from '../../../../../src/components/domain/config/workspace';
 import { preCommitRejection } from '../../../../../src/components/domain/config/publication-state';
 import { ApiError } from '../../../../../src/api/client';
@@ -46,10 +46,19 @@ test('replacement slots/attempts/revisions are bounded; raw errors are excluded'
   expect(result[1]).toEqual({ slot: null, attempt: null, revision: null, state: 'unknown' });
   expect(JSON.stringify(result)).not.toContain('SECRET');
 });
-test('only the entire allowlisted drain grammar is rendered', () => {
-  expect(drainSummary('old_worker_drain_failed', '0:timeout, 1:exit-unconfirmed').rows).toEqual([{ slot: 0, code: 'timeout' }, { slot: 1, code: 'exit_unconfirmed' }]);
-  for (const detail of ['SECRET', '0:timeout, 1:SECRET', '9:timeout\nSECRET', '0:timeout'.repeat(100)]) {
-    const result = drainSummary('old_worker_drain_failed', detail);
-    expect(result.hidden).toBe(true); expect(result.rows).toEqual([]); expect(JSON.stringify(result)).not.toContain('SECRET');
-  }
+test('historical drain failure requires fresh confirmed serving and no active cleanup', () => {
+  const publication = { operation: { state: 'degraded', error_code: 'old_worker_drain_failed' }, serving_complete: true, serving_revision: 8, target_revision: 8, cleanup: null } as any;
+  expect(publicationMessage(publication, true)).toBe('historicalDrainFailure');
+  expect(historicalDrainFailure(publication, true)).toBe(true);
+  expect(publicationMessage(publication, false)).toBe('statusUnavailable');
+  expect(publicationMessage({ ...publication, serving_revision: 7 }, true)).toBe('drainUnconfirmed');
+  expect(publicationMessage({ ...publication, cleanup: { active: true, state: 'stopped' } }, true)).toBe('drainFailed');
+});
+test('component and dependency faults remain current even after serving converges', () => {
+  const health = { observed_at: 1, component_recovery: [{ state: 'stopped' }], dependencies: [{ state: 'ready', observed_at: 1 }] } as any;
+  expect(runtimeHealthFault(health, true)).toBe(true);
+  expect(runtimeHealthFault(health, false)).toBe(false);
+  expect(runtimeHealthFault({ ...health, component_recovery: [], dependencies: [{ state: 'ready', observed_at: null }] }, true)).toBe(true);
+  expect(runtimeHealthFault({ ...health, component_recovery: [], dependencies: [{ state: 'ready', fresh: false, observed_at: 1 }] }, true)).toBe(true);
+  expect(runtimeHealthFault({ ...health, component_recovery: [], dependencies: [{ state: 'ready', fresh: true, observed_at: 1 }] }, true)).toBe(false);
 });

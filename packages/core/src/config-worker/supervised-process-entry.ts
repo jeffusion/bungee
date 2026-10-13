@@ -1,3 +1,4 @@
+import { holdInheritedProcessLifetimeGuard, writeProcessLifetimeHeldAck } from '../supervision/process-lifetime-guard';
 import { randomUUID } from 'node:crypto';
 import { basename, resolve } from 'node:path';
 import { createConfigWorkerRuntimeController } from '../config-publication/worker-runtime';
@@ -46,7 +47,12 @@ export type SupervisedWorkerProcessDependencies = {
 export async function runSupervisedWorkerProcess(
   dependencies: SupervisedWorkerProcessDependencies = {},
 ): Promise<void> {
+  const sourceEnvironment = dependencies.env ?? process.env;
   const environment: SupervisedWorkerEnvironment = parseSupervisedWorkerEnvironment(dependencies.env ?? process.env);
+  const lifetimeGuard = holdInheritedProcessLifetimeGuard(sourceEnvironment, environment.identity.worker_instance_id);
+  if (lifetimeGuard === null && process.platform !== 'win32' && dependencies.env === undefined) {
+    throw new Error('worker lifetime guard is required; offline conversion is required for older launch formats');
+  }
   const exitProcess = dependencies.exitProcess ?? ((code: number) => {
     process.exitCode = code;
     process.exit(code);
@@ -54,6 +60,7 @@ export async function runSupervisedWorkerProcess(
   const bootNonce = randomUUID();
   const kernelBootId = await (dependencies.kernelBootId ?? readKernelDeadlineClockId)();
   const credential = deriveWorkerSupervisionCredential(environment.supervisionSeed, bootNonce);
+  if (lifetimeGuard !== null) writeProcessLifetimeHeldAck(`${environment.descriptorPath}.held`, lifetimeGuard, bootNonce, credential.process_key);
   const pathResolver = new PluginPathResolver(resolveConfigWorkerCoreBaseDir(import.meta.dir), process.cwd());
   const loadCatalog = dependencies.loadCatalog ?? (() => PluginManifestCatalog.build({ pathResolver }));
 
@@ -235,6 +242,7 @@ export async function runSupervisedWorkerProcess(
   const runtime = controller;
   server = new WorkerSupervisionHttpServer({
     credential,
+    lifetimeGuard: lifetimeGuard ?? undefined,
     identity: environment.identity,
     runtime,
     controlPort: environment.controlPort,

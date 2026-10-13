@@ -730,20 +730,18 @@ test('an attached worker fact becomes null after injected child exit without rel
     expect(adapter.bootNonce).toBe(boot);
     expect(adapter.latestSignedStatus!.phase).toBe('draining');
     expect(workerFactory.lookupPhysicalSession({ ...identity, boot_nonce: boot })).toBeNull();
-    // Isolated mutation check: demonstrate every other lookup predicate still
-    // succeeds without the known-exit record, then restore it immediately. This
-    // is injected fixture bookkeeping, NEVER production or an alive claim.
+    // The irreversible identity fence survives removal of the acceleration cache.
     const recorded = internal.exitHistory.get(adapter)!;
     internal.exitHistory.delete(adapter);
     try {
-      expect(workerFactory.lookupPhysicalSession({ ...identity, boot_nonce: boot })).not.toBeNull();
+      expect(workerFactory.lookupPhysicalSession({ ...identity, boot_nonce: boot })).toBeNull();
     } finally { internal.exitHistory.set(adapter, recorded); }
     expect(workerFactory.lookupPhysicalSession({ ...identity, boot_nonce: boot })).toBeNull();
-    // Physical exit is distinct from cleanup-usable required retirement proof.
-    expect(workerFactory.owns(adapter)).toBe(true);
-    expect(usableRetirements).toHaveLength(0);
-    expect(workerFactory.snapshot()).toHaveLength(1);
-    expect(Object.is(workerFactory.snapshot()[0], adapter)).toBe(true);
+    // Physical ownership ends, while cleanup remains unconfirmed in the exit evidence.
+    expect(workerFactory.owns(adapter)).toBe(false);
+    expect(usableRetirements).toHaveLength(1);
+    expect(usableRetirements[0]).not.toHaveProperty('terminalDrain');
+    expect(workerFactory.snapshot()).toHaveLength(0);
   } finally {
     if (timeout !== undefined) clearTimeout(timeout);
     stopPhysical?.(); stopRetirement(); workerFactory.disconnect();

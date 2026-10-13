@@ -98,3 +98,23 @@ export type {
   WorkerControllerAuthorityListener,
   WorkerSupervisionHttpServerOptions,
 } from './worker-http';
+
+export {
+  armProcessLifetimeGuard,
+  holdInheritedProcessLifetimeGuard,
+  parseHeldProcessLifetimeGuardFacts,
+  parseProcessLifetimeGuardFacts,
+  parseProcessLifetimeHeldAck,
+  probeExistingProcessLifetimeGuard,
+  processLifetimeHostBootId,
+  writeProcessLifetimeHeldAck,
+  PROCESS_LIFETIME_GUARD_DOMAIN,
+  PROCESS_LIFETIME_GUARD_ENV,
+} from './process-lifetime-guard';
+export type {
+  HeldProcessLifetimeGuardFacts,
+  ProcessLifetimeGuardFacts,
+  ProcessLifetimeGuardProbe,
+  ProcessLifetimeHeldAck,
+  ProcessLifetimeRetirementFence,
+} from './process-lifetime-guard';

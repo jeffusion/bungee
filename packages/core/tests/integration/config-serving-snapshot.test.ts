@@ -13,6 +13,7 @@ import {
   type ConfigRepositoryOptions,
   type RepositorySnapshot,
 } from '../../src/config-storage';
+import { CONFIG_MIGRATIONS } from '../../src/config-storage/migrations';
 import { verifySchemaFingerprint } from '../../src/config-storage/schema-fingerprint';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 
@@ -65,9 +66,9 @@ afterEach(() => {
 });
 
 describe('configuration serving snapshot baseline', () => {
-  test('creates one current baseline and rejects a UTF-16 database', () => {
+  test('creates the frozen baseline and appended migrations and rejects a UTF-16 database', () => {
     const fresh=openRepository();
-    expect(fresh.getDatabase().query('SELECT version,name FROM schema_migrations').all()).toEqual([{version:1,name:'current_storage_baseline'}]);
+    expect(fresh.getDatabase().query('SELECT version,name FROM schema_migrations').all()).toEqual(CONFIG_MIGRATIONS.map(({version,name})=>({version,name})));
     expect(() => verifySchemaFingerprint(fresh.getDatabase())).not.toThrow();
     const directory=mkdtempSync(join(tmpdir(),'bungee-utf16-')); roots.push(directory);
     const path=join(directory,'config.db'); const db=new Database(path);

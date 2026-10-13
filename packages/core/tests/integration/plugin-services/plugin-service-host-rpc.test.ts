@@ -1166,7 +1166,7 @@ describe('Host RPC production storage outcome and cleanup separation',()=>{
     const {createPluginPeerJournalResolver}=await import('../../../src/plugin-services/peer-journal');
     const dir=mkdtempSync(join(tmpdir(),'host-rpc-cleanup-timeout-')),file=join(dir,'silent-release.db');
     const resourceFailures:string[]=[];const cleanupFailures:{operationId:string;code:string}[]=[];const cleanup=gate();
-    const storage=await PluginStateClient.open(file,{initialize:true,requestTimeoutMs:400,
+    const storage=await PluginStateClient.open(file,{initialize:true,requestTimeoutMs:400,cleanupTimeoutMs:100,
       workerUrl:new URL('../../fixtures/plugin-state-fault-worker.ts',import.meta.url),onWorkerFailure:error=>{resourceFailures.push(error.code);}});
     const resolver=createPluginPeerJournalResolver({client:storage});
     const adapter=new HostRpcAdapter({process:'worker',limits:{hardDeadlineMs:150},resolvePlacement:()=>null,resolveCallee:()=>null,
@@ -1178,8 +1178,8 @@ describe('Host RPC production storage outcome and cleanup separation',()=>{
       expect(await consumers(consumer).add({amount:1},{operationId:'acknowledged-before-cleanup'})).toEqual({count:7});
       expect(cleanupFailures).toEqual([]);await cleanup.promise;
       expect(cleanupFailures).toEqual([{code:'request_timeout',operationId:'acknowledged-before-cleanup'}]);
-      expect(resourceFailures).toEqual(['request_timeout']);
-      await expect(storage.close()).rejects.toMatchObject({code:'request_timeout'});
+      expect(resourceFailures).toEqual(['worker_failed']);
+      await expect(storage.close()).rejects.toMatchObject({code:'worker_failed'});
     }finally{await adapter.dispose();await resolver.close();await storage.close().catch(()=>undefined);rmSync(dir,{recursive:true,force:true});}
   });
 });

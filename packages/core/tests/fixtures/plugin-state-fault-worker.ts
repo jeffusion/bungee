@@ -4,8 +4,13 @@ const scope = globalThis as any;
 const post = scope.postMessage.bind(scope);
 const responseIds = new Set<number>();
 let crashId = -1;
+const delayed=new Map<number,number>();
+const dropAcks=new Set<number>();
+let faultMode='silent';
 scope.postMessage = (message:any) => {
-  if(message.type==='response' && responseIds.has(message.id))return;
+  if(message.type==='response' && (responseIds.has(message.id)||dropAcks.has(message.id)))return;
+  if(message.type==='response'&&delayed.has(message.id)){const delay=delayed.get(message.id)!;delayed.delete(message.id);setTimeout(()=>post(message),delay);return;}
+  if(message.type==='callback'&&faultMode==='late-callback'){setTimeout(()=>post(message),180);return;}
   if(message.type==='response' && message.id===crashId && !message.error){scope.close();return;}
   post(message);
 };
@@ -16,8 +21,12 @@ scope.onmessage = (event:any) => {
   if(request.type==='request') {
     if(request.method==='open') {
       const path=request.args[0] as string;
-      scope.faultMode=path.includes('lost-ack')?'lost-ack':path.includes('silent-close')?'silent-close':path.includes('silent-cap')?'silent-cap':path.includes('silent-release')?'silent-release':'silent';
+      scope.faultMode=path.includes('late-cap')?'late-cap':path.includes('late-source')?'late-source':path.includes('late-callback')?'late-callback':path.includes('drop-write-ack')?'drop-write-ack':path.includes('drop-probe')?'drop-probe':path.includes('drop-release-ack')?'drop-release-ack':path.includes('lost-ack')?'lost-ack':path.includes('silent-close')?'silent-close':path.includes('silent-cap')?'silent-cap':path.includes('silent-release')?'silent-release':'silent';
     }
+    faultMode=scope.faultMode;
+    if((faultMode==='late-cap'&&['durable','journal'].includes(request.method))||(faultMode==='late-source'&&request.method==='current'))delayed.set(request.id,400);
+    if((faultMode==='drop-write-ack'&&request.method==='execute')||(faultMode==='drop-release-ack'&&['release','releaseCapability'].includes(request.method)))dropAcks.add(request.id);
+    if(faultMode==='drop-probe'&&['get','probe'].includes(request.method)){responseIds.add(request.id);return;}
     if(scope.faultMode==='lost-ack'&&request.method==='execute')crashId=request.id;
     if((scope.faultMode==='silent-cap'&&['durable','journal'].includes(request.method))||(scope.faultMode==='silent-release'&&request.method==='releaseCapability')){responseIds.add(request.id);return;}
     if((scope.faultMode==='silent'&&request.method==='get')||(scope.faultMode==='silent-close'&&request.method==='close')) {responseIds.add(request.id);return;}

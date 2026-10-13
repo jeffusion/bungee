@@ -1,5 +1,8 @@
 import type { DataAdmissionPublication } from '../data-admission/host';
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { armProcessLifetimeGuard, parseProcessLifetimeHeldAck, PROCESS_LIFETIME_GUARD_ENV } from '../supervision/process-lifetime-guard';
 import { spawn as spawnChild, type ChildProcess } from 'node:child_process';
 import { clearDaemonBootstrapEnvironment, DAEMON_BOOTSTRAP_ENV_NAMES } from '../daemon-control/bootstrap';
 import { DAEMON_PROCESS_IDENTITY_MARKER_PREFIX, DEFAULT_PUBLICATION_POLICY, type Sha256Digest } from '@jeffusion/bungee-types';
@@ -615,6 +618,37 @@ export class MasterIngressController implements WorkerAdmissionController {
     return this.enqueue((signal) => this.statusNow(scope, signal));
   }
 
+  /** A recovered commit has no new prepare/commit side effect. Every release stays boot-fenced. */
+  async recoverActiveAdmission(expected: AdmissionSet, retiredInstances: readonly string[]): Promise<PreparedWorkerAdmission> {
+    const scope = this.captureAdmissionHandleScope();
+    const identity = admissionSetIdentity(expected);
+    const check = async () => {
+      const status = await this.status(scope);
+      if (status.registry.active === null || admissionSetIdentity(status.registry.active) !== identity
+        || status.registry.prepared !== null || status.registry.retired.some(set =>
+          set.workers.some(worker => !retiredInstances.includes(worker.worker_instance_id)))) {
+        throw new MasterIngressControllerError('control_recovering', 'recovered admission membership changed');
+      }
+      return status;
+    };
+    await check();
+    return {
+      async commit() { throw new MasterIngressControllerError('invalid_options', 'recovered admission is already committed'); },
+      async abort() { throw new MasterIngressControllerError('invalid_options', 'recovered admission cannot be aborted'); },
+      handoffStatus: async () => {
+        const status = await check();
+        return status.registry.handoff ?? null;
+      },
+      releaseRetiredAfterExitProof: async () => {
+        const status = await check();
+        for (const set of status.registry.retired) {
+          await this.enqueue(signal => this.releaseRetiredAfterExitProof(set, scope, signal));
+        }
+        await check();
+      },
+    };
+  }
+
   private async statusNow(scope?: AdmissionHandleScope, signal?: AbortSignal): Promise<IngressStatusPayload> {
     if (scope !== undefined) this.assertAdmissionHandleScope(scope);
     throwIfAborted(signal);
@@ -851,12 +885,17 @@ export class MasterIngressController implements WorkerAdmissionController {
     this.assertRecoveryEligible(lifecycle);
     for (const name of Object.values(DAEMON_BOOTSTRAP_ENV_NAMES)) delete environment[name];
     clearDaemonBootstrapEnvironment(environment);
-    this.child = this.spawn(this.options.executable, [this.options.entry,
+    delete environment[PROCESS_LIFETIME_GUARD_ENV];
+    const guard = this.options.processIdentity === undefined && process.platform !== 'win32'
+      ? armProcessLifetimeGuard({directory: join(dirname(this.options.instanceLockPath), 'runtime', 'ingress'),
+        processInstanceId: this.childCredential.identity.process_instance_id}) : null;
+    try { this.child = this.spawn(this.options.executable, [this.options.entry,
       `${DAEMON_PROCESS_IDENTITY_MARKER_PREFIX}${this.childCredential.identity.process_instance_id}`], {
       cwd: this.options.cwd, detached: true, shell: false,
-      stdio: ['ignore', 'inherit', 'inherit'],
+      stdio: guard === null ? ['ignore', 'inherit', 'inherit'] : ['ignore', 'inherit', 'inherit', guard.fd],
       env: {
         ...environment,
+        ...(guard === null ? {} : {[PROCESS_LIFETIME_GUARD_ENV]: JSON.stringify(guard.facts)}),
         BUNGEE_ROLE: 'ingress',
         BUNGEE_INGRESS_CREDENTIAL: serializeSupervisionCredential(this.childCredential),
         BUNGEE_INGRESS_TRANSPORT_SECRET: this.options.transportSecret,
@@ -866,7 +905,11 @@ export class MasterIngressController implements WorkerAdmissionController {
         BUNGEE_INGRESS_SUPERVISION_PORT: String(this.options.controlPort),
         BUNGEE_INGRESS_STARTUP_WATCHDOG_MS: String(this.startupTimeoutMs),
       },
-    });
+    }); } catch (error) { guard?.closeAfterChildExit(); throw error; }
+    if (guard !== null) {
+      this.child.once('exit', () => guard.closeAfterChildExit());
+      this.child.once('error', () => guard.closeAfterChildExit());
+    }
     this.ingressOrigin = 'spawned';
     this.child.unref();
     const deadline = Date.now() + this.startupTimeoutMs;
@@ -874,6 +917,12 @@ export class MasterIngressController implements WorkerAdmissionController {
       try {
         throwIfAborted(signal);
         const identity = await discoverIngressIdentity(this.baseUrl(), this.fetch, DISCOVERY_TIMEOUT_MS, signal);
+        if (guard !== null) {
+          const ack = parseProcessLifetimeHeldAck(JSON.parse(await readFile(`${this.options.instanceLockPath}.held`, 'utf8')),
+            this.childCredential.process_key);
+          if (ack.boot_nonce !== this.childCredential.identity.boot_nonce) throw new Error('ingress lifetime acknowledgement mismatch');
+          guard.closeAfterHeldAck(ack.guard);
+        }
         throwIfAborted(signal);
         this.assertRecoveryEligible(lifecycle);
         return identity;

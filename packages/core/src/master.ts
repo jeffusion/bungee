@@ -26,6 +26,8 @@ import { createAsyncMasterStats, migrateAccessDatabaseAsync, resolveObservabilit
 import { takeOverDaemonBootstrap } from './daemon-control/bootstrap';
 import { currentLaunchIdentity } from './daemon-control/launch-identity';
 import { serializeErrorChain } from './master-runtime/error-chain';
+import {ComponentRecovery} from './master-runtime/component-recovery';
+import {holdCurrentProcessLifetimeGuard} from './supervision/process-lifetime-guard';
 
 function environment(): Record<string, string> {
   return Object.fromEntries(
@@ -79,13 +81,7 @@ const PRODUCTION_DEPENDENCIES: MasterProcessDependencies = {
   createManagementListener,
   createControllerClaim: mintControllerClaimCapability,
   createIngressController: (options) => new MasterIngressController(options),
-  createRuntime: (options) => new MasterRuntime({
-    ...options,
-    onFatal(error) {
-      process.exitCode = 1;
-      logger.error({ error: serializeErrorChain(error) }, 'Master runtime failed');
-    },
-  }),
+  createRuntime: (options) => new MasterRuntime(options),
   installSignalHandlers: (runtime) => installMasterSignalHandlers({
     runtime,
     onError(error) {
@@ -99,7 +95,15 @@ export async function startMasterProcess(
   dependencies: MasterProcessDependencies = PRODUCTION_DEPENDENCIES,
   bootNonce: string | null = null,
 ): Promise<MasterProcessHandle> {
-  if (dependencies === PRODUCTION_DEPENDENCIES && bootNonce !== null) {
+  if (dependencies === PRODUCTION_DEPENDENCIES) {
+    const owner = process.argv.find(argument => argument.startsWith('--bungee-process-identity='))?.slice('--bungee-process-identity='.length) ?? randomUUID();
+    const options = readMasterProcessOptions();
+    const recovery = await ComponentRecovery.create(owner);
+    const executorLifetimeGuard = process.platform === 'win32' ? null
+      : holdCurrentProcessLifetimeGuard(resolve(options.configDbPath,'..','runtime','masters'),owner);
+    dependencies = {...dependencies,runtimeRecovery:recovery,executorLifetimeGuard};
+  }
+  if (bootNonce !== null && dependencies.runtimeRecovery !== undefined) {
     const identity = currentLaunchIdentity();
     dependencies = {
       ...dependencies,

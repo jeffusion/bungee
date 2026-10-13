@@ -42,6 +42,11 @@ export type MasterConfigPublicationCoordinatorOptions = {
   readonly admission: WorkerAdmissionController;
   readonly masterGeneration?: string;
   readonly createWorkerInstanceId?: () => string;
+  readonly recoverPreviousServingWorkers?: (active: ActiveConfigurationPublication) => Promise<readonly ServingConfigWorker[]>;
+  readonly recoverRetiredWorkers?: (active: ActiveConfigurationPublication) => Promise<readonly ServingConfigWorker[]>;
+  readonly recoverActiveServingWorkers?: (active: ActiveConfigurationPublication) => Promise<{
+    readonly workers: readonly ServingConfigWorker[]; readonly admission: import('./coordinator-types').PreparedWorkerAdmission;
+  } | null>;
   readonly confirmPreviousWorkersExited?: (replacements: readonly ServingConfigWorker[]) => Promise<boolean>;
 };
 
@@ -191,13 +196,34 @@ export class MasterConfigPublicationCoordinator {
           'target_set_mismatch', 'durable target worker slots do not match coordinator slots',
         );
       }
-      const oldWorkers: readonly ServingConfigWorker[] = [];
+      const recoveredActive = await this.options.recoverActiveServingWorkers?.(active) ?? undefined;
+      if (recoveredActive !== undefined && (recoveredActive.workers.length !== this.options.workerCount
+        || recoveredActive.workers.some(worker => worker.revision !== active.snapshot.revision
+          || worker.content_hash !== active.snapshot.content_hash || worker.plugin_catalog_hash !== this.options.pluginCatalogHash
+          || worker.publication?.mutation_id !== active.operation.mutation_id
+          || worker.publication.attempt_no !== active.targets.find(target => target.worker_slot === worker.process.slot)?.attempt_no
+          || worker.publication.drain_recovery_generation !== active.operation.drain_recovery_generation))) {
+        return { kind: 'outcome_unknown', fatal: false, code: 'control_recovering',
+          error: new Error('recovered active serving does not match the durable publication attempts'), serving: [], pending: [] };
+      }
+      const authority = recoveredActive === undefined
+        ? await this.options.repository.getPublicationServingSet?.(active.operation.mutation_id, active.operation.drain_recovery_generation) ?? null : null;
+      const requiresPriorExit = active.operation.state === 'draining' || authority !== null;
+      const priorAttemptExited = recoveredActive === undefined && requiresPriorExit
+        && await this.options.workerFactory.confirmActivePublicationExited?.(active) === true;
+      const oldWorkers = recoveredActive !== undefined || active.operation.state === 'draining'
+        ? await this.options.recoverRetiredWorkers?.(active) ?? []
+        : await this.options.recoverPreviousServingWorkers?.(active) ?? [];
+      if (recoveredActive === undefined && requiresPriorExit && !priorAttemptExited) {
+        return { kind: 'outcome_unknown', fatal: false, code: 'control_recovering',
+          error: new Error('prior publication attempt lifetime proof remains stopped'), serving: oldWorkers, pending: [] };
+      }
       return await runPublication({ repository: this.options.repository,
         workerFactory: this.options.workerFactory, clock: this.options.clock, scheduler: this.scheduler,
         applyTimeoutMs: this.options.startupApplyTimeoutMs, drainTimeoutMs: this.options.drainTimeoutMs,
         identities: this.identities, oldWorkers, owned: new OwnedProcessCollection(),
         pluginCatalogHash: this.options.pluginCatalogHash, admission: this.options.admission,
-        recoveringMaster: true, confirmPreviousWorkersExited: this.options.confirmPreviousWorkersExited, signal }, active, oldWorkers);
+        recoveringMaster: true, recoveredActive, priorAttemptExited, confirmPreviousWorkersExited: this.options.confirmPreviousWorkersExited, signal }, active, oldWorkers);
     } finally {
       this.release();
     }

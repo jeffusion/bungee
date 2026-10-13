@@ -27,10 +27,11 @@
   import ConfigurationDiff from '$components/domain/config/ConfigurationDiff.svelte';
   import { publicationFields, publicationInputs, parsePublicationInputs, publicationServerErrors, maxPublicationSeconds,
     type PublicationInputs, type PublicationErrors, type PublicationField } from '$components/domain/config/publication-policy';
-  import { publicationMessage } from '$components/domain/config/publication-state';
+  import { publicationMessage, historicalDrainFailure, runtimeHealthFault } from '$components/domain/config/publication-state';
+  import RuntimeFacts from '$components/domain/config/RuntimeFacts.svelte';
   import { configurationDiff, parseImportPreview, aggregateCounts, publicationBusy, servingStatus,
     IMPORT_LIMITS, readPendingPublication } from '$components/domain/config/workspace';
-  import { retainAccepted, forgetDispatch, submissionLocked, isTerminal, queryFailure, replacementSummary, drainSummary, preCommitRejection,
+  import { retainAccepted, forgetDispatch, submissionLocked, isTerminal, queryFailure, replacementSummary, preCommitRejection,
     type SubmissionPhase } from '$components/domain/config/publication-state';
 
   type Draft = { -readonly [K in keyof LogicalConfiguration]: LogicalConfiguration[K] };
@@ -88,14 +89,14 @@
   const operationState = $derived(pendingId ? tracked?.operation.mutation_id === pendingId ? tracked.operation.state : 'unknown'
     : phase === 'terminal' && tracked?.operation.mutation_id === operationId ? tracked.operation.state
     : !fresh || !publication ? 'unknown' : publication.operation ? publication.operation.state ?? 'unknown' : 'none');
-  const detailsForced = $derived(!!pendingId || publicationBusy(publication));
+  const detailsForced = $derived(!!pendingId || publicationBusy(publication) || runtimeHealthFault(runtime?.health, fresh));
   const authNeedsLogin = $derived(phase === 'terminal' && !!proofForRead && proofForRead.replace(/^Bearer /, '') !== $authToken);
   const canPublish = $derived(reviewOpen && !locked && !validating && !publicationInvalid && !!snapshot && !!candidate && diff.length > 0
     && validSignature === signature && fresh && !!publication && !conflict && !staleBaseline && !authNeedsLogin
     && (!nextAuthRequired || nextAuthToken.trim() !== ''));
   const importCounts = $derived(imported ? aggregateCounts(imported.aggregate) : null);
   const replacements = $derived(replacementSummary(tracked?.workers));
-  const drain = $derived(drainSummary(tracked?.operation.error_code, tracked?.operation.error_detail));
+  const historicalFailure = $derived(historicalDrainFailure(publication, fresh));
   const publicationStatusMessage = $derived(publicationMessage(publication, fresh));
   const runtimeMessage = $derived($publicationRecovery.readStatus === 'paused' ? 'runtimeTracking'
     : $publicationRecovery.readStatus === 'loading' ? 'runtimeLoading' : fresh ? 'servingNotice' : 'runtimeUnavailable');
@@ -365,6 +366,7 @@
       <p class="nx-field-label">{t('lastPublication')}</p>
       <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5">
         <p class="text-sm text-zinc-200">{publication?.operation && fresh ? $_(`configurationSave.${publicationStatusMessage}`) : t(`state.${operationState}`)}</p>
+        {#if historicalFailure}<p class="font-mono text-xs text-zinc-400" data-testid="publication-history-time">{typeof publication?.operation?.updated_at === 'number' ? new Date(publication.operation.updated_at).toLocaleString() : t('runtimeFacts.unavailable')}</p>{/if}
         {#if operationId}<button type="button" class="settings-text-action inline-flex items-center gap-1 border-0 bg-transparent px-0.5 text-left text-sm text-zinc-400 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-500" aria-expanded={detailsOpen || detailsForced} aria-controls="settings-publication-details" onclick={() => { if (detailsForced) document.getElementById('settings-publication-details')?.scrollIntoView(); else detailsOpen = !detailsOpen; }}>{t('details')}<ChevronDown class="h-3.5 w-3.5" aria-hidden="true" /></button>{/if}
       </div>
     </div>
@@ -399,13 +401,8 @@
           <p class="text-sm text-zinc-300">{t('committedRevision')}: r{tracked.operation.committed_revision ?? '—'} · {t('resultStatus')}: {tracked.operation.result_status ?? '—'}</p>
           <h3 class="nx-field-label">{t('replacementResults')}</h3>
           <ul class="space-y-1 text-sm text-zinc-300">{#each replacements as worker}<li>{t('slot')} {worker.slot ?? '—'} · {t('attempt')} {worker.attempt ?? '—'} · r{worker.revision ?? '—'} · {t(`workerState.${worker.state}`)}</li>{/each}</ul>
-          {#if drain.relevant}
-            <h3 class="nx-field-label">{t('drainResults')}</h3>
-            {#if drain.hidden}<p class="text-sm text-amber-300">{t('failureHidden')}</p>{/if}
-            {#each drain.rows as row}<p class="text-sm text-amber-300">{t('slot')} {row.slot} · {t(`drainCode.${row.code}`)}</p>{/each}
-            <p class="text-sm text-zinc-400">{t('drainNoRetry')}</p>
-          {/if}
         {:else}<p class="text-sm text-zinc-400">{t('unknown')}</p>{/if}
+        <RuntimeFacts {publication} health={runtime?.health} {fresh} />
         {#if fresh && runtime}<p class="text-sm text-zinc-400">{t('workerReports')}: {(runtime.workers ?? []).map(w => `${w.slot}: r${w.revision ?? '—'}`).join(' · ') || t('unknown')}</p>{/if}
         {#if publication?.recovery}<p class="text-sm text-zinc-400">{t('recovery')}: {publication.recovery.state} · {publication.recovery.attempt_count}/{publication.recovery.max_attempts}</p>{/if}
         <div class="flex flex-wrap gap-3">

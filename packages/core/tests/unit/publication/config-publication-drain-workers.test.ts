@@ -275,7 +275,7 @@ describe('drainWorkers', () => {
     const [delays, calls, elapsed] = await runWithFakeClock(process, scheduler, policy);
 
     expect(elapsed).toBeLessThanOrEqual(100);
-    expect(delays).toEqual([policy.drain_start_timeout_ms, policy.worker_exit_timeout_ms]);
+    expect(delays).toEqual([100,policy.drain_start_timeout_ms, policy.worker_exit_timeout_ms]);
     expect(calls).toEqual(['graceful']);
   });
 
@@ -285,7 +285,7 @@ describe('drainWorkers', () => {
     const [delays, calls, elapsed] = await runWithFakeClock(process, scheduler, policy);
 
     expect(elapsed).toBeLessThanOrEqual(policy.drain_start_timeout_ms);
-    expect(delays).toEqual([policy.drain_start_timeout_ms, 100]);
+    expect(delays).toEqual([100,policy.drain_start_timeout_ms, 100]);
     expect(calls).toEqual([]);
   });
 
@@ -297,7 +297,7 @@ describe('drainWorkers', () => {
     expect(result[0]?.unknownStage).toBe('rejected');
     expect(process.calls).toEqual([]);
     expect(scheduler.size).toBe(0);
-    expect(scheduler.delays).toEqual([policy.drain_start_timeout_ms, 100]);
+    expect(scheduler.delays).toEqual([100,policy.drain_start_timeout_ms, 100]);
   });
 
   test('reconnects to the existing drain id and frozen policy without resetting D', async () => {
@@ -399,7 +399,7 @@ describe('drainWorkers', () => {
     const result = await drainEvidenceWithFakeClock(process, scheduler, DEFAULT_PUBLICATION_POLICY);
     expect(allDrainExitsConfirmed(result)).toBe(true);
     expect(drainFailures(result)).toContainEqual(expect.objectContaining({ code: 'apply_failed' }));
-    expect(process.calls).toEqual(['graceful']);
+    expect(process.calls).toEqual([]);
   });
 
   test('matching signed cleanup and exact exit supersede a lost shutdown response', async () => {
@@ -416,13 +416,13 @@ describe('drainWorkers', () => {
     expect(drainFailures(result)).toContainEqual(expect.objectContaining({ code: 'timeout' }));
   });
 
-  test('exact process exit without signed terminal evidence remains unconfirmed', async () => {
+  test('exact process exit without signed terminal evidence keeps cleanup unknown', async () => {
     const scheduler = new FakeScheduler();
     const process = new ExitWithoutTerminalProcess('pending');
     const result = await drainEvidenceWithFakeClock(process, scheduler, DEFAULT_PUBLICATION_POLICY);
     expect(result[0]?.exitEvidence).toEqual({ exited: true, pid: process.pid });
-    expect(allDrainExitsConfirmed(result)).toBe(false);
-    expect(drainFailures(result)).toContainEqual(expect.objectContaining({ code: 'mismatched_message' }));
+    expect(allDrainExitsConfirmed(result)).toBe(true);
+    expect(drainFailures(result)).toContainEqual(expect.objectContaining({ code: 'apply_failed' }));
   });
 
   test('a stalled OS probe cannot extend the terminal polling window', async () => {

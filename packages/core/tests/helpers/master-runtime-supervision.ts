@@ -139,7 +139,7 @@ export type RepairContext = {
 
 export function supervisionFixture(
   onFatal?: (error: Error) => void | Promise<void>,
-  options: { readonly recoveryGate?: boolean } = {},
+  options: { readonly recoveryGate?: boolean; readonly onFailure?: (error:Error)=>void } = {},
 ) {
   const admission = new WorkerAdmissionRegistry();
   const pool = new TestPool();
@@ -196,6 +196,7 @@ export function supervisionFixture(
     ...(gate === undefined ? {} : { ingressBootRecoveryGate: gate }),
     ancillary: { beforeCleanup: () => beforeCleanup?.(), cleanupAfterStartupFailure() { return STARTUP_DISPOSITION; }, closeForNormalShutdown() {} },
     ...(onFatal === undefined ? {} : { onFatal }),
+    ...(options.onFailure === undefined ? {} : { onFailure:options.onFailure }),
   });
   return {
     admission, initial, pool, repairCalls, runtime,

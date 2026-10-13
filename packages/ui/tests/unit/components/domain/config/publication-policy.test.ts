@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { DEFAULT_PUBLICATION_POLICY, MAX_PUBLICATION_TIMEOUT_MS } from '@jeffusion/bungee-types';
 import { publicationInputs, parsePublicationInputs, publicationServerErrors, publicationFields } from '../../../../../src/components/domain/config/publication-policy';
 import { configurationDiff } from '../../../../../src/components/domain/config/workspace';
-import { publicationMessage, drainSummary } from '../../../../../src/components/domain/config/publication-state';
+import { publicationMessage } from '../../../../../src/components/domain/config/publication-state';
 import { publicationFixture } from '../../../../helpers/publication';
 
 test('absence shows defaults without materialising policy; explicit defaults review separately', () => {
@@ -43,14 +43,18 @@ test('server validation paths associate all timeout fields, never unrelated path
 
 test('historical drain failure cannot make unconfirmed or stale serving look effective', () => {
   const p = publicationFixture({ serving_complete: true, serving_revision: 8,
-    operation: { operation_id: 'op', committed_revision: 8, state: 'degraded', result_status: 202, error_code: 'old_worker_drain_failed' } });
-  expect(publicationMessage(p, true)).toBe('drainFailed');
+    operation: { operation_id: 'op', committed_revision: 8, state: 'degraded', result_status: 202, error_code: 'old_worker_drain_failed', updated_at: 1 } });
+  expect(publicationMessage(p, true)).toBe('historicalDrainFailure');
   expect(publicationMessage(p, false)).toBe('statusUnavailable');
   expect(publicationMessage({ ...p, serving_revision: 7 }, true)).toBe('drainUnconfirmed');
   expect(publicationMessage({ ...p, serving_complete: false }, true)).toBe('drainUnconfirmed');
   expect(publicationMessage({ ...p, operation: { ...p.operation!, state: 'draining', error_code: null } }, true)).toBe('draining');
 });
 
-test('actual drain control failure details retain slots and accurate failure labels', () => {
-  expect(drainSummary('old_worker_drain_failed', '0:apply_failed, 1:apply_failed')).toEqual({ relevant: true, hidden: false, rows: [{ slot: 0, code: 'apply_failed' }, { slot: 1, code: 'apply_failed' }] });
+test('a stopped typed cleanup remains current when target serving is confirmed', () => {
+  const p = publicationFixture({ serving_complete: true, serving_revision: 8,
+    cleanup: { active: true, state: 'stopped', reason_code: 'exit_unknown', pending_count: 0,
+      exit_unknown_count: 1, failed_count: 0, unknown_count: 1, remaining_ms: null, members: [] } });
+  expect(publicationMessage(p, true)).toBe('drainFailed');
+  expect(publicationMessage(p, false)).toBe('statusUnavailable');
 });

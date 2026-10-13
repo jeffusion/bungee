@@ -1,3 +1,5 @@
+import { canonicalJson } from '../config-storage/content-hash';
+import { parseProcessLifetimeHeldAck, probeExistingProcessLifetimeGuard, type HeldProcessLifetimeGuardFacts, type ProcessLifetimeRetirementFence, type armProcessLifetimeGuard } from '../supervision/process-lifetime-guard';
 import { kernelMonotonicNowNs, readKernelDeadlineClockId } from './kernel-monotonic-clock';
 import type { ChildProcess } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
@@ -85,6 +87,7 @@ export type SupervisedConfigWorkerProcessAdapterOptions = {
   readonly processIdentity?: ProcessIdentityControl;
   readonly kernelBootId?: () => Promise<string>;
   readonly readDescriptor?: () => Promise<unknown>;
+  readonly lifetimeGuard?: ReturnType<typeof armProcessLifetimeGuard>;
 };
 
 export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWorkerProcess {
@@ -110,6 +113,10 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
   private drainStatusFailureReported = false;
   private exitPublication: Promise<WorkerExitEvidence> | null = null;
   kernelBootId: string | undefined;
+  private heldGuard: HeldProcessLifetimeGuardFacts | null = null;
+  private retirementFence: ProcessLifetimeRetirementFence | null = null;
+  get lifetimeGuardFacts(): HeldProcessLifetimeGuardFacts | null { return this.heldGuard; }
+  releaseLifetimeRetirementFence(): void { this.retirementFence?.close(); this.retirementFence = null; }
 
   constructor(private readonly options: SupervisedConfigWorkerProcessAdapterOptions) {
     this.identity = options.identity;
@@ -133,12 +140,13 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
     try { this.kernelBootId = await (this.options.kernelBootId ?? readKernelDeadlineClockId)(); }
     catch (error) { reportFailure('kernel_clock', error); throw error; }
     if (this.options.readyClient !== undefined) {
+      await this.loadHeldGuard();
       // Exact identity is captured before anything else: a wrong or unknown capture
       // rejects initialization before the ready client's control-state subscription
       // is retained.
       this.bootNonce = this.options.readyClient.credential.identity.boot_nonce;
       try { this.capturedIdentity = await this.identityControl.capture(this.pid, this.identity.worker_instance_id); }
-      catch (error) { reportFailure('os_identity_capture', error); throw error; }
+      catch (error) { if (this.heldGuard === null) { reportFailure('os_identity_capture', error); throw error; } }
       this.client = this.options.readyClient;
       this.bootNonce = this.client.credential.identity.boot_nonce;
       this.lastStatus = this.client.cachedStatus;
@@ -171,6 +179,7 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
           || hint.worker_slot !== this.identity.worker_slot) throw new Error('worker descriptor identity mismatch');
         const credential = deriveWorkerSupervisionCredential(this.options.supervisionSeed, hint.boot_nonce);
         const descriptor = parseWorkerDescriptor(raw, credential);
+        await this.loadHeldGuard(descriptor);
         this.bootNonce = descriptor.boot_nonce;
         if (descriptor.control_port !== hint.control_port || descriptor.pid !== this.pid && this.origin === 'spawned') throw new Error('worker descriptor process mismatch');
         if (this.capturedIdentity === null) {
@@ -179,7 +188,8 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
           // retry within the same initialization deadline; a wrong or unknown identity
           // never reaches attach and therefore never becomes ready.
           phase = 'os_identity_capture';
-          this.capturedIdentity = await this.identityControl.capture(this.pid, this.identity.worker_instance_id);
+          try { this.capturedIdentity = await this.identityControl.capture(this.pid, this.identity.worker_instance_id); }
+          catch (error) { if (this.heldGuard === null || this.origin === 'spawned') throw error; }
         }
         phase = 'control_attach';
         if (this.client === null) {
@@ -213,6 +223,29 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
     }
     reportFailure(phase, lastError);
     throw new Error(`supervised worker initialization timed out: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+  }
+
+
+  private async loadHeldGuard(descriptor?: ReturnType<typeof parseWorkerDescriptor>): Promise<void> {
+    if (this.heldGuard !== null) return;
+    // Windows keeps its same-domain identity checks. Injected OS controls support
+    // deterministic tests; production native discovery requires the current format.
+    if (this.options.processIdentity !== undefined && this.options.lifetimeGuard === undefined) return;
+    if (process.platform === 'win32' && this.options.lifetimeGuard === undefined) return;
+    const raw: unknown = JSON.parse(await readFile(`${this.options.descriptorPath}.held`, 'utf8'));
+    const nonce = (raw as { boot_nonce?: unknown }).boot_nonce;
+    if (typeof nonce !== 'string') throw new Error('worker lifetime guard held acknowledgement is missing');
+    const credential = deriveWorkerSupervisionCredential(this.options.supervisionSeed, nonce);
+    const ack = parseProcessLifetimeHeldAck(raw, credential.process_key);
+    if (ack.guard.process_instance_id !== this.identity.worker_instance_id
+      || (descriptor !== undefined && (descriptor.boot_nonce !== nonce
+        || canonicalJson(descriptor.lifetime_guard ?? null) !== canonicalJson(ack.guard)))) throw new Error('worker lifetime guard identity mismatch');
+    if (this.options.lifetimeGuard !== undefined) this.options.lifetimeGuard.closeAfterHeldAck(ack.guard);
+    const { held: _held, ...facts } = ack.guard;
+    const probe = probeExistingProcessLifetimeGuard(facts);
+    if (probe.kind === 'confirmed') { probe.fence.close(); throw new Error('worker lifetime guard is no longer held'); }
+    if (probe.kind !== 'live') throw new Error('worker lifetime guard proof is unknown; offline conversion is required for older descriptors');
+    this.heldGuard = ack.guard;
   }
 
   private publishExitEvidence(terminalDrain?: WorkerDrainedMessage | WorkerDrainFailedMessage): WorkerExitEvidence {
@@ -280,6 +313,19 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
       return this.exitEvidence;
     }
     if (this.exitPublication !== null) return this.exitPublication;
+    if (this.heldGuard !== null) {
+      const { held: _held, ...facts } = this.heldGuard;
+      const proof = probeExistingProcessLifetimeGuard(facts);
+      if (proof.kind === 'live') return null;
+      if (proof.kind === 'unknown') throw new Error(`worker lifetime guard exit proof is unknown (${proof.reason})`);
+      this.retirementFence = proof.fence;
+      let terminal: WorkerDrainedMessage | WorkerDrainFailedMessage | null = null;
+      try { terminal = await this.readTerminalDrainEvidence(); } catch { /* cleanup remains independent and unknown */ }
+      return this.publishExitEvidence(terminal ?? undefined);
+    }
+    if (process.platform !== 'win32' && this.options.processIdentity === undefined) {
+      throw new Error('worker lifetime guard was not verified; exit remains unknown');
+    }
     const startedAt = performance.now();
     const captured = this.capturedIdentity;
     if (captured === null) {

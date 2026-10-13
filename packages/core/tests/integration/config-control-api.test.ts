@@ -710,6 +710,7 @@ describe('configuration control with an explicit management provider', () => {
       revision: snapshot.revision,
       content_hash: snapshot.content_hash,
       config: snapshot.aggregate,
+      health: null,
       workers: [{
         master_generation: worker.process.identity.master_generation,
         worker_instance_id: worker.process.identity.worker_instance_id,
@@ -724,6 +725,7 @@ describe('configuration control with an explicit management provider', () => {
       }],
       publication: {
         operation: null,
+        cleanup: null,
         recovery: null,
         retryable: false,
         serving_complete: false,

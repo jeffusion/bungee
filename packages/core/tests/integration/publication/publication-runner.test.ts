@@ -206,14 +206,14 @@ describe('publication phase diagnostics', () => {
     expect(harness.retiredReleases()).toBe(0);
   });
 
-  test('recovering master really drains adopted old workers and converges on exact exit proof', async () => {
+  test('recovering master drains adopted old workers and retains a historical degraded audit', async () => {
     const oldWorkers = [servingWorker(0, 'adopted', true)];
     const harness = publicationHarness(oldWorkers, { recoveringMaster: true });
 
     const outcome = await runPublication(harness.options, harness.active, oldWorkers);
 
-    expect(outcome).toMatchObject({ kind: 'converged', http_status: 200 });
-    expect(harness.active.finalOutcome).toMatchObject({ outcome: 'converged', old_workers_exited: true });
+    expect(outcome).toMatchObject({ kind: 'degraded', http_status: 202, error_code: 'old_worker_drain_failed' });
+    expect(harness.active.finalOutcome).toMatchObject({ outcome: 'degraded', old_workers_exited: true });
   });
 
   test('recovering master with known new target and old-worker exit unknown remains nonfatal', async () => {
@@ -233,11 +233,32 @@ describe('publication phase diagnostics', () => {
 
     const outcome = await runPublication(harness.options, harness.active, []);
 
-    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true, code: 'worker_exit_unconfirmed' });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false, code: 'control_recovering' });
     expect((outcome as { readonly error?: unknown }).error).toBeInstanceOf(TypeError);
     // No finalize, no retired release; admission and ownership stay exactly as committed.
     expect(harness.active.finalOutcome).toBeUndefined();
     expect(harness.retiredReleases()).toBe(0);
+  });
+
+  test('draining stopped retries preserve verified serving and never create another attempt', async () => {
+    const harness = publicationHarness([], { recoveringMaster: true });
+    harness.active.operation.state = 'draining';
+    let spawns = 0; let generations = 0; let releases = 0;
+    const serving = servingWorker(0, 'adopted');
+    harness.options.workerFactory.spawn = () => { spawns += 1; throw new Error('must not spawn'); };
+    harness.options.repository.beginDrainingRecovery = () => { generations += 1; throw new Error('must not fence a new attempt'); };
+    harness.options.recoveredActive = { workers: [serving], admission: {
+      commit: async () => { throw new Error('must not commit again'); }, abort: async () => { throw new Error('must preserve active serving'); },
+      handoffStatus: async () => null, releaseRetiredAfterExitProof: async () => { releases += 1; },
+    } };
+    harness.options.confirmPreviousWorkersExited = async () => false;
+    for (let retry = 0; retry < 3; retry += 1) {
+      const outcome = await runPublication(harness.options, harness.active, []);
+      expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false, code: 'control_recovering' });
+      expect(outcome.serving).toEqual([serving]);
+      expect(harness.active.finalOutcome).toBeUndefined();
+    }
+    expect(spawns).toBe(0); expect(generations).toBe(0); expect(releases).toBe(0);
   });
 
   test('keeps admission commit identity uncertainty fatal before classifying retired-only uncertainty', async () => {

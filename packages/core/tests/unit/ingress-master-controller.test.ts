@@ -39,6 +39,7 @@ function options(onRecovered?: () => Promise<MasterIngressRecoveryResult | void>
     instanceLockPath: '/tmp/bungee-ingress.lock', transportSecret: 'secret',
     executable: process.execPath, entry: '/tmp/ingress.ts', cwd: '/tmp',
     leaseDurationMs: 100, onRecovered,
+    processIdentity:fakeIdentityControl(),
   };
 }
 

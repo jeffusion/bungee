@@ -1299,7 +1299,7 @@ describe('peer journal Host maintenance', () => {
     const { PluginStateClient } = await import('../../../src/plugin-state/client');
     const directory=fs.mkdtempSync(path.join(os.tmpdir(),'peer-journal-worker-'));directories.push(directory);
     const file=path.join(directory,'plugin-state.db');
-    let client=await PluginStateClient.open(file,{initialize:true,limits:WIDE,maxPendingRequests:256});
+    let client=await PluginStateClient.open(file,{initialize:true,limits:WIDE,maxPendingRequests:256,closeTimeoutMs:200});
     let terminal=false;
     const make=()=>createPluginPeerJournalResolver({client,authorizeRecovery:request=>terminal
       ? {owner:request.owner,epoch:request.epoch,issuedAt:Date.now()}:null});
@@ -1316,7 +1316,9 @@ describe('peer journal Host maintenance', () => {
       const committed=first.resolve({...request,service:'other'})!;
       await committed.execute(execution({operationId:'expired-result',serviceId:'other',deduplication:'none',resultRetentionMs:10,
         maxResultBytes:128,quotaBytes:1_048_576}));
-      await first.close();await client.close();
+      await first.close();
+      // Never-finishing real callbacks prevent a database-close proof. The failed client is discarded.
+      await expect(client.close()).rejects.toMatchObject({code:'close_unconfirmed'});
       client=await PluginStateClient.open(file,{limits:WIDE});
       const restarted=make(),observed=restarted.resolve(request)!,other=restarted.resolve({...request,service:'other'})!;
       const initial=await restarted.maintain({namespaceLimit:1,recordLimit:128});expect(initial.recovered).toBe(0);
@@ -1334,7 +1336,7 @@ describe('peer journal Host maintenance', () => {
       await restarted.close();await client.close();
       const db=new Database(file,{readonly:true});
       expect(db.query<{n:number},[]>('SELECT count(*) AS n FROM plugin_communication_receipts').get()!.n).toBe(1);db.close();
-    } finally {await client.close();}
+    } finally {await client.close().catch(()=>undefined);}
   });
 
   test('each command facade keeps its publication capability and maintenance never runs it', async () => {
