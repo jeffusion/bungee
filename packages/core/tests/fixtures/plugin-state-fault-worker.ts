@@ -7,6 +7,7 @@ let crashId = -1;
 const delayed=new Map<number,number>();
 const dropAcks=new Set<number>();
 let faultMode='silent';
+let dropProbes=false;
 scope.postMessage = (message:any) => {
   if(message.type==='response' && (responseIds.has(message.id)||dropAcks.has(message.id)))return;
   if(message.type==='response'&&delayed.has(message.id)){const delay=delayed.get(message.id)!;delayed.delete(message.id);setTimeout(()=>post(message),delay);return;}
@@ -25,8 +26,11 @@ scope.onmessage = (event:any) => {
     }
     faultMode=scope.faultMode;
     if((faultMode==='late-cap'&&['durable','journal'].includes(request.method))||(faultMode==='late-source'&&request.method==='current'))delayed.set(request.id,400);
+    // Setup must stay healthy; arm probe loss only after the suspect read starts.
+    if(faultMode==='drop-probe'&&request.method==='durable')delayed.set(request.id,120);
     if((faultMode==='drop-write-ack'&&request.method==='execute')||(faultMode==='drop-release-ack'&&['release','releaseCapability'].includes(request.method)))dropAcks.add(request.id);
-    if(faultMode==='drop-probe'&&['get','probe'].includes(request.method)){responseIds.add(request.id);return;}
+    if(faultMode==='drop-probe'&&request.method==='get'){dropProbes=true;responseIds.add(request.id);return;}
+    if(faultMode==='drop-probe'&&request.method==='probe'&&dropProbes){responseIds.add(request.id);return;}
     if(scope.faultMode==='lost-ack'&&request.method==='execute')crashId=request.id;
     if((scope.faultMode==='silent-cap'&&['durable','journal'].includes(request.method))||(scope.faultMode==='silent-release'&&request.method==='releaseCapability')){responseIds.add(request.id);return;}
     if((scope.faultMode==='silent'&&request.method==='get')||(scope.faultMode==='silent-close'&&request.method==='close')) {responseIds.add(request.id);return;}

@@ -451,14 +451,16 @@ test('真实worker D到期执行HTTP force并取消仍在传输的SSE后持久�
     const evidence = await within(drainWorkers([worker], timeoutScheduler, {
       drain_start_timeout_ms: 5_000, drain_timeout_ms: 1_000, worker_exit_timeout_ms: 5_000,
     }), 8_000);
-    const names = events.map(({ event }) => event);
     if (evidence[0]?.exitEvidence === null) {
       let terminal: any = null;
       try { terminal = (JSON.parse(await readFile(descriptorPath, 'utf8')) as any).evidence?.message ?? null; } catch { /* include absence below */ }
       throw new Error(`D-force exit proof missing; childExitCode=${child.exitCode}; terminal=${JSON.stringify(terminal === null
         ? null : { status: terminal.status, cleanup_state: terminal.cleanup_state,
-          exit_remaining_ms: terminal.exit_remaining_ms })}; events=${names.join(',')}`);
+          exit_remaining_ms: terminal.exit_remaining_ms })}; events=${events.map(({ event }) => event).join(',')}`);
     }
+    // Physical exit proof and delivery of buffered stdout are independent.
+    await waitForEvent('control_stopped', 1_000);
+    const names = events.map(({ event }) => event);
     expect(names).toContain('force_stop_complete');
     expect(names).toContain('cleanup');
     expect(names).toContain('control_stopped');

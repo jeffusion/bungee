@@ -572,6 +572,7 @@ describe('IPC physical progress and orphan resources',()=>{
     const client=await fault('drop-probe',{requestTimeoutMs:1000,maxPendingRequests:1,progressTimeoutMs:25,probeTimeoutMs:30,probeIntervalMs:10,
       onWorkerFailure:()=>{failures++;failed.resolve();},onDiagnostic:event=>{if(event.event==='suspect')suspect++;}});
     const state=client.durableState('suspect');await waitForState(()=>client.health().pendingCount===0);
+    expect(client.health().failure).toBeNull();suspect=0;
     const result=state.get('missing').catch(error=>error);await failed.promise;
     expect(await result).toMatchObject({code:'worker_failed'});expect(suspect).toBe(1);expect(failures).toBe(1);
   });
