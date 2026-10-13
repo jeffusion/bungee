@@ -1,6 +1,6 @@
 import type { ConfigRepository } from '../../src/config-storage';
 
-type FixtureMethod = 'getActivePublication' | 'getOperation' | 'getOperationState' | 'getCurrentOperationState' | 'getRecovery' | 'getCurrentRecovery' | 'getLatestRecovery' | 'commit' | 'beginPublication' | 'beginWorkerAttempt' | 'beginDrainingRecovery' | 'recordWorkerResult' | 'finalizePublication' | 'markDraining' | 'createManualRecovery' | 'claimRecoveryAttempt' | 'scheduleRecoveryRetry' | 'succeedRecovery' | 'stopRecovery' | 'requeueRecovery' | 'appendServingSnapshot' | 'getServingSnapshot' | 'close';
+type FixtureMethod = 'getActivePublication' | 'getOperation' | 'getOperationState' | 'getCurrentOperationState' | 'getRecovery' | 'getCurrentRecovery' | 'getLatestRecovery' | 'commit' | 'beginPublication' | 'beginWorkerAttempt' | 'beginDrainingRecovery' | 'recordWorkerResult' | 'finalizePublication' | 'markDraining' | 'createManualRecovery' | 'claimRecoveryAttempt' | 'scheduleRecoveryRetry' | 'succeedRecovery' | 'stopRecovery' | 'requeueRecovery' | 'appendServingSnapshot' | 'getServingSnapshot' | 'getRetirementDescriptorCleanupState' | 'getRetiredWorkerInstanceIds' | 'getPublicationRetirement' | 'freezePublicationRetirement' | 'recordPublicationRetirementEvidence' | 'stopPublicationRetirement' | 'retryPublicationRetirement' | 'markPublicationRetirementReleased' | 'getRuntimeRecoveryBudget' | 'consumeRuntimeRecoveryRestartTicket' | 'getRuntimeRecoveryStartupGate' | 'observeRuntimeRecoveryHealth' | 'getPublicationServingSet' | 'freezePublicationServingSet' | 'confirmPublicationServingMemberExit' | 'close';
 type ConfigurationRepositoryFixture = {
   [M in FixtureMethod]: (...args: Parameters<ConfigRepository[M]>) => Promise<ReturnType<ConfigRepository[M]>>;
 } & Pick<ConfigRepository, 'getSnapshot'>;
@@ -9,6 +9,23 @@ type ConfigurationRepositoryFixture = {
 export function configurationRepositoryFixture(repository: ConfigRepository): ConfigurationRepositoryFixture {
   return {
     getSnapshot: () => repository.getSnapshot(),
+    getPublicationServingSet: async (...args: Parameters<ConfigRepository['getPublicationServingSet']>) => repository.getPublicationServingSet(...args),
+    freezePublicationServingSet: async (...args: Parameters<ConfigRepository['freezePublicationServingSet']>) => repository.freezePublicationServingSet(...args),
+    confirmPublicationServingMemberExit: async (...args: Parameters<ConfigRepository['confirmPublicationServingMemberExit']>) => repository.confirmPublicationServingMemberExit(...args),
+
+    getRetirementDescriptorCleanupState: async (instance: string) => repository.getRetirementDescriptorCleanupState(instance),
+    getRetiredWorkerInstanceIds: async () => repository.getRetiredWorkerInstanceIds(),
+    getPublicationRetirement: async (...args: Parameters<ConfigRepository['getPublicationRetirement']>) => repository.getPublicationRetirement(...args),
+    freezePublicationRetirement: async (...args: Parameters<ConfigRepository['freezePublicationRetirement']>) => repository.freezePublicationRetirement(...args),
+    recordPublicationRetirementEvidence: async (...args: Parameters<ConfigRepository['recordPublicationRetirementEvidence']>) => repository.recordPublicationRetirementEvidence(...args),
+    stopPublicationRetirement: async (...args: Parameters<ConfigRepository['stopPublicationRetirement']>) => repository.stopPublicationRetirement(...args),
+    retryPublicationRetirement: async (...args: Parameters<ConfigRepository['retryPublicationRetirement']>) => repository.retryPublicationRetirement(...args),
+    markPublicationRetirementReleased: async (...args: Parameters<ConfigRepository['markPublicationRetirementReleased']>) => repository.markPublicationRetirementReleased(...args),
+    getRuntimeRecoveryBudget: async (...args: Parameters<ConfigRepository['getRuntimeRecoveryBudget']>) => repository.getRuntimeRecoveryBudget(...args),
+    consumeRuntimeRecoveryRestartTicket: async (...args: Parameters<ConfigRepository['consumeRuntimeRecoveryRestartTicket']>) => repository.consumeRuntimeRecoveryRestartTicket(...args),
+    getRuntimeRecoveryStartupGate: async (...args: Parameters<ConfigRepository['getRuntimeRecoveryStartupGate']>) => repository.getRuntimeRecoveryStartupGate(...args),
+    observeRuntimeRecoveryHealth: async (...args: Parameters<ConfigRepository['observeRuntimeRecoveryHealth']>) => repository.observeRuntimeRecoveryHealth(...args),
+
     getActivePublication: async (...args: Parameters<ConfigRepository['getActivePublication']>) => repository.getActivePublication(...args),
     getOperation: async (...args: Parameters<ConfigRepository['getOperation']>) => repository.getOperation(...args),
     getOperationState: async (...args: Parameters<ConfigRepository['getOperationState']>) => repository.getOperationState(...args),

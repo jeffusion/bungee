@@ -1,3 +1,4 @@
+import { armProcessLifetimeGuard, PROCESS_LIFETIME_GUARD_ENV } from '../../../src/supervision/process-lifetime-guard';
 import { expect, test } from 'bun:test';
 import { DEFAULT_PUBLICATION_POLICY } from '@jeffusion/bungee-types';
 import { randomUUID } from 'node:crypto';
@@ -182,6 +183,7 @@ test('a preaborted adapter runtimeSnapshot rejects before pending initialization
 test.each([[0, 'within budget'], [750, 'within budget'], [750, 'deadline exceeded']] as const)('真实进程可终止性故障注入：drain边界由shutdown解除并产生exact exit evidence (prepare response delay %ims, %s)', async (prepareDelayMs, scenario) => {
   const expectSetupTimeout = scenario === 'deadline exceeded';
   const directory = await mkdtemp(join(tmpdir(), 'bungee-adapter-real-termination-'));
+  const lifetimeGuard = process.platform === 'win32' ? undefined : armProcessLifetimeGuard({ directory: join(directory, 'guards'), processInstanceId: IDENTITY.worker_instance_id });
   const descriptorPath = join(directory, 'worker.json');
   const childEntry = resolve(import.meta.dir, '../../fixtures/supervised-worker-termination-child.ts');
   const rootKey = new Uint8Array(32).fill(11);
@@ -259,13 +261,16 @@ test.each([[0, 'within budget'], [750, 'within budget'], [750, 'deadline exceede
       cwd: directory,
       env: {
         ...process.env,
+        ...(lifetimeGuard === undefined ? {} : { [PROCESS_LIFETIME_GUARD_ENV]: JSON.stringify(lifetimeGuard.facts) }),
         BUNGEE_TEST_WORKER_IDENTITY: JSON.stringify(IDENTITY),
         BUNGEE_TEST_WORKER_BOOT: BOOT,
         BUNGEE_TEST_WORKER_SEED: Buffer.from(rootKey).toString('base64'),
         BUNGEE_WORKER_DESCRIPTOR_PATH: descriptorPath,
       },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: lifetimeGuard === undefined ? ['ignore', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe', lifetimeGuard.fd],
     });
+    child.once('exit', () => lifetimeGuard?.closeAfterChildExit());
+    child.once('error', () => lifetimeGuard?.closeAfterChildExit());
     child.once('error', rejectChildError);
     child.stdout?.on('data', (chunk: Buffer) => consumeChildStdout(chunk.toString('utf8')));
     child.stdout?.on('end', () => consumeChildStdout('', true));
@@ -287,7 +292,7 @@ test.each([[0, 'within budget'], [750, 'within budget'], [750, 'deadline exceede
       supervisionSeed: seed,
       client: { authority: AUTHORITY },
       pid: child.pid,
-      readyClient: client,
+      readyClient: client, lifetimeGuard,
       processIdentity: {
         capture: (pid, processInstanceId) => captureProcessIdentity(pid, processInstanceId),
         probe: async (captured) => { probes.push(captured); return probeProcessIdentity(captured); },
@@ -320,9 +325,10 @@ test.each([[0, 'within budget'], [750, 'within budget'], [750, 'deadline exceede
       terminalDrain: { status: 'worker-drained', cleanup_state: 'success' } });
     expect(exits).toEqual([expect.objectContaining({ exited: true, pid: child.pid,
       terminalDrain: expect.objectContaining({ status: 'worker-drained', cleanup_state: 'success' }) })]);
-    expect(probes.length).toBeGreaterThan(0);
-    expect(probes[0]?.pid).toBe(child.pid);
-    expect(probes[0]?.processInstanceId).toBe(IDENTITY.worker_instance_id);
+    if (lifetimeGuard === undefined) expect(probes.length).toBeGreaterThan(0);
+    else expect(adapter.lifetimeGuardFacts?.process_instance_id).toBe(IDENTITY.worker_instance_id);
+    expect(adapter.capturedProcessIdentity?.pid).toBe(child.pid);
+    expect(adapter.capturedProcessIdentity?.processInstanceId).toBe(IDENTITY.worker_instance_id);
     const childExit = await within(child.exitCode !== null || child.signalCode !== null
       ? Promise.resolve({ code: child.exitCode, signal: child.signalCode })
       : new Promise<{ readonly code: number | null; readonly signal: NodeJS.Signals | null }>((resolveExit) => {
@@ -355,6 +361,7 @@ test.each([[0, 'within budget'], [750, 'within budget'], [750, 'deadline exceede
       try { await within(exited, 1_000); }
       catch (error) { throw new Error(`child cleanup exit timed out: ${error instanceof Error ? error.message : String(error)}`); }
     }
+    lifetimeGuard?.closeAfterChildExit();
     await rm(directory, { recursive: true, force: true });
   }
   if (expectSetupTimeout) {
@@ -371,8 +378,8 @@ test.each([[0, 'within budget'], [750, 'within budget'], [750, 'deadline exceede
 }, 30_000);
 
 test('真实worker D到期执行HTTP force并取消仍在传输的SSE后持久化cleanup证据', async () => {
-  const directory = join(process.cwd(), 'test-results/publication', `worker-force-${randomUUID()}`);
-  await mkdir(directory, { recursive: true });
+  const directory = await mkdtemp(join(tmpdir(), 'worker-force-'));
+  const lifetimeGuard = process.platform === 'win32' ? undefined : armProcessLifetimeGuard({ directory: join(directory, 'guards'), processInstanceId: IDENTITY.worker_instance_id });
   const descriptorPath = join(directory, 'worker.json');
   const childEntry = resolve(import.meta.dir, '../../fixtures/supervised-worker-termination-child.ts');
   const rootKey = new Uint8Array(32).fill(12);
@@ -401,14 +408,17 @@ test('真实worker D到期执行HTTP force并取消仍在传输的SSE后持久�
       cwd: directory,
       env: {
         ...process.env,
+        ...(lifetimeGuard === undefined ? {} : { [PROCESS_LIFETIME_GUARD_ENV]: JSON.stringify(lifetimeGuard.facts) }),
         BUNGEE_TEST_WORKER_IDENTITY: JSON.stringify(IDENTITY),
         BUNGEE_TEST_WORKER_BOOT: BOOT,
         BUNGEE_TEST_WORKER_SEED: Buffer.from(rootKey).toString('base64'),
         BUNGEE_TEST_HOLD_DRAIN: '1',
         BUNGEE_WORKER_DESCRIPTOR_PATH: descriptorPath,
       },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: lifetimeGuard === undefined ? ['ignore', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe', lifetimeGuard.fd],
     });
+    child.once('exit', () => lifetimeGuard?.closeAfterChildExit());
+    child.once('error', () => lifetimeGuard?.closeAfterChildExit());
     child.stdout?.on('data', (chunk: Buffer) => {
       stdoutBuffer += chunk.toString('utf8');
       const lines = stdoutBuffer.split('\n');
@@ -422,7 +432,7 @@ test('真实worker D到期执行HTTP force并取消仍在传输的SSE后持久�
       credential, authority: AUTHORITY, timeoutMs: 500 });
     await client.attach();
     adapter = new SupervisedConfigWorkerProcessAdapter({ identity: IDENTITY, descriptorPath, supervisionSeed: seed,
-      client: { authority: AUTHORITY, timeoutMs: 500 }, child, readyClient: client });
+      client: { authority: AUTHORITY, timeoutMs: 500 }, child, readyClient: client, lifetimeGuard });
     await within(adapter.initialization, 2_000);
     const start = { ...startCurrentMessage(), ...IDENTITY };
     await adapter.send(start);
@@ -472,10 +482,9 @@ test('真实worker D到期执行HTTP force并取消仍在传输的SSE后持久�
 }, 12_000);
 
 test('real C=2s D=1s E=1s lost drain ACK still performs natural cleanup and exits with signed proof', async () => {
-  const evidenceDirectory = resolve(import.meta.dir, '../../../../../test-results/publication');
-  await mkdir(evidenceDirectory, { recursive: true });
-  const directory = await mkdtemp(join(evidenceDirectory, 'worker-cde-lost-ack-'));
+  const directory = await mkdtemp(join(tmpdir(), 'worker-cde-lost-ack-'));
   const childEntry = resolve(import.meta.dir, '../../fixtures/supervised-worker-termination-child.ts');
+  const lifetimeGuard = process.platform === 'win32' ? undefined : armProcessLifetimeGuard({ directory: join(directory, 'guards'), processInstanceId: IDENTITY.worker_instance_id });
   const descriptorPath = join(directory, 'worker.json');
   const rootKey = new Uint8Array(32).fill(12);
   const seed = deriveWorkerSupervisionSeed(rootKey, IDENTITY.master_generation, IDENTITY.worker_instance_id, IDENTITY.worker_slot);
@@ -529,13 +538,16 @@ test('real C=2s D=1s E=1s lost drain ACK still performs natural cleanup and exit
       cwd: directory,
       env: {
         ...process.env,
+        ...(lifetimeGuard === undefined ? {} : { [PROCESS_LIFETIME_GUARD_ENV]: JSON.stringify(lifetimeGuard.facts) }),
         BUNGEE_TEST_WORKER_IDENTITY: JSON.stringify(IDENTITY),
         BUNGEE_TEST_WORKER_BOOT: BOOT,
         BUNGEE_TEST_WORKER_SEED: Buffer.from(rootKey).toString('base64'),
         BUNGEE_WORKER_DESCRIPTOR_PATH: descriptorPath,
       },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: lifetimeGuard === undefined ? ['ignore', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe', lifetimeGuard.fd],
     });
+    child.once('exit', () => lifetimeGuard?.closeAfterChildExit());
+    child.once('error', () => lifetimeGuard?.closeAfterChildExit());
     child.stdout?.on('data', (chunk: Buffer) => {
       stdoutBuffer += chunk.toString('utf8');
       const lines = stdoutBuffer.split('\n');
@@ -549,7 +561,7 @@ test('real C=2s D=1s E=1s lost drain ACK still performs natural cleanup and exit
       credential, authority: AUTHORITY, timeoutMs: 5_000, fetch: loseDrainAck });
     await client.attach();
     adapter = new SupervisedConfigWorkerProcessAdapter({ identity: IDENTITY, descriptorPath, supervisionSeed: seed,
-      client: { authority: AUTHORITY, timeoutMs: 5_000 }, pid: child.pid, readyClient: client });
+      client: { authority: AUTHORITY, timeoutMs: 5_000 }, pid: child.pid, readyClient: client, lifetimeGuard });
     await within(adapter.initialization, 2_000);
     const start = { ...startCurrentMessage(), ...IDENTITY };
     await adapter.send(start);

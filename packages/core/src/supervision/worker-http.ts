@@ -1,3 +1,4 @@
+import type { HeldProcessLifetimeGuardFacts } from './process-lifetime-guard';
 import { randomUUID } from 'node:crypto';
 import type { Server } from 'bun';
 import { snapshotJsonGraph } from '../config-storage/json-preflight';
@@ -85,6 +86,7 @@ export type WorkerSupervisionHttpServerOptions = {
   readonly credential: SupervisionProcessCredential;
   readonly identity: ConfigProcessIdentity;
   readonly runtime: ConfigWorkerRuntimeController;
+  readonly lifetimeGuard?: HeldProcessLifetimeGuardFacts;
   readonly controlPort?: number;
   readonly masterControlPort: number;
   readonly descriptorPath?: string;
@@ -200,6 +202,7 @@ export class WorkerSupervisionHttpServer {
   readonly authority: SupervisionAuthorityGuard;
   readonly commands: SupervisionCommandGuard;
   private readonly credential: SupervisionProcessCredential;
+  private readonly lifetimeGuard?: HeldProcessLifetimeGuardFacts;
   private readonly workerIdentity: ConfigProcessIdentity;
   private readonly runtime: ConfigWorkerRuntimeController;
   private readonly clock: () => number;
@@ -234,6 +237,7 @@ export class WorkerSupervisionHttpServer {
 
   constructor(options: WorkerSupervisionHttpServerOptions) {
     this.credential = options.credential;
+    this.lifetimeGuard = options.lifetimeGuard;
     this.identity = identityFromCredential(options.credential);
     this.workerIdentity = { ...options.identity };
     this.runtime = options.runtime;
@@ -315,7 +319,9 @@ export class WorkerSupervisionHttpServer {
 
   async stop(): Promise<void> {
     const priorEvidence = this.currentEvidence();
-    const keepDescriptor = priorEvidence.message?.status === 'worker-draining'
+    // Native lifetime identities remain readable until the controller has durably
+    // fenced retirement and terminalized its audit, including ordinary stop/crash.
+    const keepDescriptor = this.lifetimeGuard !== undefined || priorEvidence.message?.status === 'worker-draining'
       || priorEvidence.message?.status === 'worker-drained'
       || priorEvidence.message?.status === 'worker-drain-failed';
     this.terminating = true;
@@ -381,7 +387,8 @@ export class WorkerSupervisionHttpServer {
     if (this.descriptorPath === undefined || this.controlPort <= 0) return;
     const facts = this.facts();
     const { schema: _schema, role: _role, ...descriptorFacts } = facts;
-    const body: WorkerDescriptorBody = { schema: 'bungee-worker-descriptor-v1', role: 'worker', ...descriptorFacts, evidence };
+    const body: WorkerDescriptorBody = { schema: 'bungee-worker-descriptor-v1', role: 'worker', ...descriptorFacts, evidence,
+      ...(this.lifetimeGuard === undefined ? {} : { lifetime_guard: this.lifetimeGuard }) };
     await writeWorkerDescriptor(this.descriptorPath, body, this.credential.process_key, this.descriptorWriteOptions);
     this.descriptorDirty = false;
   }

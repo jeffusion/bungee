@@ -16,6 +16,8 @@ import { logger } from '../logger';
 import { serializeErrorChain } from './error-chain';
 import { isLowercaseUuid } from '../config-storage/validation';
 import { buildRouteBodyPlans } from './route-body-plan';
+import { publicationCleanup, runtimeHealthSnapshot, type ConfigControlRuntimeHealth } from './runtime-status';
+export type { ConfigControlRuntimeHealth } from './runtime-status';
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' } as const;
 const PUT_FIELDS = new Set(['expected_revision', 'aggregate', 'mutation_id', 'kind', 'managementSetup']);
@@ -31,6 +33,8 @@ export interface ConfigControlRepository {
   getCurrentRecovery?(): Promise<import('../config-storage').ConfigurationRecovery | null>;
   getRecovery?(recoveryId: string): Promise<import('../config-storage').ConfigurationRecovery | null>;
   getCurrentOperationState?(): Promise<ConfigurationOperationState | null>;
+  getPublicationRetirement?(mutationId: string): Promise<import('../config-storage/retirement-store').PublicationRetirement | null>;
+  getPublicationRetirementRetry?(requestId:string):Promise<import('../config-storage/retirement-store').PublicationRetirementRetry|null>;
   getOperationState(mutationId: string): Promise<ConfigurationOperationState | null>;
   commit(command: {
     readonly mutation_id: string; readonly expected_revision: number;
@@ -86,10 +90,14 @@ export type ConfigControlApiOptions = {
     recoveryId: string, sourceMutationId: string, expectedRevision: number,
   ) => Promise<import('../config-storage').ConfigurationRecovery>;
   readonly isRecoveryReady?: () => boolean;
+  readonly isCleanupRecoveryReady?: () => boolean;
+  readonly requestCleanupRecovery?: (requestId:string,mutationId:string,revision:number)=>Promise<import('../config-storage/retirement-store').PublicationRetirementRetry>;
   readonly runtimePublicationEvidence?: () => {
     readonly serving_complete: boolean;
     readonly serving_revision: number | null;
   };
+  readonly runtimeHealth?: () => ConfigControlRuntimeHealth | Promise<ConfigControlRuntimeHealth>;
+  readonly retirementDeadline?: (bootId: string, deadlineNs: string) => number | null;
 };
 
 export interface ConfigControlApi {
@@ -154,6 +162,7 @@ async function login(request: Request, options: ConfigControlApiOptions): Promis
       return json({ success: false, error: 'authentication_provider_changed' }, 409);
     }
     const provider = auth.provider();
+    if (selected !== null && !provider) return json({ success: false, error: 'management_provider_unavailable' }, 503);
     if (provider) {
       const response = await provider.login(request);
       const body = await response.json() as Record<string, unknown>;
@@ -539,7 +548,8 @@ function runtimeOperation(state: ConfigurationOperationState | null): object | n
   if (state === null) return null;
   const operation = state.operation;
   return { operation_id: operation.mutation_id, committed_revision: operation.committed_revision,
-    state: operation.state, result_status: operation.result_status, error_code: operation.error_code };
+    state: operation.state, result_status: operation.result_status, error_code: operation.error_code,
+    updated_at: operation.updated_at };
 }
 
 function runtimeRecovery(recovery: import('../config-storage').ConfigurationRecovery | null): object | null {
@@ -579,10 +589,20 @@ async function retryOperation(
         ? recoveryResponse(existing)
         : json({ error: 'idempotency_key_reused' }, 409);
     }
+    const cleanupRequest = await repositoryCall(()=>options.repository.getPublicationRetirementRetry?.(requestId)??null);
+    if(cleanupRequest!==null) return cleanupRequest.source_mutation_id===sourceMutationId && cleanupRequest.target_revision===expectedRevision
+      ? json(cleanupRequest,202) : json({error:'idempotency_key_reused'},409);
 
     const state = await repositoryCall(() => options.repository.getOperationState(sourceMutationId));
     if (state === null) return json({ error: 'operation_not_found' }, 404);
     const operation = state.operation;
+    if(operation.state==='draining') {
+      if(operation.committed_revision!==expectedRevision||active.revision!==expectedRevision) return json({error:'revision_conflict'},409);
+      const retirement=await repositoryCall(()=>options.repository.getPublicationRetirement?.(sourceMutationId)??null);
+      if(retirement?.state!=='stopped') return json({error:'recovery_not_retryable'},409);
+      if(options.isCleanupRecoveryReady?.()!==true||!options.requestCleanupRecovery) return json({error:'recovery_unavailable'},503);
+      return json(await options.requestCleanupRecovery(requestId,sourceMutationId,expectedRevision),202);
+    }
     if (operation.state !== 'degraded') return json({ error: 'operation_not_degraded' }, 409);
     if (operation.committed_revision !== expectedRevision || active.revision !== expectedRevision) {
       return json({ error: 'revision_conflict' }, 409);
@@ -996,19 +1016,24 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
         if (path === '/api/config/runtime' && request.method === 'GET') {
           const currentOperation = await repositoryCall(() => serializedOptions.repository.getCurrentOperationState?.() ?? null);
           const currentRecovery = await repositoryCall(() => serializedOptions.repository.getCurrentRecovery?.() ?? null);
+          const retirement = currentOperation === null ? null : await repositoryCall(() =>
+            serializedOptions.repository.getPublicationRetirement?.(currentOperation.operation.mutation_id) ?? null);
+          const health = runtimeHealthSnapshot(await serializedOptions.runtimeHealth?.() ?? null);
           const evidence = serializedOptions.runtimePublicationEvidence?.()
             ?? { serving_complete: false, serving_revision: null };
           return json({ config: snapshot.aggregate, revision: snapshot.revision, content_hash: snapshot.content_hash,
             workers: serializedOptions.admission.snapshot().map(runtimeWorker),
+            health,
             publication: {
               operation: runtimeOperation(currentOperation),
+              cleanup: publicationCleanup(retirement, serializedOptions.retirementDeadline),
               recovery: runtimeRecovery(currentRecovery),
-              retryable: currentOperation?.operation.state === 'degraded'
+              retryable: (currentOperation?.operation.state==='draining' && retirement?.state==='stopped') || (currentOperation?.operation.state === 'degraded'
                 && (currentOperation.operation.error_code === 'replacement_convergence_failed'
                   || currentOperation.operation.error_code === 'control_readiness_failed')
                 && currentRecovery?.state === 'stopped'
                 && currentRecovery.target_revision === snapshot.revision
-                && evidence.serving_complete === false,
+                && evidence.serving_complete === false),
               serving_complete: evidence.serving_complete,
               serving_revision: evidence.serving_revision,
               target_revision: snapshot!.revision,

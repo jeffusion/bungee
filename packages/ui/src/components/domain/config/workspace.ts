@@ -146,6 +146,7 @@ export function aggregateCounts(aggregate: ConfigurationAggregate) {
 }
 export function publicationBusy(publication: ConfigurationPublication | null): boolean {
   return !!publication && (['committed', 'publishing', 'draining'].includes(publication.operation?.state ?? '')
+    || publication.cleanup?.active === true
     || ['scheduled', 'running'].includes(publication.recovery?.state ?? ''));
 }
 export function servingStatus(publication: ConfigurationPublication | null, fresh: boolean): 'confirmed' | 'unconfirmed' | 'unknown' {

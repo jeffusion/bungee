@@ -1,6 +1,6 @@
 import {test,expect} from 'bun:test';
 import {Database} from 'bun:sqlite';
-import {migrateConfigurationDatabase,CONFIG_MIGRATIONS} from '../../src/config-storage/migrations';
+import {migrateConfigurationDatabase,CONFIG_MIGRATIONS,CONFIG_SCHEMA_VERSION} from '../../src/config-storage/migrations';
 import {migrateAccessDatabase} from '../../src/migrations/migration-manager';
 import {migrations} from '../../src/migrations';
 import {initializePluginStateDatabase,PLUGIN_STATE_MIGRATIONS,validatePluginStateDatabase} from '../../src/plugin-state/schema';
@@ -10,11 +10,11 @@ test.each(['config','access','plugin'] as const)('%s baseline supports future in
  const db=new Database(':memory:');
  try {
   const up=(database:Database)=>database.run('CREATE TABLE next_version(id INTEGER PRIMARY KEY, value TEXT)');
-  const run=()=>kind==='config'?migrateConfigurationDatabase(db,[...CONFIG_MIGRATIONS,{version:2,name:'next',up}]):kind==='access'?migrateAccessDatabase(db,[...migrations,{version:'002',name:'next',up}]):initializePluginStateDatabase(db,[...PLUGIN_STATE_MIGRATIONS,{version:2,name:'next',up}]);
+  const run=()=>kind==='config'?migrateConfigurationDatabase(db,[...CONFIG_MIGRATIONS,{version:CONFIG_SCHEMA_VERSION+1,name:'next',up}]):kind==='access'?migrateAccessDatabase(db,[...migrations,{version:'002',name:'next',up}]):initializePluginStateDatabase(db,[...PLUGIN_STATE_MIGRATIONS,{version:2,name:'next',up}]);
   run();db.run("INSERT INTO next_version VALUES(1,'retained')");run();
   expect(db.query('SELECT * FROM next_version').get()).toEqual({id:1,value:'retained'});
   if(kind==='plugin')expect(db.query('PRAGMA user_version').get()).toEqual({user_version:2});
-  else expect(db.query('SELECT * FROM schema_migrations ORDER BY version').all()).toHaveLength(2);
+  else expect(db.query('SELECT * FROM schema_migrations ORDER BY version').all()).toHaveLength(kind==='config'?CONFIG_MIGRATIONS.length+1:2);
  }finally{db.close();}
 });
 test.each(['config','access','plugin'] as const)('%s incremental failure rolls back schema, business writes and version',kind=>{
@@ -23,9 +23,9 @@ test.each(['config','access','plugin'] as const)('%s incremental failure rolls b
   if(kind==='config')migrateConfigurationDatabase(db);else if(kind==='access')migrateAccessDatabase(db);else initializePluginStateDatabase(db);
   const before=databaseSchemaDescriptor(db);
   const up=(database:Database)=>{database.run('CREATE TABLE unfinished(id INTEGER)');database.run('INSERT INTO unfinished VALUES(1)');throw new Error('injected failure');};
-  expect(()=>kind==='config'?migrateConfigurationDatabase(db,[...CONFIG_MIGRATIONS,{version:2,name:'next',up}]):kind==='access'?migrateAccessDatabase(db,[...migrations,{version:'002',name:'next',up}]):initializePluginStateDatabase(db,[...PLUGIN_STATE_MIGRATIONS,{version:2,name:'next',up}])).toThrow();
+  expect(()=>kind==='config'?migrateConfigurationDatabase(db,[...CONFIG_MIGRATIONS,{version:CONFIG_SCHEMA_VERSION+1,name:'next',up}]):kind==='access'?migrateAccessDatabase(db,[...migrations,{version:'002',name:'next',up}]):initializePluginStateDatabase(db,[...PLUGIN_STATE_MIGRATIONS,{version:2,name:'next',up}])).toThrow();
   expect(databaseSchemaDescriptor(db)).toBe(before);expect(db.inTransaction).toBe(false);
-  if(kind==='plugin')expect(db.query('PRAGMA user_version').get()).toEqual({user_version:1});else expect(db.query('SELECT * FROM schema_migrations').all()).toHaveLength(1);
+  if(kind==='plugin')expect(db.query('PRAGMA user_version').get()).toEqual({user_version:1});else expect(db.query('SELECT * FROM schema_migrations').all()).toHaveLength(kind==='config'?CONFIG_MIGRATIONS.length:1);
  }finally{db.close();}
 });
 test.each(['config','access','plugin'] as const)('%s rejects unknown future version and corrupted schema without repair',kind=>{
@@ -33,7 +33,7 @@ test.each(['config','access','plugin'] as const)('%s rejects unknown future vers
  try {
   const run=()=>kind==='config'?migrateConfigurationDatabase(db):kind==='access'?migrateAccessDatabase(db):initializePluginStateDatabase(db);
   run();db.run('CREATE TABLE unexpected(id INTEGER)');expect(run).toThrow();expect(db.query("SELECT name FROM sqlite_schema WHERE name='unexpected'").get()).not.toBeNull();
-  db.run('DROP TABLE unexpected');if(kind==='plugin')db.run('PRAGMA user_version=2');else db.run('UPDATE schema_migrations SET version=?',[kind==='config'?2:'002']);expect(run).toThrow();
+  db.run('DROP TABLE unexpected');if(kind==='plugin')db.run('PRAGMA user_version=2');else db.run('UPDATE schema_migrations SET version=? WHERE version=(SELECT max(version) FROM schema_migrations)',[kind==='config'?CONFIG_SCHEMA_VERSION+1:'002']);expect(run).toThrow();
  }finally{db.close();}
 });
 test('plugin baseline refuses a missing table instead of recreating an incomplete library',()=>{

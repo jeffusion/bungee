@@ -1,3 +1,4 @@
+import { parseHeldProcessLifetimeGuardFacts, type HeldProcessLifetimeGuardFacts } from './process-lifetime-guard';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { mkdir, open, rename, rm, chmod } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -20,6 +21,7 @@ export type WorkerDescriptorEvidence = {
 export type WorkerDescriptorBody = {
   readonly schema: 'bungee-worker-descriptor-v1';
   readonly role: 'worker';
+  readonly lifetime_guard?: HeldProcessLifetimeGuardFacts;
   readonly master_generation: string;
   readonly worker_instance_id: string;
   readonly worker_slot: number;
@@ -158,7 +160,8 @@ export function parseWorkerDescriptor(
     if (error instanceof SupervisionProtocolError) throw error;
     throw new SupervisionProtocolError('malformed_message', 'worker descriptor JSON is unsafe', { cause: error });
   }
-  exact(input, input.master_control_port === undefined ? DESCRIPTOR_KEYS : DESCRIPTOR_KEYS_WITH_MASTER_CONTROL);
+  const keys = input.master_control_port === undefined ? DESCRIPTOR_KEYS : DESCRIPTOR_KEYS_WITH_MASTER_CONTROL;
+  exact(input, input.lifetime_guard === undefined ? keys : [...keys, 'lifetime_guard']);
   if (input.schema !== 'bungee-worker-descriptor-v1' || input.role !== 'worker') fail('schema or role is invalid');
   const masterGeneration = text(input, 'master_generation');
   const workerInstanceId = text(input, 'worker_instance_id');
@@ -183,11 +186,14 @@ export function parseWorkerDescriptor(
   const descriptorMac = text(input, 'descriptor_mac');
   if (!/^hmac-sha256:[0-9a-f]{64}$/.test(descriptorMac)) fail('descriptor_mac is invalid');
   const body: WorkerDescriptorBody = {
-    schema: 'bungee-worker-descriptor-v1', role: 'worker', master_generation: masterGeneration,
+    schema: 'bungee-worker-descriptor-v1', role: 'worker',
+    ...(input.lifetime_guard === undefined ? {} : { lifetime_guard: parseHeldProcessLifetimeGuardFacts(input.lifetime_guard) }),
+    master_generation: masterGeneration,
     worker_instance_id: workerInstanceId, worker_slot: workerSlot, boot_nonce: bootNonce, pid,
     control_port: controlPort, ...(masterControlPort === undefined ? {} : { master_control_port: masterControlPort }), phase, frozen: input.frozen, private_port: privatePort, revision,
     content_hash: contentHash, plugin_catalog_hash: pluginCatalogHash, started_at: startedAt, evidence,
   };
+  if (body.lifetime_guard !== undefined && body.lifetime_guard.process_instance_id !== workerInstanceId) fail('lifetime guard identity does not match');
   if (!(credential instanceof Uint8Array)) {
     const processCredential = credential as SupervisionProcessCredential;
     if (processCredential.identity.role !== 'worker' || processCredential.identity.process_instance_id !== workerInstanceId

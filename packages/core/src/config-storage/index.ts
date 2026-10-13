@@ -45,3 +45,8 @@ export type {
 } from './validation';
 
 export { CONFIG_MIGRATIONS } from './migrations';
+
+export type { PublicationRetirement, PublicationRetirementMember, RetirementCleanupState, RetirementExitState, RetirementStopReason } from './retirement-store';
+export type { RuntimeRecoveryBudget, RuntimeRecoverySample, RuntimeRecoveryStartupGate } from './runtime-recovery-budget';
+
+export type { PublicationServingMember, PublicationServingSet } from './retirement-store';

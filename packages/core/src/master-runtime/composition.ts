@@ -1,6 +1,9 @@
 import {requestServiceDeclared, RequestRouteProtections} from '../plugin-control/request-service-authority';
 import { PluginJournalRecovery } from './plugin-journal-recovery';
-import type { DaemonMetadataV1, Sha256Digest } from '@jeffusion/bungee-types';
+import { kernelMonotonicNowNs, readKernelDeadlineClockId } from './kernel-monotonic-clock';
+import {ComponentRecoveryStopped, type ComponentRecovery} from './component-recovery';
+import type {HeldProcessLifetimeGuardFacts} from '../supervision/process-lifetime-guard';
+import {resolvePublicationPolicy, type DaemonMetadataV1, type Sha256Digest} from '@jeffusion/bungee-types';
 import type { AsyncConfigRepository, AsyncConfigRepositoryOptions } from '../config-storage/async-config-repository';
 import { PluginStateClient, type PluginStateOpenOptions } from '../plugin-state/client';
 import { PLUGIN_STORAGE_OPERATIONS, type PluginStorageOperation } from '../plugin-state/storage-rpc';
@@ -117,7 +120,14 @@ export type MasterProcessRepository = Pick<AsyncConfigRepository,
   | 'getOperationState' | 'getCurrentOperationState' | 'getRecovery' | 'getCurrentRecovery'
   | 'appendServingSnapshot' | 'getServingSnapshot' | 'claimControllerWithCapability'
   | 'beginPublication' | 'beginWorkerAttempt' | 'beginDrainingRecovery' | 'markDraining' | 'recordWorkerResult' | 'finalizePublication' | 'createManualRecovery' | 'claimRecoveryAttempt'
-  | 'scheduleRecoveryRetry' | 'succeedRecovery' | 'stopRecovery' | 'requeueRecovery'>;
+  | 'scheduleRecoveryRetry' | 'succeedRecovery' | 'stopRecovery' | 'requeueRecovery'
+  | 'getPublicationServingSet' | 'freezePublicationServingSet' | 'confirmPublicationServingMemberExit'
+  | 'getPublicationRetirement' | 'freezePublicationRetirement' | 'recordPublicationRetirementEvidence'
+  | 'stopPublicationRetirement' | 'retryPublicationRetirement' | 'markPublicationRetirementReleased' | 'getRetiredWorkerInstanceIds'
+  | 'getRetirementDescriptorCleanupState' | 'getRuntimeRecoveryBudget' | 'getRuntimeRecoveryStartupGate'
+  | 'getPublicationRetirementRetry' | 'requestPublicationRetirementRetry'
+  | 'freezePublicationRetirementDrainStart'
+  | 'consumeRuntimeRecoveryRestartTicket' | 'observeRuntimeRecoveryHealth'>;
 export type MasterProcessAdmission = WorkerAdmissionController
   & MasterRuntimeAdmission
   & AdmittedWorkerSelector;
@@ -136,6 +146,7 @@ export type MasterProcessWorkerFactory = ConfigPublicationWorkerFactory & Master
   discoverAndAdopt(admission: import('../ingress').AdmissionSet): Promise<SupervisedAdoptionResult>;
   cleanupAuthenticatedOrphans?(registry: import('../ingress').AdmissionRegistryStatus): Promise<AuthenticatedOrphanCleanupResult>;
   confirmPreviousWorkersExited?(registry: import('../ingress').AdmissionRegistryStatus, replacements: readonly ServingConfigWorker[]): Promise<boolean>;
+  recoverRetiredWorkers?(retirement: import('../config-storage/retirement-store').PublicationRetirement): Promise<readonly ServingConfigWorker[]>;
 };
 
 export interface MasterProcessRuntime extends MasterSignalRuntime {
@@ -160,6 +171,8 @@ export interface MasterProcessCoordinator extends MasterRuntimeCoordinator {
 }
 
 export interface MasterProcessDependencies {
+  readonly runtimeRecovery?: ComponentRecovery;
+  readonly executorLifetimeGuard?: HeldProcessLifetimeGuardFacts | null;
   readonly context: MasterProcessContext;
   readonly clock: PublicationClock;
   readOptions(): MasterProcessOptions;
@@ -478,19 +491,61 @@ export async function startMasterComposition(
   let daemonControl: ReturnType<typeof createDaemonShutdownHandler> | null = null;
   let configurationStorageHealthy = true;
   let pluginStorageHealthy = true;
-  const configurationStorageFailed = () => { configurationStorageHealthy = false; resources.storageResourceUnreleased = true; };
+  let shutdownForRecovery = async () => {
+    const errors = await cleanupConstruction(resources);
+    if (errors.length) throw new AggregateError(errors,'component recovery cleanup is unconfirmed');
+  };
+  let freezeForRecovery = () => {};
+  const requestComponentRecovery = (reason: string): Promise<void> => {
+    const recovery = dependencies.runtimeRecovery;
+    if (recovery === undefined) return Promise.resolve();
+    freezeForRecovery();
+    const repository = resources.repository;
+    let policy=resolvePublicationPolicy(undefined);
+    try {if(configurationStorageHealthy && repository!==null) policy=resolvePublicationPolicy(repository.getSnapshot().aggregate.logical_configuration.publication);} catch { recovery.stop('restart_budget_unavailable');return Promise.resolve(); }
+    const defaultDeadline = kernelMonotonicNowNs() + BigInt(policy.drain_timeout_ms + policy.worker_exit_timeout_ms) * 1_000_000n;
+    return (async () => {
+      let deadline = defaultDeadline;
+      if (repository !== null && configurationStorageHealthy) {
+        try {
+          const active = await repository.getActivePublication();
+          const retirement = active === null ? null : await repository.getPublicationRetirement(active.operation.mutation_id);
+          for (const member of retirement?.members ?? []) {
+            const evidence = retirement!.evidence.find(item => item.member_id === member.identity.worker_instance_id);
+            if (evidence?.exit_state === 'confirmed') continue;
+            const boot = evidence?.exit_boot_id ?? member.deadline_boot_id;
+            if (boot !== recovery.bootId) { recovery.stop('clock_domain_unknown'); return; }
+            const start=evidence?.start_deadline_ns??member.start_deadline_ns;
+            const candidate = evidence?.exit_deadline_ns ? BigInt(evidence.exit_deadline_ns)
+              : start!==null ? BigInt(start) + BigInt(policy.drain_timeout_ms + policy.worker_exit_timeout_ms) * 1_000_000n : defaultDeadline;
+            if (candidate > deadline) deadline = candidate;
+          }
+        } catch { recovery.stop('restart_budget_unavailable'); return; }
+      }
+      await recovery.fail(reason,configurationStorageHealthy ? repository : null,shutdownForRecovery,deadline);
+    })();
+  };
+  const configurationStorageFailed = () => {
+    configurationStorageHealthy = false; resources.storageResourceUnreleased = true;
+    void requestComponentRecovery('config_storage').catch(error => logger.error({error:serializeErrorChain(error)},'Configuration storage recovery stopped'));
+  };
   try {
     const options = dependencies.readOptions();
+    const runtimeClockId = await readKernelDeadlineClockId();
     const configLock = await dependencies.acquireInstanceLock(options.configDbLockPath);
     resources.locks.push(configLock);
     const accessLock = await dependencies.acquireInstanceLock(`${dependencies.context.accessLogDbPath}.lock`);
     resources.locks.push(accessLock);
-    try { await dependencies.migrateAccessDatabase(dependencies.context.accessLogDbPath); }
-    catch (error) { resources.statsResourceUnreleased = hasUnreleasedMasterStatsResource(error); throw error; }
+    const migrateAccess = async () => {
+      try { await dependencies.migrateAccessDatabase(dependencies.context.accessLogDbPath); }
+      catch (error) { resources.statsResourceUnreleased = hasUnreleasedMasterStatsResource(error); throw error; }
+    };
     let supervisionState: import('../supervision/state-repository').SupervisionState | null = null;
     if (dependencies.createIngressController !== undefined) {
       const bootstrap = await dependencies.openRepository(options.configDbPath, { onWorkerFailure: configurationStorageFailed });
       resources.repository = bootstrap;
+      await dependencies.runtimeRecovery?.startup(bootstrap);
+      await migrateAccess();
       const createClaim = dependencies.createControllerClaim;
       if (createClaim === undefined || bootstrap.claimControllerWithCapability === undefined) {
         throw new MasterRuntimeError('startup_incomplete', 'supervision claim is unavailable');
@@ -500,7 +555,7 @@ export async function startMasterComposition(
       );
       await bootstrap.close();
       resources.repository = null;
-    }
+    } else await migrateAccess();
     const resolver = dependencies.createPluginPathResolver({
       moduleDirectory: dependencies.context.moduleDirectory,
       cwd: dependencies.context.cwd,
@@ -511,6 +566,7 @@ export async function startMasterComposition(
       compileOptions,
       onWorkerFailure: configurationStorageFailed,
     });
+    if (dependencies.createIngressController === undefined) await dependencies.runtimeRecovery?.startup(resources.repository);
     try {
       resources.stats = await dependencies.createMasterStats?.(dependencies.context.accessLogDbPath) ?? null;
     } catch (error) {
@@ -535,7 +591,12 @@ export async function startMasterComposition(
     resources.locks.push(pluginStateLock);
     resources.pluginState = await (dependencies.openPluginState ?? PluginStateClient.open)(pluginStatePath, {
       material, workerUrl: resolveStorageWorkerUrls(import.meta.url).pluginState,
-      onWorkerFailure: () => { pluginStorageHealthy = false; resources.storageResourceUnreleased = true; },
+      onWorkerFailure: error => {
+        pluginStorageHealthy = false; resources.storageResourceUnreleased = true;
+        logger.error({code:error.code,operationId:error.operationId},'Plugin state component failed');
+        void requestComponentRecovery('plugin_state').catch(failure => logger.error({error:serializeErrorChain(failure)},'Plugin state recovery stopped'));
+      },
+      onDiagnostic: event => logger.debug({...event},'Plugin state request progress'),
     });
     const pluginState = resources.pluginState;
     const secretStores = pluginState.secretStores;
@@ -929,11 +990,11 @@ export async function startMasterComposition(
             && registry.workers.some(peer => peer.worker_instance_id === worker.process.identity.worker_instance_id
               && peer.boot_nonce === worker.boot_nonce && peer.master_generation === worker.process.identity.master_generation));
         const selected = managementAuth.selected();
-        const management = !runtimeStopping && configurationStorageHealthy && pluginStorageHealthy
+        const management = !runtimeStopping && dependencies.runtimeRecovery?.state !== 'stopped' && configurationStorageHealthy && pluginStorageHealthy
           && resources.stats?.healthy?.() !== false
           && (selected === null || resources.pluginControl?.status(selected) === 'ready');
         const snapshot = resources.repository!.getSnapshot();
-        return {live:!runtimeStopping,management,data,degraded:!management || !data || admissionRecovering
+        return {live:true,management,data,degraded:!management || !data || admissionRecovering
           || registry?.revision !== snapshot.revision || registry?.content_hash !== snapshot.content_hash};
       },
       trustedProxyAddresses,
@@ -1445,6 +1506,7 @@ export async function startMasterComposition(
       ...workerFactoryBase,
       rootKey: material?.key ?? new Uint8Array(32),
       runtimeWorkersDirectory: resolve(options.configDbPath, '..', 'runtime', 'workers'),
+      retirementRepository: resources.repository,
        masterControlPort: options.masterControlPort,
       authority: {
         controller_epoch: supervisionState?.controller_epoch ?? 0,
@@ -1534,7 +1596,7 @@ export async function startMasterComposition(
     }
     const executorMarker = process.argv.find(argument => argument.startsWith('--bungee-process-identity='))?.split('=')[1];
     if (executorMarker && journalRecovery) {
-      await journalRecovery.register(controlIdentityFacts(), dependencies.context.pid, executorMarker);
+      await journalRecovery.register(controlIdentityFacts(), dependencies.context.pid, executorMarker, dependencies.executorLifetimeGuard ?? null);
     } else logger.warn('Durable plugin commands unavailable: exact executor identity marker is missing');
     if (remoteAdmission !== null) {
       const current = resources.repository.getSnapshot();
@@ -1587,6 +1649,55 @@ export async function startMasterComposition(
       pluginCatalogHash: catalog.hash,
       admission: trackedAdmission,
       masterGeneration,
+      recoverActiveServingWorkers: async (active) => {
+        const ingress = resources.ingressController;
+        if (ingress === null) return null;
+        assertIngressBootRecoveryGateOpen();
+        const generation = ingressBootRecoveryGate.generation;
+        const before = await ingress.status();
+        const serving = before.registry.active;
+        if (serving === null || serving.revision !== active.snapshot.revision
+          || serving.content_hash !== active.snapshot.content_hash || serving.plugin_catalog_hash !== catalog.hash) return null;
+        const adoption = await resources.workerFactory!.discoverAndAdopt(serving);
+        if (adoption.kind !== 'adopted') return null;
+        const after = await ingress.status();
+        assertIngressBootRecoveryGeneration(generation);
+        if (JSON.stringify({active:before.registry.active,prepared:before.registry.prepared,retired:before.registry.retired})
+          !== JSON.stringify({active:after.registry.active,prepared:after.registry.prepared,retired:after.registry.retired})) return null;
+        const retirement = await resources.repository!.getPublicationRetirement(active.operation.mutation_id);
+        if (retirement === null) return null;
+        const admission = await ingress.recoverActiveAdmission(serving, retirement.members.map(member => member.identity.worker_instance_id));
+        trackedAdmission.adoptCommitted(adoption.serving, serving);
+        startupServing = adoption.serving;
+        await trackRememberedServing(adoption.serving);
+        resources.workerFactory!.markCommitted(adoption.serving.map(worker => worker.process));
+        syncPluginControlAdmission();
+        return {workers: adoption.serving, admission};
+      },
+      recoverPreviousServingWorkers: async (active) => {
+        const ingress = resources.ingressController;
+        if (ingress === null) return trackedAdmission.snapshot();
+        const before = await ingress.status();
+        const serving = before.registry.active;
+        if (serving === null) return [];
+        if (serving.revision === active.snapshot.revision && serving.content_hash === active.snapshot.content_hash) {
+          throw new Error('target serving admission could not be authenticated for recovery');
+        }
+        const adoption = await resources.workerFactory!.discoverAndAdopt(serving);
+        if (adoption.kind !== 'adopted') throw new Error('previous serving admission could not be authenticated');
+        const after = await ingress.status();
+        if (JSON.stringify(after.registry.active) !== JSON.stringify(serving)) throw new Error('previous serving admission changed');
+        trackedAdmission.adoptCommitted(adoption.serving, serving);
+        await trackRememberedServing(adoption.serving);
+        return adoption.serving;
+      },
+      recoverRetiredWorkers: async (active) => {
+        const retirement = await resources.repository!.getPublicationRetirement(active.operation.mutation_id);
+        if (retirement === null) return [];
+        const workers = await resources.workerFactory!.recoverRetiredWorkers?.(retirement) ?? [];
+        await trackRememberedServing(workers);
+        return workers;
+      },
       confirmPreviousWorkersExited: async (replacements) => {
         assertIngressBootRecoveryGateOpen();
         const generation = ingressBootRecoveryGate.generation;
@@ -1785,7 +1896,7 @@ export async function startMasterComposition(
     let communicationStopped = false;
     let communicationWork: Promise<void> | null = null;
     const maintainCommunication = (): Promise<void> => {
-      if (communicationStopped) return Promise.resolve();
+      if (communicationStopped || !pluginStorageHealthy) return Promise.resolve();
       if (communicationWork !== null) return communicationWork;
       communicationWork = (async () => {
         try { await journalRecovery?.maintain(); }
@@ -1799,6 +1910,17 @@ export async function startMasterComposition(
     };
     const communicationTimer = setInterval(() => { void maintainCommunication(); }, 5_000);
     communicationTimer.unref?.();
+    const healthTimer = setInterval(() => {
+      if (communicationStopped || !configurationStorageHealthy) return;
+      const ingressFresh = resources.ingressController?.trustedActiveAdmissionIfFresh();
+      const selected = managementAuth.selected();
+      const healthy = runtimeReady && !runtimeStopping && pluginStorageHealthy && resources.stats?.healthy?.() !== false
+        && (selected === null || resources.pluginControl?.status(selected) === 'ready') && !!ingressFresh
+        && trackedAdmission.snapshot().length === options.workerCount;
+      void dependencies.runtimeRecovery?.observe(resources.repository!,healthy)
+        .catch(() => { configurationStorageFailed(); });
+    },5_000);
+    healthTimer.unref?.();
     let backgroundStopPromise: Promise<void> | null = null;
     const stopBackgroundTasks = (): Promise<void> => {
       if (backgroundStopPromise !== null) return backgroundStopPromise;
@@ -1806,6 +1928,7 @@ export async function startMasterComposition(
         const errors: unknown[] = [];
         communicationStopped = true;
         clearInterval(communicationTimer);
+        clearInterval(healthTimer);
         await communicationWork;
         try { await recoveryRunner?.stop(); } catch (error) { errors.push(error); }
         const publicationStop = publicationTasks.stop();
@@ -1852,6 +1975,7 @@ export async function startMasterComposition(
       }).then((result) => result.kind === 'complete' ? 'complete' : result.kind === 'fatal' ? 'fatal' : 'retryable');
     };
     const mutationReadiness = (): MasterIngressMutationReadiness | { readonly ready: false; readonly reason: 'ingress_unavailable' | 'admission_recovering' | 'readiness_check_failed' } => {
+      if (!configurationStorageHealthy || !pluginStorageHealthy) return {ready:false,reason:'readiness_check_failed'};
       const controller = resources.ingressController;
       if (controller === null) return { ready: false, reason: 'ingress_unavailable' };
       if (admissionRecovering) return { ready: false, reason: 'admission_recovering' };
@@ -1881,6 +2005,12 @@ export async function startMasterComposition(
       recoveryRunner?.stopAccepting();
       resources.ingressController?.stopRecovery?.();
       revokeRuntimePublication();
+    };
+    freezeForRecovery = () => {
+      stopAcceptingRecovery();
+      communicationStopped = true;
+      clearInterval(communicationTimer);
+      clearInterval(healthTimer);
     };
     const catalogRecords = catalog.records?.() ?? [];
     const pluginCatalogApi = createMasterPluginCatalogApi({
@@ -1926,6 +2056,22 @@ export async function startMasterComposition(
     let committedManagementProvider = managementAuth?.selected() ?? null;
     controlApi = createConfigControlApi({
       repository: resources.repository,
+      retirementDeadline: (bootId, deadlineNs) => {
+        if (bootId !== runtimeClockId) return null;
+        return Number((BigInt(deadlineNs) > kernelMonotonicNowNs() ? BigInt(deadlineNs) - kernelMonotonicNowNs() : 0n) / 1_000_000n);
+      },
+      runtimeHealth: () => ({observed_at: dependencies.clock.now(),component_recovery: dependencies.runtimeRecovery ? [{
+        component: dependencies.runtimeRecovery.reason === 'config_storage' ? 'config_storage' as const : 'plugin_state' as const,
+        state:dependencies.runtimeRecovery.state,reason_code:dependencies.runtimeRecovery.reason,
+        attempt_count:dependencies.runtimeRecovery.budget?.tickets ?? null,max_attempts:2,
+        next_retry_at:dependencies.runtimeRecovery.remainingRetryMs() === null ? null
+          : dependencies.clock.now() + dependencies.runtimeRecovery.remainingRetryMs()!,
+      }] : [],dependencies: [
+        {component:'config_storage',state:configurationStorageHealthy ? 'ready' as const : 'unavailable' as const,fresh:true,observed_at:dependencies.clock.now()},
+        {component:'plugin_state',state:pluginStorageHealthy ? 'ready' as const : 'unavailable' as const,fresh:true,observed_at:dependencies.clock.now()},
+        {component:'ingress',state:resources.ingressController?.trustedAdmissionRegistryIfFresh() ? 'ready' as const : 'unavailable' as const,
+          fresh:!!resources.ingressController?.trustedAdmissionRegistryIfFresh(),observed_at:dependencies.clock.now()},
+      ]}),
       managementAuth,
       pluginDependencies: new PluginDependencyGraph(catalogRecords.map(value=>value.manifest)),
       managementSetupStatus: name => resources.pluginControl!.readManagementSetup(name),
@@ -1981,7 +2127,19 @@ export async function startMasterComposition(
         if (recoveryRunner === null) return Promise.reject(new Error('configuration recovery runner is unavailable'));
         return recoveryRunner.requestManualRecovery(recoveryId, sourceMutationId, expectedRevision);
       },
+      isCleanupRecoveryReady: () => runtimeReady && !runtimeStopping && pluginStorageHealthy && configurationStorageHealthy
+        && !!resources.ingressController?.trustedAdmissionRegistryIfFresh(),
+      requestCleanupRecovery: async (requestId,mutationId,revision) => {
+        const accepted = await resources.repository!.requestPublicationRetirementRetry(requestId,mutationId,revision,dependencies.clock.now());
+        void publicationTasks.enqueueRecovery(async () => {
+          const outcome = await coordinator.recoverAndPublish();
+          if (outcome?.kind === 'outcome_unknown') return {kind:'retryable',error:outcome.error};
+          return {kind:'complete'};
+        });
+        return accepted;
+      },
       isRecoveryReady: () => runtimeReady && !runtimeStopping && !publicationFatalReported
+        && pluginStorageHealthy && configurationStorageHealthy
         && resources.ingressController?.isRecoveryReady() === true,
       runtimePublicationEvidence: () => {
         const trusted = resources.ingressController?.trustedActiveAdmissionIfFresh() ?? null;
@@ -2042,6 +2200,9 @@ export async function startMasterComposition(
     });
     const instanceLocks = [...resources.locks];
     const baseRuntime = dependencies.createRuntime({
+      ...(dependencies.runtimeRecovery === undefined ? {} : {onFailure: (error: Error) => {
+        void requestComponentRecovery('runtime_failure').catch(failure => logger.error({error:serializeErrorChain(failure)},'Runtime recovery stopped'));
+      }}),
       workerCount: options.workerCount,
       expectedPluginCatalogHash: catalog.hash,
             repository: resources.repository,
@@ -2109,6 +2270,10 @@ export async function startMasterComposition(
     runtimeLifecycle = {
       async start() { await baseRuntime.start(); },
       reportAsynchronousFailure(error) {
+        if (dependencies.runtimeRecovery !== undefined) {
+          void requestComponentRecovery('runtime_failure').catch(failure => logger.error({error:serializeErrorChain(failure)},'Runtime recovery stopped'));
+          return;
+        }
         stopAcceptingRecovery();
         baseRuntime.reportAsynchronousFailure(error);
         if (runtimeStarted) void publicShutdown().catch(() => undefined);
@@ -2200,6 +2365,7 @@ export async function startMasterComposition(
 
     const coordinateShutdown = (): Promise<void> => {
       if (shutdownCoordinatorPromise !== null) return shutdownCoordinatorPromise;
+      dependencies.runtimeRecovery?.dispose();
       const shutdownStartedAt = performance.now();
       let runtimeShutdown: Promise<void>;
       try {
@@ -2247,13 +2413,20 @@ export async function startMasterComposition(
       shutdown: () => publicShutdown(),
     };
     requestShutdown = () => publicShutdown();
+    shutdownForRecovery = coordinateShutdown;
 
     resources.listener.ready?.();
     await runtime.start();
+    if (dependencies.runtimeRecovery !== undefined && dependencies.runtimeRecovery.state !== 'healthy') {
+      throw new ComponentRecoveryStopped(dependencies.runtimeRecovery.reason ?? 'startup_failure');
+    }
     runtimeStarted = true;
     await recoveryRunner.start();
     if (startupRecoveryFailure !== null) throw startupRecoveryFailure;
     await publishDataState();
+    if (dependencies.runtimeRecovery !== undefined && dependencies.runtimeRecovery.state !== 'healthy') {
+      throw new ComponentRecoveryStopped(dependencies.runtimeRecovery.reason ?? 'startup_failure');
+    }
     runtimePublicationEligible = true;
     resources.workerFactory.markCommitted(trackedAdmission.snapshot().map(({ process }) => process));
     syncPluginControlAdmission();
@@ -2275,6 +2448,33 @@ export async function startMasterComposition(
       ingressControlPort: resources.ingressController.controlPort,
     };
   } catch (error) {
+    if (dependencies.runtimeRecovery !== undefined) {
+      if (!(error instanceof ComponentRecoveryStopped)) {
+        logger.error({error:serializeErrorChain(error)},'Master startup fault entered controlled recovery');
+        try { await requestComponentRecovery('startup_failure'); }
+        catch (failure) { logger.error({error:serializeErrorChain(failure)},'Master startup recovery remained unconfirmed'); }
+      }
+      const stoppedRuntime: MasterProcessRuntime = {
+        async start() {},
+        reportAsynchronousFailure() {},
+        async shutdown() {
+          const errors = await cleanupConstruction(resources);
+          dependencies.runtimeRecovery!.dispose();
+          if (errors.length) throw new AggregateError(errors,'stopped master cleanup unconfirmed');
+        },
+      };
+      if (resources.listener === null) {
+        const options = dependencies.readOptions();
+        resources.listener = dependencies.createManagementListener({profile:'management',hostname:options.managementHost,
+          port:options.managementPort,shutdownTimeoutMs:options.shutdownTimeoutMs,
+          controlApi:{handle:async () => Response.json({error:'runtime_stopped'},{status:503})},
+          health: () => ({live:true,management:false,data:false,degraded:true})});
+        resources.listener.start(); resources.listener.ready?.();
+      }
+      dependencies.runtimeRecovery.stop(dependencies.runtimeRecovery.reason ?? 'startup_failure');
+      const signals = dependencies.installSignalHandlers(stoppedRuntime);
+      return {runtime:stoppedRuntime,managementPort:resources.listener.port,shutdown:signals.shutdown,removeSignalHandlers:signals.remove};
+    }
     resources.ingressController?.stopRecovery?.();
     const cleanupErrors = runtime === null
       ? await cleanupConstruction(resources)

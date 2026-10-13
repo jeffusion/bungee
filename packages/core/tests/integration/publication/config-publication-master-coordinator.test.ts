@@ -22,6 +22,7 @@ import {
 import type { WorkerDrainedMessage, WorkerDrainFailedMessage, WorkerExitDeadlineEvidence } from '../../../src/config-publication/types';
 import type { ConfigMasterMessage, ConfigProcessIdentity, ConfigPublicationIdentity } from '../../../src/config-publication/messages';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../../helpers/test-budgets';
+import { configurationRepositoryFixture } from '../../helpers/config-repository';
 
 setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
@@ -216,6 +217,8 @@ class FakeFactory implements ConfigPublicationWorkerFactory {
   private nextPid = 100;
 
   failAtSpawn: number | null = null;
+  priorAttemptExited = false;
+  async confirmActivePublicationExited(): Promise<boolean> { return this.priorAttemptExited; }
 
   constructor(private readonly events: string[]) {}
 
@@ -391,6 +394,74 @@ afterEach(() => {
 });
 
 describe('MasterConfigPublicationCoordinator', () => {
+  for (const retirementFrozen of [false, true]) {
+    test(`publishing recovery preserves immutable serving attempts across the pre-admission crash window (retirement frozen=${retirementFrozen})`, async () => {
+      const opened = openRepository();
+      const mutation = `pre-admission-authority-${retirementFrozen}`;
+      commit(opened.repository, mutation, [0, 1]);
+      opened.repository.beginPublication(mutation, CREATED_AT + 1);
+      const oldTargets = [new FakeWorker(0, 80, []), new FakeWorker(1, 81, [])];
+      for (const worker of oldTargets) {
+        opened.repository.beginWorkerAttempt(mutation, worker.slot, 0, 'initial', CREATED_AT + 2);
+      }
+      for (const worker of oldTargets) {
+        opened.repository.recordWorkerResult(mutation, worker.slot, { kind: 'converged', attempt_no: 1, applied_revision: 2 }, CREATED_AT + 3);
+      }
+      const frozen = opened.repository.freezePublicationServingSet(mutation, 0, oldTargets.map(worker => ({
+        identity: worker.identity, pid: worker.pid, boot_nonce: `40000000-0000-4000-8000-${String(worker.pid).padStart(12, '0')}`,
+        private_port: 41_000 + worker.slot, revision: 2, content_hash: opened.repository.getSnapshot().content_hash,
+        plugin_catalog_hash: PLUGIN_CATALOG_HASH, publication: { mutation_id: mutation, attempt_no: 1, drain_recovery_generation: 0 },
+        guard: null, kernel_boot_id: KERNEL_BOOT_ID,
+      })));
+      if (retirementFrozen) opened.repository.freezePublicationRetirement(mutation, 0, [], CREATED_AT + 4);
+      // Crash after durable authority and before prepare/markDraining: real DB reopen.
+      const repository = reopen(opened.repository, opened.dbPath);
+      expect(repository.getActivePublication()?.operation.state).toBe('publishing');
+      expect(() => repository.beginWorkerAttempt(mutation, 0, 1, 'master_recovery', CREATED_AT + 5)).toThrow('complete durable exit fence');
+      const factory = new FakeFactory([]);
+      factory.confirmActivePublicationExited = async () => {
+        for (const worker of oldTargets) {
+          if (await worker.verifyExactExit() === null) return false;
+          repository.confirmPublicationServingMemberExit(mutation, 0, worker.identity.worker_instance_id);
+        }
+        return true;
+      };
+      const coordinator = new MasterConfigPublicationCoordinator({ repository: configurationRepositoryFixture(repository),
+        workerFactory: factory, workerCount: 2, clock: { now: () => CREATED_AT + 100 },
+        startupApplyTimeoutMs: 100, drainTimeoutMs: 100, confirmPreviousWorkersExited: async () => true });
+      for (let retry = 0; retry < 3; retry += 1) {
+        expect(await coordinator.recoverAndPublish()).toMatchObject({ kind: 'outcome_unknown', fatal: false, code: 'control_recovering' });
+      }
+      expect(factory.workers).toHaveLength(0);
+      expect(repository.getActivePublication()?.targets.map(target => target.attempt_no)).toEqual([1, 1]);
+      expect(repository.getPublicationServingSet(mutation, 0)).toEqual(frozen);
+      oldTargets[0]!.exit();
+      expect(await coordinator.recoverAndPublish()).toMatchObject({ kind: 'outcome_unknown', fatal: false });
+      expect(factory.workers).toHaveLength(0);
+      oldTargets[1]!.exit();
+      const pending = coordinator.recoverAndPublish();
+      for (let step = 0; step < 10 && factory.workers.length < 2; step += 1) await flushMicrotasks();
+      expect(factory.workers).toHaveLength(2);
+      const active = repository.getActivePublication();
+      if (active === null) throw new Error('recovered publication missing');
+      expect(active.targets.map(target => target.attempt_no)).toEqual([2, 2]);
+      expect(active.operation.drain_recovery_generation).toBe(0);
+      for (const worker of factory.workers) publicationReady(worker,
+        { mutation_id: mutation, attempt_no: 2, drain_recovery_generation: 0 }, 2, active.snapshot.content_hash);
+      expect(await pending).toMatchObject({ kind: 'degraded', error_code: 'old_worker_drain_failed' });
+      const histories = repository.getDatabase().query<{ attempt_key: string; workers_json: string; exited_json: string }, [string]>(
+        'SELECT attempt_key,workers_json,exited_json FROM configuration_publication_serving_sets WHERE mutation_id=? ORDER BY attempt_key').all(mutation);
+      expect(histories.map(history => history.attempt_key)).toEqual(['[[0,1],[1,1]]', '[[0,2],[1,2]]']);
+      expect(JSON.parse(histories[0]!.workers_json)).toEqual(frozen.workers);
+      expect(JSON.parse(histories[0]!.exited_json)).toEqual(oldTargets.map(worker => worker.identity.worker_instance_id).sort());
+      expect(() => repository.getDatabase().run('DELETE FROM configuration_publication_serving_sets WHERE mutation_id=?', [mutation])).toThrow('immutable');
+      expect(() => repository.getDatabase().run('UPDATE configuration_publication_serving_sets SET workers_json=\'[]\' WHERE mutation_id=?', [mutation])).toThrow('immutable');
+      const audit = repository.getOperationState(mutation);
+      expect(await coordinator.recoverAndPublish()).toBeNull();
+      expect(repository.getOperationState(mutation)).toEqual(audit);
+    });
+  }
+
   test('starts a later setup revision with the exact current message shape', async () => {
     // Given
     const { repository } = openRepository();
@@ -1601,9 +1672,9 @@ describe('MasterConfigPublicationCoordinator', () => {
       { attempt_no: 1, last_begin_reason: 'master_recovery' },
     ]);
     // No rebuilt old-generation ownership: an empty drain set is not exit proof, so the
-    // recovery fails fatally while the durable operation stays untouched.
-    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true,
-      code: 'worker_exit_unconfirmed' });
+    // recovery stops nonfatally while the durable operation stays untouched.
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false,
+      code: 'control_recovering' });
     expect(repository.getActivePublication()).not.toBeNull();
   });
 
@@ -1631,9 +1702,51 @@ describe('MasterConfigPublicationCoordinator', () => {
 
     // Then
     expect(target).toMatchObject({ attempt_no: 1, last_begin_reason: 'master_recovery' });
-    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true,
-      code: 'worker_exit_unconfirmed' });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false,
+      code: 'control_recovering' });
     expect(repository.getActivePublication()).not.toBeNull();
+  });
+
+  test('adopts verified active targets, retries retirement without spawning and preserves the terminal audit', async () => {
+    const { repository } = openRepository();
+    commit(repository, 'adopt-current-target', [0]);
+    repository.beginPublication('adopt-current-target', CREATED_AT + 1);
+    repository.beginWorkerAttempt('adopt-current-target', 0, 0, 'initial', CREATED_AT + 2);
+    repository.recordWorkerResult('adopt-current-target', 0, { kind: 'converged', attempt_no: 1, applied_revision: 2 }, CREATED_AT + 3);
+    repository.markDraining('adopt-current-target', CREATED_AT + 4);
+    const snapshot = repository.getSnapshot();
+    const events: string[] = [];
+    const worker = new FakeWorker(0, 42, events);
+    const activeServing = { ...serving(worker, 2, snapshot.content_hash),
+      boot_nonce: '40000000-0000-4000-8000-000000000042',
+      publication: { mutation_id: 'adopt-current-target', attempt_no: 1, drain_recovery_generation: 0 } };
+    const factory = new FakeFactory(events);
+    const faults = new FaultRepository(repository, events);
+    let proven = false; let releases = 0;
+    const coordinator = new MasterConfigPublicationCoordinator({
+      repository: faults, workerFactory: factory, workerCount: 1,
+      clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
+      recoverActiveServingWorkers: async () => ({ workers: [activeServing], admission: {
+        async commit() { throw new Error('active adoption must not commit another set'); },
+        async abort() { throw new Error('active adoption must preserve serving'); },
+        async handoffStatus() { return null; },
+        async releaseRetiredAfterExitProof() { releases += 1; },
+      } }),
+      confirmPreviousWorkersExited: async () => proven,
+    });
+    for (let retry = 0; retry < 3; retry += 1) {
+      const outcome = await coordinator.recoverAndPublish();
+      expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false, code: 'control_recovering' });
+      expect(outcome?.serving).toEqual([activeServing]);
+      expect(repository.getActivePublication()?.targets[0]).toMatchObject({ attempt_no: 1, drain_recovery_generation: 0 });
+    }
+    expect(factory.workers).toEqual([]); expect(faults.beginDrainingRecoveryCalls).toBe(0); expect(releases).toBe(0);
+    proven = true;
+    expect(await coordinator.recoverAndPublish()).toMatchObject({ kind: 'degraded', error_code: 'old_worker_drain_failed' });
+    expect(releases).toBe(1);
+    const terminal = repository.getOperation('adopt-current-target');
+    expect(await coordinator.recoverAndPublish()).toBeNull();
+    expect(repository.getOperation('adopt-current-target')).toEqual(terminal);
   });
 
   test('returns null from recovery entrypoint when no active operation exists', async () => {
@@ -1663,6 +1776,7 @@ describe('MasterConfigPublicationCoordinator', () => {
         repository.markDraining(mutationId, CREATED_AT + 4);
       }
       const factory = new FakeFactory([]);
+      factory.priorAttemptExited = phase === 'draining';
       const admission = new FakeAdmissionController();
       let proofs = 0;
       const coordinator = new MasterConfigPublicationCoordinator({
@@ -1677,6 +1791,7 @@ describe('MasterConfigPublicationCoordinator', () => {
       });
       const pending = coordinator.recoverAndPublish();
       await flushMicrotasks();
+      await flushMicrotasks();
       const active = repository.getActivePublication();
       const target = active?.targets[0];
       const worker = factory.workers[0];
@@ -1685,9 +1800,7 @@ describe('MasterConfigPublicationCoordinator', () => {
         drain_recovery_generation: target.drain_recovery_generation }, 2, active.snapshot.content_hash);
       const outcome = await pending;
       expect(proofs).toBe(1);
-      expect(outcome).toMatchObject(phase === 'committed'
-        ? { kind: 'converged', operation: { state: 'converged' } }
-        : { kind: 'degraded', error_code: 'old_worker_drain_failed', operation: { state: 'degraded' } });
+      expect(outcome).toMatchObject({ kind: 'degraded', error_code: 'old_worker_drain_failed', operation: { state: 'degraded' } });
       expect(repository.getActivePublication()).toBeNull();
       expect(admission.registry.select()?.process).toBe(worker);
     });
@@ -1710,6 +1823,7 @@ describe('MasterConfigPublicationCoordinator', () => {
     const factory = new FakeFactory(events);
     const admission = new FakeAdmissionController(events);
     const faultRepository = new FaultRepository(repository, events);
+    factory.priorAttemptExited = true;
     const coordinator = new MasterConfigPublicationCoordinator({
       repository: faultRepository, workerFactory: factory, workerCount: 1, admission,
       clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
@@ -1718,6 +1832,7 @@ describe('MasterConfigPublicationCoordinator', () => {
 
     // When
     const pending = coordinator.recoverAndPublish();
+    await flushMicrotasks();
     await flushMicrotasks();
     const recovered = repository.getActivePublication();
     const worker = factory.workers[0];
@@ -1734,12 +1849,12 @@ describe('MasterConfigPublicationCoordinator', () => {
     expect(events).toContain('prepare');
     expect(events).toContain('commit');
     // The recovering master rebuilt no exact old-generation ownership, so the empty drain
-    // set is vacuum rather than exit proof: fatal outcome, admission kept, operation and
+    // set is not exit proof: stopped outcome, admission kept, operation and
     // retired set untouched — nothing is finalized or released.
     expect(events.some((event) => event.includes('drain-worker'))).toBeFalse();
     expect(admission.registry.select()?.process).toBe(worker);
-    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true,
-      code: 'worker_exit_unconfirmed' });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false,
+      code: 'control_recovering' });
     expect(repository.getOperation('draining-recovery')).toMatchObject({ state: 'draining' });
     expect(repository.getActivePublication()).not.toBeNull();
   });
@@ -1755,6 +1870,7 @@ describe('MasterConfigPublicationCoordinator', () => {
     }, CREATED_AT + 3);
     repository.markDraining('draining-replacement-failure', CREATED_AT + 4);
     const factory = new FakeFactory([]);
+    factory.priorAttemptExited = true;
     const coordinator = new MasterConfigPublicationCoordinator({
       repository, workerFactory: factory, workerCount: 1,
       clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
@@ -1762,6 +1878,7 @@ describe('MasterConfigPublicationCoordinator', () => {
 
     // When
     const pending = coordinator.recoverAndPublish();
+    await flushMicrotasks();
     await flushMicrotasks();
     const target = repository.getActivePublication()?.targets[0];
     const worker = factory.workers[0];
@@ -1834,13 +1951,13 @@ describe('MasterConfigPublicationCoordinator', () => {
     const outcome = await pending;
 
     // Then
-    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true, code: 'worker_exit_unconfirmed' });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false, code: 'control_recovering' });
     expect(admission.registry.select()?.process).toBe(worker);
     expect(worker.events.some((event) => event.startsWith(`terminate:${worker.pid}:`))).toBeFalse();
     expect(repository.getActivePublication()?.operation.state).toBe('draining');
   });
 
-  test('fences again after a second master crash during draining recovery', async () => {
+  test('starts another attempt after a second crash only when prior targets are proven exited', async () => {
     // Given
     const { repository } = openRepository();
     commit(repository, 'second-recovery-crash', [0]);
@@ -1852,6 +1969,7 @@ describe('MasterConfigPublicationCoordinator', () => {
     repository.markDraining('second-recovery-crash', CREATED_AT + 4);
     repository.beginDrainingRecovery('second-recovery-crash', 0, CREATED_AT + 5);
     const factory = new FakeFactory([]);
+    factory.priorAttemptExited = true;
     const coordinator = new MasterConfigPublicationCoordinator({
       repository, workerFactory: factory, workerCount: 1,
       clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
@@ -1859,6 +1977,7 @@ describe('MasterConfigPublicationCoordinator', () => {
 
     // When
     const pending = coordinator.recoverAndPublish();
+    await flushMicrotasks();
     await flushMicrotasks();
     const active = repository.getActivePublication();
     const target = active?.targets[0];
@@ -1871,8 +1990,8 @@ describe('MasterConfigPublicationCoordinator', () => {
     // Then
     expect(target).toMatchObject({ attempt_no: 3, drain_recovery_generation: 2,
       last_begin_previous_attempt_no: 2, last_begin_reason: 'master_recovery' });
-    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true,
-      code: 'worker_exit_unconfirmed' });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false,
+      code: 'control_recovering' });
     expect(repository.getActivePublication()).not.toBeNull();
   });
 
@@ -2291,8 +2410,8 @@ describe('MasterConfigPublicationCoordinator', () => {
     const outcome = await coordinator.publish(active, []);
 
     // Then
-    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true,
-      code: 'worker_exit_unconfirmed' });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false,
+      code: 'control_recovering' });
     expect(repository.getActivePublication()?.operation.state).toBe('draining');
     expect(outcome.serving).toEqual([]);
     expect(factory.workers).toEqual([]);
@@ -2356,8 +2475,8 @@ describe('MasterConfigPublicationCoordinator', () => {
     const outcome = await coordinator.publish(active, []);
 
     // Then
-    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true,
-      code: 'worker_exit_unconfirmed' });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false,
+      code: 'control_recovering' });
     expect(repository.getActivePublication()?.operation.state).toBe('draining');
     expect(factory.workers).toEqual([]);
   });
@@ -2388,8 +2507,8 @@ describe('MasterConfigPublicationCoordinator', () => {
     const outcome = await coordinator.publish(active, []);
 
     // Then
-    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true,
-      code: 'worker_exit_unconfirmed' });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false,
+      code: 'control_recovering' });
     expect(factory.workers).toEqual([]);
     expect(repository.getActivePublication()?.operation).toMatchObject({ state: 'draining',
       drain_recovery_generation: 0 });

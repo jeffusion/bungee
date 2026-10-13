@@ -1,5 +1,7 @@
 /** Sole production owner of plugin-state.db. No Database crosses this thread boundary. */
 import { Database } from 'bun:sqlite';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { stateMethodClass } from './operations';
 import { PluginDurableStateStore, DurableStateConflictError } from '../plugin-durable-state';
 import { SQLitePluginStorage } from '../plugin-storage';
 import { createSecretStore, clearSecretStore, revokeSecretStore } from '../plugin-control/secret-store';
@@ -14,6 +16,7 @@ import type { PluginCommunicationLimits } from '../plugin-services/persistence';
 import type { PluginChannelSnapshotSource } from '../plugin-services/peer-channel-hub';
 import { PLUGIN_STORAGE_OPERATIONS } from './storage-rpc';
 import { initializePluginStateDatabase } from './schema';
+import {prepareExecutorProofPage,retireExecutorProof} from './executor-proof-store';
 import type { StateRequest, StateCallbackResponse, StateResponse } from './protocol';
 
 declare const self: Worker;
@@ -26,16 +29,30 @@ const kvStores=new Map<string,SQLitePluginStorage>();
 const handles = new Map<string, any>();
 const durableNamespaces = new Map<string,string>();
 const sources = new Map<string, PluginChannelSnapshotSource>();
-const callbacks = new Map<number,{resolve:(v:any)=>void;reject:(e:any)=>void}>();
+const callbacks = new Map<number,{requestId:number;resolve:(v:any)=>void;reject:(e:any)=>void;timer:ReturnType<typeof setTimeout>}>();
+const requests=new Map<number,{request:StateRequest;responded:boolean}>();
+const context=new AsyncLocalStorage<StateRequest>();
+let closing=false;
+let offline=false;
+let drain: (()=>void)|null=null;
 let nextCallback = 0;
 let callbackCapacity=128;
+function physical(id:number):void {
+  const active=requests.get(id);
+  if(!active?.responded||[...callbacks.values()].some(c=>c.requestId===id))return;
+  requests.delete(id);self.postMessage({type:'physical-settled',id});
+  if(requests.size===0&&callbacks.size===0)drain?.();
+}
 function callback(token:string, method:string, args:readonly unknown[]):Promise<any> {
+  const request=context.getStore();
+  if(!request||closing||Date.now()>=request.deadlineAt)return Promise.reject(new CommandJournalError('unknown'));
   if(callbacks.size>=callbackCapacity)return Promise.reject(new CommandJournalError('overloaded'));
-  const id = ++nextCallback;
-  return new Promise((resolve,reject) => {
-    const timer=setTimeout(()=>{callbacks.delete(id);reject(new CommandJournalError('unknown'));},30000);
-    callbacks.set(id,{resolve:value=>{clearTimeout(timer);resolve(value);},reject:error=>{clearTimeout(timer);reject(error);}});
-    self.postMessage({type:'callback',id,token,method,args});
+  const id=++nextCallback;
+  return new Promise((resolve,reject)=>{
+    // The journal may settle at its deadline; the callback still physically owns this slot.
+    const timer=setTimeout(()=>reject(new CommandJournalError('unknown')),Math.max(0,request.deadlineAt-Date.now()));
+    callbacks.set(id,{requestId:request.id,resolve,reject,timer});
+    self.postMessage({type:'callback',id,requestId:request.id,deadlineAt:request.deadlineAt,token,method,args});
   });
 }
 function bind(value:unknown):string { if(handles.size>=8192)throw new Error('plugin_state_capability_capacity_exceeded');const id = crypto.randomUUID(); handles.set(id,value); return id; }
@@ -94,7 +111,8 @@ async function dispatch(request:StateRequest):Promise<unknown> {
   const {target,method,args}=request;
   if (target==='host' && method==='open') {
     if (db) throw new Error('plugin_state_already_open');
-    const [path,options] = args as [string,{material?:SecretKeyMaterial;limits?:PluginCommunicationLimits;initialize?:boolean;callbackCapacity?:number}];
+    const [path,options] = args as [string,{material?:SecretKeyMaterial;limits?:PluginCommunicationLimits;initialize?:boolean;offline?:boolean;callbackCapacity?:number}];
+    offline=options.offline===true;
     db=new Database(path,{create:options.initialize === true,strict:true});
     db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;');
     if (options.initialize !== true && db.query<{user_version:number},[]>('PRAGMA user_version').get()!.user_version === 0)
@@ -107,6 +125,11 @@ async function dispatch(request:StateRequest):Promise<unknown> {
   }
   if (!db) throw new Error('plugin_state_not_open');
   if (target==='host') {
+    if(method==='retireExecutorProof') return retireExecutorProof(db,communication,args[0] as string,args[1] as any);
+    if(method==='prepareExecutorProofPage') {
+      if(!offline) throw new Error('runtime_upgrade_requires_offline_session');
+      return prepareExecutorProofPage(db,communication,args[0] as string);
+    }
     if (method==='durable') { const id=bind(durable.forStorageNamespace(args[0] as string)); durableNamespaces.set(id,args[0] as string); return id; }
     if (method==='storageOperation') {
       const [namespace,operation,values]=args as [string,string,unknown[]];
@@ -164,7 +187,10 @@ async function dispatch(request:StateRequest):Promise<unknown> {
         });
       }).deferred();
     }
-    if (method==='close') { for (const s of sources.values()) s.release?.(); sources.clear(); handles.clear(); kvStores.clear(); db.close(); db=undefined; return; }
+    if (method==='probe')return {database:db.query('SELECT 1 AS ok').get(),requests:requests.size,callbacks:callbacks.size,handles:handles.size,sources:sources.size};
+    if (method==='close') {
+      if(requests.size||callbacks.size)await new Promise<void>(resolve=>{drain=resolve;});
+      drain=null;for (const s of sources.values())await s.release?.(); sources.clear(); handles.clear(); kvStores.clear(); db.close(); db=undefined; return; }
     if (method==='release') { handles.delete(args[0] as string);durableNamespaces.delete(args[0] as string); return; }
     throw new Error('plugin_state_method_invalid');
   }
@@ -172,7 +198,7 @@ async function dispatch(request:StateRequest):Promise<unknown> {
     const value=sources.get(args[0] as string);
     if (!value) throw new Error('snapshot_source_released');
     if (method==='read') return value.read(args[1] as number,args[2] as number);
-    if (method==='release') { value.release?.(); sources.delete(args[0] as string); return; }
+    if (method==='release') {await value.release?.(); sources.delete(args[0] as string); return; }
     throw new Error('plugin_state_method_invalid');
   }
   const handle=handles.get(target);
@@ -197,13 +223,26 @@ async function dispatch(request:StateRequest):Promise<unknown> {
 self.onmessage = event => {
   const message=event.data as StateRequest|StateCallbackResponse;
   if (message.type==='callback-response') {
-    const pending=callbacks.get(message.id); if (!pending) return; callbacks.delete(message.id);
-    if (message.error) pending.reject(new Error(message.error)); else pending.resolve(message.value); return;
+    const pending=callbacks.get(message.id);if(!pending)return;
+    callbacks.delete(message.id);clearTimeout(pending.timer);
+    if(message.error)pending.reject(new Error(message.error));else pending.resolve(message.value);
+    physical(pending.requestId);return;
   }
-  if (message.type!=='request') return;
-  void dispatch(message).then(value=>self.postMessage({type:'response',id:message.id,value} satisfies StateResponse),error=>{
-    self.postMessage({type:'response',id:message.id,error:{name:error?.name ?? 'Error',message:error?.message ?? 'plugin_state_failure',code:error?.code,operationId:error?.operationId}} satisfies StateResponse);
+  if(message.type!=='request')return;
+  const kind=stateMethodClass(message.target,message.method,message.args);
+  if(closing&&kind!=='cleanup'&&message.method!=='probe') {
+    self.postMessage({type:'response',id:message.id,error:{name:'Error',message:'plugin_state_closing'}} satisfies StateResponse);
+    self.postMessage({type:'physical-settled',id:message.id});return;
+  }
+  if(kind==='close')closing=true;
+  else requests.set(message.id,{request:message,responded:false});
+  void context.run(message,()=>dispatch(message)).then(value=>{
+    self.postMessage({type:'response',id:message.id,physical:![...callbacks.values()].some(c=>c.requestId===message.id),value} satisfies StateResponse);
+  },error=>{
+    self.postMessage({type:'response',id:message.id,physical:![...callbacks.values()].some(c=>c.requestId===message.id),error:{name:error?.name ?? 'Error',message:error?.message ?? 'plugin_state_failure',code:error?.code,operationId:error?.operationId}} satisfies StateResponse);
+  }).finally(()=>{
+    if(kind==='close')self.postMessage({type:'physical-settled',id:message.id});
+    else {const active=requests.get(message.id);if(active)active.responded=true;physical(message.id);}
   });
 };
-
 self.postMessage({type:'ready'});

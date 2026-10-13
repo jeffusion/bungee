@@ -1,3 +1,6 @@
+import type { AsyncConfigRepository } from '../config-storage/async-config-repository';
+import type { PublicationRetirement } from '../config-storage/retirement-store';
+import { probeExistingProcessLifetimeGuard, armProcessLifetimeGuard, PROCESS_LIFETIME_GUARD_ENV } from '../supervision/process-lifetime-guard';
 import { readKernelDeadlineClockId } from './kernel-monotonic-clock';
 import { spawn as spawnChild, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { join, resolve } from 'node:path';
@@ -7,6 +10,7 @@ import type { ConfigPublicationWorkerFactory, ConfigPublicationWorkerProcess, Se
 import type { ProcessCleanupResult } from '../config-publication/process-cleanup';
 import { admissionSetIdentity, parseAdmissionSet, type AdmissionRegistryStatus, type AdmissionSet } from '../ingress';
 import type { WorkerLaunch } from './process-options';
+import { canonicalJson } from '../config-storage/content-hash';
 import { isLowercaseUuid } from '../config-storage/validation';
 import { CONFIG_WORKER_ENV_NAMES, type SupervisedWorkerRateLimitSession } from '../config-worker/process-environment';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, parseWorkerDescriptor, removeWorkerDescriptor, serializeWorkerSupervisionSeed, type SupervisionRootKeyMaterial } from '../supervision';
@@ -46,6 +50,7 @@ export type SupervisedConfigWorkerFactoryOptions = {
   /** Injectable host boot identity; production always defaults to native OS evidence. */
   readonly kernelBootId?: () => Promise<string>;
   /** Re-checks signed ingress registry membership immediately before orphan cleanup. */
+  readonly retirementRepository?: Pick<AsyncConfigRepository, 'getPublicationServingSet' | 'confirmPublicationServingMemberExit' | 'getRetirementDescriptorCleanupState' | 'getRetiredWorkerInstanceIds' | 'getPublicationRetirement' | 'recordPublicationRetirementEvidence' | 'stopPublicationRetirement'>;
   readonly confirmOrphan?: () => Promise<AdmissionRegistryStatus>;
 };
 
@@ -57,7 +62,7 @@ export const STRIPPED_ROOT_ENV_NAMES = [
   'BUNGEE_INGRESS_CREDENTIAL', 'BUNGEE_INGRESS_TRANSPORT_SECRET',
   CONFIG_WORKER_ENV_NAMES.ingressSupervisionPort, CONFIG_WORKER_ENV_NAMES.ingressProcessInstanceId, CONFIG_WORKER_ENV_NAMES.ingressBootNonce,
   'BUNGEE_PLUGIN_BINDING', 'BUNGEE_PLUGIN_BINDING_ID', 'BUNGEE_PLUGIN_BINDING_OPTIONS',
-  'BUNGEE_PLUGIN_OPTIONS', 'BUNGEE_CONTROL_BINDING', 'BUNGEE_CONTROL_OPTIONS',
+  'BUNGEE_PLUGIN_OPTIONS', 'BUNGEE_CONTROL_BINDING', 'BUNGEE_CONTROL_OPTIONS', PROCESS_LIFETIME_GUARD_ENV,
   DAEMON_BOOTSTRAP_ENV_NAMES.metadataPath, DAEMON_BOOTSTRAP_ENV_NAMES.bootNonce, DAEMON_BOOTSTRAP_ENV_NAMES.shutdownSecret,
 ] as const;
 const STRIPPED_ROOT_ENV_NAMES_LOWER = new Set(STRIPPED_ROOT_ENV_NAMES.map((name) => name.toLowerCase()));
@@ -190,6 +195,8 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
   private rateLimitSession: SupervisedWorkerRateLimitSession | undefined;
   private readonly owned = new Map<ConfigPublicationWorkerProcess, Owned>();
   private readonly identities = new Set<string>();
+  private readonly retiredInstanceIds = new Set<string>();
+  private readonly retirementProofFences = new Map<string, import('../supervision/process-lifetime-guard').ProcessLifetimeRetirementFence>();
   private readonly clients = new Map<string, { readonly client: WorkerControllerClient; readonly bootNonce: string; readonly port: number }>();
   private readonly adapters = new Map<string, SupervisedConfigWorkerProcessAdapter>();
   private readonly committed = new Set<ConfigPublicationWorkerProcess>();
@@ -217,6 +224,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
 
   spawn(identity: ConfigProcessIdentity): SupervisedConfigWorkerProcessAdapter {
     const key = identityKey(identity);
+    if (this.retiredInstanceIds.has(identity.worker_instance_id)) throw new SupervisedConfigWorkerFactoryError('already_owned', 'retired worker identity cannot rejoin');
     if (this.identities.has(key)) throw new SupervisedConfigWorkerFactoryError('already_owned', 'supervised worker identity is already owned');
     const controlPort = this.options.allocateControlPort?.(identity) ?? 0;
     if (!Number.isSafeInteger(controlPort) || controlPort < 0 || controlPort > 65_535) throw new Error('supervised control port is invalid');
@@ -228,11 +236,15 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
       if (STRIPPED_ROOT_ENV_NAMES_LOWER.has(name.toLowerCase())) delete env[name];
     }
     clearDaemonBootstrapEnvironment(env);
-    const child = this.spawnWorker(this.options.launch.executable, [...this.options.launch.args,
+    const lifetimeGuard = this.options.spawn === undefined && process.platform !== 'win32'
+      ? armProcessLifetimeGuard({ directory: join(this.options.runtimeWorkersDirectory, 'guards'), processInstanceId: identity.worker_instance_id }) : undefined;
+    let child: ChildProcess;
+    try { child = this.spawnWorker(this.options.launch.executable, [...this.options.launch.args,
       `${DAEMON_PROCESS_IDENTITY_MARKER_PREFIX}${identity.worker_instance_id}`], {
-      detached: true, shell: false, cwd: this.options.cwd, stdio: ['ignore', 'inherit', 'inherit'],
+      detached: true, shell: false, cwd: this.options.cwd, stdio: lifetimeGuard === undefined ? ['ignore', 'inherit', 'inherit'] : ['ignore', 'inherit', 'inherit', lifetimeGuard.fd],
       env: {
         ...env,
+        ...(lifetimeGuard === undefined ? {} : { [PROCESS_LIFETIME_GUARD_ENV]: JSON.stringify(lifetimeGuard.facts) }),
         BUNGEE_WORKER_STARTUP_WATCHDOG_MS: String(this.options.initializationTimeoutMs ?? 30_000),
         BUNGEE_ROLE: 'worker',
         BUNGEE_MASTER_GENERATION: identity.master_generation, BUNGEE_WORKER_INSTANCE_ID: identity.worker_instance_id,
@@ -244,13 +256,15 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
         ...(this.options.configDbPath === undefined ? {} : { BUNGEE_CONFIG_DB_PATH: resolve(this.options.configDbPath) }),
         ...rateLimitSessionEnvironment(this.rateLimitSession),
       },
-    });
+    }); } catch (error) { lifetimeGuard?.closeAfterChildExit(); throw error; }
+    child.once('exit', () => lifetimeGuard?.closeAfterChildExit());
+    child.once('error', () => lifetimeGuard?.closeAfterChildExit());
     // No child.kill anywhere in the spawn path: every spawned worker carries its own
     // startup watchdog (BUNGEE_WORKER_STARTUP_WATCHDOG_MS) and self-terminates, and a
     // bare child PID must never be signaled without OS identity proof.
     child.unref();
     const workerProcess = new SupervisedConfigWorkerProcessAdapter({
-      identity, descriptorPath: resolve(descriptorPath), supervisionSeed: seed,
+      identity, descriptorPath: resolve(descriptorPath), supervisionSeed: seed, lifetimeGuard,
       client: { ...(this.options.client ?? {}), authority: this.options.authority }, child,
       clientFor: (clientOptions) => this.clientFor(identity, clientOptions.authority, clientOptions),
       initializationTimeoutMs: this.options.initializationTimeoutMs,
@@ -283,6 +297,25 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
 
   async discoverAndAdopt(expectedAdmissionSet: AdmissionSet): Promise<SupervisedAdoptionResult> {
     const admission = parseAdmissionSet(expectedAdmissionSet);
+    for (const identity of await this.options.retirementRepository?.getRetiredWorkerInstanceIds() ?? []) this.retiredInstanceIds.add(identity);
+    if (admission.workers.some(worker => this.retiredInstanceIds.has(worker.worker_instance_id))) {
+      return { kind: 'recovering', code: 'admission_mismatch', workers: [], issues: [] };
+    }
+    if (this.options.processIdentity === undefined && process.platform !== 'win32') {
+      // Reject older/incomplete evidence before any discovery attach changes authority.
+      for (const worker of admission.workers) {
+        try {
+          const raw: unknown = JSON.parse(await readFile(join(this.options.runtimeWorkersDirectory, `${worker.worker_instance_id}.json`), 'utf8'));
+          const seed = deriveWorkerSupervisionSeed(this.options.rootKey, worker.master_generation, worker.worker_instance_id, worker.worker_slot);
+          const descriptor = parseWorkerDescriptor(raw, deriveWorkerSupervisionCredential(seed, worker.boot_nonce));
+          if (descriptor.lifetime_guard === undefined) return { kind: 'recovering', code: 'admission_mismatch', workers: [], issues: [] };
+          const { held: _held, ...facts } = descriptor.lifetime_guard;
+          const proof = probeExistingProcessLifetimeGuard(facts);
+          if (proof.kind === 'confirmed') proof.fence.close();
+          if (proof.kind !== 'live') return { kind: 'recovering', code: 'admission_mismatch', workers: [], issues: [] };
+        } catch { return { kind: 'recovering', code: 'admission_mismatch', workers: [], issues: [] }; }
+      }
+    }
     const discovered = await discoverSupervisedWorkers({
       runtimeWorkersDirectory: this.options.runtimeWorkersDirectory, rootKey: this.options.rootKey, authority: this.options.authority,
       masterControlPort: this.options.masterControlPort,
@@ -365,48 +398,187 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
 
   snapshot(): readonly ConfigPublicationWorkerProcess[] { return [...this.owned.keys()]; }
 
+  /** Retired members may already be draining; they never enter serving admission. */
+  async recoverRetiredWorkers(retirement: PublicationRetirement): Promise<readonly ServingConfigWorker[]> {
+    const workers: ServingConfigWorker[] = [];
+    for (const member of retirement.members) {
+      if (retirement.evidence.some(item => item.member_id === member.identity.worker_instance_id && item.exit_state === 'confirmed')) continue;
+      const key = identityKey(member.identity);
+      let adapter = this.adapters.get(key);
+      if (adapter === undefined) {
+        const descriptorPath = join(this.options.runtimeWorkersDirectory, `${member.identity.worker_instance_id}.json`);
+        try {
+          const seed = deriveWorkerSupervisionSeed(this.options.rootKey, member.identity.master_generation,
+            member.identity.worker_instance_id, member.identity.worker_slot);
+          const credential = deriveWorkerSupervisionCredential(seed, member.boot_nonce);
+          const descriptor = parseWorkerDescriptor(JSON.parse(await readFile(descriptorPath, 'utf8')), credential);
+          if (identityKey(descriptor) !== key || descriptor.boot_nonce !== member.boot_nonce || descriptor.pid !== member.pid
+            || descriptor.master_control_port !== this.options.masterControlPort
+            || descriptor.revision !== member.revision || descriptor.content_hash !== member.content_hash
+            || descriptor.plugin_catalog_hash !== member.plugin_catalog_hash || descriptor.private_port !== member.private_port
+            || canonicalJson(descriptor.evidence.message?.publication ?? null) !== canonicalJson(member.publication)) continue;
+          if (member.guard !== null) {
+            const held = descriptor.lifetime_guard;
+            if (held === undefined) continue;
+            const {held: _held, ...facts} = held;
+            if (canonicalJson(facts) !== canonicalJson(member.guard)) continue;
+            const probe = probeExistingProcessLifetimeGuard(facts);
+            if (probe.kind === 'confirmed') probe.fence.close();
+            if (probe.kind !== 'live') continue;
+          } else if (process.platform !== 'win32' && this.options.processIdentity === undefined) continue;
+          const client = this.clientFor(member.identity, this.options.authority, {...this.options.client,
+            authority: this.options.authority, credential, baseUrl: `http://127.0.0.1:${descriptor.control_port}`});
+          const status = await client.attach();
+          if (status.boot_nonce !== member.boot_nonce || status.pid !== member.pid
+            || status.revision !== member.revision || status.content_hash !== member.content_hash
+            || status.plugin_catalog_hash !== member.plugin_catalog_hash || status.private_port !== member.private_port
+            || canonicalJson(status.evidence.message?.publication ?? null) !== canonicalJson(member.publication)
+            || !['serving','draining'].includes(status.phase)) { client.disconnect(); continue; }
+          adapter = new SupervisedConfigWorkerProcessAdapter({identity: member.identity, descriptorPath,
+            supervisionSeed: seed, pid: member.pid, client: {...this.options.client, authority: this.options.authority},
+            readyClient: client,
+            clientFor: options => this.clientFor(member.identity, options.authority, options),
+            processIdentity: this.options.processIdentity, kernelBootId: this.kernelBootId});
+          await adapter.initialization;
+          this.identities.add(key); this.adapters.set(key, adapter); this.owned.set(adapter, {process: adapter});
+          this.bindUnavailable(adapter); this.bindExit(adapter);
+        } catch { adapter?.disconnect(); continue; }
+      }
+      workers.push({process: adapter, boot_nonce: member.boot_nonce, revision: member.revision,
+        content_hash: member.content_hash, plugin_catalog_hash: member.plugin_catalog_hash,
+        private_port: member.private_port, publication: member.publication});
+    }
+    return workers;
+  }
+
   /** A missing RPC endpoint is not exit proof: authenticate persisted identities and probe the OS. */
   async confirmPreviousWorkersExited(registry: AdmissionRegistryStatus, replacements: readonly ServingConfigWorker[]): Promise<boolean> {
-    const current = new Map(replacements.map((worker) => [identityKey(worker.process.identity), worker]));
-    const exited = new Set<string>();
-    try {
-      const kernelBootId = await this.kernelBootId();
-      const entries = await readdir(this.options.runtimeWorkersDirectory, { withFileTypes: true });
-      const proofs = await Promise.all(entries.filter((entry) => entry.isFile() && entry.name.endsWith('.json')).map(async (entry) => {
-        const raw: unknown = JSON.parse(await readFile(join(this.options.runtimeWorkersDirectory, entry.name), 'utf8'));
-        const hint = parseWorkerDescriptorHint(raw);
-        const seed = deriveWorkerSupervisionSeed(this.options.rootKey, hint.master_generation, hint.worker_instance_id, hint.worker_slot);
-        const descriptor = parseWorkerDescriptor(raw, deriveWorkerSupervisionCredential(seed, hint.boot_nonce));
-        const key = identityKey(descriptor);
-        const replacement = current.get(key);
-        if (replacement !== undefined) {
-          return descriptor.pid === replacement.process.pid && descriptor.boot_nonce === replacement.boot_nonce;
+    const mutationId = replacements[0]?.publication?.mutation_id;
+    if (mutationId === undefined || this.options.retirementRepository === undefined) return false;
+    const retirement = await this.options.retirementRepository.getPublicationRetirement(mutationId);
+    if (retirement === null) return false;
+    return (await this.provePublicationRetirement(registry, retirement)).kind === 'confirmed';
+  }
+
+  /** A new attempt is allowed only after every prior target has a durable exact exit fence. */
+  async confirmActivePublicationExited(active: import('../config-storage/repository-types').ActiveConfigurationPublication): Promise<boolean> {
+    const repository = this.options.retirementRepository;
+    if (repository === undefined) return false;
+    let set = await repository.getPublicationServingSet(active.operation.mutation_id, active.operation.drain_recovery_generation);
+    if (set === null || set.workers.length !== active.targets.length) return false;
+    for (const member of set.workers) {
+      const target = active.targets.find(target => target.worker_slot === member.identity.worker_slot);
+      if (target === undefined || member.publication?.mutation_id !== active.operation.mutation_id
+        || member.publication.attempt_no !== target.attempt_no || member.publication.drain_recovery_generation !== target.drain_recovery_generation
+        || member.revision !== active.snapshot.revision || member.content_hash !== active.snapshot.content_hash) return false;
+      if (set.exited.includes(member.identity.worker_instance_id)) continue;
+      let fence: import('../supervision/process-lifetime-guard').ProcessLifetimeRetirementFence | undefined;
+      try {
+        const raw: unknown = JSON.parse(await readFile(join(this.options.runtimeWorkersDirectory, `${member.identity.worker_instance_id}.json`), 'utf8'));
+        const seed = deriveWorkerSupervisionSeed(this.options.rootKey, member.identity.master_generation, member.identity.worker_instance_id, member.identity.worker_slot);
+        const descriptor = parseWorkerDescriptor(raw, deriveWorkerSupervisionCredential(seed, member.boot_nonce));
+        const message = descriptor.evidence.message;
+        if (identityKey(descriptor) !== identityKey(member.identity) || descriptor.boot_nonce !== member.boot_nonce
+          || descriptor.revision !== member.revision || descriptor.content_hash !== member.content_hash
+          || descriptor.plugin_catalog_hash !== member.plugin_catalog_hash || descriptor.private_port !== member.private_port
+          || message === undefined || !('publication' in message) || canonicalJson(message.publication) !== canonicalJson(member.publication)) return false;
+        if (member.guard !== null) {
+          const held = descriptor.lifetime_guard;
+          if (held === undefined) return false;
+          const { held: _held, ...facts } = held;
+          if (canonicalJson(facts) !== canonicalJson(member.guard)) return false;
+          const saved = this.retirementProofFences.get(member.identity.worker_instance_id);
+          const proof = saved === undefined ? probeExistingProcessLifetimeGuard(member.guard)
+            : saved.isCurrent() ? { kind: 'confirmed' as const, fence: saved } : { kind: 'unknown' as const };
+          if (proof.kind !== 'confirmed') return false;
+          fence = proof.fence; this.retirementProofFences.set(member.identity.worker_instance_id, fence);
+        } else if (process.platform === 'win32') {
+          if (member.kernel_boot_id !== await this.kernelBootId()) return false;
+          const proof = await (this.options.processIdentity?.probeInstance ?? probeProcessInstance)(descriptor.pid, member.identity.worker_instance_id);
+          if (proof !== 'dead' && proof !== 'mismatch') return false;
+        } else return false;
+        set = await repository.confirmPublicationServingMemberExit(active.operation.mutation_id, set.generation, member.identity.worker_instance_id);
+        this.retiredInstanceIds.add(member.identity.worker_instance_id);
+        fence?.close(); this.retirementProofFences.delete(member.identity.worker_instance_id);
+      } catch { return false; }
+    }
+    return true;
+  }
+
+  /** Authority is the frozen durable members, never every historical JSON file. */
+  async provePublicationRetirement(registry: AdmissionRegistryStatus, retirement: PublicationRetirement): Promise<{
+    readonly kind: 'confirmed' | 'stopped'; readonly retirement: PublicationRetirement;
+  }> {
+    const repository = this.options.retirementRepository;
+    if (repository === undefined || registry.prepared !== null) return { kind: 'stopped', retirement };
+    const memberKeys = new Set(retirement.members.map(member => this.admissionWorkerKey(member.identity, member.boot_nonce,
+      member.private_port, member.revision, member.content_hash, member.plugin_catalog_hash)));
+    if (registry.retired.some(set => set.workers.some(worker => !memberKeys.has(this.admissionWorkerKey(worker,
+      worker.boot_nonce, worker.private_port, set.revision, set.content_hash, set.plugin_catalog_hash))))) {
+      return { kind: 'stopped', retirement };
+    }
+    let current = retirement;
+    for (const member of retirement.members) {
+      const saved = current.evidence.find(item => item.member_id === member.identity.worker_instance_id)!;
+      if (saved.exit_state === 'confirmed') continue;
+      let exit: 'live' | 'confirmed' | 'unknown' = 'unknown';
+      let cleanup: 'success' | 'failed' | 'unknown' = 'unknown';
+      let exitDeadline: { readonly boot_id: string; readonly exit_deadline_ns: string } | undefined;
+      let fence: import('../supervision/process-lifetime-guard').ProcessLifetimeRetirementFence | undefined;
+      try {
+        const path = join(this.options.runtimeWorkersDirectory, `${member.identity.worker_instance_id}.json`);
+        const raw: unknown = JSON.parse(await readFile(path, 'utf8'));
+        const seed = deriveWorkerSupervisionSeed(this.options.rootKey, member.identity.master_generation,
+          member.identity.worker_instance_id, member.identity.worker_slot);
+        const descriptor = parseWorkerDescriptor(raw, deriveWorkerSupervisionCredential(seed, member.boot_nonce));
+        if (identityKey(descriptor) !== identityKey(member.identity) || descriptor.boot_nonce !== member.boot_nonce
+          || descriptor.revision !== member.revision || descriptor.content_hash !== member.content_hash
+          || descriptor.plugin_catalog_hash !== member.plugin_catalog_hash || descriptor.private_port !== member.private_port) {
+          throw new Error('retirement descriptor does not match durable member');
         }
         const terminal = descriptor.evidence.message;
-        if ((terminal?.status !== 'worker-drained' && terminal?.status !== 'worker-drain-failed')
-          || descriptor.evidence.kind !== (terminal.status === 'worker-drained' ? 'drained' : 'drain-failed')
-          || terminal.master_generation !== descriptor.master_generation
-          || terminal.worker_instance_id !== descriptor.worker_instance_id
-          || terminal.worker_slot !== descriptor.worker_slot || terminal.boot_nonce !== descriptor.boot_nonce
-          || terminal.pid !== descriptor.pid || terminal.revision !== descriptor.revision
-          || terminal.content_hash !== descriptor.content_hash
-          || terminal.plugin_catalog_hash !== descriptor.plugin_catalog_hash
-          || terminal.boot_id !== kernelBootId || terminal.exit_remaining_ms <= 0
-          || terminal.cleanup_state !== 'success') return false;
-        const proof = await (this.options.processIdentity?.probeInstance ?? probeProcessInstance)(descriptor.pid, descriptor.worker_instance_id);
-        if (proof !== 'dead' && proof !== 'mismatch') return false;
-        exited.add(this.admissionWorkerKey(descriptor, descriptor.boot_nonce, descriptor.private_port,
-          descriptor.revision, descriptor.content_hash, descriptor.plugin_catalog_hash));
-        return true;
-      }));
-      if (proofs.some((proof) => !proof)) return false;
-      // Every retired member needs its own proof, even if its descriptor is missing.
-      return registry.prepared === null && registry.retired.every((set) => set.workers.every((worker) =>
-        exited.has(this.admissionWorkerKey(worker, worker.boot_nonce, worker.private_port,
-          set.revision, set.content_hash, set.plugin_catalog_hash))));
-    } catch {
-      return false;
+        if ((terminal?.status === 'worker-drained' || terminal?.status === 'worker-drain-failed')
+          && terminal.drain_id === member.drain_id && terminal.boot_id === member.deadline_boot_id
+          && JSON.stringify(terminal.publication) === JSON.stringify(member.publication)) {
+          exitDeadline = terminal;
+          cleanup = terminal.cleanup_state === 'success' || terminal.cleanup_state === 'failed' ? terminal.cleanup_state : 'unknown';
+        }
+        if (member.guard !== null) {
+          const held = descriptor.lifetime_guard;
+          if (held === undefined) throw new Error('retirement descriptor lifetime guard is missing');
+          const { held: _held, ...facts } = held;
+          if (canonicalJson(facts) !== canonicalJson(member.guard)) throw new Error('retirement lifetime guard mismatch');
+          const savedFence = this.retirementProofFences.get(member.identity.worker_instance_id);
+          const proof = savedFence === undefined ? probeExistingProcessLifetimeGuard(member.guard)
+            : savedFence.isCurrent() ? { kind: 'confirmed' as const, fence: savedFence } : { kind: 'unknown' as const, reason: 'replaced' as const };
+          exit = proof.kind === 'confirmed' ? 'confirmed' : proof.kind === 'live' ? 'live' : 'unknown';
+          if (proof.kind === 'confirmed') { fence = proof.fence; this.retirementProofFences.set(member.identity.worker_instance_id, fence); }
+        } else if (process.platform === 'win32') {
+          // Native Windows retains only its same-host exact identity path. A different
+          // boot/domain cannot be turned into proof by a recycled numeric PID.
+          if (member.deadline_boot_id !== await this.kernelBootId()) throw new Error('retirement clock domain mismatch');
+          const proof = await (this.options.processIdentity?.probeInstance ?? probeProcessInstance)(descriptor.pid, member.identity.worker_instance_id);
+          exit = proof === 'dead' || proof === 'mismatch' ? 'confirmed' : proof === 'exact' ? 'live' : 'unknown';
+        }
+      } catch { /* missing, malformed, invalid MAC or untrusted guard stays unknown */ }
+      try {
+        current = await repository.recordPublicationRetirementEvidence(retirement.mutation_id,
+          member.identity.worker_instance_id, exit, cleanup, Date.now(), exitDeadline);
+      } finally {
+        // Once this durable irreversible identity fence exists, the old identity can
+        // never be re-admitted; release the native probe descriptor after the write.
+        if (current.evidence.find(item => item.member_id === member.identity.worker_instance_id)?.exit_state === 'confirmed') {
+          this.retiredInstanceIds.add(member.identity.worker_instance_id);
+          fence?.close();
+          this.retirementProofFences.delete(member.identity.worker_instance_id);
+        }
+      }
     }
+    if (current.evidence.some(item => item.exit_state !== 'confirmed')) {
+      current = await repository.stopPublicationRetirement(retirement.mutation_id, 'exit_unknown', Date.now());
+      return { kind: 'stopped', retirement: current };
+    }
+    return { kind: 'confirmed', retirement: current };
   }
 
   owns(process: ConfigPublicationWorkerProcess): boolean { return this.owned.has(process); }
@@ -747,6 +919,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
         const key = this.admissionWorkerKey(identity, descriptor.boot_nonce, descriptor.private_port,
           descriptor.revision, descriptor.content_hash, descriptor.plugin_catalog_hash);
         if (protectedIdentities.has(key)) continue;
+        if (await this.options.retirementRepository?.getRetirementDescriptorCleanupState(identity.worker_instance_id) === 'pending') continue;
         const terminal = descriptor.evidence.message;
         if ((terminal?.status !== 'worker-drained' && terminal?.status !== 'worker-drain-failed')
           || descriptor.evidence.kind !== (terminal.status === 'worker-drained' ? 'drained' : 'drain-failed')
@@ -760,9 +933,18 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
           identityKey(process.identity) === identityKey(identity) && process.pid === descriptor.pid
           && evidence.pid === descriptor.pid && evidence.terminalDrain?.drain_id === terminal.drain_id
           && evidence.terminalDrain.exit_deadline_ns === terminal.exit_deadline_ns);
-        const probe = known ? 'dead'
-          : await (this.options.processIdentity?.probeInstance ?? probeProcessInstance)(descriptor.pid, descriptor.worker_instance_id);
-        if (probe !== 'dead' && probe !== 'mismatch') continue;
+        let cleanupFence: import('../supervision/process-lifetime-guard').ProcessLifetimeRetirementFence | undefined;
+        if (!known && this.options.processIdentity === undefined && process.platform !== 'win32') {
+          if (descriptor.lifetime_guard === undefined) continue;
+          const { held: _held, ...facts } = descriptor.lifetime_guard;
+          const proof = probeExistingProcessLifetimeGuard(facts);
+          if (proof.kind !== 'confirmed') continue;
+          cleanupFence = proof.fence;
+        } else {
+          const probe = known ? 'dead' : await (this.options.processIdentity?.probeInstance ?? probeProcessInstance)(descriptor.pid, descriptor.worker_instance_id);
+          if (probe !== 'dead' && probe !== 'mismatch') continue;
+        }
+        try {
         const latestRaw = JSON.parse(await readFile(path, 'utf8')) as unknown;
         const latestHint = parseWorkerDescriptorHint(latestRaw);
         if (latestHint.master_generation !== identity.master_generation
@@ -785,6 +967,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
             issues.push({ file: path, kind: 'unreachable', detail: 'completed worker descriptor removal could not be verified' });
           }
         }
+        } finally { cleanupFence?.close(); }
       }
     } catch (error) {
       issues.push({ file: this.options.runtimeWorkersDirectory, kind: 'unreachable',
@@ -865,15 +1048,9 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
     evidence: WorkerExitEvidence,
   ): boolean {
     if (evidence.pid !== process.pid) return false;
-    if (!this.committed.has(process) || !process.hasDrainTask) return true;
-    const terminal = evidence.terminalDrain;
-    return terminal !== undefined && terminal.pid === process.pid
-      && terminal.master_generation === process.identity.master_generation
-      && terminal.worker_instance_id === process.identity.worker_instance_id
-      && terminal.worker_slot === process.identity.worker_slot
-      && terminal.boot_nonce === process.bootNonce
-      && terminal.boot_id === process.kernelBootId
-      && terminal.exit_remaining_ms > 0 && terminal.cleanup_state !== 'pending';
+    // Physical exit is independent of terminal cleanup publication. Child exit or
+    // lifetime guard proof already belongs to this exact process object.
+    return true;
   }
 
   private async waitForExactExit(process: SupervisedConfigWorkerProcessAdapter): Promise<WorkerExitEvidence | null> {
@@ -962,6 +1139,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
       const known = this.exitHistory.get(process);
       if (known !== undefined && this.exitEvidenceIsUsable(process, known)) return;
       this.exitHistory.set(process, evidence);
+      this.retiredInstanceIds.add(process.identity.worker_instance_id);
       if (!this.owned.has(process)) return;
       if (!this.exitEvidenceIsUsable(process, evidence)) return;
       this.owned.delete(process);

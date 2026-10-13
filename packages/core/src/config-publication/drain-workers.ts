@@ -28,6 +28,11 @@ type FrozenDrainTask = {
   readonly startBootId?: string;
   readonly startDeadlineNs?: string;
 };
+export function freezeWorkerDrainTask(process: ServingConfigWorker['process'], drainId: string, policy: PublicationPolicy, startBootId: string, startDeadlineNs: string): void {
+  const previous = drainTasks.get(process);
+  if (previous !== undefined && (previous.drainId !== drainId || previous.startDeadlineNs !== startDeadlineNs)) throw new Error('worker drain task is already frozen');
+  if (previous === undefined) drainTasks.set(process, { drainId, policy: Object.freeze({ ...policy }), sent: false, startBootId, startDeadlineNs });
+}
 const drainTasks = new WeakMap<ServingConfigWorker['process'], FrozenDrainTask>();
 
 function errorDetail(error: unknown, fallback: string): string {
@@ -79,17 +84,19 @@ async function completedTerminalExit(
 ): Promise<WorkerExitEvidence | null> {
   try {
     // A stalled OS probe must not hold the retirement task beyond its window.
-    const evidence = await new Promise<WorkerExitEvidence | null>((resolve) => {
-      const timeout = scheduler.schedule(timeoutMs, () => resolve(null));
-      Promise.resolve().then(() => worker.process.verifyExactExit?.()).then(
-        result => { bestEffort(() => timeout.cancel()); resolve(result ?? null); },
-        () => { bestEffort(() => timeout.cancel()); resolve(null); },
-      );
-    });
+    const evidence = await readExactExit(worker,scheduler,timeoutMs);
     const message = evidence?.terminalDrain;
     return evidence !== null && evidence !== undefined && evidence.pid === worker.process.pid
       && message !== undefined && terminalMatchesWorker(message, worker, task) ? evidence : null;
   } catch { return null; }
+}
+function readExactExit(worker:ServingConfigWorker,scheduler:PublicationScheduler,timeoutMs:number):Promise<WorkerExitEvidence|null> {
+  return new Promise(resolve=>{
+    const timeout=scheduler.schedule(Math.max(1,timeoutMs),()=>resolve(null));
+    Promise.resolve().then(()=>worker.process.verifyExactExit?.()).then(
+      result=>{bestEffort(()=>timeout.cancel());resolve(result?.pid===worker.process.pid ? result : null);},
+      ()=>{bestEffort(()=>timeout.cancel());resolve(null);});
+  });
 }
 
 function terminalFailure(message: WorkerDrainedMessage | WorkerDrainFailedMessage, slot: number): PublicationFailure | null {
@@ -142,12 +149,27 @@ export async function drainWorkers(
   const policy = Object.freeze({ ...resolvePublicationPolicy(publicationPolicy) });
   return await Promise.all(workers.map(async (worker) => {
     const { process } = worker;
+    let observed: WorkerDrainStartedMessage | WorkerDrainedMessage | WorkerDrainFailedMessage | null = null;
+    let statusError:unknown;
+    try { observed = await process.drainStatus?.(policy.drain_start_timeout_ms) ?? null; }
+    catch(error) {statusError=error;}
+    // Physical exit and resource cleanup are independent facts. A killed worker
+    // can exit without publishing terminal cleanup; keep that cleanup unknown.
+    let physicalExit: WorkerExitEvidence | null = null;
+    try { if(observed?.status!=='worker-draining') physicalExit=await readExactExit(worker,scheduler,Math.min(100,policy.worker_exit_timeout_ms)); }
+    catch { /* unknown remains owned */ }
+    if (physicalExit !== null && physicalExit.pid === process.pid) {
+      const terminal = physicalExit.terminalDrain;
+      const trustedTerminal = terminal !== undefined && terminalMatchesWorker(terminal, worker,drainTasks.get(process));
+      return { worker, acknowledgementFailure: trustedTerminal
+        ? terminalFailure(terminal!, process.slot)
+        : { slot: process.slot, code: 'apply_failed', detail: 'worker exited; terminal cleanup is unknown', recovery_disposition: 'retryable' },
+        exitEvidence: trustedTerminal ? physicalExit : { exited: true, pid: physicalExit.pid } };
+    }
     if (process.kernelBootId === undefined) return { worker, acknowledgementFailure: { slot: process.slot, code: 'timeout',
       detail: 'kernel boot identity is unavailable; worker exit outcome is unknown', recovery_disposition: 'retryable' },
     unknownStage: 'exit', exitEvidence: null };
-    let observed: WorkerDrainStartedMessage | WorkerDrainedMessage | WorkerDrainFailedMessage | null = null;
-    try { observed = await process.drainStatus?.(policy.drain_start_timeout_ms) ?? null; }
-    catch (error) {
+    if(statusError!==undefined) {
       const remembered = drainTasks.get(process);
       const completed = await completedTerminalExit(worker, scheduler, remembered);
       if (completed !== null) {
@@ -156,7 +178,7 @@ export async function drainWorkers(
         return { worker, acknowledgementFailure: terminalFailure(terminal, process.slot), exitEvidence: completed };
       }
       return { worker, acknowledgementFailure: { slot: process.slot, code: 'timeout',
-        detail: errorDetail(error, 'worker drain status is unknown'), recovery_disposition: 'retryable' },
+        detail: errorDetail(statusError, 'worker drain status is unknown'), recovery_disposition: 'retryable' },
       unknownStage: remembered?.sent ? 'exit' : 'start', exitEvidence: null };
     }
     const rememberedTask = drainTasks.get(process);
@@ -211,8 +233,8 @@ export async function drainWorkers(
         }
         const started = waitForDrainAck({ worker, scheduler, timeoutMs: policy.drain_start_timeout_ms,
           drainId, bootNonce, policy: taskPolicy, phase: 'started' });
-        const startBootId = process.kernelBootId;
-        const startDeadlineNs = (kernelMonotonicNowNs() + BigInt(policy.drain_start_timeout_ms) * 1_000_000n).toString();
+        const startBootId = drainTask.startBootId ?? process.kernelBootId;
+        const startDeadlineNs = drainTask.startDeadlineNs ?? (kernelMonotonicNowNs() + BigInt(policy.drain_start_timeout_ms) * 1_000_000n).toString();
         drainTask = { drainId, policy: taskPolicy, sent: true, startBootId, startDeadlineNs };
         drainTasks.set(process, drainTask);
         const sendFailure: Promise<PublicationFailure | null> = process.send({ command: 'drain-worker', ...process.identity,
@@ -369,7 +391,8 @@ export async function drainWorkersUntilKnown(
     const next: ServingConfigWorker[] = [];
     for (const item of evidence) {
       latest.set(item.worker.process, item);
-      if (item.unknownStage === 'start' || item.unknownStage === 'drain') next.push(item.worker);
+      // Unknown is a stopped retirement. A later explicit retry reuses the same
+      // frozen task; this call never reopens a deadline window.
     }
     retry = next;
     if (retry.length > 0) await new Promise<void>((resolve) => scheduler.schedule(100, resolve));
@@ -394,6 +417,5 @@ export function drainFailures(evidence: readonly WorkerDrainEvidence[]): readonl
 }
 
 export function allDrainExitsConfirmed(evidence: readonly WorkerDrainEvidence[]): boolean {
-  return evidence.every(({ exitEvidence }) => exitEvidence !== null
-    && exitEvidence.terminalDrain !== undefined && exitEvidence.terminalDrain.cleanup_state !== 'pending');
+  return evidence.every(({ exitEvidence }) => exitEvidence !== null);
 }

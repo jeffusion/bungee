@@ -38,6 +38,10 @@ export class OwnedProcessCollection {
     return serving;
   }
 
+  adoptServing(worker: ServingConfigWorker): void {
+    this.owned.set(worker.process, { process: worker.process, evidence: worker });
+  }
+
   remove(process: ConfigPublicationWorkerProcess): void {
     this.owned.delete(process);
   }

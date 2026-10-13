@@ -1,9 +1,12 @@
 import { Database } from 'bun:sqlite';
 import { CommandJournal } from '../../../packages/core/src/plugin-services/command-journal';
 import type { RpcCommandExecution } from '../../../packages/core/src/plugin-services/rpc-runtime';
+import {holdInheritedProcessLifetimeGuard} from '../../../packages/core/src/supervision/process-lifetime-guard';
 
 // This process owns both the durable pending row and the genuinely in-flight business task.
 const source = JSON.parse(process.env.RPC_EXECUTOR_SOURCE!);
+const marker = process.argv.find(value=>value.startsWith('--bungee-process-identity='))!.slice('--bungee-process-identity='.length);
+const lifetimeGuard = holdInheritedProcessLifetimeGuard(process.env,marker);
 const db = new Database(process.env.RPC_EXECUTOR_DB!);
 const journal = new CommandJournal({ db, namespace: 'rpc.proof', privateStateNamespace: 'test', setup: true,
   resolveExternal: () => ({ reconcile: () => ({ status: 'unknown' }) }) });
@@ -15,7 +18,7 @@ const execution = {
     caller: { subject: 'caller' }, method: 'run', kind: 'command', purpose: 'management', operationId: 'proof-op',
     signal: new AbortController().signal, callee: null },
   executeBusiness: async () => {
-    process.stdout.write(`${JSON.stringify({ event: 'entered', source, pid: process.pid })}\n`);
+    process.stdout.write(`${JSON.stringify({ event: 'entered', source, pid: process.pid, lifetime_guard:lifetimeGuard })}\n`);
     await new Promise(() => {});
     throw new Error('unreachable');
   },

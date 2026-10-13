@@ -1,6 +1,6 @@
 import { createManagementAuthFixture } from '../helpers/management-auth';
 import { afterEach, describe, expect, test } from 'bun:test';
-import { createConfigControlApi } from '../../src/master-runtime/control-api';
+import { createConfigControlApi, type ConfigControlApiOptions } from '../../src/master-runtime/control-api';
 import { ConfigRepositoryError } from '../../src/config-storage';
 
 const REQUEST_ID = '11111111-1111-4111-8111-111111111111';
@@ -9,7 +9,7 @@ let TOKEN = '';
 const credentials: ReturnType<typeof createManagementAuthFixture>[] = [];
 afterEach(() => { for (const fixture of credentials.splice(0)) fixture.dispose(); });
 
-function fixture() {
+function fixture(options: Partial<ConfigControlApiOptions> = {}) {
   let ready = true;
   let recovery: any = {
     recovery_id: '22222222-2222-4222-8222-222222222222', source_mutation_id: 'operation-1',
@@ -47,6 +47,7 @@ function fixture() {
       recovery = created;
       return created;
     },
+    ...options,
   });
   return { api, repository, recoveries, setReady: (value: boolean) => { ready = value; },
     setManualError: (value: unknown) => { manualError = value; }, getWakes: () => wakes };
@@ -61,6 +62,67 @@ function authorized(path: string, init: RequestInit = {}): Request {
 }
 
 describe('configuration recovery control API', () => {
+  test('stopped active cleanup accepts a durable retry and replays without creating a worker recovery',async()=>{
+    const accepted={request_id:REQUEST_ID,source_mutation_id:'operation-1',target_revision:1,status:'accepted' as const};
+    let stored:any=null,calls=0;
+    const h=fixture({isCleanupRecoveryReady:()=>true,
+      requestCleanupRecovery:async(id,source,revision)=>{expect([id,source,revision]).toEqual([REQUEST_ID,'operation-1',1]);calls++;stored=accepted;return accepted;}});
+    h.repository.getPublicationRetirementRetry=async()=>stored;
+    h.repository.getOperationState=async()=>({operation:{mutation_id:'operation-1',state:'draining',committed_revision:1},workers:[]});
+    h.repository.getPublicationRetirement=async()=>({state:'stopped',members:[],evidence:[],reason_code:'exit_unknown'});
+    const path='/api/config/operations/operation-1/retry';const body=JSON.stringify({request_id:REQUEST_ID,expected_revision:1});
+    const first=await h.api.handle(authorized(path,{method:'POST',body}));
+    expect(first?.status).toBe(202);expect(await first?.json()).toEqual(accepted);
+    h.setReady(false);
+    const replay=await h.api.handle(authorized(path,{method:'POST',body}));
+    expect(replay?.status).toBe(202);expect(await replay?.json()).toEqual(accepted);
+    const mismatch=await h.api.handle(authorized(path,{method:'POST',body:JSON.stringify({request_id:REQUEST_ID,expected_revision:2})}));
+    expect(mismatch?.status).toBe(409);expect(calls).toBe(1);expect(h.getWakes()).toBe(0);
+  });
+  test('selected but unavailable management provider never becomes anonymous login', async () => {
+    const h = fixture({ managementAuth: { selected: () => 'selected-provider', provider: () => null } as any });
+    const response = await h.api.handle(request('/api/auth/login', { method: 'POST' }));
+    expect(response?.status).toBe(503);
+    expect(await response?.json()).toEqual({ success: false, error: 'management_provider_unavailable' });
+  });
+
+  test('runtime and retry keep capability and CSRF denial ahead of facts and side effects', async () => {
+    let healthReads = 0;
+    const identity = { subject: {} };
+    const denied = fixture({ runtimeHealth: () => { healthReads++; return { observed_at: 1, component_recovery: [], dependencies: [] }; },
+      managementAuth: { authenticate: async () => identity, authorized: async () => false } as any });
+    expect((await denied.api.handle(request('/api/config/runtime')))?.status).toBe(403);
+    expect((await denied.api.handle(request('/api/config/operations/operation-1/retry', { method: 'POST' })))?.status).toBe(403);
+    expect(healthReads).toBe(0); expect(denied.getWakes()).toBe(0);
+    const csrf = fixture({ managementAuth: { authenticate: async () => identity, authorized: async () => true,
+      validateWrite: async () => { throw new Error('invalid_csrf'); } } as any });
+    expect((await csrf.api.handle(request('/api/config/operations/operation-1/retry', { method: 'POST' })))?.status).toBe(403);
+    expect(csrf.getWakes()).toBe(0);
+  });
+
+  test('runtime projects health and typed cleanup without private process facts', async () => {
+    const h = fixture({ runtimeHealth: () => ({ observed_at: 5, credential: 'SECRET',
+      component_recovery: [{ component: 'plugin_state', state: 'stopped', attempt_count: 6, max_attempts: 6,
+        next_retry_at: null, reason_code: 'retry_exhausted', detail: 'SECRET' }],
+      dependencies: [{ component: 'management_provider', state: 'unavailable', fresh: false, observed_at: 4, arguments: 'SECRET' }] } as any),
+      retirementDeadline: () => 500 });
+    h.repository.getCurrentOperationState = async () => ({ operation: { mutation_id: 'operation-1', updated_at: 4,
+      committed_revision: 1, state: 'draining', result_status: null, error_code: null }, workers: [] });
+    h.repository.getPublicationRetirement = async (id: string) => {
+      expect(id).toBe('operation-1');
+      return { state: 'pending', reason_code: null,
+        members: [{ identity: { worker_slot: 0, worker_instance_id: 'a' }, start_deadline_ns: '100', deadline_boot_id: 'boot', guard: { path: 'SECRET' } }],
+        evidence: [{ member_id: 'a', exit_state: 'live', cleanup_state: 'failed', exit_boot_id: null, exit_deadline_ns: null }] };
+    };
+    const response = await h.api.handle(authorized('/api/config/runtime'));
+    const body = await response?.json();
+    expect(body).toMatchObject({ publication: { operation: { updated_at: 4 },
+      cleanup: { active: true, pending_count: 1, failed_count: 1, remaining_ms: 500 } },
+      health: { observed_at: 5, component_recovery: [{ state: 'stopped', attempt_count: 6 }] } });
+    expect(JSON.stringify(body)).not.toContain('SECRET');
+    expect(body.health.dependencies).toEqual([{ component: 'management_provider', state: 'unavailable', fresh: false, observed_at: 4 }]);
+  });
+
   test('anonymous management parses requests and accepts exact retry bodies', async () => {
     const h = fixture();
     const unauthorized = request('/api/config/operations/operation-1/retry', {

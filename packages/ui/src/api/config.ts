@@ -72,7 +72,9 @@ export type ConfigurationPublication = {
     readonly state: ConfigurationOperation['state'];
     readonly result_status: number | null;
     readonly error_code: string | null;
+    readonly updated_at: number;
   };
+  readonly cleanup: ConfigurationCleanup | null;
   readonly recovery: ConfigurationRecovery | null;
   readonly retryable: boolean;
   readonly serving_complete: boolean;
@@ -80,7 +82,43 @@ export type ConfigurationPublication = {
   readonly target_revision: number;
 };
 
+export type ConfigurationCleanup = {
+  readonly active: boolean;
+  readonly state: 'pending' | 'stopped' | 'released';
+  readonly reason_code: 'exit_unknown' | 'cleanup_unknown' | 'release_unknown' | null;
+  readonly pending_count: number;
+  readonly exit_unknown_count: number;
+  readonly failed_count: number;
+  readonly unknown_count: number;
+  readonly remaining_ms: number | null;
+  readonly members: readonly {
+    readonly slot: number;
+    readonly exit_state: 'live' | 'confirmed' | 'unknown';
+    readonly cleanup_state: 'success' | 'failed' | 'unknown';
+    readonly remaining_ms: number | null;
+  }[];
+};
+
+export type ConfigurationRuntimeHealth = {
+  readonly observed_at: number;
+  readonly component_recovery: readonly {
+    readonly component: 'ingress' | 'config_storage' | 'plugin_state';
+    readonly state: 'healthy' | 'recovering' | 'stopped' | 'unknown';
+    readonly reason_code: string | null;
+    readonly attempt_count: number | null;
+    readonly max_attempts: number | null;
+    readonly next_retry_at: number | null;
+  }[];
+  readonly dependencies: readonly {
+    readonly component: string;
+    readonly state: 'ready' | 'unavailable' | 'stopped';
+    readonly fresh: boolean;
+    readonly observed_at: number | null;
+  }[];
+};
+
 export type ConfigurationRuntime = ConfigurationSnapshot & {
+  readonly health: ConfigurationRuntimeHealth | null;
   readonly publication: ConfigurationPublication;
   readonly workers: readonly {
     readonly slot: number;
@@ -255,8 +293,9 @@ export function validateAggregate(aggregate: ConfigurationAggregate): Promise<Va
   return api.post('/config/validate', { aggregate });
 }
 
-export function retryConfigurationPublication(operationId: string, requestId: string, expectedRevision: number): Promise<ConfigurationRecovery> {
-  return api.post<ConfigurationRecovery>(`/config/operations/${encodeURIComponent(operationId)}/retry`, {
+export type ConfigurationCleanupRetry = {readonly request_id:string;readonly source_mutation_id:string;readonly target_revision:number;readonly status:'accepted'};
+export function retryConfigurationPublication(operationId: string, requestId: string, expectedRevision: number): Promise<ConfigurationRecovery|ConfigurationCleanupRetry> {
+  return api.post<ConfigurationRecovery|ConfigurationCleanupRetry>(`/config/operations/${encodeURIComponent(operationId)}/retry`, {
     request_id: requestId,
     expected_revision: expectedRevision,
   });

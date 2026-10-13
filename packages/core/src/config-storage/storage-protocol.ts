@@ -3,20 +3,25 @@ import { ConfigRepositoryError, type ConfigRepositoryErrorCode, type Configurati
 
 /** Every callable storage endpoint is named here; no arbitrary property dispatch. */
 export const STORAGE_METHODS = [
+  'getPublicationRetirementRetry','requestPublicationRetirementRetry',
+  'freezePublicationRetirementDrainStart',
   'commitPrepared', 'appendServingSnapshot', 'getServingSnapshot', 'claimController',
   'getActivePublication', 'getOperation', 'getOperationState', 'getCurrentOperationState',
   'getRecovery', 'getCurrentRecovery', 'getLatestRecovery', 'createManualRecovery',
   'claimRecoveryAttempt', 'scheduleRecoveryRetry', 'succeedRecovery', 'stopRecovery', 'requeueRecovery',
   'beginPublication', 'beginWorkerAttempt', 'beginDrainingRecovery', 'recordWorkerResult',
-  'finalizePublication', 'markDraining', 'verify',
+  'finalizePublication', 'markDraining', 'verify', 'getPublicationServingSet', 'freezePublicationServingSet', 'confirmPublicationServingMemberExit',
+  'getRetirementDescriptorCleanupState', 'getRetiredWorkerInstanceIds', 'getPublicationRetirement', 'freezePublicationRetirement', 'recordPublicationRetirementEvidence', 'stopPublicationRetirement', 'retryPublicationRetirement', 'markPublicationRetirementReleased', 'getRuntimeRecoveryBudget', 'consumeRuntimeRecoveryRestartTicket', 'getRuntimeRecoveryStartupGate', 'observeRuntimeRecoveryHealth',
 ] as const satisfies readonly (keyof ConfigRepository)[];
 
 export type StorageMethod = typeof STORAGE_METHODS[number];
 export type StorageParameters<M extends StorageMethod> = Parameters<ConfigRepository[M]>;
 export type StorageResult<M extends StorageMethod> = ReturnType<ConfigRepository[M]>;
 export const READ_METHODS: ReadonlySet<StorageMethod> = new Set([
-  'getServingSnapshot', 'getActivePublication', 'getOperation', 'getOperationState',
+  'getPublicationRetirementRetry',
+  'getPublicationServingSet', 'getServingSnapshot', 'getActivePublication', 'getOperation', 'getOperationState',
   'getCurrentOperationState', 'getRecovery', 'getCurrentRecovery', 'getLatestRecovery', 'verify',
+  'getRetirementDescriptorCleanupState', 'getRetiredWorkerInstanceIds', 'getPublicationRetirement', 'getRuntimeRecoveryBudget', 'getRuntimeRecoveryStartupGate',
 ]);
 
 export type StorageRequest =

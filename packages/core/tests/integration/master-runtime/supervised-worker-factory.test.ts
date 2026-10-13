@@ -1,3 +1,7 @@
+import { ConfigRepository } from '../../../src/config-storage';
+import { configurationRepositoryFixture } from '../../helpers/config-repository';
+import { armProcessLifetimeGuard } from '../../../src/supervision/process-lifetime-guard';
+import { randomUUID } from 'node:crypto';
 import { kernelMonotonicNowNs } from '../../../src/master-runtime/kernel-monotonic-clock';
 import { expect, test } from 'bun:test';
 import type { ChildProcess } from 'node:child_process';
@@ -138,10 +142,11 @@ function factory(
   confirmOrphan?: () => Promise<AdmissionRegistryStatus>,
   identity: ProcessIdentityControl = fakeIdentityControl().control,
   kernelBootId: () => Promise<string> = async () => TEST_KERNEL_BOOT_ID,
+  retirementRepository?: import('../../../src/master-runtime/supervised-worker-factory').SupervisedConfigWorkerFactoryOptions['retirementRepository'],
 ) {
   const byPort = new Map(workers.map((worker) => [worker.descriptor.control_port, worker]));
   return new SupervisedConfigWorkerFactory({
-    kernelBootId,
+    kernelBootId, retirementRepository,
     launch: { source: 'compiled', executable: process.execPath, args: [] }, rootKey: ROOT,
     runtimeWorkersDirectory: directory, authority: AUTHORITY, masterControlPort: 3011,
     accessLogDbPath: join(directory, 'access.db'),
@@ -189,70 +194,53 @@ async function writeWorkers(directory: string, workers: readonly OnlineWorker[])
   for (const worker of workers) await writeFile(join(directory, `${worker.identity.worker_instance_id}.json`), JSON.stringify(worker.descriptor));
 }
 
-test('recovery exit proof authenticates stale descriptors and refuses live, unknown, missing and tampered old workers', async () => {
+test('recovery uses durable members, separates exit/cleanup and ignores unrelated history', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'bungee-recovery-exit-'));
   const old = await completedWorker(onlineWorker('40000000-0000-4000-8000-000000000001', '50000000-0000-4000-8000-000000000001', 40101, 41101));
   const next = onlineWorker('40000000-0000-4000-8000-000000000002', '50000000-0000-4000-8000-000000000002', 40102, 41102);
-  let proof: ProcessIdentityProbe = 'dead';
-  let bootId = TEST_KERNEL_BOOT_ID;
-  let bootUnavailable = false;
-  const identity = { ...fakeIdentityControl().control, probeInstance: async () => proof };
-  const workers = factory(directory, [old, next], undefined, identity, async () => {
-    if (bootUnavailable) throw new Error('kernel boot identity unavailable');
-    return bootId;
-  });
+  const guard = armProcessLifetimeGuard({ directory: join(directory, 'guards'), processInstanceId: old.identity.worker_instance_id });
+  const repository = ConfigRepository.open(join(directory, 'config.db'));
+  const committed = repository.commit({ mutation_id: 'retirement-authority', expected_revision: 1,
+    aggregate: { logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [] },
+    kind: 'config', created_at: 1, target_worker_slots: [] });
+  expect(committed.kind).toBe('committed');
+  const terminal = old.descriptor.evidence.message as import('../../../src/config-publication').WorkerDrainedMessage;
+  repository.freezePublicationRetirement('retirement-authority', 0, [{ identity: old.identity,
+    boot_nonce: old.descriptor.boot_nonce, pid: old.descriptor.pid, private_port: old.descriptor.private_port!, revision: 1,
+    content_hash: HASH, plugin_catalog_hash: CATALOG, publication: null, guard: guard.facts,
+    drain_id: terminal.drain_id, deadline_boot_id: TEST_KERNEL_BOOT_ID, start_deadline_ns: '123456789' }], 1);
+  const workers = factory(directory, [old, next], undefined, fakeIdentityControl(() => 'mismatch').control,
+    async () => TEST_KERNEL_BOOT_ID, configurationRepositoryFixture(repository));
   const registry = { active: admission(next), prepared: null, retired: [admission(old)] };
-    const replacements = [{ process: { identity: next.identity, pid: next.descriptor.pid },
-      boot_nonce: next.descriptor.boot_nonce }] as unknown as readonly ServingConfigWorker[];
-    const parsedOld = parseWorkerDescriptor(old.descriptor, old.credential.process_key);
-    const oldTerminal = parsedOld.evidence.message;
-    expect(oldTerminal).toMatchObject({ status: 'worker-drained', cleanup_state: 'success', exit_remaining_ms: 1,
-      boot_id: TEST_KERNEL_BOOT_ID, pid: parsedOld.pid, revision: parsedOld.revision,
-      content_hash: parsedOld.content_hash, plugin_catalog_hash: parsedOld.plugin_catalog_hash });
-    expect(JSON.stringify([[parsedOld.master_generation, parsedOld.worker_instance_id, parsedOld.worker_slot],
-      parsedOld.boot_nonce, parsedOld.private_port, parsedOld.revision, parsedOld.content_hash, parsedOld.plugin_catalog_hash]))
-      .toBe(JSON.stringify([[old.identity.master_generation, old.identity.worker_instance_id, old.identity.worker_slot],
-        old.descriptor.boot_nonce, old.descriptor.private_port, 1, HASH, CATALOG]));
+  const replacements = [{ process: { identity: next.identity, pid: old.descriptor.pid }, boot_nonce: next.descriptor.boot_nonce,
+    publication: { mutation_id: 'retirement-authority', attempt_no: 1, drain_recovery_generation: 0 } }] as unknown as readonly ServingConfigWorker[];
+  const { descriptor_mac: _mac, ...body } = old.descriptor;
+  const signed = signWorkerDescriptor({ ...body, lifetime_guard: { ...guard.facts, held: true },
+    evidence: { kind: 'drained', message: { ...terminal, cleanup_state: 'failed' } } }, old.credential.process_key);
+  const path = join(directory, `${old.identity.worker_instance_id}.json`);
   try {
-    await writeWorkers(directory, [old, next]);
+    await writeFile(path, JSON.stringify(signed));
+    await writeFile(join(directory, 'unrelated-history.json'), '{broken');
+    // A colliding/reused raw PID cannot override the live native guard.
+    expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(false);
+    await writeFile(path, JSON.stringify({ ...signed, pid: 999 }));
+    expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(false);
+    await rm(path);
+    expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(false);
+    await writeFile(path, JSON.stringify(signed));
+    guard.closeAfterChildExit();
     expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(true);
-    bootId = 'linux:22222222-2222-4222-8222-222222222222';
-    expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(false);
-    bootId = TEST_KERNEL_BOOT_ID;
-    bootUnavailable = true;
-    expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(false);
-    bootUnavailable = false;
-    const { descriptor_mac: _mac, ...oldBody } = old.descriptor;
-    const failedMessage = { ...oldTerminal!, status: 'worker-drain-failed' as const,
-      error_code: 'timeout' as const, http_stopped: true as const };
-    const failedOld = { ...old, descriptor: signWorkerDescriptor({ ...oldBody,
-      evidence: { kind: 'drain-failed', message: failedMessage as any } }, old.credential.process_key) };
-    await writeWorkers(directory, [failedOld]);
+    expect(repository.getPublicationRetirement('retirement-authority')?.evidence[0]).toMatchObject({ exit_state: 'confirmed', cleanup_state: 'failed' });
+    await rm(path);
+    // The durable confirmed fence survives descriptor removal and reopen.
     expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(true);
-    await writeWorkers(directory, [old]);
-    proof = 'mismatch';
-    expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(true);
-    for (const unavailable of ['exact', 'unknown'] as const) {
-      proof = unavailable;
-      expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(false);
-    }
-    proof = 'dead';
-    await rm(join(directory, `${old.identity.worker_instance_id}.json`));
-    expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(false);
-    await writeWorkers(directory, [old]);
-    await writeFile(join(directory, `${old.identity.worker_instance_id}.json`), JSON.stringify({ ...old.descriptor, pid: 999 }));
-    expect(await workers.confirmPreviousWorkersExited(registry, replacements)).toBe(false);
+    expect(repository.getRetiredWorkerInstanceIds()).toContain(old.identity.worker_instance_id);
     expect(old.shutdowns).toBe(0);
-  } finally {
-    workers.disconnect();
-    await rm(directory, { recursive: true, force: true });
-  }
+  } finally { guard.closeAfterChildExit(); workers.disconnect(); repository.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
 test('reclaims an expired completed terminal descriptor only after the signed registry no longer protects it', async () => {
-  const evidenceDirectory = resolve(import.meta.dir, '../../../../../test-results/publication');
-  await mkdir(evidenceDirectory, { recursive: true });
-  const directory = await mkdtemp(join(evidenceDirectory, 'factory-reclaim-terminal-'));
+  const directory = await mkdtemp(join(tmpdir(), 'factory-reclaim-terminal-'));
   const completed = await completedWorker(onlineWorker('40000000-0000-4000-8000-000000000045',
     '50000000-0000-4000-8000-000000000045', 43245, 44245));
   const identity: ProcessIdentityControl = { ...fakeIdentityControl().control, probeInstance: async () => 'dead' };
@@ -264,7 +252,7 @@ test('reclaims an expired completed terminal descriptor only after the signed re
       retired: [admission(completed)] });
     expect(protectedCleanup.cleaned).toEqual([]);
     expect(await workerFactory.confirmPreviousWorkersExited({ active: null, prepared: null,
-      retired: [admission(completed)] }, [])).toBe(true);
+      retired: [admission(completed)] }, [])).toBe(false);
 
     const releasedCleanup = await workerFactory.cleanupAuthenticatedOrphans({ active: null, prepared: null, retired: [] });
     expect(releasedCleanup.cleaned).toContainEqual(completed.identity);
@@ -1036,4 +1024,51 @@ test('orphan cleanup keeps ownership and reports exitUnknown when the failed gra
       } finally { workerFactory.disconnect(); }
     }
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('a new attempt requires all prior serving targets to exit and persists the identity fence before reuse', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-publication-target-exit-'));
+  const repository = ConfigRepository.open(join(directory, 'config.db'));
+  const worker = onlineWorker(randomUUID(), randomUUID(), 40111, 41111);
+  const guard = armProcessLifetimeGuard({ directory: join(directory, 'guards'), processInstanceId: worker.identity.worker_instance_id });
+  const workers = factory(directory, [], undefined, fakeIdentityControl(() => 'mismatch').control,
+    async () => TEST_KERNEL_BOOT_ID, configurationRepositoryFixture(repository));
+  try {
+    repository.commit({ mutation_id: 'target-exit', expected_revision: 1, kind: 'config', created_at: 1, target_worker_slots: [0],
+      aggregate: { logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [] } });
+    repository.beginPublication('target-exit', 2);
+    repository.beginWorkerAttempt('target-exit', 0, 0, 'initial', 3);
+    repository.recordWorkerResult('target-exit', 0, { kind: 'converged', attempt_no: 1, applied_revision: 2 }, 4);
+    const publication = { mutation_id: 'target-exit', attempt_no: 1, drain_recovery_generation: 0 };
+    const contentHash = repository.getSnapshot().content_hash;
+    const { descriptor_mac: _mac, ...body } = worker.descriptor;
+    const message = body.evidence.message;
+    if (message?.status !== 'config-ready') throw new Error('target ready fixture missing');
+    const descriptor = signWorkerDescriptor({ ...body, revision: 2, content_hash: contentHash,
+      lifetime_guard: { ...guard.facts, held: true },
+      evidence: { kind: 'ready', message: { ...message, revision: 2, content_hash: contentHash, publication } } }, worker.credential.process_key);
+    const path = join(directory, `${worker.identity.worker_instance_id}.json`);
+    await writeFile(path, JSON.stringify(descriptor));
+    repository.freezePublicationRetirement('target-exit', 0, [], 4);
+    repository.freezePublicationServingSet('target-exit', 0, [{ identity: worker.identity, boot_nonce: worker.descriptor.boot_nonce,
+      pid: worker.descriptor.pid, private_port: 41111, revision: 2, content_hash: contentHash, plugin_catalog_hash: CATALOG,
+      publication, guard: guard.facts, kernel_boot_id: TEST_KERNEL_BOOT_ID }]);
+    repository.markDraining('target-exit', 5);
+    const active = repository.getActivePublication();
+    if (active === null) throw new Error('target publication missing');
+    expect(await workers.confirmActivePublicationExited(active)).toBe(false);
+    expect(repository.getPublicationServingSet('target-exit', 0)?.exited).toEqual([]);
+    guard.closeAfterChildExit();
+    await writeFile(path, JSON.stringify({ ...descriptor, pid: 999 }));
+    expect(await workers.confirmActivePublicationExited(active)).toBe(false);
+    await writeFile(path, JSON.stringify(descriptor));
+    expect(await workers.confirmActivePublicationExited(active)).toBe(true);
+    expect(repository.getPublicationServingSet('target-exit', 0)?.exited).toEqual([worker.identity.worker_instance_id]);
+    expect(repository.getRetiredWorkerInstanceIds()).toContain(worker.identity.worker_instance_id);
+    expect((await workers.discoverAndAdopt(admission(worker))).kind).toBe('recovering');
+    // Proof alone does not consume an attempt. Only the caller's actual new attempt does.
+    expect(repository.getOperation('target-exit')?.drain_recovery_generation).toBe(0);
+    repository.beginDrainingRecovery('target-exit', 0, 6);
+    expect(repository.getActivePublication()?.targets[0]).toMatchObject({ attempt_no: 2, drain_recovery_generation: 1 });
+  } finally { guard.closeAfterChildExit(); workers.disconnect(); repository.close(); await rm(directory, { recursive: true, force: true }); }
 });

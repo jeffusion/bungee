@@ -84,6 +84,11 @@ if (import.meta.main) {
       if (args.length !== 2 || args[0] !== '--recover-admin' || !args[1]) throw new Error('invalid_recovery_arguments');
       console.log('目标配置数据库：' + args[1]);
       console.log(JSON.stringify(await recoverOffline(args[1], await readAdministratorRecovery())));
+    } else if(process.argv.includes('--prepare-runtime-upgrade')) {
+      const args=process.argv.slice(2);
+      if(args.length!==2||args[0]!=='--prepare-runtime-upgrade'||!args[1]) throw new Error('invalid_runtime_upgrade_arguments');
+      const {prepareRuntimeUpgrade}=await import('./master-runtime/runtime-upgrade');
+      console.log(JSON.stringify(await prepareRuntimeUpgrade(args[1])));
     } else if (process.argv.includes('--recover')) {
       const args = process.argv.slice(2);
       if (args.length !== 2 || args[0] !== '--recover' || !args[1]) throw new Error('invalid_recovery_arguments');
@@ -103,14 +108,17 @@ if (import.meta.main) {
     if (process.argv[2] === 'oauth-callback') {
       console.error('OAuth callback capture failed or was cancelled. Check the local port and restart the login.');
       process.exitCode = 1;
-    } else if (process.argv.includes('--recover') || process.argv.includes('--recover-admin')) {
+    } else if (process.argv.includes('--recover') || process.argv.includes('--recover-admin') || process.argv.includes('--prepare-runtime-upgrade')) {
       console.error('Offline recovery failed; no recovery input is logged.');
       process.exitCode = 1;
     } else {
     clearDaemonBootstrapEnvironment();
     const { logger } = await import('./logger');
     logger.error({ error: serializeErrorChain(error) }, 'Process startup failed');
-    process.exitCode = 1;
+    if (role === 'master' && !process.argv.includes('--initialize-config')) {
+      const {keepStoppedProcessAlive} = await import('./master-runtime/stopped-process');
+      keepStoppedProcessAlive();
+    } else process.exitCode = 1;
     }
   }
 }

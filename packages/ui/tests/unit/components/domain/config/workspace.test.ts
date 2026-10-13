@@ -60,7 +60,7 @@ test('file selection and cancellation are a local preview, not an import write',
 
 test('publication and serving are independent; stale reads are never green; degraded is terminal', () => {
   const p = publicationFixture({ serving_complete: false, serving_revision: null,
-    operation: { operation_id: 'op', committed_revision: 8, state: 'converged', result_status: 200, error_code: null } });
+    operation: { operation_id: 'op', committed_revision: 8, state: 'converged', result_status: 200, error_code: null, updated_at: 1 } });
   expect(servingStatus(p, true)).toBe('unconfirmed');
   expect(servingStatus({ ...p, serving_complete: true, serving_revision: 8 }, false)).toBe('unknown');
   expect(servingStatus({ ...p, serving_revision: undefined } as any, true)).toBe('unknown');

@@ -25,7 +25,9 @@
     "converged": "发布记录已收敛，当前接流尚未确认。",
     "degraded": "配置已保存，但发布出现异常。请查看发布状态。",
     "statusUnavailable": "配置已保存，暂时无法确认发布进度，正在重新查询。",
-    "details": "查看发布状态"
+    "details": "查看发布状态",
+    "historicalDrainFailure": "历史收尾失败记录；当前接流已确认。",
+    "runtimeBlocked": "运行组件或依赖当前不可用，请查看运行事实。"
   },
   "publicationRecovery": {
     "label": "配置恢复",
@@ -391,6 +393,57 @@
     }
   },
   "settings": {
+    "runtimeFacts": {
+      "cleanup": "旧进程清理",
+      "pending": "仍存活",
+      "exitUnknown": "退出未确认",
+      "failed": "清理失败",
+      "unknown": "清理未知",
+      "remaining": "观测时截止剩余",
+      "slot": "槽位",
+      "exit": "退出",
+      "unavailable": "事实不可用",
+      "components": "组件恢复",
+      "dependencies": "依赖状态",
+      "dependency": "依赖",
+      "observedAt": "观测时间",
+      "attempt": "尝试次数",
+      "notScheduled": "未计划",
+      "nextRetry": "下次重试",
+      "state": {
+        "stale": "过期",
+        "pending": "进行中",
+        "stopped": "已停止",
+        "released": "已释放",
+        "healthy": "健康",
+        "recovering": "恢复中",
+        "unknown": "未知",
+        "ready": "就绪",
+        "unavailable": "不可用"
+      },
+      "exitState": {
+        "live": "存活",
+        "confirmed": "已确认",
+        "unknown": "未知"
+      },
+      "cleanupReason": {
+        "exit_unknown": "退出确认不可用。",
+        "cleanup_unknown": "清理确认不可用。",
+        "release_unknown": "接流释放确认不可用。"
+      },
+      "cleanupState": {
+        "success": "成功",
+        "failed": "失败",
+        "unknown": "未知"
+      },
+      "component": {
+        "ingress": "入口",
+        "config_storage": "配置存储",
+        "plugin_state": "插件状态",
+        "management_provider": "管理认证",
+        "control_plugins": "控制插件"
+      }
+    },
     "publication": {
       "title": "配置发布",
       "seconds": "{value} 秒", "defaultSeconds": "默认 {value} 秒（未显式设置）", "otherSettings": "其他发布设置",
@@ -413,9 +466,8 @@
     "snapshotReadRuntimeUnknown": "当前配置已读取，但接流状态无法确认。已保留本次追踪和草稿，暂不能解锁编辑或再次提交；请恢复连接后继续查询。",
     "queryNotFound": "本次发布已确认提交，但暂未查到记录。继续保留追踪锁，请稍后查询，不要重新发送。", "queryUnauthorized": "当前凭据无权查询本次发布。请使用有效凭据重新登录；不会再次提交。", "queryNetwork": "发布查询暂不可用，保留当前记录和结果。请恢复连接后再查询，不会自动重新提交。",
     "runtimeTracking": "正在跟踪本次发布，后台运行状态读取暂缓；这不是读取失败。", "authRelogin": "认证策略已提交。请使用新凭据重新登录后再提交其他更改；证明令牌仅保留在当前页面内存。",
-    "replacementResults": "新工作进程结果", "drainResults": "旧工作进程收尾结果", "slot": "进程槽位", "attempt": "尝试次数",
+    "replacementResults": "新工作进程结果", "slot": "进程槽位", "attempt": "尝试次数",
     "workerState": { "pending": "等待结果", "converged": "已确认", "failed": "失败", "unknown": "未知" },
-    "drainCode": { "timeout": "旧进程收尾确认超时", "exit_unconfirmed": "旧进程退出尚未确认", "apply_failed": "旧进程收尾操作失败", "early_exit": "旧进程提前退出", "invalid_message": "旧进程收尾确认消息无效", "mismatched_message": "旧进程收尾确认身份不匹配" }, "failureHidden": "失败详情格式无法安全识别，已隐藏原文。", "drainNoRetry": "旧进程收尾异常不提供重试发布操作。请先检查原发布记录及运行状态。",
     "cleanupOutcome": { "executed": "清理已执行。", "refreshFailed": "清理已执行，状态刷新失败。请只刷新状态，不要再次清理。", "rejected": "服务端明确拒绝清理请求，请检查访问权限。", "unknown": "清理结果尚未确认。已停止重复执行，请检查运行状态。" }, "cleanupReadFailed": "清理状态读取失败。",
     "diff": { "logLevel": "日志级别", "requestLimit": "请求体接收上限", "authEnabled": "管理访问与默认代理认证", "authTokens": "访问令牌", "loggingEnabled": "正文采集", "bodyMax": "单条正文存储上限", "retention": "正文保留天数", "routes": "路由", "services": "服务", "activations": "插件启用项", "bindings": "全局绑定", "authHidden": "其他认证设置", "loggingHidden": "其他日志设置", "globalHidden": "其他全局设置", "unknown": "未知设置", "added": "新增", "removed": "删除", "changed": "修改", "reordered": "顺序变化", "hidden": "已隐藏细节", "unset": "未设置", "on": "开启", "off": "关闭", "items": "项", "unidentified": "未识别资源", "hiddenDetails": "安全摘要，其他细节已隐藏。", "bindingCount": "绑定数量", "endpointCount": "端点数量" },
     "responsibility": "编辑全局策略，审阅更改并跟踪发布结果。",

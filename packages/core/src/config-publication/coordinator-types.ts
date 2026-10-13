@@ -1,3 +1,5 @@
+import type { ConfigRepository } from '../config-storage/config-repository';
+import type { HeldProcessLifetimeGuardFacts } from '../supervision/process-lifetime-guard';
 import type { Sha256Digest } from '@jeffusion/bungee-types';
 import type {
   ActiveConfigurationPublication,
@@ -29,6 +31,8 @@ export interface ConfigPublicationWorkerProcess {
   readonly identity: ConfigProcessIdentity;
   readonly pid: number;
   readonly kernelBootId?: string;
+  readonly lifetimeGuardFacts?: HeldProcessLifetimeGuardFacts | null;
+  releaseLifetimeRetirementFence?(): void;
   send(message: ConfigMasterMessage): Promise<void>;
   drainStatus?(timeoutMs?: number): Promise<WorkerDrainStartedMessage | WorkerDrainedMessage | WorkerDrainFailedMessage | null>;
   subscribeMessage(listener: (message: unknown) => void): () => void;
@@ -43,6 +47,7 @@ export interface ConfigPublicationWorkerProcess {
 }
 
 export interface ConfigPublicationWorkerFactory {
+  confirmActivePublicationExited?(active: ActiveConfigurationPublication): Promise<boolean>;
   spawn(identity: ConfigProcessIdentity): ConfigPublicationWorkerProcess;
   markCommitted(processes: readonly ConfigPublicationWorkerProcess[]): void;
   disconnectProcesses(processes: readonly ConfigPublicationWorkerProcess[]): void;
@@ -75,6 +80,16 @@ export interface WorkerAdmissionController {
 }
 
 export interface ConfigPublicationRepository {
+  freezePublicationRetirementDrainStart?: (...args:Parameters<ConfigRepository['freezePublicationRetirementDrainStart']>)=>Promise<ReturnType<ConfigRepository['freezePublicationRetirementDrainStart']>>;
+  getPublicationServingSet?: (...args: Parameters<ConfigRepository['getPublicationServingSet']>) => Promise<ReturnType<ConfigRepository['getPublicationServingSet']>>;
+  freezePublicationServingSet?: (...args: Parameters<ConfigRepository['freezePublicationServingSet']>) => Promise<ReturnType<ConfigRepository['freezePublicationServingSet']>>;
+  getPublicationRetirement?: (...args: Parameters<ConfigRepository['getPublicationRetirement']>) => Promise<ReturnType<ConfigRepository['getPublicationRetirement']>>;
+  freezePublicationRetirement?: (...args: Parameters<ConfigRepository['freezePublicationRetirement']>) => Promise<ReturnType<ConfigRepository['freezePublicationRetirement']>>;
+  recordPublicationRetirementEvidence?: (...args: Parameters<ConfigRepository['recordPublicationRetirementEvidence']>) => Promise<ReturnType<ConfigRepository['recordPublicationRetirementEvidence']>>;
+  stopPublicationRetirement?: (...args: Parameters<ConfigRepository['stopPublicationRetirement']>) => Promise<ReturnType<ConfigRepository['stopPublicationRetirement']>>;
+  retryPublicationRetirement?: (...args: Parameters<ConfigRepository['retryPublicationRetirement']>) => Promise<ReturnType<ConfigRepository['retryPublicationRetirement']>>;
+  markPublicationRetirementReleased?: (...args: Parameters<ConfigRepository['markPublicationRetirementReleased']>) => Promise<ReturnType<ConfigRepository['markPublicationRetirementReleased']>>;
+
   getSnapshot(): RepositorySnapshot;
   getActivePublication(): Promise<ActiveConfigurationPublication | null>;
   beginPublication(mutationId: string, updatedAt: number): Promise<ConfigurationOperation>;

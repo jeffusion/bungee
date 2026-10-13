@@ -72,16 +72,26 @@ describe('main role dispatch', () => {
     expect(await child.exited).toBe(1);
   });
 
-  test('maps production startup failure to a nonzero process exit', async () => {
+  async function confirmStopped(child:ReturnType<typeof Bun.spawn>) {
+    const reader=(child.stdout as ReadableStream<Uint8Array>).getReader();let output='';
+    try {
+      while(!output.includes('Stopped master requires local offline recovery')) {
+        const chunk=await reader.read();if(chunk.done)throw new Error('master exited instead of remaining stopped');
+        output+=new TextDecoder().decode(chunk.value);
+      }
+      expect(child.exitCode).toBeNull();child.kill('SIGTERM');expect(await child.exited).toBe(0);
+    } finally {reader.releaseLock();}
+  }
+  test('production bootstrap failure remains stopped and accepts manual shutdown', async () => {
     const child = Bun.spawn([bunExecutable, 'src/main.ts'], {
       cwd: coreRoot,
       env: { ...process.env, BUNGEE_ROLE: 'master', WORKER_COUNT: '0' },
-      stdout: 'ignore',
-      stderr: 'ignore',
+      stdout: 'pipe',
+      stderr: 'pipe',
     });
     processes.registerChild(child);
 
-    expect(await child.exited).toBe(1);
+    await confirmStopped(child);
   });
 
   test('defaults an unset role to master startup', async () => {
@@ -90,11 +100,11 @@ describe('main role dispatch', () => {
     const child = Bun.spawn([bunExecutable, 'src/main.ts'], {
       cwd: coreRoot,
       env,
-      stdout: 'ignore',
-      stderr: 'ignore',
+      stdout: 'pipe',
+      stderr: 'pipe',
     });
     processes.registerChild(child);
 
-    expect(await child.exited).toBe(1);
+    await confirmStopped(child);
   });
 });
