@@ -1,3 +1,12 @@
+## [5.23.3](https://github.com/jeffusion/bungee/compare/v5.23.2...v5.23.3) (2026-10-13)
+
+
+### Bug Fixes
+
+* **cli:** size Unix marker queries for host-wide process lists ([dcda51d](https://github.com/jeffusion/bungee/commit/dcda51d424c613ebef7de02b6a89852d5574ae23))
+* **runtime:** bound storage recovery and persist worker retirement proofs ([b86590b](https://github.com/jeffusion/bungee/commit/b86590b63845d0f3c3bf15ecadd6ac92ec070c9b))
+* **supervision:** classify missing guards before filesystem probes ([10efe74](https://github.com/jeffusion/bungee/commit/10efe747c58dcb882f2433fa11f33f1f27507d89))
+
 ## [5.23.2](https://github.com/jeffusion/bungee/compare/v5.23.1...v5.23.2) (2026-10-12)
 
 
