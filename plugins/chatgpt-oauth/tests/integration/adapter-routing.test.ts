@@ -6,9 +6,144 @@ const dataPlane = await createDataPlaneRuntime();
 const { ScopedPluginRegistry, setScopedPluginRegistry } = await import('../../../../packages/core/src/scoped-plugin-registry');
 const { setBoundControlClientProvider } = await import('../../../../packages/core/src/config-worker/runtime-dependencies');
 const { setPluginRegistry } = await import('../../../../packages/core/src/worker/state/plugin-manager');
-const { RESPONSES_PATH, CHAT_COMPLETIONS_PATH, CODEX_RESPONSES_PATH } = await import('../../server/adapter');
+const { RESPONSES_PATH, CHAT_COMPLETIONS_PATH, CODEX_RESPONSES_PATH, CODEX_SEARCH_PATH, CODEX_RESPONSES_USER_AGENT } = await import('../../server/adapter');
 const originalFetch = global.fetch;
+const searchBody = JSON.stringify({
+  id: 'search-session', model: 'search-model',
+  input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Read the Keycloak docs' }],
+    internal_chat_message_metadata_passthrough: { turn_id: 'search-turn' } }],
+  commands: { open: [{ ref_id: 'https://www.keycloak.org/securing-apps/oidc-layers' }], response_length: 'short' },
+  settings: { allowed_callers: ['direct'], external_web_access: false }, max_output_tokens: 10000,
+}, null, 2) + '\n';
+
+async function forwardSearch(options: {
+  combined?: boolean; entry?: string; rewrite?: boolean; target?: string;
+  contributionId?: string; method?: string; status?: number; failover?: boolean;
+} = {}) {
+  const [{ handleRequest }, runtime, { accessLogWriter }] = await Promise.all([
+    import('../../../../packages/core/src/worker/request/handler'),
+    import('../../../../packages/core/src/worker/state/runtime-state'),
+    import('../../../../packages/core/src/logger/access-log-writer'),
+  ]);
+  const routeId = options.entry ?? '/codex/alpha/search';
+  const endpointId = 'search-primary', bindingId = 'search-binding', serviceName = 'managed-search';
+  const registry = new ScopedPluginRegistry(fileURLToPath(new URL('../../../..', import.meta.url)));
+  const controlCalls: string[] = [];
+  const upstreamCalls: Array<{ url: string; method?: string; headers: Headers; body: string }> = [];
+  const status = options.status ?? 200;
+  const upstreamBody = status === 200 ? '{ "output": "Keycloak docs", "results": [], "encrypted_output": "opaque" }\n'
+    : JSON.stringify({ error: 'upstream search failure' });
+  try {
+    for (const scope of options.combined ? ['route', 'service', 'upstream'] as const : ['upstream'] as const) {
+      await registry.createInstance({ type: scope, routeId,
+        ...(scope === 'upstream' ? { upstreamId: endpointId } : scope === 'service' ? { serviceName } : {}) },
+      { name: 'chatgpt-oauth', options: { accountRef: 'integration-account' } } as any);
+    }
+    const manifest = JSON.parse(readFileSync(new URL('../../manifest.json', import.meta.url), 'utf8'));
+    setPluginRegistry({ getPluginStateSnapshot: () => ({
+      pluginName: 'chatgpt-oauth', discovery: 'discovered', validation: 'validated', persistedEnabled: 'enabled', manifest,
+    }) } as any);
+    setBoundControlClientProvider(() => ({ call: async <T>(method: string): Promise<T> => {
+      controlCalls.push(method);
+      return (method === 'getCredential' ? {
+        version: 1, expiresAt: Date.now() + 10_000,
+        headers: { authorization: 'Bearer fixture-search-token', 'chatgpt-account-id': 'fixture-search-account' },
+      } : { rejected: true }) as T;
+    } }));
+    setScopedPluginRegistry(registry);
+    global.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      upstreamCalls.push({ url: String(url), method: init?.method, headers: new Headers(init?.headers),
+        body: await new Response(init?.body).text() });
+      return new Response(upstreamBody, { status, headers: {
+        'content-type': 'application/json', 'x-request-id': 'search-response', ...(status === 429 ? { 'retry-after': '7' } : {}),
+      } });
+    }) as unknown as typeof fetch;
+    const config = {
+      services: [{ name: serviceName, failover: { enabled: options.failover ?? false, retry_on: [503] }, endpoints: [{
+        id: endpointId, target: options.target ?? 'https://chatgpt.com', priority: 0,
+        managedBy: { plugin: 'chatgpt-oauth', contributionId: options.contributionId ?? 'chatgpt', bindingId },
+        plugins: [{ id: bindingId, name: 'chatgpt-oauth', options: { accountRef: 'integration-account' }, enabled: true }],
+      }, { id: 'fallback', target: 'https://fallback.example.test', priority: 1 }] }],
+      routes: [{ path: routeId, service: serviceName,
+        ...(options.rewrite === false ? {} : { path_rewrite: { '^/codex/alpha/search$': '/alpha/search' } }) }],
+    } as any;
+    runtime.initializeRuntimeState(config);
+    const method = options.method ?? 'POST';
+    const response = await handleRequest(new Request(`http://localhost${routeId}?request=search`, { method,
+      ...(!['GET', 'HEAD'].includes(method) ? { body: searchBody } : {}),
+      headers: { 'content-type': 'application/json', Authorization: 'Bearer fixture-caller-token', Cookie: 'fixture-caller-cookie',
+        'X-Codex-Turn-Metadata': 'turn-metadata', 'X-Codex-Routing-Hint': 'stale',
+        'X-OpenAI-Internal-Codex-Responses-Lite': 'true', 'User-Agent': 'caller', Originator: 'caller' },
+    }), config, { servingRevision: 26 });
+    const body = await response.text();
+    await accessLogWriter.flush();
+    return { status: response.status, headers: response.headers, body, upstreamBody, upstreamCalls, controlCalls,
+      activeRequests: runtime.getActiveRequestCount(serviceName, endpointId),
+      healthFailures: runtime.runtimeState.get(serviceName)?.upstreams.map(upstream => upstream.consecutive_failures) };
+  } finally {
+    accessLogWriter.getDatabase().query('DELETE FROM access_logs WHERE path = ?').run(routeId);
+    runtime.runtimeState.clear(); setScopedPluginRegistry(null); setPluginRegistry(null); setBoundControlClientProvider(null);
+    await registry.destroy(); global.fetch = originalFetch;
+  }
+}
+
 describe('ChatGPT OAuth request handler integration', () => {
+  for (const combined of [false, true]) {
+    test(`standalone search preserves JSON bytes through managed ${combined ? 'combined' : 'upstream'} scopes`, async () => {
+      const result = await forwardSearch({ combined });
+      expect(result.status).toBe(200);
+      expect(result.body).toBe(result.upstreamBody);
+      expect(result.headers.get('content-type')).toBe('application/json');
+      expect(result.headers.get('x-request-id')).toBe('search-response');
+      expect(result.controlCalls).toEqual(['getCredential']);
+      expect(result.upstreamCalls).toHaveLength(1);
+      const sent = result.upstreamCalls[0]!;
+      expect(sent.url).toBe('https://chatgpt.com' + CODEX_SEARCH_PATH + '?request=search');
+      expect(sent.method).toBe('POST');
+      expect(sent.body).toBe(searchBody);
+      expect(sent.headers.get('authorization')).toBe('Bearer fixture-search-token');
+      expect(sent.headers.get('chatgpt-account-id')).toBe('fixture-search-account');
+      expect(sent.headers.get('accept')).toBe('application/json');
+      expect(sent.headers.get('content-type')).toBe('application/json');
+      expect(sent.headers.get('user-agent')).toBe(CODEX_RESPONSES_USER_AGENT);
+      expect(sent.headers.get('originator')).toBe('codex-tui');
+      expect(sent.headers.get('x-codex-turn-metadata')).toBe('turn-metadata');
+      for (const header of ['cookie', 'x-codex-routing-hint', 'x-openai-internal-codex-responses-lite']) expect(sent.headers.has(header)).toBe(false);
+      expect(result.activeRequests).toBe(0);
+    });
+  }
+
+  for (const status of [200, 400, 401, 429, 503]) {
+    test(`native standalone search preserves upstream ${status} and existing credential handling`, async () => {
+      const result = await forwardSearch({ entry: CODEX_SEARCH_PATH, status });
+      expect(result.status).toBe(status);
+      expect(result.body).toBe(result.upstreamBody);
+      expect(result.upstreamCalls).toHaveLength(1);
+      expect(result.controlCalls).toEqual(status === 401 ? ['getCredential', 'rejectAccess'] : ['getCredential']);
+      expect(result.headers.get('x-request-id')).toBe('search-response');
+      if (status === 429) expect(result.headers.get('retry-after')).toBe('7');
+      expect(result.activeRequests).toBe(0);
+    });
+  }
+
+  for (const [name, options] of [
+    ['missing prefix rewrite', { rewrite: false }],
+    ['unsupported method', { method: 'GET' }],
+    ['similar path', { entry: '/alpha/search/extra' }],
+    ['other origin', { target: 'https://other.example.test' }],
+    ['SIWC source', { target: 'https://api.openai.com', contributionId: 'chatgpt-siwc' }],
+  ] as const) {
+    test(`standalone search rejects ${name} before acquiring credentials or fetching a sibling`, async () => {
+      const result = await forwardSearch({ ...options, failover: true });
+      expect(result.status).toBe(503);
+      expect(JSON.parse(result.body)).toEqual({ error: 'Service Unavailable' });
+      expect(result.controlCalls).toEqual([]);
+      expect(result.upstreamCalls).toEqual([]);
+      expect(result.healthFailures).toEqual([0, 0]);
+      expect(result.activeRequests).toBe(0);
+    });
+  }
+
   for (const routeId of [RESPONSES_PATH, CHAT_COMPLETIONS_PATH, '/chat/completions', '/chatgpt/responses']) {
     const native = routeId === '/chatgpt/responses';
     const chat = routeId === CHAT_COMPLETIONS_PATH || routeId === '/chat/completions';

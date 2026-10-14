@@ -8,9 +8,9 @@ import { validatePluginOptions } from '../../../../packages/core/src/config-stor
 import { ValidationContext } from '../../../../packages/core/src/config-storage/validation';
 import { parsePluginManifestText } from '../../../../packages/core/src/plugin-manifest-catalog';
 import { setBoundControlClientProvider } from '../../../../packages/core/src/config-worker/runtime-dependencies';
-import { applyOutboundHeaderProfile } from '../../../../packages/core/src/worker/request/credential';
+import { applyOutboundHeaderProfile, assertCredentialTarget, credentialPolicyFromManifest } from '../../../../packages/core/src/worker/request/credential';
 import { setPluginRegistry } from '../../../../packages/core/src/worker/state/plugin-manager';
-import { CHAT_COMPLETIONS_PATH, CODEX_COMPATIBILITY_VERSION, CODEX_MODELS_PATH, CODEX_MODELS_USER_AGENT, CODEX_RESPONSES_PATH, CODEX_RESPONSES_USER_AGENT, MODELS_PATH, RESPONSES_PATH } from '../../server/adapter';
+import { CHAT_COMPLETIONS_PATH, CODEX_COMPATIBILITY_VERSION, CODEX_MODELS_PATH, CODEX_MODELS_USER_AGENT, CODEX_RESPONSES_PATH, CODEX_RESPONSES_USER_AGENT, CODEX_SEARCH_PATH, MODELS_PATH, RESPONSES_PATH, SEARCH_PATH } from '../../server/adapter';
 const HOST_FRAME_LIMIT = 50 * 1024 * 1024;
 import ChatgptOauthPlugin from '../../server/index';
 import { ModelMappingPlugin } from '../../../model-mapping/server';
@@ -74,6 +74,84 @@ function completion(status: 'completed' | 'failed' | 'incomplete' | 'cancelled' 
 }
 
 describe('ChatGPT OAuth adapter', () => {
+  test('registered search hooks preserve the opaque request and JSON response across repeated passes', async () => {
+    const plugin = new ChatgptOauthPlugin();
+    const hooks = createPluginHooks();
+    plugin.register(hooks);
+    for (const path of [SEARCH_PATH, CODEX_SEARCH_PATH]) {
+      const context = request(path, false);
+      context.url.search = '?request=search';
+      const body = Object.freeze({
+        id: 'search-session', model: 'search-model',
+        input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Read the docs' }] }],
+        commands: { open: [{ ref_id: 'https://www.keycloak.org/securing-apps/oidc-layers' }], response_length: 'short' },
+        settings: { external_web_access: false, allowed_callers: ['direct'] }, max_output_tokens: 10000,
+      });
+      context.body = body;
+      for (let pass = 0; pass < 3; pass++) {
+        await hooks.onBeforeRequest.promise(context);
+        expect(context.url.pathname).toBe(CODEX_SEARCH_PATH);
+        expect(context.url.search).toBe('?request=search');
+        expect(context.body).toBe(body);
+        expect(plugin.bodyRequirements({ method: 'POST', url: context.url, requestId: context.requestId, stage: 'selected' }))
+          .toEqual({ request: 'none' });
+      }
+      const provider = {
+        response: new Response('{ "output": "Keycloak docs", "results": [], "encrypted_output": "opaque" }',
+          { headers: { 'content-type': 'application/json' } }),
+        completion: completion(),
+      };
+      const result = await hooks.onRawResponse.promise(provider, { ...rawContext(context), upstreamUrl: context.url.href });
+      expect(result).toBe(provider);
+      expect(result.response.bodyUsed).toBe(false);
+      expect(await result.response.json()).toEqual({ output: 'Keycloak docs', results: [], encrypted_output: 'opaque' });
+    }
+  });
+
+  test('search adaptation leaves SIWC, unsupported methods and prefixed or similar paths untouched', () => {
+    for (const [origin, path, method] of [
+      ['https://api.openai.com', SEARCH_PATH, 'POST'],
+      ['https://api.openai.com', CODEX_SEARCH_PATH, 'POST'],
+      ['https://chatgpt.com', SEARCH_PATH, 'GET'],
+      ['https://chatgpt.com', '/codex/alpha/search', 'POST'],
+      ['https://chatgpt.com', '/alpha/search/extra', 'POST'],
+    ]) {
+      const context = request(path!, false);
+      context.url = new URL(origin! + path!);
+      context.method = method!;
+      const body = context.body;
+      const adapter = new ChatgptOauthAdapter();
+      adapter.beforeRequest(context);
+      adapter.reconcileOutboundRequest(context);
+      expect(context.url.href).toBe(origin! + path!);
+      expect(context.body).toBe(body);
+    }
+  });
+
+  test('search credentials allow only Codex POST and use a JSON outbound profile', () => {
+    const manifest = parsePluginManifestText(readFileSync(new URL('../../manifest.json', import.meta.url), 'utf8'));
+    const policy = credentialPolicyFromManifest(manifest, 'chatgpt');
+    const source = new URL('https://chatgpt.com');
+    const target = new URL('https://chatgpt.com' + CODEX_SEARCH_PATH);
+    const allowed = assertCredentialTarget(target, source, policy, 'POST');
+    const headers = applyOutboundHeaderProfile(new Headers({
+      'X-Codex-Turn-Metadata': 'turn-metadata', 'X-Codex-Routing-Hint': 'untrusted',
+      'X-OpenAI-Internal-Codex-Responses-Lite': 'true', 'User-Agent': 'caller', Originator: 'caller',
+      Authorization: 'Bearer caller', Cookie: 'caller-cookie',
+    }), allowed.outboundHeaders!);
+    expect(Object.fromEntries(headers)).toEqual({
+      accept: 'application/json', 'content-type': 'application/json',
+      'user-agent': CODEX_RESPONSES_USER_AGENT, originator: 'codex-tui', 'x-codex-turn-metadata': 'turn-metadata',
+    });
+    for (const method of ['GET', 'HEAD', 'PUT', 'DELETE']) expect(() => assertCredentialTarget(target, source, policy, method)).toThrow();
+    for (const path of [SEARCH_PATH, CODEX_SEARCH_PATH + '/extra']) {
+      expect(() => assertCredentialTarget(new URL(source.origin + path), source, policy, 'POST')).toThrow();
+    }
+    expect(() => assertCredentialTarget(new URL('https://other.example' + CODEX_SEARCH_PATH), source, policy, 'POST')).toThrow();
+    expect(() => assertCredentialTarget(new URL('https://api.openai.com' + CODEX_SEARCH_PATH), new URL('https://api.openai.com'),
+      credentialPolicyFromManifest(manifest, 'chatgpt-siwc'), 'POST')).toThrow();
+  });
+
   test('streams a 20MiB Responses event beyond the old event and cumulative limits', async () => {
     const adapter = new ChatgptOauthAdapter();
     const context = request(RESPONSES_PATH, true);

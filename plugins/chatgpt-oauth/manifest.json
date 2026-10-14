@@ -74,6 +74,19 @@
           "allowedOrigins": ["https://chatgpt.com"],
           "allowedRequests": [
             {
+              "pathname": "/backend-api/codex/alpha/search",
+              "methods": ["POST"],
+              "outboundHeaders": {
+                "passthrough": ["X-Codex-Turn-Metadata"],
+                "set": {
+                  "Accept": "application/json",
+                  "Content-Type": "application/json",
+                  "User-Agent": "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)",
+                  "Originator": "codex-tui"
+                }
+              }
+            },
+            {
               "pathname": "/backend-api/codex/responses",
               "methods": ["POST"],
               "outboundHeaders": {
