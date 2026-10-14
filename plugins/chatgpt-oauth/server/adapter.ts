@@ -582,6 +582,12 @@ export class ChatgptOauthAdapter {
       return result;
     }
 
+    // Conditional model requests have no body to adapt. The directory consumer owns revalidation.
+    if (state.target === 'models' && result.response.status === 304) {
+      trackCompletion(result.completion);
+      return result;
+    }
+
     // The host owns wire reading, decompression, framing and JSON caching.
     // Adaptation requires that explicit shared view; there is no private reader fallback.
     if (!context.bodyHandle) {
@@ -611,10 +617,13 @@ export class ChatgptOauthAdapter {
           data: models.map(({ id }) => ({ id, object: 'model', owned_by: 'openai' })),
         };
         const completion = joinCompletion(result.completion, Promise.resolve({ status: 'completed' as const }), context.signal);
+        const headers = responseHeaders(result.response, 'application/json; charset=utf-8');
+        const etag = result.response.headers.get('etag');
+        if (etag !== null) headers.set('etag', etag);
         const response = mark(new Response(JSON.stringify(body), {
           status: result.response.status,
           statusText: result.response.statusText,
-          headers: responseHeaders(result.response, 'application/json; charset=utf-8'),
+          headers,
         }));
         trackCompletion(completion);
         return { response, completion };

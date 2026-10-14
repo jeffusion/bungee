@@ -1,4 +1,4 @@
-import {expect, test} from 'bun:test';
+import {expect, test, spyOn} from 'bun:test';
 import {createPluginHooks} from '../../../../packages/core/src/hooks';
 import {catalogValidatorsRpc} from '../../contract';
 import {CatalogValidators, catalogValidatorKey} from '../../server/catalog-validators';
@@ -166,4 +166,133 @@ test('route dispatch transfers notification ownership to its adapter before prep
   expect(invalidResponse.headers.has('x-models-etag')).toBe(false); expect(queries).toBe(1);
   controller.abort();
   expect((await rawResponse(adapterHooks, new Response('cancelled metadata'), post)).headers.has('x-models-etag')).toBe(false);
+});
+
+
+test('model hooks reuse fresh snapshots, revalidate upstream ETags and renew a 304 for ten minutes', async () => {
+  let now = 0;
+  const clock = spyOn(Date, 'now').mockImplementation(() => now);
+  try {
+    const {hooks} = await router(new CatalogValidators(() => now));
+    const native = {models: [{slug: 'native', display_name: '你好🙂'}]};
+    const directory = async () => {
+      const input = request();
+      input.context.headers['If-None-Match'] = '"client-validator"';
+      input.context.headers['If-Modified-Since'] = 'yesterday';
+      await hooks.onDispatchRequest.promise(input);
+      await hooks.onBeforeRequest.promise(input.context);
+      return input;
+    };
+    const publish = async (input: ReturnType<typeof request>, response: Response, body = native) => hooks.onResponse.promise(response,
+      {...input.context, response, latencyMs: 0, bodyHandle: {json: async () => body}} as any);
+    const first = await directory();
+    expect(first.context.headers['If-None-Match']).toBeUndefined();
+    expect(first.context.headers['If-Modified-Since']).toBeUndefined();
+    expect(await hooks.onInterceptRequest.promise(first.context)).toBeUndefined();
+    const initial = await publish(first, Response.json(native, {headers: {etag: 'W/"upstream"'}}));
+    const downstreamEtag = initial.headers.get('etag');
+    expect(downstreamEtag).not.toBe('W/"upstream"');
+    now = 599_999;
+    const fresh = await directory();
+    const hit = await hooks.onInterceptRequest.promise(fresh.context);
+    expect(hit?.action).toBe('respond');
+    if (hit?.action !== 'respond') throw new Error('missing cache hit');
+    expect(await hit.response.json()).toEqual(native);
+    expect(hit.response.headers.get('etag')).toBe(downstreamEtag);
+    now = 600_000;
+    const stale = await directory();
+    expect(stale.context.headers['if-none-match']).toBe('W/"upstream"');
+    expect(await hooks.onInterceptRequest.promise(stale.context)).toBeUndefined();
+    const completion = Promise.resolve({status: 'completed' as const});
+    const restored = await hooks.onRawResponse.promise({response: new Response(null, {status: 304}), completion},
+      {...stale.context, signal: stale.signal} as any);
+    expect(restored.completion).toBe(completion); expect(restored.response.status).toBe(200);
+    const final = await publish(stale, restored.response, await restored.response.json() as any);
+    expect(final.headers.get('etag')).toBe(downstreamEtag);
+    now = 1_199_999;
+    expect((await hooks.onInterceptRequest.promise((await directory()).context))?.action).toBe('respond');
+    now = 1_200_000;
+    expect(await hooks.onInterceptRequest.promise((await directory()).context)).toBeUndefined();
+  } finally { clock.mockRestore(); }
+});
+
+test('explicit revalidation uses only the upstream ETag, updates the snapshot, and auth failures invalidate it', async () => {
+  const {hooks, plugin} = await router(new CatalogValidators());
+  const native = {models: [{slug: 'before'}]};
+  const directory = async (force = false, version = '0.162.1') => {
+    const input = request('GET', version);
+    if (force) input.context.headers['cache-control'] = 'no-cache';
+    await hooks.onDispatchRequest.promise(input); await hooks.onBeforeRequest.promise(input.context);
+    return input;
+  };
+  const publish = async (input: ReturnType<typeof request>, body: unknown, upstreamEtag?: string) => hooks.onResponse.promise(
+    Response.json(body, {headers: upstreamEtag ? {etag: upstreamEtag} : {}}),
+    {...input.context, latencyMs: 0, bodyHandle: {json: async () => body}} as any);
+  const first = await directory(); await publish(first, native, '"upstream-before"');
+  const force = await directory(true);
+  expect(await hooks.onInterceptRequest.promise(force.context)).toBeUndefined();
+  expect(force.context.headers['if-none-match']).toBe('"upstream-before"');
+  await publish(force, {models: [{slug: 'after'}]}, '"upstream-after"');
+  const hit = await hooks.onInterceptRequest.promise((await directory()).context);
+  if (hit?.action !== 'respond') throw new Error('missing cache hit');
+  expect(await hit.response.json()).toEqual({models: [{slug: 'after'}]});
+  expect(await hooks.onInterceptRequest.promise((await directory(false, 'different-client')).context)).toBeUndefined();
+  for (const status of [401, 403]) {
+    const refresh = await directory(true);
+    await hooks.onRawResponse.promise({response: new Response(null, {status}), completion: Promise.resolve({status: 'completed'})}, {...refresh.context, signal: refresh.signal} as any);
+    const missing = await directory(); expect(missing.context.headers['if-none-match']).toBeUndefined();
+    expect(await hooks.onInterceptRequest.promise(missing.context)).toBeUndefined();
+    await publish(missing, native);
+  }
+  const withoutEtag = await directory(true);
+  expect(withoutEtag.context.headers['if-none-match']).toBeUndefined();
+  await expect(hooks.onRawResponse.promise({response: new Response(null, {status: 304}), completion: Promise.resolve({status: 'completed'})},
+    {...withoutEtag.context, signal: withoutEtag.signal} as any)).rejects.toThrow('without_snapshot');
+  plugin.reset();
+  expect(await hooks.onInterceptRequest.promise((await directory()).context)).toBeUndefined();
+});
+
+
+test('oversized model directories remain deliverable, replace old snapshots and are not cached', async () => {
+  const {hooks} = await router(new CatalogValidators());
+  const load = async (native: unknown) => {
+    const input = request();
+    input.context.headers['cache-control'] = 'no-cache';
+    await hooks.onDispatchRequest.promise(input); await hooks.onBeforeRequest.promise(input.context);
+    const result = await hooks.onResponse.promise(Response.json(native, {headers: {etag: '"upstream"'}}),
+      {...input.context, latencyMs: 0, bodyHandle: {json: async () => native}} as any);
+    expect(result.status).toBe(200); expect(await result.json()).toEqual(native);
+  };
+  await load({models: []});
+  await load({models: [{slug: 'large', description: '中'.repeat(100_000)}]});
+  const next = request(); await hooks.onDispatchRequest.promise(next); await hooks.onBeforeRequest.promise(next.context);
+  expect(next.context.headers['if-none-match']).toBeUndefined();
+  expect(await hooks.onInterceptRequest.promise(next.context)).toBeUndefined();
+});
+
+test('failed or cancelled refreshes do not publish a fresh model snapshot', async () => {
+  let now = 0;
+  const clock = spyOn(Date, 'now').mockImplementation(() => now);
+  try {
+    const {hooks} = await router(new CatalogValidators(() => now));
+    const directory = async (signal = new AbortController().signal) => {
+      const input = {...request(), signal};
+      await hooks.onDispatchRequest.promise(input); await hooks.onBeforeRequest.promise(input.context);
+      return input;
+    };
+    const first = await directory();
+    await hooks.onResponse.promise(Response.json({models: []}, {headers: {etag: '"upstream"'}}),
+      {...first.context, latencyMs: 0, bodyHandle: {json: async () => ({models: []})}} as any);
+    now = 600_000;
+    const expired = await directory();
+    const failed = new Response(null, {status: 500});
+    expect(await hooks.onResponse.promise(failed, {...expired.context} as any)).toBe(failed);
+    const retry = await directory();
+    expect(retry.context.headers['if-none-match']).toBe('"upstream"');
+    expect(await hooks.onInterceptRequest.promise(retry.context)).toBeUndefined();
+    const controller = new AbortController(), cancelled = await directory(controller.signal);
+    await hooks.onResponse.promise(Response.json({models: [{slug: 'cancelled'}]}),
+      {...cancelled.context, latencyMs: 0, bodyHandle: {json: async () => {controller.abort(); return {models: [{slug: 'cancelled'}]};}}} as any);
+    expect(await hooks.onInterceptRequest.promise((await directory()).context)).toBeUndefined();
+  } finally { clock.mockRestore(); }
 });

@@ -11,6 +11,8 @@ const { handleRequest } = await import('../../src/worker/request/handler');
 const { bodyMetrics } = await import('../../src/gateway/body-resources');
 const { BodyServicePlugin } = await import('../../src/gateway/body-plugin');
 import { gzipSync } from 'node:zlib';
+import {generateWorkerTransportSecret, restoreWorkerTransportRequest} from '../../src/config-worker/private-transport';
+import {privateRequestHeaders} from '../../src/public-listener/headers';
 const { DataAdmissionError } = await import('../../src/data-admission/errors');
 const { runtimeState, getActiveRequestCount } = await import('../../src/worker/state/runtime-state');
 import type { RuntimeUpstream } from '../../src/worker/types';
@@ -100,6 +102,34 @@ describe('registered gateway pipeline',()=>{
     expect((await response.json() as any).value).toBe(1);
     for(const name of ['onGatewayBody','onGatewayRequest','onGatewayRoute','onGatewayAdmission','onGatewaySelect','onGatewayRetry','onGatewayForward','onGatewayResponseRules','onGatewayLog'] as const)
       expect(providers[name].getStats().callCount).toBeGreaterThan(0);
+  });
+  test('successful local responses require current authorization without opening an upstream or reserving a budget', async () => {
+    const {providers, config, hooks, phase} = fixtures(true);
+    phase.hasInterceptCallbacks = true;
+    hooks.onInterceptRequest.tap('cached-response', () => ({action: 'respond', response: Response.json({cached: true})}));
+    let denied = false, inspections = 0, fetches = 0;
+    providers.onGatewayAdmissionSession.tapPromise({name: 'cache-access', stage: -100}, async () => ({
+      async inspect() { inspections++; if (denied) throw new DataAdmissionError(403, 'cache_access_denied'); },
+      async prepare() { throw new Error('cached responses must not reserve upstream budgets'); },
+      async release() {},
+    }) as any);
+    globalThis.fetch = Object.assign(async () => { fetches++; throw new Error('cache must not connect upstream'); }, {preconnect() {}}) as typeof fetch;
+    const secret = generateWorkerTransportSecret();
+    const request = () => {
+      const source = new Request('http://local/gateway-test');
+      const transport = new Request(source.url, {headers: privateRequestHeaders(source, secret, '127.0.0.1', {
+        requestId: crypto.randomUUID(), principal: {domain: 'data', keyId: 'key', credentialVersion: 1},
+      })});
+      const restored = restoreWorkerTransportRequest(transport, secret);
+      if (!restored.ok) throw new Error('trusted cache fixture rejected');
+      return restored.request;
+    };
+    const allowed = await handleRequest(request(), config, {logging});
+    expect(allowed.status).toBe(200); expect(await allowed.json()).toEqual({cached: true});
+    denied = true;
+    const rejected = await handleRequest(request(), config, {logging});
+    expect(rejected.status).toBe(403); expect(await rejected.json()).toEqual({error: 'cache_access_denied'});
+    expect(inspections).toBe(2); expect(fetches).toBe(0);
   });
   test.each([false,true])('bundled local rejection retains details and never trips upstream health (runtime tracking: %s)',async(tracked)=>{
     const {config,hooks}=fixtures();

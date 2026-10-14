@@ -81,6 +81,8 @@ interface Plugin {
 
 网关阶段 Hook（`onGateway*`）、准入与 attempt 观察的全部签名见 Hook 定义。平台装配要求必需网关阶段恰好一个 provider；普通 scoped 插件不应重复注册核心阶段提供者。
 
+路由或服务阶段 `onInterceptRequest` 返回成功响应时，宿主仍执行当前访问权限的只读检查，再返回本地响应；不连接上游或预留上游预算。拦截响应不执行上游响应 Hook。
+
 URL 可改 pathname、search、hash，不能改 protocol、host 或 port。Headers 在请求上下文中为普通记录，不是 Headers 实例。对冻结 JSON／事件进行转换时创建新对象，不能修改共享视图。
 
 ## 内部请求注解
