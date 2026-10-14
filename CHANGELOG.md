@@ -1,3 +1,10 @@
+## [5.24.1](https://github.com/jeffusion/bungee/compare/v5.24.0...v5.24.1) (2026-10-14)
+
+
+### Bug Fixes
+
+* **codex-router:** cache model snapshots with upstream etags ([e9c0814](https://github.com/jeffusion/bungee/commit/e9c081414d7bcc2bf49d1be8fea7f271efcf75d7))
+
 # [5.24.0](https://github.com/jeffusion/bungee/compare/v5.23.3...v5.24.0) (2026-10-14)
 
 
