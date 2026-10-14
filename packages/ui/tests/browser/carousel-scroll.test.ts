@@ -107,7 +107,11 @@ try {
       const x = box.x + box.width * .6, y = box.y + yOffset;
       if (dx) assert(await mobile.evaluate(({ x, y }) => !document.elementFromPoint(x, y)?.closest('button, a, input, textarea, select, label, summary, [role="button"]'), { x, y }), 'horizontal probe must start on content, not a nested control');
       await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
-      for (let step = 1; step <= 6; step++) await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x + dx * step / 6, y: y + dy * step / 6 }] });
+      for (let step = 1; step <= 6; step++) {
+        // Let the compositor process the synthetic gesture across frames before touchEnd.
+        await mobile.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
+        await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x + dx * step / 6, y: y + dy * step / 6 }] });
+      }
       await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
       await mobile.waitForTimeout(350);
     };
