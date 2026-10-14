@@ -1717,6 +1717,9 @@ describe.serial('A core lifecycle', () => {
     const competitor=state.competitor;
     await waitUntil(async()=>childOutput.get(competitor)?.join('').includes('instance lock is held')===true,
       'concurrent owner was not rejected',{signal:state.polling.signal});
+    // Lock rejection precedes the async stopped bootstrap that installs signal handlers.
+    await waitUntil(async()=>childOutput.get(competitor)?.join('').includes('Stopped master requires local offline recovery')===true,
+      'rejected owner did not enter the stopped fallback',{signal:state.polling.signal});
     expect(competitor.exitCode).toBeNull();
     expect(durableController(state.fixture.dbPath)?.controllerId).not.toBe(state.firstController.controllerId);
     competitor.kill('SIGTERM');
