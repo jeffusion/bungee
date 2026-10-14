@@ -1,3 +1,15 @@
+# [5.24.0](https://github.com/jeffusion/bungee/compare/v5.23.3...v5.24.0) (2026-10-14)
+
+
+### Bug Fixes
+
+* **ci:** separate PR provenance from tested checkout ([d6c36dc](https://github.com/jeffusion/bungee/commit/d6c36dc5eb9c8bd188938e931d420d732d6a52cf))
+
+
+### Features
+
+* **chatgpt-oauth:** support standalone web search ([ecb5e5c](https://github.com/jeffusion/bungee/commit/ecb5e5c1fcc065fb712a4d3f370e4edd825d8639))
+
 ## [5.23.3](https://github.com/jeffusion/bungee/compare/v5.23.2...v5.23.3) (2026-10-13)
 
 
