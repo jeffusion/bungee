@@ -1,6 +1,6 @@
 import {initializePluginStateFixture} from '../helpers/plugin-state-fixture';
 import { ConfigRepository } from '../../packages/core/src/config-storage';
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm, stat, writeFile, appendFile } from 'node:fs/promises';
@@ -34,7 +34,7 @@ import {
 } from '../helpers/publication-fixture';
 import {
   claimTestPortBlock, ensureTestPortBlockClosed, makeTestPortBlock, releaseTestPortBlock,
-  quarantineTestPortBlock, type TestPortBlock,
+  quarantineTestPortBlock, testPortBlocksOverlap, testPortBlockState, testPortBlockOverlapsClaimed, type TestPortBlock,
 } from '../helpers/test-port-block-broker';
 
 const CORE_ENTRY = resolve(import.meta.dir, '../../packages/core/dist/main.js');
@@ -65,6 +65,10 @@ async function reservePortBlock(): Promise<PortLease> {
       continue;
     }
     const block = makeTestPortBlock(base);
+    if (testPortBlockOverlapsClaimed(block)) {
+      await first.stop(true);
+      continue;
+    }
     try {
       second = Bun.serve({ hostname: '127.0.0.1', port: base + 1, fetch: () => new Response('reserved') });
       third = Bun.serve({ hostname: '127.0.0.1', port: base + 2, fetch: () => new Response('reserved') });
@@ -81,6 +85,28 @@ async function reservePortBlock(): Promise<PortLease> {
     }
   }
 }
+
+test('port allocation skips a broker-retained block returned by the operating system', async () => {
+  const first = Bun.serve({hostname: '127.0.0.1', port: 0, fetch: () => new Response('reserved')});
+  const retained = makeTestPortBlock(first.port!);
+  expect(claimTestPortBlock(retained)).toBeTrue();
+  // Return a real listener in the retained range on the first allocation only.
+  const listener = spyOn(Bun, 'serve').mockImplementationOnce(() => first);
+  let lease: PortLease | undefined;
+  try {
+    lease = await reservePortBlock();
+    expect(testPortBlocksOverlap(lease.block, retained)).toBeFalse();
+    expect(testPortBlockState(retained)).toBe('active');
+  } finally {
+    listener.mockRestore();
+    await first.stop(true);
+    if (lease) {
+      await ensureTestPortBlockClosed(lease.block);
+      expect(releaseTestPortBlock(lease.block)).toBeTrue();
+    }
+    expect(releaseTestPortBlock(retained)).toBeTrue();
+  }
+});
 
 async function makeFixture(root: string, name: string, credentialPort: number): Promise<Fixture> {
   const fixtureRoot = join(root, name);
