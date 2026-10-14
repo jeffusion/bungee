@@ -5,7 +5,7 @@
 | 来源 | 上游 | 凭据允许的请求 |
 | --- | --- | --- |
 | `chatgpt-siwc` / Sign in with ChatGPT | `https://api.openai.com` | `POST /v1/responses`、`GET /v1/models` |
-| `chatgpt` / 原 Codex OAuth | `https://chatgpt.com` | 原 Codex Responses 和 models 接口 |
+| `chatgpt` / 原 Codex OAuth | `https://chatgpt.com` | 原 Codex Responses、models 和 `POST /backend-api/codex/alpha/search` 接口 |
 
 SIWC 请求使用 `Authorization` 和 Bungee 自身的 `User-Agent: Bungee/5.11.0`、`Originator: Bungee`。来源之间不共用凭据策略，不会把 SIWC 令牌发到旧 Codex 后端。凭据由插件控制面存储，服务及路由草稿只保存账户引用。
 
@@ -28,6 +28,10 @@ SIWC 会话使用 PKCE、state 和 nonce；插件验证回调及身份后才保�
 
 两类账号统一使用 Responses 入口 `/responses`，HTTP 请求和 WebSocket 握手遵循同一规则。Codex OAuth 上游配置为 `https://chatgpt.com`，插件改写为 `/backend-api/codex/responses`；SIWC 上游配置为 `https://api.openai.com`，插件改写为 `/v1/responses`。客户端 base URL 和上游地址不添加 `/v1`；入口 `/v1/responses` 明确拒绝。原生 `/backend-api/codex/responses` 请求保持原生处理。
 
+原 Codex OAuth 还支持独立联网工具 `web.run` 的 `POST /alpha/search`，插件改写为 `/backend-api/codex/alpha/search`；原生目标路径直接转发。该接口执行搜索、打开网页及页面内查找等操作，保留请求和响应正文，不进行 Responses 转换或 SSE 聚合。请求使用 JSON 头及现有 Codex User-Agent、Originator，并透传 `X-Codex-Turn-Metadata`。SIWC 不授权此接口。
+
+客户端使用 `/codex` 等路由前缀时，需在路由中先去掉前缀。例如 `/codex/alpha/search` 可用 `path_rewrite: { "^/codex/alpha/search$": "/alpha/search" }` 改写。上游仍配置为 `https://chatgpt.com`，不添加 `/codex` 或 `/backend-api/codex`。Responses 请求成功不能证明独立搜索接口的账户权限或上游可用性。
+
 SIWC 支持客户端的 `/responses` 和 `/v1/chat/completions` 请求；插件将两者转为公共 `/v1/responses`。上游请求固定 `store:false`、`stream:true`，客户端仍可选择接收流式结果或聚合后的 JSON。
 
 客户端需发送完整对话。字符串 `input` 转为用户消息数组，system 消息转为 developer，`previous_response_id` 被拒绝。其他不支持的后台、对话句柄、输出上限、采样、元数据等字段被移除，具体列表见 `server/adapter.ts`。工具限定为 function 和 custom；不支持托管 MCP、tool search、原生 computer、image generation、file search、code interpreter 等工具。
@@ -45,16 +49,18 @@ OAuth/PKCE 流程参考 [Pi 的 MIT 实现](https://github.com/earendil-works/pi
 针对性测试：
 
 ```sh
-bun test plugins/chatgpt-oauth/tests/unit/siwc-adapter.test.ts \
+bun test --isolate plugins/chatgpt-oauth/tests/unit/adapter.test.ts \
+  plugins/chatgpt-oauth/tests/integration/adapter-routing.test.ts \
+  plugins/chatgpt-oauth/tests/unit/siwc-adapter.test.ts \
   plugins/chatgpt-oauth/tests/unit/ui/siwc-account-model.test.ts \
   plugins/chatgpt-oauth/tests/unit/ui/account-automation.test.ts
 ```
 
-这些测试覆盖请求转换、受限工具、模型列表、SSE 聚合/转换、授权地址校验、登录类型和 manifest 契约；真实登录、账户权限及上游服务可用性需用自己的账户验证。
+这些测试覆盖独立搜索路径、凭据门禁与正文转发，以及请求转换、受限工具、模型列表、SSE 聚合/转换、授权地址校验、登录类型和 manifest 契约；真实登录、账户权限及上游服务可用性需用自己的账户验证。
 
 ## 共享正文接口
 
-插件 server 只依赖公开 `@jeffusion/bungee-core/plugin` SDK。代理返回的模型列表和 HTTP 错误使用宿主 `bodyHandle.json()`；Codex/SIWC 的流式转换和非流式聚合共同使用 `bodyHandle.events()`。解压、SSE 分帧和 JSON 解析由宿主完成，插件只校验 Codex 事件与终态。模型正文限额继承宿主 `bodyHandle.maxBytes`，日志保存限额独立。缺少共享正文视图会返回固定错误，不自行创建读流器。
+插件 server 只依赖公开 `@jeffusion/bungee-core/plugin` SDK。代理返回的模型列表和经转换的 HTTP 错误使用宿主 `bodyHandle.json()`；Codex/SIWC 的流式转换和非流式聚合共同使用 `bodyHandle.events()`。解压、SSE 分帧和 JSON 解析由宿主完成，插件只校验 Codex 事件与终态。模型正文限额继承宿主 `bodyHandle.maxBytes`，日志保存限额独立。缺少共享正文视图会返回固定错误，不自行创建读流器。
 
 原生 Codex Responses 使用共享事件视图保留原始事件正文、工具及加密字段，并识别显式协议终态；其 HTTP 错误保留原生正文和响应头。流式响应支持 `text/event-stream`、`application/octet-stream` 及缺少 Content-Type，输出使用 `text/event-stream` 并清除解码前的实体长度和编码。收到合法 `response.completed` 后，客户端关闭连接可同时记录 `protocol_outcome=completed`、`transport_outcome=cancelled`；`response.incomplete` 和 `response.failed` 保留各自协议结果。完成事件到达前断开记录协议取消，EOF 或 `[DONE]` 本身不能证明协议完成。
 

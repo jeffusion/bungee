@@ -31,10 +31,12 @@ export {
 
 export const CHAT_COMPLETIONS_PATH = '/v1/chat/completions';
 export const RESPONSES_PATH = '/responses';
+export const SEARCH_PATH = '/alpha/search';
 const SIWC_RESPONSES_PATH = '/v1/responses';
 export const MODELS_PATH = '/v1/models';
 export const CODEX_RESPONSES_PATH = '/backend-api/codex/responses';
 export const CODEX_MODELS_PATH = '/backend-api/codex/models';
+export const CODEX_SEARCH_PATH = '/backend-api/codex/alpha/search';
 export function isResponsesRequest(url: URL): boolean {
   return url.pathname === RESPONSES_PATH;
 }
@@ -458,6 +460,10 @@ export class ChatgptOauthAdapter {
         target, stream, includeUsage, siwc: true, allowMissingContentType: target !== 'models',
         adaptedResponses: new WeakSet<Response>(),
       }));
+      return context;
+    }
+    if (context.method.toUpperCase() === 'POST' && context.url.pathname === SEARCH_PATH) {
+      context.url.pathname = CODEX_SEARCH_PATH;
       return context;
     }
     if (context.url.pathname === CODEX_RESPONSES_PATH) {
