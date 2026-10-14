@@ -6,9 +6,9 @@
 
 原始模型和目标模型复用 models.dev 的分页搜索选择器。原始目录固定为 OpenAI，目标提供商支持过滤并排除 OpenAI；原始模型可切换为手动输入，用于目录未收录的官方模型标识。`sourceProvider` 只记录目录来源，不参与路由匹配。新增模式下，改变目标模型会同步改变 source，无需单独填写标识或别名；替换模式下，原始模型和目标模型独立。切换模式保留转发目标、协议和原始模型草稿，概览显示对应的新增或替换行为。
 
-模型匹配不依赖 Codex 客户端身份；其它 Responses 客户端也可使用此入口。当前仍只接受 Responses 生成入口，目标支持 Responses、Chat Completions、Anthropic Messages；增加原始模型目录选择不代表新增 Chat Completions 或 Messages 入口。Codex 专用模型目录适配与会话兼容行为继续保留。
+模型匹配不依赖 Codex 客户端身份，其它 Responses 客户端也可使用此入口。插件接受 Responses 生成请求，目标支持 Responses、Chat Completions、Anthropic Messages；不提供 Chat Completions 或 Messages 生成入口。插件同时提供 Codex 模型目录适配和会话处理。
 
-显式 `source` 可以替换原生目录中的同名模型，保留它的位置并使用目标能力描述；其它原生模型保持原样。新增标识则追加到目录。同一原始标识不允许多个绑定。未声明 source 时按 `alias ?? model` 匹配，保留原冲突检查；`source` 与 `alias` 不允许同时设置。
+显式 `source` 可以替换原生目录中的同名模型，保留它的位置并使用目标能力描述；其它原生模型保持原样。新增标识则追加到目录。同一原始标识不允许多个绑定。未声明 source 时按 `alias ?? model` 匹配；`source` 与 `alias` 不允许同时设置。
 
 目标模型缺失、缺少上下文长度或不支持文本时，目录隐藏该绑定占用的标识，请求返回模型不可用；不会恢复原生能力或悄悄转回原生上游。models.dev 刷新失败时仍使用最后有效资料。
 
@@ -20,7 +20,7 @@
 
 上游地址、API Key、模型映射、重试均使用目标原配置。Codex base URL 已指向入口即可；ChatGPT 登录的模型目录请求可发现新增模型，API Key 模式不承诺自动列入选择器。
 
-模型生成和协作中继均使用宿主的[内部调度端点规则](../../docs/reference/plugin-api.md#内部调度与准备)。端点由目标协议确定：Responses `/responses`、Chat Completions `/v1/chat/completions`、Anthropic Messages `/v1/messages`。服务目标直接使用端点；路由目标在端点前加目标路由路径，再执行目标路由的规则。入口路由的路径及 `path_rewrite` 不用于外部目标。公共 OpenAI Responses 上游基址包含 `/v1`；ChatGPT OAuth 使用 origin，由提供商插件改写实际后端路径。Chat 和 Anthropic 的上游基址不应重复包含端点已有的 `/v1`。
+模型生成和协作中继均使用 Bungee 的[内部调度端点规则](../../docs/reference/plugin-api.md#内部调度与准备)。端点由目标协议确定：Responses `/responses`、Chat Completions `/v1/chat/completions`、Anthropic Messages `/v1/messages`。服务目标直接使用端点；路由目标在端点前加目标路由路径，再执行目标路由的规则。入口路由的路径及 `path_rewrite` 不用于外部目标。公共 OpenAI Responses 上游基址包含 `/v1`；ChatGPT OAuth 使用 origin，由提供商插件改写实际后端路径。Chat 和 Anthropic 的上游基址不应重复包含端点已有的 `/v1`。
 
 入口使用 WebSocket 时开启 route.websocket.enabled。目标接收协议必须在插件绑定的 `target.protocol` 中声明；Responses 目标也开启 websocket 时使用原生 WS 上游，否则使用 HTTP/SSE。缺少协议时拒绝保存，不从 route/service 推断。每个连接串行生成，断开取消活动请求。WS 实现沿用握手限流；需要未支持的逐生成硬预算时，目标生成在连接上游前拒绝。
 
@@ -105,12 +105,12 @@ OpenAI 主 Agent 已返回真实密文时，可在入口插件中配置独立的
 
 `response.create` 派生独立请求 ID 并重新执行绑定与最终链路；同一连接串行生成，busy 时拒绝新生成。`generate:false` 仅预热连接内输入，不访问提供商也不产生生成统计。response.cancel 和断连取消活动生成。
 
-HTTP 上游经共享 SSE BodyHandle 转成 WS JSON；启用 WS 的 Responses 目标可使用原生上游连接。发送 drain、消息预算、关闭期限和旧代排空归核心[WebSocket transport](../../docs/architecture/websocket.md)。逐生成硬预算未支持时在上游连接前拒绝，不能用统计代替授权。
+HTTP 上游经共享 SSE BodyHandle 转成 WS JSON；启用 WS 的 Responses 目标可使用原生上游连接。发送 drain、消息预算、关闭期限和连接排空使用 Bungee 的[WebSocket transport](../../docs/architecture/websocket.md)。逐生成硬预算未支持时在上游连接前拒绝，不能用统计代替授权。
 
 ## 来源与验证方法
 
-字段处理参考 cc-switch `b4a079430ce85a604e10d97d4b7530774e00e112` 的工具提取与测试场景；new-api `7aa3531ef4c247ad4891c06cc8ed9d0ffb73fecc` 和 sub2api `3a6fd1c9db07203ca308aaba69e502bc1f35b307` 用于核对转换损耗与历史边界。未复制这些项目的协议源码或增加依赖。访问模式依据 [OpenAI Daybreak](https://developers.openai.com/api/docs/guides/daybreak)，不授予目标权限。
+工具提取与转换约束的参考来源：cc-switch `b4a079430ce85a604e10d97d4b7530774e00e112`、new-api `7aa3531ef4c247ad4891c06cc8ed9d0ffb73fecc`、sub2api `3a6fd1c9db07203ca308aaba69e502bc1f35b307`。访问模式依据 [OpenAI Daybreak](https://developers.openai.com/api/docs/guides/daybreak)，不授予目标权限。
 
-明文协作标记参考 [OmniRoute 的协作修复](https://github.com/diegosouzapw/OmniRoute/pull/14447)，原生工具中继参考 [codex-router 固定提交](https://github.com/duolahypercho/codex-router/blob/2d2b3d2ee063a16e5172c21176c74058f0be4be4/src/router.mjs#L1964-L2042)。这些参考不替代实际模型恢复任务的验收。
+明文协作标记参考 [OmniRoute 的协作修复](https://github.com/diegosouzapw/OmniRoute/pull/14447)，原生工具中继参考 [codex-router 固定提交](https://github.com/duolahypercho/codex-router/blob/2d2b3d2ee063a16e5172c21176c74058f0be4be4/src/router.mjs#L1964-L2042)。
 
-[脱敏 fixtures](../../tests/fixtures/codex-requests/README.md)保留真实请求形状和不可表示约束。[真实进程测试](../../tests/integration/codex-router-real-process.test.ts)经过实际宿主、worker 与 SQLite，但目录和模型上游使用 fixtures，不能证明远端提供商兼容。可选真实 CLI 检查使用 `BUNGEE_CODEX_CLI_PROBE=1`；它需要本地 Codex CLI，隔离配置和凭据，不访问用户实际会话。运行方法及证据边界见[开发指南](../../docs/guides/development.md)。
+[脱敏 fixtures](../../tests/fixtures/codex-requests/README.md)和[集成测试](../../tests/integration/codex-router-real-process.test.ts)覆盖请求形状、协议约束、调度与协作行为。目录和模型上游使用 fixtures，真实提供商兼容性需单独验证。可选 CLI 检查通过 `BUNGEE_CODEX_CLI_PROBE=1` 启用，使用隔离配置和凭据；运行方法见[开发指南](../../docs/guides/development.md)。
