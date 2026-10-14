@@ -5,7 +5,7 @@ import { definePlugin, DataAdmissionError, type Plugin, type PluginInitContext, 
 import manifest from '../manifest.json';
 import type { PluginConfigField } from '@jeffusion/bungee-core/plugin';
 import { parseBindings, parseCollaborationRelay, bindingSource } from './config';
-import { mergeCatalog, catalogEtag } from './catalog';
+import { mergeCatalog, catalogEtag, CatalogSnapshots, type CatalogSnapshot } from './catalog';
 import { catalogValidatorsClient } from '../contract';
 import { catalogValidatorKey } from './catalog-validators';
 
@@ -17,7 +17,8 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
   private readonly relay?:CollaborationRelay;
   private history!:HistoryClient;
   private validators?: ReturnType<typeof catalogValidatorsClient>;
-  private readonly catalogRequests = new Map<string, {key: string; signal: AbortSignal}>();
+  private readonly catalogRequests = new Map<string, {key: string; signal: AbortSignal; snapshot?: CatalogSnapshot}>();
+  private readonly snapshots = new CatalogSnapshots();
   private conversion!:ConversionService;
   constructor(options?: { models?: unknown; collaborationRelay?: unknown }) { this.bindings = parseBindings(options?.models); this.relay = parseCollaborationRelay(options?.collaborationRelay); }
   async init(context: PluginInitContext) {
@@ -25,7 +26,7 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
     this.history=historyClient(context.services!.rpc!.consume(ADAPTER_PLUGIN,historyRpc));
     this.conversion=context.services!.consume(ADAPTER_PLUGIN,CONVERSION_SERVICE_ID,CONVERSION_VERSION);
     try { this.validators = catalogValidatorsClient(context.services!); } catch { /* Optional notification state must not block generation. */ }
-    context.services!.onDispose?.(() => this.catalogRequests.clear());
+    context.services!.onDispose?.(() => { this.catalogRequests.clear(); this.snapshots.clear(); });
   }
   bodyRequirements(context: { method: string; url: URL }) {
     return {request:context.method === 'POST' && /\/responses$/.test(context.url.pathname) ? 'json-write' as const : 'none' as const, response: context.method === 'GET' && /\/models$/.test(context.url.pathname) ? ['json' as const] : []};
@@ -112,10 +113,35 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
     hooks.onBeforeRequest.tap('codex-router.catalog-validator', context => {
       if (context.method === 'GET' && /\/models$/.test(context.originalUrl.pathname)) {
         for (const key of Object.keys(context.headers)) if (['if-none-match','if-modified-since'].includes(key.toLowerCase())) delete context.headers[key];
+        const record = this.catalogRequests.get(context.requestId);
+        if (record) {
+          record.snapshot = this.snapshots.get(record.key);
+          if (record.snapshot?.upstreamEtag) context.headers['if-none-match'] = record.snapshot.upstreamEtag;
+        }
       }
       return context;
     });
+    hooks.onInterceptRequest.tapPromise('codex-router.catalog-cache', async context => {
+      if (context.method !== 'GET' || !/\/models$/.test(context.originalUrl.pathname)) return;
+      const record = this.catalogRequests.get(context.requestId);
+      const revalidate = Object.entries(context.headers).some(([key, value]) => key.toLowerCase() === 'cache-control' && /(?:^|,)\s*(?:no-cache|max-age=0)\s*(?:,|$)/i.test(value));
+      if (!record?.snapshot || !this.snapshots.fresh(record.snapshot) || revalidate) return;
+      const response = await this.catalogResponse(record.snapshot.native, new Headers(), record);
+      return {action: 'respond' as const, response};
+    });
     hooks.onRawResponse.tapPromise('codex-router.catalog-notification', async (result, context) => {
+      if (context.method === 'GET' && /\/models$/.test(context.originalUrl.pathname)) {
+        const record = this.catalogRequests.get(context.requestId);
+        if (record && [401, 403].includes(result.response.status)) this.snapshots.invalidate(record.key);
+        if (result.response.status === 304) {
+          if (!record?.snapshot?.upstreamEtag) throw new DataAdmissionError(502, 'codex_router_catalog_without_snapshot');
+          const headers = new Headers(result.response.headers);
+          for (const key of ['content-length', 'content-encoding', 'transfer-encoding']) headers.delete(key);
+          headers.set('content-type', 'application/json');
+          headers.set('etag', headers.get('etag') ?? record.snapshot.upstreamEtag);
+          return {...result, response: new Response(JSON.stringify(record.snapshot.native), {headers})};
+        }
+      }
       if (context.method === 'POST' && /\/responses$/.test(context.originalUrl.pathname)) {
         await this.rewriteCatalogNotification(result.response, this.catalogRequests.get(context.requestId));
       }
@@ -125,20 +151,25 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       const record = this.catalogRequests.get(context.requestId);
       if (context.method !== 'GET' || !/\/models$/.test(context.originalUrl.pathname) || !response.ok) return response;
       const native = await context.bodyHandle!.json({id:'codex-router.catalog',mandatory:true});
-      const body = JSON.stringify(mergeCatalog(native,this.bindings,this.conversion));
-      const etag = catalogEtag(body);
-      const headers = new Headers(response.headers);
-      for (const key of ['content-length','content-encoding','etag','last-modified']) headers.delete(key);
-      headers.set('content-type','application/json');
-      headers.set('cache-control','private, no-store');
-      headers.set('etag', etag);
-      if (record && this.validators) {
-        try { await this.validators.put({key: record.key, etag}, {signal: record.signal, timeoutMs: 1000, operationId: crypto.randomUUID()}); }
-        catch { /* Directory delivery does not depend on transient notification state. */ }
-      }
-      return new Response(body, {status:response.status,headers});
+      const merged = await this.catalogResponse(native, response.headers, record, response.status);
+      if (record && !record.signal.aborted) this.snapshots.put(record.key, native, response.headers.get('etag'));
+      return merged;
     });
     hooks.onFinally.tap('codex-router.catalog-cleanup', context => { this.catalogRequests.delete(context.requestId); });
+  }
+  private async catalogResponse(native: unknown, sourceHeaders: Headers, record?: {key: string; signal: AbortSignal}, status = 200) {
+    const body = JSON.stringify(mergeCatalog(native, this.bindings, this.conversion));
+    const etag = catalogEtag(body);
+    const headers = new Headers(sourceHeaders);
+    for (const key of ['content-length','content-encoding','etag','last-modified']) headers.delete(key);
+    headers.set('content-type', 'application/json');
+    headers.set('cache-control', 'private, no-store');
+    headers.set('etag', etag);
+    if (record && this.validators) {
+      try { await this.validators.put({key: record.key, etag}, {signal: record.signal, timeoutMs: 1000, operationId: crypto.randomUUID()}); }
+      catch { /* Directory delivery does not depend on transient notification state. */ }
+    }
+    return new Response(body, {status, headers});
   }
   private async rewriteCatalogNotification(response: Response, record?: {key: string; signal: AbortSignal}) {
     response.headers.delete('x-models-etag');
@@ -149,6 +180,6 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       } catch { /* Missing/shared-state failures leave the generation body untouched. */ }
     }
   }
-  reset() { this.catalogRequests.clear(); }
+  reset() { this.catalogRequests.clear(); this.snapshots.clear(); }
 });
 export default CodexRouterPlugin;

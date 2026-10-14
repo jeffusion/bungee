@@ -49,7 +49,7 @@ test('declares separate credential policies and unique control endpoints for eac
   expect(siwc.credentialPolicy.allowedHeaderNames).toEqual(['Authorization']);
   expect(siwc.credentialPolicy.allowedRequests.map(request => [request.pathname, request.methods])).toEqual([['/v1/responses', ['POST']], ['/v1/responses', ['GET']], ['/v1/models', ['GET']]]);
   for (const request of siwc.credentialPolicy.allowedRequests) {
-    expect(request.outboundHeaders!.passthrough).toEqual(request.pathname==='/v1/responses' && request.methods.includes('GET') ? ['OpenAI-Beta','Origin'] : []);
+    expect(request.outboundHeaders!.passthrough).toEqual(request.pathname === '/v1/models' ? ['If-None-Match'] : request.pathname === '/v1/responses' && request.methods.includes('GET') ? ['OpenAI-Beta','Origin'] : []);
     expect(request.outboundHeaders!.set['User-Agent']).toBe('Bungee/5.11.0');
     expect(request.outboundHeaders!.set.Originator).toBe('Bungee');
   }

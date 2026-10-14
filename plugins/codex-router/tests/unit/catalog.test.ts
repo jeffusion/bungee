@@ -3,7 +3,7 @@ import {expect,test} from 'bun:test';
 import {CatalogView,capabilitiesServiceOf} from '../../../models-dev/server/local';
 import {buildCatalogIndex} from '../../../models-dev/server/catalog';
 import {parseBindings,bindingSource} from '../../server/config';
-import {mergeCatalog,catalogEtag} from '../../server/catalog';
+import {mergeCatalog,catalogEtag,CatalogSnapshots} from '../../server/catalog';
 const view=new CatalogView();
 view.apply(buildCatalogIndex({version:1,fetchedAt:1,catalog:{lab:{models:{'org/model':{name:'Model',limit:{context:32000,output:4000},tool_call:true,reasoning:true,modalities:{input:['text','image']}}}}}}));
 const catalog=capabilitiesServiceOf(view);const service=conversionService(catalog,true);
@@ -92,4 +92,32 @@ test('equal source and destination IDs add a model while preserving the native d
   expect(bindingSource(added[0])).toBe(added[0].model);
   expect((mergeCatalog({ data: [{ id: 'gpt-native' }] }, added, service) as any).data)
     .toEqual([{ id: 'gpt-native' }, { id: 'org/model', object: 'model', owned_by: 'lab' }]);
+});
+
+
+test('upstream snapshots retain ETags for revalidation after ten minutes without extending TTL on reads', () => {
+  let now = 0;
+  const snapshots = new CatalogSnapshots(() => now);
+  snapshots.put('account-a', {models: []}, 'W/"upstream"');
+  const first = snapshots.get('account-a')!;
+  expect(first.upstreamEtag).toBe('W/"upstream"');
+  now = 599_999; expect(snapshots.fresh(first)).toBe(true);
+  expect(snapshots.get('account-b')).toBeUndefined();
+  now = 600_000; expect(snapshots.fresh(first)).toBe(false);
+  expect(snapshots.get('account-a')).toBe(first);
+  snapshots.put('account-a', first.native, first.upstreamEtag);
+  expect(snapshots.fresh(snapshots.get('account-a')!)).toBe(true);
+  snapshots.invalidate('account-a'); expect(snapshots.get('account-a')).toBeUndefined();
+  snapshots.put('account-a', {}, null); snapshots.clear();
+  expect(snapshots.get('account-a')).toBeUndefined();
+});
+
+test('upstream snapshot storage is bounded and evicts the least recently used identity', () => {
+  const snapshots = new CatalogSnapshots();
+  for (let i = 0; i < 32; i++) snapshots.put(String(i), {}, null);
+  snapshots.get('0'); snapshots.put('32', {}, null);
+  expect(snapshots.get('0')).toBeDefined(); expect(snapshots.get('1')).toBeUndefined();
+  snapshots.put('oversized', {}, '"previous"');
+  snapshots.put('oversized', {description: '中'.repeat(100_000)}, null);
+  expect(snapshots.get('oversized')).toBeUndefined();
 });

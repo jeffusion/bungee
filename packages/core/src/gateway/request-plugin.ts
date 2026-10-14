@@ -244,6 +244,7 @@ async function executePreFailoverPhase(
     requestId: string;
     routeId: string;
     serviceName?: string;
+    authorizeResponse?: () => Promise<void>;
   }
 ): Promise<Response | undefined> {
   if (!phase) {
@@ -274,6 +275,10 @@ async function executePreFailoverPhase(
 
   const interceptResult = await phase.hooks.onInterceptRequest.promise(ctx as HookMutableRequestContext);
   if (interceptResult?.action === 'respond') {
+    if (interceptResult.response.ok) {
+      try { await options.authorizeResponse?.(); }
+      catch (error) { await interceptResult.response.body?.cancel().catch(() => undefined); throw error; }
+    }
     return interceptResult.response;
   }
   if (interceptResult?.action === 'failover') {
@@ -1038,12 +1043,19 @@ async function executeHttpRequestInternal(
     if (dispatch.target) phaseContext.url = new URL(dispatch.context.url);
     phaseContext.bodyRequirements = routeDemand;
     applyRoutePathRewriteToContext(phaseContext, route, requestLog);
+    // Successful local responses still require current access authorization, without
+    // reserving an upstream attempt or spending provider budgets.
+    const authorizePhaseResponse = async () => {
+      await dataAdmission?.inspect({attemptId:requestId,upstreamId:endpoints[0]?.id ?? '0',url:phaseContext.url.href,
+        model:typeof phaseContext.body?.model === 'string' ? phaseContext.body.model : null,body:phaseContext.body,transport:runtimeContext?.transport},processingSignal);
+    };
     const routePhaseResponse = await executePreFailoverPhase(requestPhaseHooks?.routePhase, phaseContext, {
       phaseName: 'route',
       requestLog,
       requestId,
       routeId: currentRouteId,
       serviceName: routeServiceName,
+      authorizeResponse: authorizePhaseResponse,
     });
     if (routePhaseResponse) {
       responseStatus = routePhaseResponse.status;
@@ -1057,6 +1069,7 @@ async function executeHttpRequestInternal(
       requestId,
       routeId: currentRouteId,
       serviceName: routeServiceName,
+      authorizeResponse: authorizePhaseResponse,
     });
     if (servicePhaseResponse) {
       responseStatus = servicePhaseResponse.status;

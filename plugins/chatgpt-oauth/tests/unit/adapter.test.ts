@@ -630,6 +630,18 @@ describe('ChatGPT OAuth adapter', () => {
     await expect(result.completion).resolves.toEqual({ status: 'failed', code: 'invalid_content_type' });
   });
 
+  test('models preserve upstream ETags and pass bodyless 304 responses through unchanged', async () => {
+    const adapter = new ChatgptOauthAdapter();
+    const initial = modelsRequest(); adapter.beforeRequest(initial);
+    const response = await adapter.rawResponse({response: Response.json({models: []}, {headers: {etag: 'W/"models"'}}), completion: completion()}, rawContext(initial));
+    expect(response.response.headers.get('etag')).toBe('W/"models"');
+    expect(await response.response.json()).toEqual({object: 'list', data: []});
+    const refresh = modelsRequest(); adapter.beforeRequest(refresh);
+    const original = {response: new Response(null, {status: 304, headers: {etag: 'W/"models"'}}), completion: completion()};
+    const result = await adapter.rawResponse(original, {...rawContext(refresh), bodyHandle: undefined});
+    expect(result).toBe(original); expect(result.response.body).toBeNull();
+  });
+
   test('models preserve an official empty result and sanitize malformed responses', async () => {
     const empty = new ChatgptOauthAdapter();
     const emptyContext = modelsRequest();
@@ -690,7 +702,7 @@ describe('ChatGPT OAuth adapter', () => {
     const requests = manifest.contributes.upstreamSources[0].credentialPolicy.allowedRequests;
     const models = requests.find((item: any) => item.pathname === CODEX_MODELS_PATH).outboundHeaders;
     const responses = requests.find((item: any) => item.pathname === CODEX_RESPONSES_PATH).outboundHeaders;
-    expect(models.passthrough).toEqual([]);
+    expect(models.passthrough).toEqual(['If-None-Match']);
     expect(responses.passthrough).toEqual([
       'Version', 'X-Codex-Beta-Features', 'X-Codex-Turn-Metadata', 'X-Client-Request-Id',
       'X-Codex-Window-Id', 'Thread-Id', 'Session-Id', 'X-Codex-Routing-Hint',

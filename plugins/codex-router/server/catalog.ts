@@ -3,6 +3,32 @@ import type { ConversionService } from '../../llm-protocol-adapter/contract';
 import { bindingSource, type ModelBinding } from './config';
 import template from './model-template-0.160.1.json';
 
+export interface CatalogSnapshot {
+  readonly native: unknown;
+  readonly upstreamEtag: string | null;
+  readonly expiresAt: number;
+}
+
+/** Worker-local upstream snapshots; expired entries remain available for revalidation. */
+export class CatalogSnapshots {
+  private readonly entries = new Map<string, CatalogSnapshot>();
+  constructor(private readonly now = Date.now) {}
+  get(key: string): CatalogSnapshot | undefined {
+    const entry = this.entries.get(key);
+    if (entry) { this.entries.delete(key); this.entries.set(key, entry); }
+    return entry;
+  }
+  fresh(snapshot: CatalogSnapshot): boolean { return snapshot.expiresAt > this.now(); }
+  put(key: string, native: unknown, upstreamEtag: string | null): void {
+    this.entries.delete(key);
+    if (Buffer.byteLength(JSON.stringify(native), 'utf8') > 256 * 1024) return;
+    if (this.entries.size >= 32) this.entries.delete(this.entries.keys().next().value!);
+    this.entries.set(key, {native: structuredClone(native), upstreamEtag, expiresAt: this.now() + 600_000});
+  }
+  invalidate(key: string): void { this.entries.delete(key); }
+  clear(): void { this.entries.clear(); }
+}
+
 export function mergeCatalog(native: unknown, bindings: readonly ModelBinding[], catalog: ConversionService): unknown {
   if (!native || typeof native !== 'object' || Array.isArray(native)) throw new Error('codex_router_invalid_catalog');
   const body = native as Record<string, any>;

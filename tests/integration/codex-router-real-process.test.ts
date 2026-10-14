@@ -82,7 +82,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
   const startup: GatewayMasterStartupState = {attempted: false, errors: []};
   const calls: Call[] = [], sockets = new Set<Socket>();
   const pending = new Set<string>(), aborted = new Set<string>();
-  const modelQueries: Array<{path: string; clientVersion: string | null; pid: number}> = [];
+  const modelQueries: Array<{path: string; clientVersion: string | null; pid: number; etag: string | null}> = [];
   const accountQueries: string[] = [];
   type ToolRoundTrip={firstRequestId?:string;followupRequestId?:string;wires?:Record<string,string>;outputs?:any[]};
   const cliToolRoundTrips=new Map<string,ToolRoundTrip>();
@@ -113,8 +113,10 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
           return new Response('upgrade failed', {status: 400});
         }
         if (path.endsWith('/models')) {
-          modelQueries.push({path, clientVersion: new URL(request.url).searchParams.get('client_version'), pid: Number(request.headers.get('x-codex-fixture-pid'))});
-          return Response.json({models: [nativeCatalogModel]}, {headers: {etag: 'W/"fixture-upstream-directory"'}});
+          const etag = `W/"${new Bun.CryptoHasher('sha256').update(JSON.stringify(nativeCatalogModel)).digest('hex')}"`;
+          const condition = request.headers.get('if-none-match');
+          modelQueries.push({path, clientVersion: new URL(request.url).searchParams.get('client_version'), pid: Number(request.headers.get('x-codex-fixture-pid')), etag: condition});
+          return condition === etag ? new Response(null, {status: 304, headers: {etag}}) : Response.json({models: [nativeCatalogModel]}, {headers: {etag}});
         }
         // app-server probes unrelated ChatGPT plugin/settings APIs during init.
         // This fixture implements only accounts/config and model inference.
@@ -466,7 +468,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     let clientEtag: string | null = null;
     const beforeQueries = modelQueries.length;
     async function refreshCatalog() {
-      const result = await fetch(`${proxy}/codex/models?client_version=0.162.1`, {headers, signal: AbortSignal.timeout(20000)});
+      const result = await fetch(`${proxy}/codex/models?client_version=0.162.1`, {headers: {...headers, 'cache-control': 'no-cache'}, signal: AbortSignal.timeout(20000)});
       expect(result.status).toBe(200);
       const bytes = await result.arrayBuffer();
       // Independent byte-level check, including non-ASCII native catalog fields.
@@ -550,6 +552,28 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       expect((await control('/api/plugins/key-access/control/routes', 'PUT', {protectedRouteIds: [ENTRY]})).response.status).toBe(200);
     }
   }, 120000);
+
+  test('worker model snapshots suppress repeated upstream fetches and restore conditional 304 responses', async () => {
+    const headers = {authorization: `Bearer ${token}`, 'chatgpt-account-id': 'snapshot-cache-account'};
+    const before = modelQueries.length;
+    let etag: string | null = null;
+    for (let i = 0; i < 12; i++) {
+      const result = await fetch(`${proxy}/codex/models?client_version=0.162.1`, {headers, signal: AbortSignal.timeout(20000)});
+      expect(result.status).toBe(200);
+      const body: any = await result.json(); expect(body.models[0]).toEqual(nativeCatalogModel);
+      etag ??= result.headers.get('etag'); expect(result.headers.get('etag')).toBe(etag);
+    }
+    expect(modelQueries.length - before).toBeGreaterThan(0);
+    expect(modelQueries.length - before).toBeLessThanOrEqual(2);
+    const refreshStart = modelQueries.length;
+    for (let i = 0; i < 4; i++) {
+      const result = await fetch(`${proxy}/codex/models?client_version=0.162.1`, {headers: {...headers, 'cache-control': 'no-cache'}, signal: AbortSignal.timeout(20000)});
+      expect(result.status).toBe(200); expect(result.headers.get('etag')).toBe(etag);
+      expect((await result.json() as any).models[0]).toEqual(nativeCatalogModel);
+    }
+    expect(modelQueries.length - refreshStart).toBe(4);
+    expect(modelQueries.slice(refreshStart).some(query => query.etag?.startsWith('W/"'))).toBe(true);
+  }, 60000);
 
   test('public models retain metadata; long tool history crosses real workers via canonical RPC and rejects another identity', async () => {
     const catalog = await fetch(`${proxy}/codex/models?client_version=0.160.1`, {headers: {authorization: `Bearer ${token}`}});
