@@ -9,12 +9,15 @@ on:
         type: boolean
         default: true
       ref:
+        description: Commit or ref to check out and test
         type: string
         required: true
       base:
+        description: Available Git commit or ref used as the comparison baseline
         type: string
         required: true
       head:
+        description: Full PR source SHA for provenance; does not select the checkout
         type: string
         required: true
       pr:
@@ -45,11 +48,11 @@ jobs:
         id: plan
         env:
           BASE: ${{ inputs.base || github.event.pull_request.base.sha }}
-          HEAD: ${{ inputs.head || github.event.pull_request.head.sha }}
+          PR_HEAD_SHA: ${{ inputs.head || github.event.pull_request.head.sha }}
           FULL: ${{ inputs.full || false }}
         run: |
           set -euo pipefail
-          args=(--base "$BASE" --committed --head "$HEAD" --output "$RUNNER_TEMP/plan.json")
+          args=(--base "$BASE" --committed --head "$PR_HEAD_SHA" --output "$RUNNER_TEMP/plan.json")
           if [ "$FULL" = true ]; then args+=(--full); fi
           bun scripts/checks/select-tests.ts "${args[@]}"
           jq -r '"mode=" + .mode, "integration=" + (.files.integration | length | tostring), "browser=" + (.files.browser | length | tostring), "shards=" + (if (.files.browser | length) > 1 then "[1,2]" else "[1]" end)' "$RUNNER_TEMP/plan.json" >> "$GITHUB_OUTPUT"
@@ -266,13 +269,12 @@ jobs:
       - name: Record strict PR validation provenance
         env:
           PR_NUMBER: ${{ inputs.pr || github.event.pull_request.number }}
-          PR_HEAD_SHA: ${{ inputs.head || github.event.pull_request.head.sha }}
         run: |
           bun -e 'import {createProof} from "./scripts/checks/test-proof.ts";
           const dir=process.env.RUNNER_TEMP;
           const plan=await Bun.file(`${dir}/plan/plan.json`).json();
           const results=await Promise.all(["ubuntu-latest","macos-latest"].map(os=>Bun.file(`${dir}/platform/${os}.json`).json()));
-          const proof=createProof(plan,results,{head:process.env.PR_HEAD_SHA,pr:Number(process.env.PR_NUMBER),runId:process.env.GITHUB_RUN_ID,runAttempt:Number(process.env.GITHUB_RUN_ATTEMPT)});
+          const proof=createProof(plan,results,{pr:Number(process.env.PR_NUMBER),runId:process.env.GITHUB_RUN_ID,runAttempt:Number(process.env.GITHUB_RUN_ATTEMPT)});
           await Bun.write(`${dir}/pr.json`,JSON.stringify(proof,null,2));'
       - uses: actions/upload-artifact@v4
         with:

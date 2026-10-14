@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rename, rm, writeFile, readFile, symlink } from 'node:f
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { createPlan, git, main, testCommand, workingSnapshot } from '../../../checks/select-tests';
-import { verifyRecords, type PhaseRecord } from '../../../checks/test-proof';
+import { platforms, verifyRecords, type PhaseRecord } from '../../../checks/test-proof';
 
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
@@ -20,6 +20,60 @@ async function repo(): Promise<{ root: string; base: string }> {
   return { root, base: await save(root,'base') };
 }
 describe('Git test planning and execution contract', () => {
+  test('full CLI planning uses the checkout even when its source commit is absent', async () => {
+    const {root,base}=await repo(), source='f'.repeat(40);
+    await expect(git(root,['cat-file','-e',`${source}^{commit}`])).rejects.toThrow();
+    const dir=await mkdtemp(join(tmpdir(),'bungee-source-plan-')); roots.push(dir);
+    const output=join(dir,'plan.json');
+    const child=Bun.spawn([process.execPath,join(import.meta.dir,'../../../checks/select-tests.ts'),'--base',base,'--committed','--head',source,'--full','--output',output],{cwd:root,stdout:'pipe',stderr:'pipe'});
+    const [status,stdout,stderr]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()]);
+    expect({status,stderr}).toEqual({status:0,stderr:''});
+    const value=JSON.parse(stdout);
+    expect(JSON.parse(await readFile(output,'utf8'))).toEqual(value);
+    expect(value).toMatchObject({base,testCommit:base,head:source,mode:'full',build:true,reasons:['explicit-full']});
+    expect(value.tree).toBe((await git(root,['rev-parse','HEAD^{tree}'])).toString().trim());
+    for (const phase of ['unit','integration','browser']) expect(value.files[phase]).toHaveLength(7);
+    const alternate=await createPlan(root,{base,committed:true,full:true,head:'e'.repeat(40)});
+    expect(alternate).toEqual({...value,head:'e'.repeat(40)});
+    await expect(git(root,['cat-file','-e',`${source}^{commit}`])).rejects.toThrow();
+  });
+  test('invalid source metadata fails at the CLI boundary without producing a plan', async () => {
+    const {root,base}=await repo();
+    for (const head of ['', 'main', base.slice(0,7), 'A'.repeat(40), 'g'.repeat(40), 'a'.repeat(39), 'a'.repeat(41), 'a'.repeat(64)]) {
+      const child=Bun.spawn([process.execPath,join(import.meta.dir,'../../../checks/select-tests.ts'),'--base',base,'--committed','--head',head],{cwd:root,stdout:'pipe',stderr:'pipe'});
+      const [status,stdout,stderr]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()]);
+      expect(status).toBe(1); expect(stdout).toBe('');
+      expect(stderr).toContain(head ? 'Invalid source head SHA' : 'Missing value: --head');
+    }
+    for (const head of ['', null, 123]) await expect(createPlan(root,{base,head:head as string})).rejects.toThrow('Invalid source head SHA');
+    expect((await createPlan(root,{base,committed:true})).head).toBeUndefined();
+  });
+  test.each(['pull_request','release'])('%s workflow scripts preserve source and execution identities', async event => {
+    const {root,base}=await repo(), source='f'.repeat(40);
+    await put(root,'plugins/a/server/old name.ts','export const value=2;');
+    const checkout=await save(root,'tested checkout');
+    await expect(git(root,['cat-file','-e',`${source}^{commit}`])).rejects.toThrow();
+    const dir=await mkdtemp(join(tmpdir(),'bungee-workflow-plan-')); roots.push(dir);
+    await symlink(join(import.meta.dir,'../../..'),join(root,'scripts'),'dir');
+    const workflow=Bun.YAML.parse(await readFile(new URL('../../../../.github/workflows/ci.yml',import.meta.url),'utf8')) as any;
+    const selection=workflow.jobs.plan.steps.find((step:any)=>step.id==='plan');
+    const full=event==='release', runId=full?'456':'123', runAttempt=full?'2':'1';
+    async function step(script:string,extra:Record<string,string>): Promise<void> {
+      const child=Bun.spawn(['bash','-c',script],{cwd:root,env:{...process.env,RUNNER_TEMP:dir,GITHUB_OUTPUT:join(dir,'outputs'),GITHUB_RUN_ID:runId,GITHUB_RUN_ATTEMPT:runAttempt,...extra},stdout:'pipe',stderr:'pipe'});
+      const [status,,stderr]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()]);
+      expect({status,stderr}).toEqual({status:0,stderr:''});
+    }
+    await step(selection.run,{BASE:full?checkout:base,PR_HEAD_SHA:source,FULL:String(full)});
+    const value=JSON.parse(await readFile(join(dir,'plan.json'),'utf8'));
+    expect(value).toMatchObject({base:full?checkout:base,testCommit:checkout,head:source,mode:full?'full':'affected'});
+    await mkdir(join(dir,'plan')); await rename(join(dir,'plan.json'),join(dir,'plan','plan.json'));
+    await mkdir(join(dir,'platform'));
+    for (const platform of platforms) await writeFile(join(dir,'platform',`${platform}.json`),JSON.stringify({platform,commit:checkout,tree:value.tree,scope:value.mode,success:true}));
+    const generation=workflow.jobs.proof.steps.find((step:any)=>step.name==='Record strict PR validation provenance');
+    await step(generation.run,{PR_NUMBER:'91',PR_HEAD_SHA:'e'.repeat(40)});
+    const proof=JSON.parse(await readFile(join(dir,'pr.json'),'utf8'));
+    expect(proof).toMatchObject({head:source,testCommit:checkout,tree:value.tree,pr:91,runId,runAttempt:Number(runAttempt),scope:value.mode});
+  });
   test('local union contains staged, unstaged, untracked, cumulative commits and ignores ignored inputs', async () => {
     const {root,base}=await repo(); await put(root,'packages/cli/src/index.ts'); await save(root,'cli change');
     await put(root,'plugins/b/server/index.ts','export const value=2;'); await git(root,['add','plugins/b/server/index.ts']);
