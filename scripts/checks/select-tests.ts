@@ -69,8 +69,9 @@ export async function workingSnapshot(root: string): Promise<{ paths: string[]; 
   return { paths, source, tree: hash.digest('hex') };
 }
 export async function createPlan(root: string, options: { base: string; committed?: boolean; full?: boolean; head?: string }): Promise<TestPlan> {
+  const head = options.head;
+  if (head !== undefined && (typeof head !== 'string' || !/^[a-f0-9]{40}$/.test(head))) throw new Error('Invalid source head SHA: expected 40 lowercase hexadecimal characters');
   const base = await commit(root, options.base), testCommit = await commit(root, 'HEAD');
-  const head = options.head ? await commit(root, options.head) : undefined;
   const before = await committedSnapshot(root, base);
   const after = options.committed ? await committedSnapshot(root, testCommit) : await workingSnapshot(root);
   const changed = diffPaths(await git(root, ['diff', '--name-status', '-z', '--find-renames', base, ...(options.committed ? [testCommit] : []), '--']));
@@ -112,11 +113,12 @@ async function runPhase(root: string, plan: TestPlan, phase: Phase, shard?: stri
   }
   return status;
 }
-const help = `Usage: bun scripts/checks/select-tests.ts --base REF [--committed] [--full] [--head REF] [--output FILE] [--run]
+const help = `Usage: bun scripts/checks/select-tests.ts --base REF [--committed] [--full] [--head SHA] [--output FILE] [--run]
        bun scripts/checks/select-tests.ts --plan FILE --phase unit|integration|browser [--shard i/n] [--record FILE]
 
 Default output is JSON only. Local plans include staged, unstaged and unignored untracked files.
---committed compares base to the actual clean checkout commit; --head records source-head metadata.
+--committed compares base to the actual clean checkout commit.
+--head records a full 40-character lowercase source SHA; it need not exist in the checkout.
 --run builds once, then runs selected unit/integration/browser files in order.
 --plan consumes an existing plan without selection or build, and checks its commit/tree identity.
 Records list the explicit candidate files passed to Bun; --shard uses Bun's native partitioning.

@@ -9,7 +9,7 @@ export interface TestPlan {
   base: string;
   testCommit: string;
   tree: string;
-  head?: string;
+  head?: string; // Source metadata, independent of the tested commit and local Git objects.
   mode: 'none' | 'affected' | 'full';
   reasons: string[];
   build: boolean;
@@ -180,6 +180,7 @@ export function validatePlan(value: unknown, paths: readonly string[]): TestPlan
   if (!plan || plan.version !== 1 || !['none','affected','full'].includes(plan.mode) || typeof plan.build !== 'boolean' ||
     !/^[a-f0-9]{40,64}$/.test(plan.base) || !/^[a-f0-9]{40,64}$/.test(plan.testCommit) || !/^[a-f0-9]{40,64}$/.test(plan.tree) ||
     !Array.isArray(plan.reasons) || !plan.reasons.every(reason => typeof reason === 'string') || !plan.files) throw new Error('Invalid test plan');
+  if (plan.head !== undefined && (typeof plan.head !== 'string' || !/^[a-f0-9]{40}$/.test(plan.head))) throw new Error('Invalid source head SHA: expected 40 lowercase hexadecimal characters');
   const existing = new Set(paths), seen = new Set<string>();
   for (const phase of phases) {
     if (!Array.isArray(plan.files[phase])) throw new Error(`Missing plan phase: ${phase}`);

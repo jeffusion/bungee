@@ -57,12 +57,13 @@ export function verifyRecords(plan: TestPlan, records: PhaseRecord[], platform: 
 }
 
 export function createProof(plan: TestPlan, results: PlatformProof[], metadata: {
-  head: string; pr: number; runId: string; runAttempt: number; now?: Date;
+  pr: number; runId: string; runAttempt: number; now?: Date;
 }): TestProof {
+  if (typeof plan.head !== 'string' || !/^[a-f0-9]{40}$/.test(plan.head)) throw new Error('Invalid source head SHA: expected 40 lowercase hexadecimal characters');
   if (results.length !== platforms.length || new Set(results.map(result => result.platform)).size !== platforms.length ||
       results.some(result => !platforms.includes(result.platform) || result.commit !== plan.testCommit || result.tree !== plan.tree || result.scope !== plan.mode || result.success !== true)) throw new Error('Missing successful platform proof');
   return { version: 1, base: plan.base, testCommit: plan.testCommit, tree: plan.tree, scope: plan.mode,
-    head: metadata.head, pr: metadata.pr, runId: metadata.runId, runAttempt: metadata.runAttempt,
+    head: plan.head, pr: metadata.pr, runId: metadata.runId, runAttempt: metadata.runAttempt,
     createdAt: (metadata.now ?? new Date()).toISOString(), platforms: [...results].sort((a, b) => a.platform.localeCompare(b.platform)) };
 }
 
@@ -78,8 +79,8 @@ export function releaseNeedsFull(value: unknown, expected: {
       proof.runId !== expected.runId || proof.runAttempt !== expected.runAttempt || !Array.isArray(proof.platforms)) throw new Error('Invalid or mismatched PR test proof');
   const age = (expected.now ?? new Date()).getTime() - Date.parse(proof.createdAt);
   if (!Number.isFinite(age) || age < 0 || age >= 14 * 24 * 60 * 60 * 1000) throw new Error('Expired PR test proof');
-  createProof({ testCommit: proof.testCommit, tree: proof.tree, mode: proof.scope } as TestPlan, proof.platforms, {
-    head: proof.head, pr: proof.pr, runId: proof.runId, runAttempt: proof.runAttempt,
+  createProof({ testCommit: proof.testCommit, tree: proof.tree, mode: proof.scope, head: proof.head } as TestPlan, proof.platforms, {
+    pr: proof.pr, runId: proof.runId, runAttempt: proof.runAttempt,
   });
   return proof.scope !== 'full';
 }

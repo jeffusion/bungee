@@ -126,6 +126,18 @@ describe('dependency evidence', () => {
 
 describe('plan validation', () => {
   test('accepts generated plan', () => { const value = plan(['plugins/a/server/index.ts']); expect(validatePlan(value, paths)).toBe(value); });
+  test('source SHA is optional metadata independent of the tested commit', () => {
+    const local = plan([]);
+    expect(local.head).toBeUndefined();
+    expect(validatePlan(local, paths)).toBe(local);
+    const sourced = plan([], { head: 'c'.repeat(40) });
+    expect(validatePlan(sourced, paths).head).toBe('c'.repeat(40));
+    expect(sourced.testCommit).toBe(sha);
+  });
+  test.each([null, 123, '', 'main', 'abcdef0', 'A'.repeat(40), 'g'.repeat(40), 'a'.repeat(39), 'a'.repeat(41), 'a'.repeat(64)])('rejects malformed source SHA: %s', head => {
+    const value = plan([]); value.head = head as string;
+    expect(() => validatePlan(value, paths)).toThrow('Invalid source head SHA');
+  });
   test.each(['../tests/unit/fake.test.ts','/tests/unit/fake.test.ts','tests/unit/missing.test.ts','tests/unit/../unit/sample.test.ts','tests\\unit\\sample.test.ts'])('rejects invalid paths: %s', file => {
     const value = plan(['plugins/a/server/index.ts']); value.files.unit = [file]; expect(() => validatePlan(value, paths)).toThrow();
   });

@@ -127,6 +127,8 @@ bun run test:affected --base origin/main
 
 Local selection includes cumulative commits, staged and unstaged edits, and unignored new files. Renames and deletions consider both paths and the dependencies in both trees. Plans record the baseline commit, tested commit and content identity; a local working-tree identity is a SHA256 fingerprint, while committed CI plans use the Git tree SHA. A missing baseline or unreadable Git/configuration fails instead of producing an empty scope.
 
+The optional `--head SHA` records the PR source identity as a full 40-character lowercase hexadecimal SHA. It does not select the checkout or require that source commit to exist locally. Branch names, shortened SHAs and malformed values are rejected. Local plans may omit this metadata; generating a CI proof requires it.
+
 All non-documentation changes run the complete unit category. Integration and browser selection takes the union of these rules:
 
 | Change | Additional scope |
@@ -155,6 +157,8 @@ and its branch must be up to date with `main`. Windows CI is disabled; the activ
 
 PR planning compares the PR base SHA with the actual checked-out test commit, covering the entire PR rather than the latest push. Each Linux/macOS workspace builds once and completes all fast tests. Integration runs in a separate serial job; browser files use at most two native Bun shards, each internally serial with `--isolate`. Jobs own independent workspaces and ports; artifacts are bound to their platform and code tree, including both generated source files. No browser service or mutable context is shared across files or jobs. The final checks verify native executed-file records: missing, failed, cancelled or unexpectedly skipped work cannot pass.
 
+`testCommit` and `tree` identify the tested checkout; `head` and `pr` identify the source PR; `runId` and `runAttempt` identify the execution producing the proof. Proof generation takes the source SHA from the test plan. Release checks it against the PR head independently obtained from GitHub. These identities need not share a commit SHA: PR CI can test a merge commit, and a rebase merge can produce different commits with the same tree.
+
 A push to `main` starts Release.
 Before publishing, Release verifies that the pushed commit is the final commit
 of a merged PR targeting `main`, that its latest PR CI run and both Linux/macOS
@@ -162,6 +166,8 @@ test jobs succeeded, and that the release Git tree matches the tree recorded by
 that CI run. The proof records scope (`none`, `affected`, or `full`), run/attempt identity and both platform results. Comparing trees supports rebase merges even when commit SHAs
 change. Only a successful two-platform full proof for the same tree can be reused. Otherwise Release calls the shared full CI workflow on the release commit before entering the release environment, obtaining publishing credentials, changing versions or uploading artifacts. Missing, expired or old-format `tested-pr` artifacts block publication; rerun
 the PR CI before retrying Release. Artifacts are retained for 14 days.
+
+For full release validation, the checkout and comparison baseline both use the release commit, while the source SHA remains the original PR head. Explicit full mode selects all tests even when the comparison is empty. The resulting full proof records the Release run and attempt that executed it; the preceding PR proof remains bound to its own PR CI run and attempt.
 
 Keep the required checks `test (ubuntu-latest)` and `test (macos-latest)` bound
 to GitHub Actions, with strict status checks enabled. Do not require
