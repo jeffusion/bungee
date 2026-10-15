@@ -1,3 +1,10 @@
+## [5.24.2](https://github.com/jeffusion/bungee/compare/v5.24.1...v5.24.2) (2026-10-15)
+
+
+### Bug Fixes
+
+* **codex-router:** cache large catalogs and match prerelease clients ([7fc842c](https://github.com/jeffusion/bungee/commit/7fc842c1382dbc3266a96e3fd18f483cfc9d4821))
+
 ## [5.24.1](https://github.com/jeffusion/bungee/compare/v5.24.0...v5.24.1) (2026-10-14)
 
 
