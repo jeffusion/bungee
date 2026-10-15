@@ -117,7 +117,21 @@ test('upstream snapshot storage is bounded and evicts the least recently used id
   for (let i = 0; i < 32; i++) snapshots.put(String(i), {}, null);
   snapshots.get('0'); snapshots.put('32', {}, null);
   expect(snapshots.get('0')).toBeDefined(); expect(snapshots.get('1')).toBeUndefined();
-  snapshots.put('oversized', {}, '"previous"');
-  snapshots.put('oversized', {description: '中'.repeat(100_000)}, null);
-  expect(snapshots.get('oversized')).toBeUndefined();
+});
+
+test('snapshot byte budget counts UTF-8, evicts LRU entries and releases replaced, invalidated and cleared bytes', () => {
+  const snapshots = new CatalogSnapshots(Date.now, 10);
+  snapshots.put('a', '中', null); snapshots.put('b', '中', null); // Five serialized UTF-8 bytes each.
+  snapshots.get('a'); snapshots.put('c', 'a', null);
+  expect(snapshots.get('b')).toBeUndefined(); expect(snapshots.get('a')?.native).toBe('中');
+  snapshots.put('a', 'a', null); snapshots.put('d', 'a', null);
+  for (const key of ['a', 'c', 'd']) expect(snapshots.get(key)).toBeDefined();
+  snapshots.invalidate('c'); snapshots.put('e', 'a', null);
+  for (const key of ['a', 'd', 'e']) expect(snapshots.get(key)).toBeDefined();
+  snapshots.clear(); snapshots.put('full', '12345678', '"boundary"');
+  expect(snapshots.get('full')?.upstreamEtag).toBe('"boundary"');
+  snapshots.put('full', '123456789', null);
+  expect(snapshots.get('full')).toBeUndefined();
+  snapshots.put('next', '12345678', null);
+  expect(snapshots.get('next')).toBeDefined();
 });

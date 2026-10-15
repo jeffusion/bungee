@@ -11,8 +11,9 @@ export interface CatalogSnapshot {
 
 /** Worker-local upstream snapshots; expired entries remain available for revalidation. */
 export class CatalogSnapshots {
-  private readonly entries = new Map<string, CatalogSnapshot>();
-  constructor(private readonly now = Date.now) {}
+  private readonly entries = new Map<string, CatalogSnapshot & {bytes: number}>();
+  private bytes = 0;
+  constructor(private readonly now = Date.now, private readonly maxBytes = 32 * 1024 * 1024) {}
   get(key: string): CatalogSnapshot | undefined {
     const entry = this.entries.get(key);
     if (entry) { this.entries.delete(key); this.entries.set(key, entry); }
@@ -20,13 +21,18 @@ export class CatalogSnapshots {
   }
   fresh(snapshot: CatalogSnapshot): boolean { return snapshot.expiresAt > this.now(); }
   put(key: string, native: unknown, upstreamEtag: string | null): void {
-    this.entries.delete(key);
-    if (Buffer.byteLength(JSON.stringify(native), 'utf8') > 256 * 1024) return;
-    if (this.entries.size >= 32) this.entries.delete(this.entries.keys().next().value!);
-    this.entries.set(key, {native: structuredClone(native), upstreamEtag, expiresAt: this.now() + 600_000});
+    this.invalidate(key);
+    const bytes = Buffer.byteLength(JSON.stringify(native), 'utf8');
+    if (bytes > this.maxBytes) return;
+    while (this.entries.size >= 32 || this.bytes + bytes > this.maxBytes) this.invalidate(this.entries.keys().next().value!);
+    this.entries.set(key, {native: structuredClone(native), upstreamEtag, expiresAt: this.now() + 600_000, bytes});
+    this.bytes += bytes;
   }
-  invalidate(key: string): void { this.entries.delete(key); }
-  clear(): void { this.entries.clear(); }
+  invalidate(key: string): void {
+    const entry = this.entries.get(key);
+    if (entry) { this.bytes -= entry.bytes; this.entries.delete(key); }
+  }
+  clear(): void { this.entries.clear(); this.bytes = 0; }
 }
 
 export function mergeCatalog(native: unknown, bindings: readonly ModelBinding[], catalog: ConversionService): unknown {

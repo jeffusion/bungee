@@ -553,26 +553,42 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     }
   }, 120000);
 
-  test('worker model snapshots suppress repeated upstream fetches and restore conditional 304 responses', async () => {
-    const headers = {authorization: `Bearer ${token}`, 'chatgpt-account-id': 'snapshot-cache-account'};
-    const before = modelQueries.length;
-    let etag: string | null = null;
-    for (let i = 0; i < 12; i++) {
-      const result = await fetch(`${proxy}/codex/models?client_version=0.162.1`, {headers, signal: AbortSignal.timeout(20000)});
-      expect(result.status).toBe(200);
-      const body: any = await result.json(); expect(body.models[0]).toEqual(nativeCatalogModel);
-      etag ??= result.headers.get('etag'); expect(result.headers.get('etag')).toBe(etag);
-    }
-    expect(modelQueries.length - before).toBeGreaterThan(0);
-    expect(modelQueries.length - before).toBeLessThanOrEqual(2);
-    const refreshStart = modelQueries.length;
-    for (let i = 0; i < 4; i++) {
-      const result = await fetch(`${proxy}/codex/models?client_version=0.162.1`, {headers: {...headers, 'cache-control': 'no-cache'}, signal: AbortSignal.timeout(20000)});
-      expect(result.status).toBe(200); expect(result.headers.get('etag')).toBe(etag);
-      expect((await result.json() as any).models[0]).toEqual(nativeCatalogModel);
-    }
-    expect(modelQueries.length - refreshStart).toBe(4);
-    expect(modelQueries.slice(refreshStart).some(query => query.etag?.startsWith('W/"'))).toBe(true);
+  test('production-size model snapshots suppress upstream fetches, restore 304 and notify alpha clients', async () => {
+    const original = nativeCatalogModel;
+    nativeCatalogModel = {...original, base_instructions: '中'.repeat(190_000)};
+    const headers = {authorization: `Bearer ${token}`, 'chatgpt-account-id': 'snapshot-cache-account', version: '0.162.0-alpha.17.2'};
+    try {
+      const bytes = Buffer.byteLength(JSON.stringify({models: [nativeCatalogModel]}), 'utf8');
+      expect(bytes).toBeGreaterThan(568_000); expect(bytes).toBeLessThan(600_000);
+      const before = modelQueries.length;
+      let etag: string | null = null;
+      for (let i = 0; i < 12; i++) {
+        const result = await fetch(`${proxy}/codex/models?client_version=0.162.0`, {headers, signal: AbortSignal.timeout(20000)});
+        expect(result.status).toBe(200);
+        const bytes = await result.arrayBuffer();
+        expect(result.headers.get('etag')).toBe(`"${new Bun.CryptoHasher('sha256').update(bytes).digest('hex')}"`);
+        const body = JSON.parse(new TextDecoder().decode(bytes)); expect(body.models[0]).toEqual(nativeCatalogModel);
+        etag ??= result.headers.get('etag'); expect(result.headers.get('etag')).toBe(etag);
+      }
+      expect(modelQueries.length - before).toBeGreaterThan(0);
+      expect(modelQueries.length - before).toBeLessThanOrEqual(2);
+      const refreshStart = modelQueries.length;
+      for (let i = 0; i < 4; i++) {
+        const result = await fetch(`${proxy}/codex/models?client_version=0.162.0`, {headers: {...headers, 'cache-control': 'no-cache'}, signal: AbortSignal.timeout(20000)});
+        expect(result.status).toBe(200); expect(result.headers.get('etag')).toBe(etag);
+        expect((await result.json() as any).models[0]).toEqual(nativeCatalogModel);
+      }
+      expect(modelQueries.length - refreshStart).toBe(4);
+      expect(modelQueries.slice(refreshStart).some(query => query.etag?.startsWith('W/"'))).toBe(true);
+      const generationStart = modelQueries.length;
+      for (const model of ['native-only', 'org/chat']) {
+        const result = await fetch(`${proxy}/codex/responses`, {method: 'POST', headers: {...headers, 'content-type': 'application/json'},
+          body: JSON.stringify({model, stream: true, input: 'alpha directory notification'}), signal: AbortSignal.timeout(20000)});
+        expect(result.status).toBe(200); expect(result.headers.get('x-models-etag')).toBe(etag);
+        expect(await result.text()).toContain('response.completed');
+      }
+      expect(modelQueries.length).toBe(generationStart);
+    } finally { nativeCatalogModel = original; }
   }, 60000);
 
   test('public models retain metadata; long tool history crosses real workers via canonical RPC and rejects another identity', async () => {
