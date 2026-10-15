@@ -7,7 +7,7 @@ import type { PluginConfigField } from '@jeffusion/bungee-core/plugin';
 import { parseBindings, parseCollaborationRelay, bindingSource } from './config';
 import { mergeCatalog, catalogEtag, CatalogSnapshots, type CatalogSnapshot } from './catalog';
 import { catalogValidatorsClient } from '../contract';
-import { catalogValidatorKey } from './catalog-validators';
+import { catalogKeys } from './catalog-validators';
 
 export const CodexRouterPlugin = definePlugin(class implements Plugin {
   static readonly name = 'codex-router';
@@ -17,7 +17,7 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
   private readonly relay?:CollaborationRelay;
   private history!:HistoryClient;
   private validators?: ReturnType<typeof catalogValidatorsClient>;
-  private readonly catalogRequests = new Map<string, {key: string; signal: AbortSignal; snapshot?: CatalogSnapshot}>();
+  private readonly catalogRequests = new Map<string, {key: string; snapshotKey: string; signal: AbortSignal; snapshot?: CatalogSnapshot}>();
   private readonly snapshots = new CatalogSnapshots();
   private conversion!:ConversionService;
   constructor(options?: { models?: unknown; collaborationRelay?: unknown }) { this.bindings = parseBindings(options?.models); this.relay = parseCollaborationRelay(options?.collaborationRelay); }
@@ -34,8 +34,8 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
   register(hooks: PluginHooks) {
     hooks.onWebSocketSessionMode.tap('codex-router.session', url => /\/responses$/.test(url.pathname) ? 'responses' : undefined);
     hooks.onDispatchRequest.tap('codex-router.catalog-identity', input => {
-      const key = catalogValidatorKey(input, this.bindings);
-      if (key) this.catalogRequests.set(input.context.requestId, {key, signal: input.signal});
+      const keys = catalogKeys(input, this.bindings);
+      if (keys) this.catalogRequests.set(input.context.requestId, {key: keys.validator, snapshotKey: keys.snapshot, signal: input.signal});
     });
     hooks.onDispatchRequest.tapPromise('codex-router.binding', async ({context,targets}) => {
       if (context.method !== 'POST' || !/\/responses$/.test(context.originalUrl.pathname)) return;
@@ -115,7 +115,7 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
         for (const key of Object.keys(context.headers)) if (['if-none-match','if-modified-since'].includes(key.toLowerCase())) delete context.headers[key];
         const record = this.catalogRequests.get(context.requestId);
         if (record) {
-          record.snapshot = this.snapshots.get(record.key);
+          record.snapshot = this.snapshots.get(record.snapshotKey);
           if (record.snapshot?.upstreamEtag) context.headers['if-none-match'] = record.snapshot.upstreamEtag;
         }
       }
@@ -132,7 +132,7 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
     hooks.onRawResponse.tapPromise('codex-router.catalog-notification', async (result, context) => {
       if (context.method === 'GET' && /\/models$/.test(context.originalUrl.pathname)) {
         const record = this.catalogRequests.get(context.requestId);
-        if (record && [401, 403].includes(result.response.status)) this.snapshots.invalidate(record.key);
+        if (record && [401, 403].includes(result.response.status)) this.snapshots.invalidate(record.snapshotKey);
         if (result.response.status === 304) {
           if (!record?.snapshot?.upstreamEtag) throw new DataAdmissionError(502, 'codex_router_catalog_without_snapshot');
           const headers = new Headers(result.response.headers);
@@ -152,7 +152,7 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       if (context.method !== 'GET' || !/\/models$/.test(context.originalUrl.pathname) || !response.ok) return response;
       const native = await context.bodyHandle!.json({id:'codex-router.catalog',mandatory:true});
       const merged = await this.catalogResponse(native, response.headers, record, response.status);
-      if (record && !record.signal.aborted) this.snapshots.put(record.key, native, response.headers.get('etag'));
+      if (record && !record.signal.aborted) this.snapshots.put(record.snapshotKey, native, response.headers.get('etag'));
       return merged;
     });
     hooks.onFinally.tap('codex-router.catalog-cleanup', context => { this.catalogRequests.delete(context.requestId); });

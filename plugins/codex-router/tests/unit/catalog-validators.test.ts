@@ -1,15 +1,17 @@
 import {expect, test, spyOn} from 'bun:test';
 import {createPluginHooks} from '../../../../packages/core/src/hooks';
 import {catalogValidatorsRpc} from '../../contract';
-import {CatalogValidators, catalogValidatorKey} from '../../server/catalog-validators';
+import {CatalogValidators, catalogKeys} from '../../server/catalog-validators';
 import {CodexRouterPlugin} from '../../server/index';
 import {createControl} from '../../server/control';
 import {conversionService} from '../../../llm-protocol-adapter/server/service';
 
 const etag = `"${'a'.repeat(64)}"`, nextEtag = `"${'b'.repeat(64)}"`;
 const key = (n: number) => n.toString(16).padStart(64, '0');
+const validatorKey = (input: Parameters<typeof catalogKeys>[0], bindings: Parameters<typeof catalogKeys>[1]) => catalogKeys(input, bindings)?.validator ?? null;
 function request(method = 'GET', version = '0.162.1') {
-  const url = new URL(`http://local/codex/${method === 'GET' ? `models?client_version=${version}` : 'responses'}`);
+  const url = new URL(`http://local/codex/${method === 'GET' ? 'models' : 'responses'}`);
+  if (method === 'GET') url.searchParams.set('client_version', version);
   return {context: {method, originalUrl: new URL(url), url, routeId: '/codex/', requestId: crypto.randomUUID(), clientIP: 'local',
     headers: {Authorization: 'Bearer private-token', 'ChatGPT-Account-Id': 'account', Version: version}, body: {model: 'native'}},
     targets: [], principal: {domain: 'data', keyId: 'key', credentialVersion: 1}, servingRevision: 7, signal: new AbortController().signal};
@@ -17,9 +19,9 @@ function request(method = 'GET', version = '0.162.1') {
 
 test('directory and generation partition by entry, revision, identity, original credentials, account, client and bindings', () => {
   const get = request(), post = request('POST');
-  const base = catalogValidatorKey(get, []);
+  const base = validatorKey(get, []);
   expect(base).toMatch(/^[a-f0-9]{64}$/);
-  expect(catalogValidatorKey(post, [])).toBe(base);
+  expect(validatorKey(post, [])).toBe(base);
   for (const change of [
     (r: ReturnType<typeof request>) => {r.context.routeId = '/other/';},
     (r: ReturnType<typeof request>) => {r.servingRevision++;},
@@ -29,13 +31,28 @@ test('directory and generation partition by entry, revision, identity, original 
     (r: ReturnType<typeof request>) => {r.context.headers.Authorization = 'Bearer other';},
     (r: ReturnType<typeof request>) => {r.context.headers['ChatGPT-Account-Id'] = 'other';},
     (r: ReturnType<typeof request>) => {r.context.originalUrl.searchParams.set('client_version', '0.160.1');},
-  ]) { const different = request(); change(different); expect(catalogValidatorKey(different, [])).not.toBe(base); }
-  expect(catalogValidatorKey(get, [{provider: 'p', model: 'm', target: {type: 'service', id: 'target', protocol: 'responses'}}])).not.toBe(base);
+  ]) { const different = request(); change(different); expect(validatorKey(different, [])).not.toBe(base); }
+  expect(validatorKey(get, [{provider: 'p', model: 'm', target: {type: 'service', id: 'target', protocol: 'responses'}}])).not.toBe(base);
   const anonymous = {...get, principal: undefined};
-  expect(catalogValidatorKey(anonymous, [])).toBe(catalogValidatorKey({...post, principal: {domain: 'anonymous', keyId: '', credentialVersion: 0}}, []));
-  for (const version of ['', ' ', 'two versions', 'x'.repeat(129)]) expect(catalogValidatorKey(request('POST', version), [])).toBeNull();
+  expect(validatorKey(anonymous, [])).toBe(validatorKey({...post, principal: {domain: 'anonymous', keyId: '', credentialVersion: 0}}, []));
+  for (const version of ['', ' ', 'two versions', 'x'.repeat(129)]) expect(validatorKey(request('POST', version), [])).toBeNull();
   get.context.originalUrl.searchParams.append('client_version', '0.162.1');
-  expect(catalogValidatorKey(get, [])).toBeNull();
+  expect(validatorKey(get, [])).toBeNull();
+});
+
+test('notification versions share release identity while snapshots keep exact upstream query versions', () => {
+  const release = catalogKeys(request('GET', '0.162.0'), [])!;
+  for (const version of ['0.162.0-alpha.17.2', '0.162.0-beta.1', '0.162.0-rc.2+build.3', '0.162.0+build.4']) {
+    expect(catalogKeys(request('POST', version), [])!.validator).toBe(release.validator);
+    const directory = catalogKeys(request('GET', version), [])!;
+    expect(directory.validator).toBe(release.validator);
+    expect(directory.snapshot).not.toBe(release.snapshot);
+  }
+  for (const version of ['0.162.1-alpha.1', '0.163.0', '1.162.0', 'custom-client', 'custom-other']) {
+    expect(catalogKeys(request('POST', version), [])!.validator).not.toBe(release.validator);
+  }
+  expect(catalogKeys(request('POST', 'custom-client'), [])!.validator)
+    .not.toBe(catalogKeys(request('POST', 'custom-other'), [])!.validator);
 });
 
 test('validator TTL starts at successful publication, reads do not extend it and publication replaces it', () => {
@@ -132,7 +149,7 @@ test('missing, expired, unknown-client and unavailable notification state leave 
     plugin.reset();
   }
   let now = 0; const cache = new CatalogValidators(() => now), {hooks} = await router(cache);
-  cache.put(catalogValidatorKey(request(), [])!, etag); now = 600_000;
+  cache.put(validatorKey(request(), [])!, etag); now = 600_000;
   for (const post of [request('POST'), request('POST', '')]) {
     await hooks.onDispatchRequest.promise(post);
     const response = new Response('body', {headers: {'x-models-etag': 'upstream'}});
@@ -174,9 +191,13 @@ test('model hooks reuse fresh snapshots, revalidate upstream ETags and renew a 3
   const clock = spyOn(Date, 'now').mockImplementation(() => now);
   try {
     const {hooks} = await router(new CatalogValidators(() => now));
-    const native = {models: [{slug: 'native', display_name: '你好🙂'}]};
+    // Nine synthetic models match the observed ~570 kB directory without production instructions.
+    const native = {models: Array.from({length: 9}, (_, i) => ({slug: `native-${i}`, base_instructions: '中'.repeat(21_100)}))};
+    const bytes = Buffer.byteLength(JSON.stringify(native), 'utf8');
+    expect(bytes).toBeGreaterThan(568_000); expect(bytes).toBeLessThan(572_000);
     const directory = async () => {
-      const input = request();
+      const input = request('GET', '0.162.0');
+      input.context.headers.Version = '0.162.0-alpha.17.2';
       input.context.headers['If-None-Match'] = '"client-validator"';
       input.context.headers['If-Modified-Since'] = 'yesterday';
       await hooks.onDispatchRequest.promise(input);
@@ -192,6 +213,13 @@ test('model hooks reuse fresh snapshots, revalidate upstream ETags and renew a 3
     const initial = await publish(first, Response.json(native, {headers: {etag: 'W/"upstream"'}}));
     const downstreamEtag = initial.headers.get('etag');
     expect(downstreamEtag).not.toBe('W/"upstream"');
+    const post = request('POST', '0.162.0-alpha.17.2');
+    await hooks.onDispatchRequest.promise(post);
+    expect((await rawResponse(hooks, new Response('unchanged'), post)).headers.get('x-models-etag')).toBe(downstreamEtag);
+    const otherVersion = request('GET', '0.162.0-alpha.17.2');
+    await hooks.onDispatchRequest.promise(otherVersion); await hooks.onBeforeRequest.promise(otherVersion.context);
+    expect(otherVersion.context.headers['if-none-match']).toBeUndefined();
+    expect(await hooks.onInterceptRequest.promise(otherVersion.context)).toBeUndefined();
     now = 599_999;
     const fresh = await directory();
     const hit = await hooks.onInterceptRequest.promise(fresh.context);
@@ -264,7 +292,7 @@ test('oversized model directories remain deliverable, replace old snapshots and 
     expect(result.status).toBe(200); expect(await result.json()).toEqual(native);
   };
   await load({models: []});
-  await load({models: [{slug: 'large', description: '中'.repeat(100_000)}]});
+  await load({models: [{slug: 'large', description: 'x'.repeat(32 * 1024 * 1024)}]});
   const next = request(); await hooks.onDispatchRequest.promise(next); await hooks.onBeforeRequest.promise(next.context);
   expect(next.context.headers['if-none-match']).toBeUndefined();
   expect(await hooks.onInterceptRequest.promise(next.context)).toBeUndefined();

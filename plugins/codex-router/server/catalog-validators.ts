@@ -7,7 +7,7 @@ function header(headers: Record<string, string>, name: string): string {
 }
 
 /** Request headers are captured at entry dispatch, before provider rewrites. */
-export function catalogValidatorKey({context, principal, servingRevision}: DispatchRequestInput, bindings: readonly ModelBinding[]): string | null {
+export function catalogKeys({context, principal, servingRevision}: DispatchRequestInput, bindings: readonly ModelBinding[]): {validator: string; snapshot: string} | null {
   const directory = context.method === 'GET' && /\/models$/.test(context.originalUrl.pathname);
   const generation = context.method === 'POST' && /\/responses$/.test(context.originalUrl.pathname);
   if ((!directory && !generation) || !context.routeId) return null;
@@ -15,12 +15,16 @@ export function catalogValidatorKey({context, principal, servingRevision}: Dispa
   const version = directory ? versions.length === 1 ? versions[0] : '' : header(context.headers, 'version');
   if (!version || version.length > 128 || /[\u0000-\u0020\u007f]/.test(version)) return null;
   // Account headers partition records only; authorization still belongs to the host.
-  return createHash('sha256').update(JSON.stringify([
+  const scope = [
     context.routeId, servingRevision ?? null, bindings,
     principal ? [principal.domain, principal.keyId, principal.credentialVersion] : ['anonymous', '', 0],
     header(context.headers, 'authorization'), header(context.headers, 'x-api-key'), header(context.headers, 'api-key'),
-    header(context.headers, 'chatgpt-account-id'), version,
-  ])).digest('hex');
+    header(context.headers, 'chatgpt-account-id'),
+  ];
+  const key = (version: string) => createHash('sha256').update(JSON.stringify([...scope, version])).digest('hex');
+  // Codex queries the release version but sends the full version in generation headers.
+  // Normalize only notification matching; upstream snapshots retain the exact query version.
+  return {validator: key(version.replace(/^(\d+\.\d+\.\d+)[-+].*$/, '$1')), snapshot: key(version)};
 }
 
 /** Ephemeral control-process LRU. Reads affect eviction, never the publication TTL. */
