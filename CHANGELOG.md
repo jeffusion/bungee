@@ -1,3 +1,10 @@
+# [5.25.0](https://github.com/jeffusion/bungee/compare/v5.24.3...v5.25.0) (2026-10-16)
+
+
+### Features
+
+* **cli:** initialize and persist plugin secrets keys ([eca6038](https://github.com/jeffusion/bungee/commit/eca603889ee23bfe4a3d314c7af0a7ab529e572e))
+
 ## [5.24.3](https://github.com/jeffusion/bungee/compare/v5.24.2...v5.24.3) (2026-10-16)
 
 
