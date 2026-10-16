@@ -249,6 +249,7 @@ jobs:
 
   proof:
     needs: [plan, test]
+    if: ${{ always() && needs.plan.result == 'success' && needs.test.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
