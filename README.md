@@ -225,6 +225,8 @@ npx @jeffusion/bungee@latest status
 CLI installations persist configuration in `~/.bungee/data/bungee.db`, plugin state
 and secrets in `~/.bungee/data/plugin-state.db`, and access logs in `~/.bungee/logs/access.db`. `start` does not read a JSON config file.
 
+`init` generates and persists the plugin encryption key in `~/.bungee/data/plugin-secrets.key`. A key can be supplied only during initialization; later CLI commands read the persisted file. See the [CLI reference](./docs/reference/cli.md#bungee-init) for initialization options and backup requirements.
+
 Bungee uses a revisioned configuration aggregate:
 
 - Reusable backend pools live under `services[].endpoints`

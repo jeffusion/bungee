@@ -6,6 +6,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {__testEnsureWindowsAcl,__testReadWindowsAcl} from '../../packages/types/src/daemon-file';
 import {readRecoveryInput} from '../../packages/core/src/master-runtime/offline-recovery';
+import {initializePluginSecretsKey} from '../../packages/cli/src/config/plugin-secrets-key';
 
 test('recovery input accepts 8192 bytes and closes oversized iterators before parsing',async()=>{
  const json='{"kind":"identity"}';
@@ -51,6 +52,7 @@ test('CLI recovery file input rejects public files and symlinks, accepts owner-o
    expect(acl.ownerSid).toBe(acl.currentSid);
   }else await chmod(file,0o600);
   expect((await run(link)).code).toBe(1);expect(await Bun.file(join(dir,'config.db')).exists()).toBe(false);
+  await initializePluginSecretsKey(join(dir,'config.db'));
   const initialize=Bun.spawn([process.execPath,entry,'--initialize-config',join(dir,'config.db')],{stdout:'pipe',stderr:'pipe',env});
   const [initError,initOutput]=await Promise.all([new Response(initialize.stderr).text(),new Response(initialize.stdout).text()]);
   expect(await initialize.exited,initError+initOutput).toBe(0);

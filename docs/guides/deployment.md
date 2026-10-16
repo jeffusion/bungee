@@ -17,18 +17,19 @@ CLI state lives under `~/.bungee/`:
 ├── bin/
 ├── data/
 │   ├── bungee.db
-│   └── plugin-state.db
+│   ├── plugin-state.db
+│   └── plugin-secrets.key
 ├── logs/access.db
 ├── bungee.log
 ├── bungee.error.log
 └── bungee.pid
 ```
 
-`bungee.db` stores configuration, `plugin-state.db` stores plugin business state and secrets, and `access.db` stores telemetry. Runtime lock files are separate from these databases; do not delete lock files while Bungee is running.
+`bungee.db` stores configuration, `plugin-state.db` stores plugin business state and secrets, and `access.db` stores telemetry. CLI initialization generates and persists the encryption key in the owner-only `plugin-secrets.key` file beside the configuration database. For a supplied key, initialization parameters and precedence are documented in the [CLI reference](../reference/cli.md#bungee-init). Later CLI commands read this file; retain it with database backups. Runtime lock files are separate from these databases; do not delete lock files while Bungee is running.
 
 Storage Workers validate schema and migration prefixes before serving. The observation Worker selects and checks the journal mode using the SQLite runtime actually loaded by Bun; installing a separate sqlite3 CLI does not change that runtime. If an existing WAL database conflicts with the selected mode, startup fails before migrations. Stop the whole instance and back up SQLite side files before offline conversion; never delete a WAL file as a conversion method. See [storage contracts](../architecture/storage.md) and [journal selection](../../packages/core/src/access-database.ts).
 
-Management is anonymous and proxy routes are public by default. `bungee init` only initializes storage. Enable 管理认证 (`local-accounts`) for a single administrator session, and 访问控制 (`key-access`) to create Keys and explicitly protect routes. Disabling management authentication restores anonymous management; a failed or missing selected plugin does not. See [authentication](./authentication.md).
+Management is anonymous and proxy routes are public by default. `bungee init` initializes storage and its encryption key. Enable 管理认证 (`local-accounts`) for a single administrator session, and 访问控制 (`key-access`) to create Keys and explicitly protect routes. Disabling management authentication restores anonymous management; a failed or missing selected plugin does not. See [authentication](./authentication.md).
 
 ## Docker Compose
 

@@ -1,6 +1,11 @@
 import {expect,test} from 'bun:test';
 import {join,resolve} from 'node:path';
 import {createDaemonRuntime} from '../../../src/daemon/runtime';
+import {withPluginSecretsKey} from '../../../src/config/plugin-secrets-key';
+test('runtime key injection removes all inherited casing variants',()=>{
+ const env=withPluginSecretsKey({BUNGEE_PLUGIN_SECRETS_KEY:'external',bungee_plugin_secrets_key:'other',PATH:'kept'},'persisted');
+ expect(env).toEqual({PATH:'kept',BUNGEE_PLUGIN_SECRETS_KEY:'persisted'});
+});
 test('daemon start uses same explicit config database path as local initialization',()=>{
  const runtime=createDaemonRuntime({dataDirectory:'/tmp/bungee-user-data',logsDirectory:'/tmp/bungee-user-logs',inheritedEnvironment:{BUNGEE_CONFIG_DB_PATH:'./custom/database.db'}});
  expect(runtime.env.BUNGEE_CONFIG_DB_PATH).toBe(resolve('./custom/database.db'));

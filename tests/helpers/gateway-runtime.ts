@@ -5,6 +5,7 @@ import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { DaemonManager } from '../../packages/cli/src/daemon/manager';
+import { initializePluginSecretsKey } from '../../packages/cli/src/config/plugin-secrets-key';
 import { captureProcessIdentity, probeProcessIdentity, type CapturedProcessIdentity } from '../../packages/core/src/master-runtime/process-identity';
 import { makeCanonicalTempDir } from './canonical-temp';
 import {
@@ -139,6 +140,7 @@ export async function spawnMaster(
   onSpawn?: (master: OwnedMaster) => void,
   logLevel: 'error' | 'debug' = 'error',
 ): Promise<OwnedMaster> {
+  await initializePluginSecretsKey(fixture.configDbPath, fixture.pluginSecretsKey);
   const safeEnv: NodeJS.ProcessEnv = {};
   for (const name of ['PATH', 'HOME', 'USERPROFILE', 'TMPDIR', 'LANG', 'LC_ALL', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'ComSpec', 'ProgramFiles']) {
     if (process.env[name] !== undefined) safeEnv[name] = process.env[name];

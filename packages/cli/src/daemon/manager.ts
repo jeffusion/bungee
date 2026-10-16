@@ -21,6 +21,7 @@ import {
   type WindowsAclAdapter,
 } from '@jeffusion/bungee-types/daemon-file';
 import { ConfigPaths } from '../config/paths';
+import { readPluginSecretsKey, withPluginSecretsKey } from '../config/plugin-secrets-key';
 import { BinaryManager } from '../binary/manager';
 import { createDaemonRuntime } from './runtime';
 import { deleteLegacyPidFile, readLegacyPidFile, writeLegacyPidMirror } from './pid-mirror';
@@ -75,6 +76,7 @@ export type DaemonManagerDependencies = {
   readonly logFile?: string;
   readonly errorLogFile?: string;
   readonly inheritedEnvironment?: Readonly<Record<string, string | undefined>>;
+  readonly readPluginSecretsKey?: (configDbPath: string) => Promise<string>;
   readonly directLaunch?: LaunchDescriptor;
   readonly launchDescriptor?: LaunchDescriptor;
   readonly now?: () => number;
@@ -208,6 +210,7 @@ export class DaemonManager {
   private readonly findProcessDetailed: (bootNonce: string, expected?: ProcessIdentity) => Promise<MarkerProbeResult>;
   private readonly probePid: (pid: number) => Promise<ProcessAliveProbe>;
   private readonly injectedLaunch?: LaunchDescriptor;
+  private readonly readSecretsKey: (configDbPath: string) => Promise<string>;
   private readonly writePidMirror: (path: string, pid: number) => Promise<void>;
   private readonly httpRequest: (url: string, init: RequestInit) => Promise<Response>;
   private readonly forceStop: (metadata: DaemonMetadataV1) => Promise<void>;
@@ -232,6 +235,7 @@ export class DaemonManager {
     this.dataDirectory = dependencies.dataDirectory ?? ConfigPaths.DATA_DIR;
     this.logsDirectory = dependencies.logsDirectory ?? ConfigPaths.LOGS_DIR;
     this.inheritedEnvironment = dependencies.inheritedEnvironment ?? process.env;
+    this.readSecretsKey = dependencies.readPluginSecretsKey ?? readPluginSecretsKey;
     this.metadataFile = join(this.runtimeDirectory, 'daemon.json');
     this.now = dependencies.now ?? (() => performance.now());
     this.sleep = dependencies.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
@@ -452,6 +456,11 @@ export class DaemonManager {
 
   async start(options: StartOptions = {}): Promise<void> {
     await this.inspectExisting();
+    const runtime = createDaemonRuntime({
+      dataDirectory: this.dataDirectory, logsDirectory: this.logsDirectory, workers: options.workers,
+      port: options.port, inheritedEnvironment: this.inheritedEnvironment,
+    });
+    const key = await this.readSecretsKey(runtime.env.BUNGEE_CONFIG_DB_PATH!);
     const descriptor = await this.launchDescriptor(options);
     const bootNonce = randomUUID().toLowerCase();
     const shutdownSecret = encodeDaemonShutdownSecret(randomBytes(32));
@@ -471,12 +480,8 @@ export class DaemonManager {
       throw error;
     }
 
-    const runtime = createDaemonRuntime({
-      dataDirectory: this.dataDirectory, logsDirectory: this.logsDirectory, workers: options.workers,
-      port: options.port, inheritedEnvironment: this.inheritedEnvironment,
-    });
     const env = {
-      ...runtime.env,
+      ...withPluginSecretsKey(runtime.env, key),
       BUNGEE_ROLE: 'master',
       BUNGEE_DAEMON_METADATA_PATH: this.metadataFile,
       BUNGEE_DAEMON_BOOT_NONCE: bootNonce,

@@ -52,6 +52,8 @@ async function startManager(
   }, undefined, {
     runtimeDirectory: directory, windowsAcl: file.windowsAcl,
     directLaunch: { executable: process.execPath, entrypoint: null },
+    readPluginSecretsKey: async () => Buffer.alloc(32, 17).toString('base64'),
+    inheritedEnvironment: { ...process.env, BUNGEE_PLUGIN_SECRETS_KEY: 'external-value-is-ignored' },
     probeProcess: async () => startupSucceeds ? 'exact' : 'dead',
   });
   manager['pidFile'] = join(directory, 'bungee.pid');
@@ -189,6 +191,7 @@ describe('DaemonManager start', () => {
 
     expect(call.options.cwd).toBe(dataDirectory);
     expect(call.options.env?.BUNGEE_CLI_TEST_MARKER).toBe('inherited');
+    expect(call.options.env?.BUNGEE_PLUGIN_SECRETS_KEY).toBe(Buffer.alloc(32, 17).toString('base64'));
     expect(call.options.env?.WORKER_COUNT).toBe('4');
     expect(call.options.env?.PORT).toBe('9091');
     expect(call.options.env?.DAEMON_MODE).toBe('true');

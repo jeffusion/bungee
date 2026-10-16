@@ -30,7 +30,8 @@ export function createProgram() {
 
   program
     .command('init')
-    .description('Initialize the Bungee SQLite data directory')
+    .description('Initialize the Bungee SQLite data directory and persistent plugin secrets key')
+    .option('--plugin-secrets-key <base64>', 'Initialize with a canonical Base64 key for 32 bytes (otherwise use BUNGEE_PLUGIN_SECRETS_KEY or generate one)')
     .action(initCommand);
 
   program

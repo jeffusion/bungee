@@ -4,6 +4,7 @@ import {hashConfigurationContent} from '../../../src/config-storage/content-hash
 import {initializeConfigurationDatabase} from '../../../src/master-runtime/initialize-configuration';
 import {test} from 'bun:test';
 import {DaemonManager} from '../../../../cli/src/daemon/manager';
+import {initializePluginSecretsKey} from '../../../../cli/src/config/plugin-secrets-key';
 import {captureProcessIdentity,probeProcessIdentity,type CapturedProcessIdentity} from '../../../src/master-runtime/process-identity';
 import {makeCanonicalTempDir} from '../../../../../tests/helpers/canonical-temp';
 import {waitForAuthPublication} from '../../../../../tests/helpers/auth-publication-readiness';
@@ -15,6 +16,7 @@ const childDiagnostic=()=>({exitCode:child?.exitCode,signal:child?.signalCode,ex
 for(let i=0;i<4;i++){const s=Bun.serve({hostname:'127.0.0.1',port:0,fetch:()=>new Response('')});ports.push(s.port!);await s.stop(true);}
 try{await initializeConfigurationDatabase({configDbPath:join(root,'config.db')});
 const launchEnvironment={...process.env,HOME:root,USERPROFILE:root,BUNGEE_CONFIG_DB_PATH:join(root,'config.db'),BUNGEE_ACCESS_DB_PATH:join(root,'access.db'),WORKER_COUNT:'1',HOST:'127.0.0.1',PORT:String(ports[0]),BUNGEE_MANAGEMENT_PORT:String(ports[1]),BUNGEE_MASTER_CONTROL_PORT:String(ports[2]),BUNGEE_INGRESS_SUPERVISION_PORT:String(ports[3]),BUNGEE_PLUGIN_SECRETS_KEY:Buffer.alloc(32,7).toString('base64'),BUNGEE_INCLUDE_SYSTEM_PLUGINS:'false',PLUGINS_DIR:fileURLToPath(new URL('../../../../../plugins', import.meta.url)),LOG_LEVEL:'info'};
+await initializePluginSecretsKey(join(root,'config.db'),launchEnvironment.BUNGEE_PLUGIN_SECRETS_KEY);
 manager=new DaemonManager((executable,args,options)=>{
 child=spawn(executable,[...args],{...options,env:{...options.env,PLUGINS_DIR:launchEnvironment.PLUGINS_DIR},stdio:['ignore','pipe','pipe']});
 const capture=(chunk:Buffer)=>{output=(output+chunk.toString('utf8')).slice(-8192);};

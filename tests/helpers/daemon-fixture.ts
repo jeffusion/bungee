@@ -1,4 +1,5 @@
 import { mkdtempSync, realpathSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
 import { join, posix, resolve, win32 } from 'node:path';
 import type { DaemonFileOptions, WindowsAclAdapter, WindowsAclEntry, WindowsAclSnapshot } from '@jeffusion/bungee-types/daemon-file';
@@ -104,6 +105,7 @@ export function createTestManager(
     processPlatform: process.platform,
     filePlatform: process.platform,
     windowsAcl: file.windowsAcl,
+    readPluginSecretsKey: async () => randomBytes(32).toString('base64'),
     ...(isolated === undefined ? {} : {
       configDirectory: join(isolated, 'config'), dataDirectory: join(isolated, 'data'),
       logsDirectory: join(isolated, 'logs'), pidFile: join(isolated, 'bungee.pid'),
