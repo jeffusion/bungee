@@ -1,3 +1,10 @@
+## [5.24.3](https://github.com/jeffusion/bungee/compare/v5.24.2...v5.24.3) (2026-10-16)
+
+
+### Bug Fixes
+
+* **ci:** generate proof after skipped test jobs ([f644f4b](https://github.com/jeffusion/bungee/commit/f644f4b9937902d6a93f89116467ee5928d0462f))
+
 ## [5.24.2](https://github.com/jeffusion/bungee/compare/v5.24.1...v5.24.2) (2026-10-15)
 
 
