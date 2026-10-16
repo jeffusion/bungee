@@ -3,11 +3,11 @@
 ## CLI
 
 ```bash
-npx bungee init
-npx bungee start
-npx bungee status
-npx bungee logs
-npx bungee stop
+npx @jeffusion/bungee@latest init
+npx @jeffusion/bungee@latest start
+npx @jeffusion/bungee@latest status
+npx @jeffusion/bungee@latest logs
+npx @jeffusion/bungee@latest stop
 ```
 
 CLI state lives under `~/.bungee/`:

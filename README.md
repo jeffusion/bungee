@@ -211,13 +211,13 @@ Documentation index: [docs/README.md](docs/README.md)
 
 ```bash
 # Initialize the SQLite data directory (~/.bungee/data)
-npx bungee init
+npx @jeffusion/bungee@latest init
 
 # Start daemon
-npx bungee start
+npx @jeffusion/bungee@latest start
 
 # Check status
-npx bungee status
+npx @jeffusion/bungee@latest status
 ```
 
 ### Configuration model
