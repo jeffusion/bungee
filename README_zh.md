@@ -21,7 +21,7 @@ npx @jeffusion/bungee@latest init
 npx @jeffusion/bungee@latest start
 ```
 
-`init` 建立 SQLite 配置库及插件状态库，不生成凭证。管理入口默认匿名，代理路由默认公开。需要登录管理时，在插件中心启用“管理认证”（`local-accounts`），建立或验证唯一管理员，使用 Cookie／Bearer 会话；显式停用后恢复匿名管理。
+`init` 建立 SQLite 配置库及插件状态库，自动生成并持久化插件加密密钥，不创建管理员或访问 Key。仅初始化时可通过参数或环境变量指定密钥，后续命令只读取持久化结果；参数和备份要求见 [CLI 参考](./docs/reference/cli.md#bungee-init)。管理入口默认匿名，代理路由默认公开。需要登录管理时，在插件中心启用“管理认证”（`local-accounts`），建立或验证唯一管理员，使用 Cookie／Bearer 会话；显式停用后恢复匿名管理。
 
 需要限制代理访问时，启用“访问控制”（`key-access`），在插件设置中维护 Key 与受保护路由。Key 允许路由与路由保护分开，创建或编辑 Key 不改变公开状态，保护集合单独修改。撤销最后一个 Key 不解除保护；公开请求即使携带 Key，也不消耗 Key 限速或预算。Route 和 Service 编辑器不配置认证。
 
@@ -40,7 +40,8 @@ CLI 默认使用：
 ├── bin/
 ├── data/
 │   ├── bungee.db
-│   └── plugin-state.db
+│   ├── plugin-state.db
+│   └── plugin-secrets.key
 ├── logs/access.db
 ├── bungee.log
 ├── bungee.error.log

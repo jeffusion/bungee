@@ -17,6 +17,7 @@ import {
 import { readDaemonMetadataFile, type DaemonFileOptions } from '../../packages/types/src/daemon-file';
 import type { DaemonMetadataState } from '../../packages/types/src/daemon-control';
 import { DaemonManager } from '../../packages/cli/src/daemon/manager';
+import { initializePluginSecretsKey } from '../../packages/cli/src/config/plugin-secrets-key';
 import { probeDaemonProcess } from '../../packages/cli/src/daemon/process-identity';
 import { createMemoryWindowsAcl } from '../helpers/daemon-fixture';
 import {
@@ -522,6 +523,8 @@ async function createDaemonHarness(root: string, lease: PortLease, fixture: Fixt
   const logFiles = [join(configDirectory, 'bungee.log'), join(configDirectory, 'bungee.error.log')];
   const childExitWindows = new WeakMap<ChildProcess, () => Promise<Readonly<{ phase: DaemonRuntimePhase; messages: readonly [readonly string[], readonly string[]]; codes: readonly string[]; diagnostics: readonly ShutdownDiagnostic[]; diagnosticsTruncated: boolean; status: 'unavailable' | 'truncated' | 'complete' }>>>();
   const baseEnvironment = options.baseEnvironment ?? (fixture === undefined ? process.env : coreEnvironment(fixture, lease, workers, options.tlsCertPath));
+  const configDbPath = baseEnvironment.BUNGEE_CONFIG_DB_PATH ? resolve(baseEnvironment.BUNGEE_CONFIG_DB_PATH) : join(dataDirectory, 'bungee.db');
+  await initializePluginSecretsKey(configDbPath, options.pluginSecretsKey ?? Buffer.alloc(32, 9).toString('base64'));
   const windowsAcl = createMemoryWindowsAcl();
   const metadataFileOptions: DaemonFileOptions = { runtimeDirectory: runtime, windowsAcl };
   const childTracking: { current?: StartChildTracking } = {};

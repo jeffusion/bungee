@@ -10,6 +10,8 @@
 bungee recover --file recovery.json
 ```
 
+CLI 从配置数据库旁的 `plugin-secrets.key` 读取初始化时持久化的加密密钥，恢复命令不接受参数或环境变量覆盖。恢复数据库备份时，同时还原配套的密钥文件；CLI 初始化约定见 [CLI 参考](../reference/cli.md#bungee-init)。
+
 ## 前提与输入
 
 停止 master、ingress 和所有 Worker。初始化、启动和恢复使用相同的配置路径、环境和实例锁路径；不要通过删除锁文件绕过运行实例。输入最多 8192 字节，文件必须为 0600，或从 stdin 输入：

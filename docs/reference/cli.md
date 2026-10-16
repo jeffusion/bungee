@@ -10,7 +10,7 @@ The npm package is `@jeffusion/bungee`; its executable is named `bungee`. Use `n
 
 | Command | Description |
 |---|---|
-| `bungee init` | Initialize the SQLite data directory only |
+| `bungee init` | Initialize SQLite storage and persist the plugin secrets encryption key |
 | `bungee recover` | Recover stopped-instance identity or plugin state from bounded JSON input |
 | `bungee start` | Start proxy server as daemon |
 | `bungee stop` | Stop daemon |
@@ -28,7 +28,12 @@ The npm package is `@jeffusion/bungee`; its executable is named `bungee`. Use `n
 
 ### `bungee init`
 
-Creates the SQLite configuration database and its sibling plugin-state.db idempotently. It does not generate credentials or create an administrator. The core launch parameter is `--initialize-config <absolute-db-path>`. The instance must be stopped; initialization holds master and ingress locks.
+Creates the SQLite configuration database and its sibling `plugin-state.db` idempotently, and initializes `plugin-secrets.key` beside the configuration database. It does not create an administrator or proxy API Keys. The core launch parameter is `--initialize-config <absolute-db-path>`. The instance must be stopped; initialization holds master and ingress locks.
+
+- `--plugin-secrets-key <base64>`: supply the encryption key during initialization. It takes precedence over `BUNGEE_PLUGIN_SECRETS_KEY`; when neither is supplied, `init` generates 32 random bytes encoded as canonical Base64.
+- The final key is always persisted. The file is owner-only (`0600` on Linux/macOS, restricted ACL on Windows); command output shows its path, never the key.
+- Repeated `init` reuses the existing key. A different supplied key, a malformed key or an unsafe key file is rejected without replacement. If either the configuration database or `plugin-state.db` exists without a key file, `init` requires the original key; no replacement key is generated for either database.
+- `start`, `restart` and `recover` read only the persisted key. Their environment cannot override it, and they never generate a missing key. Back up this file with the databases and restore the matching key before use.
 
 ### `bungee recover`
 
@@ -92,7 +97,8 @@ CLI-managed default directory:
 │       └── plugins/
 ├── data/
 │   ├── bungee.db
-│   └── plugin-state.db
+│   ├── plugin-state.db
+│   └── plugin-secrets.key
 └── logs/access.db
 ```
 

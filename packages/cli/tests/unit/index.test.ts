@@ -8,6 +8,17 @@ function command(name: string) {
 }
 
 describe('management command registration', () => {
+  test('only init accepts an explicit plugin secrets key', async () => {
+    const cli = createProgram();
+    const init = cli.commands.find(candidate => candidate.name() === 'init')!;
+    let parsed: string | undefined;
+    init.action(options => { parsed = options.pluginSecretsKey; });
+    await cli.parseAsync(['node', 'bungee', 'init', '--plugin-secrets-key', 'test-key']);
+    expect(parsed).toBe('test-key');
+    for (const name of ['start', 'restart', 'recover']) {
+      expect(command(name).options.some(option => option.long === '--plugin-secrets-key')).toBe(false);
+    }
+  });
   for (const name of ['ui', 'export', 'import']) {
     test(`${name} parses the Management server default port`, async () => {
       const cli = createProgram();

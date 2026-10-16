@@ -7,6 +7,22 @@ import { readDaemonMetadataFile, transitionDaemonMetadataFile } from '@jeffusion
 import { ConfigPaths } from '../../../src/config/paths';
 import { createTestManager, makeCanonicalTempDir, optionsFor } from '../../../../../tests/helpers/daemon-fixture';
 
+test('missing persisted key fails before binary resolution, daemon ownership or spawn', async () => {
+  const directory = makeCanonicalTempDir('bungee-manager-missing-key');
+  let spawned = false;
+  try {
+    const manager = createTestManager(() => { spawned = true; throw new Error('must not spawn'); }, undefined, {
+      runtimeDirectory: directory,
+      inheritedEnvironment: { BUNGEE_PLUGIN_SECRETS_KEY: Buffer.alloc(32).toString('base64') },
+      readPluginSecretsKey: undefined,
+    });
+    await expect(manager.start()).rejects.toThrow('Run bungee init');
+    expect(spawned).toBe(false);
+    expect(existsSync(join(directory, 'daemon.json'))).toBe(false);
+    expect(existsSync(join(directory, 'data', 'plugin-secrets.key'))).toBe(false);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test('injected directories do not initialize the parent user directories', async () => {
   const directory = makeCanonicalTempDir('bungee-manager-fixture-directories');
   const spies = [ConfigPaths.ensureConfigDir, ConfigPaths.ensureDataDir, ConfigPaths.ensureLogsDir];

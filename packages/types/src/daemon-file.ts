@@ -784,6 +784,12 @@ function defaultWindowsAclAdapter(deadlineMs = WINDOWS_ACL_DEADLINE_MS): Windows
   };
 }
 
+/** Restrict a newly created private file before writing any secret bytes. */
+export async function secureWindowsOwnerOnlyFileAcl(path: string, adapter: WindowsAclAdapter = defaultWindowsAclAdapter()): Promise<void> {
+  await ensureWindowsAcl(path, adapter, 'file');
+  await assertWindowsOwnerOnlyFileAcl(path, adapter);
+}
+
 /** Read-only validation: untrusted input files must never have their ACL repaired. */
 export async function assertWindowsOwnerOnlyFileAcl(path: string, adapter: WindowsAclAdapter = defaultWindowsAclAdapter()): Promise<void> {
   const snapshot = await adapter.read(path);
