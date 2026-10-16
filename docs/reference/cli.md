@@ -2,6 +2,8 @@
 
 This document is aligned with `packages/cli/src/index.ts` and `packages/cli/src/config/paths.ts`.
 
+The npm package is `@jeffusion/bungee`; its executable is named `bungee`. Use `npx @jeffusion/bungee@latest <command>` without a global installation, or install it with `npm install -g @jeffusion/bungee@latest` to use the `bungee` commands below directly.
+
 ---
 
 ## 1) Command Matrix
@@ -103,27 +105,27 @@ CLI-managed default directory:
 ### Bootstrap and start
 
 ```bash
-npx bungee init
-npx bungee start
-npx bungee status
+npx @jeffusion/bungee@latest init
+npx @jeffusion/bungee@latest start
+npx @jeffusion/bungee@latest status
 ```
 
 ### Tail logs
 
 ```bash
-npx bungee logs --follow
+npx @jeffusion/bungee@latest logs --follow
 ```
 
 ### Restart with explicit worker count
 
 ```bash
-npx bungee restart --workers 4
+npx @jeffusion/bungee@latest restart --workers 4
 ```
 
 ### Open dashboard
 
 ```bash
-npx bungee ui --host localhost --port 8089
+npx @jeffusion/bungee@latest ui --host localhost --port 8089
 ```
 
 ---
