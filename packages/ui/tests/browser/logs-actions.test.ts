@@ -1,6 +1,7 @@
 import { test as browserTest } from 'bun:test';
 import { chromium, expect } from 'playwright/test';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
+import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 
 browserTest('logs actions', async () => {
@@ -30,6 +31,13 @@ try {
         if (url.pathname === '/api/config/runtime') return route.fulfill({ json: config });
         if (url.pathname === '/api/config') return route.fulfill({ json: { revision: 1, content_hash: config.content_hash, config: config.config } });
         if (url.pathname === '/api/plugins') return route.fulfill({ json: [] });
+        if (url.pathname === '/api/ui/menus') {
+          // Log panel bounds use a compact user layout, independently of header overflow.
+          const snapshot = menuSnapshot();
+          return route.fulfill({ json: { ...snapshot, layout: [{ kind: 'group', id: 'group:pages', title: 'Pages', visible: true,
+            children: snapshot.catalog.map(page => ({ kind: 'page', pageId: page.id, visible: true })) }] } });
+        }
+        if (url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
         if (url.pathname === '/api/resources/api-key') return route.fulfill({ json: { keys: [] } });
         if (url.pathname === '/api/logs') { queries.push(url); return route.fulfill({ json: { data: [row], total: 1, totalPages: 1, page: 1, limit: 50 } }); }
         if (url.pathname === '/api/logs/export') return route.fulfill({ contentType: 'text/csv', body: 'requestId,status\nrequest,200\n' });
