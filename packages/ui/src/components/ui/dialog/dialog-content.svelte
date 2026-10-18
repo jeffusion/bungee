@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { tick } from 'svelte';
 	import { Dialog as DialogPrimitive } from "bits-ui";
 	import X from "lucide-svelte/icons/x";
 	import * as Dialog from "./index.js";
@@ -9,6 +10,7 @@
 		closeLabel?: string;
 		closeClass?: string;
 		children?: import('svelte').Snippet;
+		onClosed?: () => void;
 	};
 	let {
 		class: className = undefined,
@@ -18,13 +20,23 @@
 		closeLabel = 'Close',
 		closeClass,
 		children,
+		onClosed,
 		...restProps
 	}: Props = $props();
+	let element = $state<HTMLElement>();
+	$effect(() => {
+		const node = element;
+		if (!node) return;
+		const closed = () => { void tick().then(() => { if (!node.isConnected) onClosed?.(); }); };
+		node.addEventListener('outroend', closed);
+		return () => node.removeEventListener('outroend', closed);
+	});
 </script>
 
 <Dialog.Portal>
 	<Dialog.Overlay />
 	<DialogPrimitive.Content
+		bind:el={element}
 		{transition}
 		{transitionConfig}
 		class={cn(

@@ -16,6 +16,20 @@ function plan(changed: string[], overrides: Partial<Parameters<typeof selectTest
 const entry = (module: string, phase: string) => `${module === 'root' ? '' : module + '/'}tests/${phase}/sample.test.ts`;
 
 describe('test scope selection', () => {
+  test('shared menu contracts and core storage/API changes retain full regression selection', () => {
+    const added = [
+      'packages/types/tests/unit/menus.test.ts',
+      'packages/core/tests/integration/ui-menus.test.ts',
+      'packages/ui/tests/browser/menus.test.ts',
+    ];
+    for (const file of ['packages/types/src/menus.ts', 'packages/core/src/master-runtime/menu-api.ts', 'packages/core/scripts/generate-icon-resources.ts']) {
+      const selected = plan([file], { paths: [...paths, ...added] });
+      expect(selected.mode).toBe('full');
+      expect(selected.files.unit).toContain(added[0]);
+      expect(selected.files.integration).toContain(added[1]);
+      expect(selected.files.browser).toContain(added[2]);
+    }
+  });
   test('discovers category entries, including tests of helpers, without discovering support files', () => {
     expect(discoverTests([...paths, 'tests/helpers/fake.test.ts', 'tests/fixtures/fake.test.ts', 'tests/fixtures/example/tests/unit/fake.test.ts', 'tests/manual/fake.test.ts', 'node_modules/x/tests/unit/fake.test.ts', 'dist/tests/unit/fake.test.ts', 'tests/integration/helpers/fixture.test.ts'])).toEqual({
       unit: paths.filter(p => p.includes('/unit/')).sort(),

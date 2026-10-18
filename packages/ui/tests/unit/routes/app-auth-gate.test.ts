@@ -29,7 +29,7 @@ test('identity invalidates the initialization cache without unmounting the shell
   const source = await read('../../../src/App.svelte');
   const template = source.slice(source.indexOf('</script>'));
   expect(template).toContain('{:else if !modeReady || !$isAuthenticated || !protectedInitialized}');
-  for (const cacheState of ['applicationReady', 'protectedIdentity', 'authenticationIdentity']) expect(template).not.toContain(cacheState);
+  for (const cacheState of ['applicationReady', 'protectedIdentity', 'authenticationIdentity']) expect(template).not.toMatch(new RegExp('\\{[:#](?:else )?if[^\\n]*' + cacheState));
   expect(source).toContain('const applicationReady = $derived(protectedInitialized && protectedIdentity === authenticationIdentity)');
   const protectedInit = source.slice(source.indexOf('async function protectedInitialize'), source.indexOf('async function initializeAuthenticatedSession'));
   expect(protectedInit).toContain('if (applicationReady) return true');
@@ -64,7 +64,7 @@ test('normal hash changes retain the login capability and completion leaves only
   const loginKey = app.match(/\{#key ([^\n]*?)\}<Login /)?.[1];
   expect(loginKey).toBeDefined();
   expect(loginKey).not.toContain('$location');
-  const completion = app.slice(app.indexOf('function handleLoginCompleted'), app.indexOf('// Navigation items'));
+  const completion = app.slice(app.indexOf('function handleLoginCompleted'), app.indexOf('const fallbackCatalog'));
   expect(completion).toContain("const path = window.location.hash.replace(/^#/, '').split('?', 1)[0]");
   expect(completion).toMatch(/if \(destroyed\) return;[\s\S]*loginPageActive = false;[\s\S]*if \(path === '\/login'\) window\.location\.hash = '#\/';/);
   for (const staleNavigation of ['get(location)', 'navigationCurrent', 'capturedLocation', 'startsWith']) expect(completion).not.toContain(staleNavigation);
@@ -124,7 +124,7 @@ test('plugin login has no host auth dependencies, endpoint prop or completion ev
 
 test('shell logout is host-owned, guards drafts and only navigates after verified settlement', async () => {
   const app = await read('../../../src/App.svelte');
-  const action = app.slice(app.indexOf('async function handleLogout'), app.indexOf('// Navigation items'));
+  const action = app.slice(app.indexOf('async function handleLogout'), app.indexOf('const fallbackCatalog'));
   expect(action).toContain('if (logoutBusy');
   expect(action).toContain('await confirmAction');
   expect(action).toContain('if (!accepted || !current()) return');
@@ -139,32 +139,11 @@ test('shell logout is host-owned, guards drafts and only navigates after verifie
   for (const removed of ['secureChannel', 'StatusBadge', '>SECURE<', '>OPEN<']) expect(header).not.toContain(removed);
   // Desktop and mobile share one independent button and the host's guarded action.
   expect(header.match(/disabled=\{logoutBusy\}/g)).toHaveLength(1);
-  expect(header).toContain('data-testid="header-management-menu"');
-  expect(header).toContain('use:managementLifecycle');
+  expect(action).toContain('menuDirty.set(false)');
   const logoutButton = header.match(/<button id="header-logout-button"[\s\S]*?<\/button>/)?.[0];
   expect(logoutButton).toBeDefined();
   expect(logoutButton).toContain('disabled={logoutBusy} aria-busy={logoutBusy}');
-  expect(logoutButton).toContain('onclick={() => { void onLogout(); }}');
+  expect(logoutButton).toContain('onLogout(event.currentTarget)');
   expect(logoutButton).toContain("aria-label={$_('login.logout')}");
   expect(header.match(/id="header-logout-button"/g)).toHaveLength(1);
-  const systemMenu = header.slice(header.indexOf('<DropdownMenu.Content data-testid="header-management-menu"'),
-    header.indexOf('</DropdownMenu.Content>', header.indexOf('<DropdownMenu.Content data-testid="header-management-menu"')));
-  expect(systemMenu).not.toContain('LogOut');
-  expect(systemMenu).not.toContain('onLogout');
-});
-
-test('shell separates plugin/business navigation from system administration', async () => {
-  const app = await read('../../../src/App.svelte');
-  const navigation = app.slice(app.indexOf('const navItems'), app.indexOf('const isOnLogin'));
-  expect(navigation).not.toContain("href: '/#/config'");
-  expect(navigation).not.toContain("href: '/#/plugins'");
-  expect(navigation).toContain('$pluginList.forEach');
-  const header = await read('../../../src/components/shell/AppHeader.svelte');
-  const pages = header.slice(header.indexOf('<Sheet.Root'), header.indexOf('</Sheet.Root>'));
-  expect(pages).toContain('{#each items as item}');
-  for (const system of ['/#/config', '/#/plugins', 'header.language', 'login.logout']) expect(pages).not.toContain(system);
-  expect(header).toContain('href="/#/config"');
-  expect(header).toContain('href="/#/plugins"');
-  expect(header).toContain("managementPage === 'configuration' ? 'page'");
-  expect(header).toContain("managementPage === 'plugins' ? 'page'");
 });

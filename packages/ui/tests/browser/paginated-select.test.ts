@@ -2,6 +2,7 @@ import { test as browserTest } from 'bun:test';
 import { chromium, expect } from 'playwright/test';
 import { resolve, extname } from 'node:path';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
+import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
 
 browserTest('paginated select', async () => {
 const manifest = await Bun.file(new URL('../../../../plugins/token-stats/manifest.json', import.meta.url)).json();
@@ -28,6 +29,8 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
   const json = (value: unknown) => route.fulfill({ json: value });
   if (path === '/api/auth/mode') return json({ mode: 'anonymous', publicOrigin: url.origin });
   if (path === '/api/auth/verify') return json({ success: true, mode: 'anonymous' });
+  if (path === '/api/ui/menus') return json(menuSnapshot());
+  if (path === '/api/ui/icons/data') return fulfillMenuIcons(route);
   if (path === '/api/config/runtime') return json(runtime);
   if (path === '/api/config') return json({ revision: runtime.revision, content_hash: runtime.content_hash, config: runtime.config });
   if (path === '/api/plugins/schemas') return json({ 'token-stats': { ...manifest, metadata: manifest.metadata } });

@@ -1,3 +1,5 @@
+import { readMenuLayout, writeMenuLayout } from './menu-store';
+import type { MenuLayout } from '@jeffusion/bungee-types';
 import * as retirementStore from './retirement-store';
 import * as runtimeRecoveryBudget from './runtime-recovery-budget';
 import { Database } from 'bun:sqlite';
@@ -117,6 +119,7 @@ export class ConfigRepository {
       repository.getSnapshot();
       repository.getSupervisionState();
       repository.getRuntimeRecoveryBudget();
+      repository.getMenuLayout();
       return repository;
     } catch (error) {
       db?.close(true);
@@ -137,6 +140,14 @@ export class ConfigRepository {
 
   getSnapshot(): RepositorySnapshot {
     return this.snapshot;
+  }
+
+  getMenuLayout() {
+    return runRepositoryAction(() => withConsistentRead(this.db, () => readMenuLayout(this.db)));
+  }
+
+  putMenuLayout(expectedRevision: number, layout: MenuLayout, catalogPageIds: readonly string[]) {
+    return runRepositoryAction(() => this.mutationTransaction(() => writeMenuLayout(this.db, expectedRevision, layout, catalogPageIds)));
   }
 
   appendServingSnapshot(snapshot: RepositorySnapshot, pluginCatalogHash: Sha256Digest): void {
@@ -462,6 +473,7 @@ export class ConfigRepository {
     verifyRepositoryIntegrity(this.db);
     readRepositorySnapshot(this.db);
     this.getRuntimeRecoveryBudget();
+    this.getMenuLayout();
   }
 
   /** Internal execution endpoint. The client consumes the lock capability before IPC. */

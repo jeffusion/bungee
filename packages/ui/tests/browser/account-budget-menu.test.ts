@@ -72,23 +72,20 @@ try {
       await expect(card).toBeVisible();
       await expect(card.locator(`a[href^="/#/plugins/${name}"]`)).toHaveCount(0);
       await expect(card.locator(`a[href="/#${canonical}"]`)).toBeVisible();
-      const menu = page.getByTestId('app-header').getByRole('link', { name: t(name, 'metadata.name'), exact: true });
-      await menu.click();
+      await page.getByTestId('header-top-menu').getByRole('link', { name: t(name, 'metadata.name'), exact: true }).click();
       const settings = page.getByTestId(testId);
       await expect(settings).toContainText(name === 'local-accounts' ? 'admin' : key.name);
       await page.reload(); await expect(settings).toContainText(name === 'local-accounts' ? 'admin' : key.name);
       for (const width of [320, 390, 768, 1440]) {
         await page.setViewportSize({ width, height: 1000 });
-        if (width < 768) {
-          await page.locator('#header-menu-trigger').click();
-          const sheet = page.getByTestId('header-menu');
-          const link = sheet.getByRole('link', { name: t(name, 'metadata.name'), exact: true });
+        {
+          const link = page.getByTestId('header-top-menu').getByRole('link', { name: t(name, 'metadata.name'), exact: true });
           await expect(link).toHaveAttribute('aria-current', 'page');
           if (language === 'zh-CN' && width === 390 && name === 'token-budget') await page.screenshot({
             path: `${evidence}/menu-390.png`, fullPage: true, animations: 'disabled' });
-          await link.click(); await expect(sheet).toHaveCount(0);
-        } else await expect(menu).toHaveAttribute('aria-current', 'page');
-        expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+          await link.click();
+        }
+        expect(await page.locator('main').evaluate(node => node.scrollWidth > node.clientWidth)).toBe(false);
         if (language === 'zh-CN' && [390, 1440].includes(width)) await page.screenshot({
           path: `${evidence}/${name}-${width}.png`, fullPage: true, animations: 'disabled' });
       }

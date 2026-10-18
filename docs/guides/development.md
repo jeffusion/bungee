@@ -98,6 +98,15 @@ Production build chain (root `build`) includes:
 
 This ensures UI and runtime artifacts are synchronized.
 
+The core build runs `packages/core/scripts/generate-icon-resources.ts` before
+bundling. It reads the locked Iconify JSON dependencies, builds the name indexes
+and embeds compressed offline geometry in generated `src/ui/icon-resources.ts`.
+Do not edit that output. To add a collection, declare its data dependency and
+register it in `packages/core/src/ui/icon-collections.ts`; discovery, validation
+and search use that registry without frontend changes. Keep collection licenses
+in the generated metadata. Validate representative icons and default mappings,
+not every icon in a complete collection.
+
 ---
 
 ## 6) Testing Strategy
@@ -277,6 +286,11 @@ bun tests/manual/storage-native-acceptance.ts /absolute/path/to/bungee-linux
 bun tests/manual/plugin-business-browser-acceptance.ts --evidence-dir /tmp/bungee-plugin-browser
 ```
 
-The plugin business check downloads the public models.dev catalog and requires network access; it does not call paid model providers. Header and publication acceptance tools under `tests/manual/` require a disposable loopback backend and their declared environment inputs. They are excluded from automatic discovery. Read their ownership checks before using them, and never pass production data or credentials.
+The plugin business check downloads the public models.dev catalog and requires network access; it does not call paid model providers. Publication acceptance tools under `tests/manual/` require a disposable loopback backend and their declared environment inputs. They are excluded from automatic discovery. Read their ownership checks before using them, and never pass production data or credentials.
+
+Header navigation, group dropdowns, language selection, logout and menu editing
+are covered by `packages/ui/tests/browser/header-actions.test.ts` and
+`packages/ui/tests/browser/menus.test.ts`. These checks use the current UI build
+with mocked management APIs.
 
 Package-local browser checks include NumberInput, scrolling, route editors and dashboard widget ownership. Use `bun test --isolate <path-to-test>` for a focused file. All browser evidence must distinguish mocked APIs, local real gateways and external providers.

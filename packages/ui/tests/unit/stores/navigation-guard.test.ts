@@ -51,19 +51,22 @@ test('guardedLocation refreshes its readable cache after source changes while fu
     Object.defineProperty(globalThis, 'history', { configurable: true, value: fakeHistory });
     Object.defineProperty(globalThis, 'HashChangeEvent', { configurable: true, value: class FakeHashChangeEvent {} });
 
-    const [{ guardedLocation, dashboardDirty, settingsDirty }, { isAuthenticated }] = await Promise.all([
+    const [{ guardedLocation, dashboardDirty, settingsDirty, menuDirty }, { isAuthenticated }] = await Promise.all([
       import('../../../src/stores/navigation-guard'), import('../../../src/stores/auth'),
     ]);
     const previousDashboardDirty = get(dashboardDirty);
     const previousSettingsDirty = get(settingsDirty);
+    const previousMenuDirty = get(menuDirty);
     const previousAuthentication = get(isAuthenticated);
     restoreStoreState = () => {
       dashboardDirty.set(previousDashboardDirty);
       settingsDirty.set(previousSettingsDirty);
+      menuDirty.set(previousMenuDirty);
       isAuthenticated.set(previousAuthentication);
     };
     dashboardDirty.set(false);
     settingsDirty.set(false);
+    menuDirty.set(false);
     isAuthenticated.set(false);
 
     const initialValues: string[] = [];
@@ -107,6 +110,16 @@ test('guardedLocation refreshes its readable cache after source changes while fu
     expect(refreshedValues.at(-1)).toBe('/services');
     expect(get(dashboardDirty)).toBe(false);
 
+    menuDirty.set(true);
+    rawLocation.set('/menus');
+    expect(confirmationCalls).toBe(3);
+    resolveConfirmation?.(false); await Promise.resolve();
+    expect(refreshedValues.at(-1)).toBe('/services');
+    expect(get(menuDirty)).toBe(true); expect(get(settingsDirty)).toBe(false); expect(get(dashboardDirty)).toBe(false);
+    rawLocation.set('/routes');
+    expect(confirmationCalls).toBe(4);
+    resolveConfirmation?.(true); await Promise.resolve();
+    expect(refreshedValues.at(-1)).toBe('/routes'); expect(get(menuDirty)).toBe(false);
     unsubscribe();
     unsubscribe = undefined;
     expect(addedListeners).toBe(removedListeners);

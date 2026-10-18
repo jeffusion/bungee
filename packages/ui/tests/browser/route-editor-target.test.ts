@@ -5,6 +5,7 @@ import { createServer } from 'node:http';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
 
 browserTest('route editor target', async () => {
 const dist = resolve(fileURLToPath(new URL('../../dist', import.meta.url)));
@@ -95,6 +96,8 @@ try {
         let body;
         if (key === 'GET /api/auth/mode') body = { mode: 'anonymous', publicOrigin: origin };
         else if (key === 'GET /api/auth/verify') body = { success: true, mode: 'anonymous', subject: { id: 'anonymous', provider: 'anonymous' } };
+        else if (key === 'GET /api/ui/menus') body = menuSnapshot();
+        else if (key === 'GET /api/ui/icons/data') return fulfillMenuIcons(route);
         else if (key === 'GET /api/plugins') body = [];
         else if (key === 'GET /api/plugin-translations') body = {};
         else if (key === 'GET /api/config') body = { revision: 1, content_hash: `sha256:${'a'.repeat(64)}`,

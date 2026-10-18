@@ -51,6 +51,47 @@ Management surface:
 
 ## 3) Customizable Layout
 
+### Navigation menus
+
+Open **System → Menu management** (`/#/menus`) in the default layout to arrange navigation for
+the entire instance. Built-in pages, plugin pages and administration pages can
+be reordered, hidden, or moved into one-level groups. The default System group
+is editable. Each compact row provides a drag handle, a clickable icon and a
+visibility switch. Rows reorder immediately while dragging, with no added gaps. Move over a row
+edge to insert before or after it, or over a group center to move inside.
+Release inside the list to keep the draft; Escape or release outside cancels
+the drag. Groups remain one level deep. **Menu actions** contains move/up/down and move-to-group
+controls, plus icon reset and group rename/dissolve. Dissolving a group preserves its pages.
+
+Click a group name to collapse or expand its children. Rename through its action
+menu; Enter or blur finishes a valid name, Escape cancels, and invalid names are
+marked next to the field. **Draft preview** opens a read-only tree. **Page
+actions** contains reload, reset and the read-only page catalog.
+
+Edits and icon choices remain a draft until **Save changes**. Reset restores the
+default draft; leaving with unsaved changes asks whether to discard it. Another
+editor's newer revision requires reload instead of overwriting their changes.
+Other browser windows refresh when brought to the foreground.
+
+Navigation displays all visible top-level pages and groups in the configured
+order at every screen width. Groups open dropdowns. There is no automatic
+overflow collection or separate mobile panel; use groups, shorter names and
+visibility to control the width. The direct Menu management route remains
+`/#/menus` if its entry is hidden.
+Hiding an entry does not revoke page access or disable its plugin. Disabled
+plugin pages are absent from the editor, page catalog and navigation. Their
+saved arrangement, visibility and icons are retained for re-enabling.
+
+Pages and groups support default or user-selected icons from the complete local
+Lucide, Tabler and Carbon sets. The chooser filters by collection and pages
+search results; English names are fully searchable, with maintained common
+Chinese keywords. Icon data is served by Bungee and works without Internet
+access. Uploading images or SVG is unsupported. Navigation settings are saved
+in the instance database, independently of browser-local dashboard card layouts
+and proxy configuration publication.
+
+### Dashboard cards
+
 With no saved layout, the dashboard starts with the **LLM gateway** template.
 Its top row contains RPM, success rate, average latency (6 columns each), and
 Token overview (12 columns). Service and route health occupy the 10-column
@@ -129,6 +170,7 @@ Major endpoint groups:
 - System: `/api/system`
 - Plugins: `/api/plugins*`
 - Logs: `/api/logs*`
+- Navigation and offline icons: `/api/ui/menus`, `/api/ui/icons/*`
 
 ---
 

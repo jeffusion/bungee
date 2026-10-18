@@ -3,6 +3,7 @@ import { ConfigRepositoryError, type ConfigRepositoryErrorCode, type Configurati
 
 /** Every callable storage endpoint is named here; no arbitrary property dispatch. */
 export const STORAGE_METHODS = [
+  'getMenuLayout', 'putMenuLayout',
   'getPublicationRetirementRetry','requestPublicationRetirementRetry',
   'freezePublicationRetirementDrainStart',
   'commitPrepared', 'appendServingSnapshot', 'getServingSnapshot', 'claimController',
@@ -18,6 +19,7 @@ export type StorageMethod = typeof STORAGE_METHODS[number];
 export type StorageParameters<M extends StorageMethod> = Parameters<ConfigRepository[M]>;
 export type StorageResult<M extends StorageMethod> = ReturnType<ConfigRepository[M]>;
 export const READ_METHODS: ReadonlySet<StorageMethod> = new Set([
+  'getMenuLayout',
   'getPublicationRetirementRetry',
   'getPublicationServingSet', 'getServingSnapshot', 'getActivePublication', 'getOperation', 'getOperationState',
   'getCurrentOperationState', 'getRecovery', 'getCurrentRecovery', 'getLatestRecovery', 'verify',

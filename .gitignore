@@ -9,6 +9,7 @@ packages/ui/dist/
 
 # Auto-generated assets
 packages/core/src/ui/assets.ts
+packages/core/src/ui/icon-resources.ts
 
 # Compiled binaries (keep the platform detection script bin/bungee)
 bin/

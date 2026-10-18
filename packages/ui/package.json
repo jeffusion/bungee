@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@floating-ui/dom": "1.7.6",
+    "@iconify/svelte": "^5.2.2",
     "@internationalized/date": "^3.12.2",
     "@jeffusion/bungee-types": "workspace:*",
     "bits-ui": "0.22.0",

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { get } from 'svelte/store';
-  import { guardedLocation as location, settingsDirty, dashboardDirty } from '$stores/navigation-guard';
+  import { guardedLocation as location, settingsDirty, dashboardDirty, menuDirty } from '$stores/navigation-guard';
   import { confirmAction } from '$stores/confirmation';
   import { toast } from '$stores/toast';
   import ConfirmationHost from '$components/shell/ConfirmationHost.svelte';
@@ -21,6 +21,7 @@
   const loadRouteEditor = () => import('./routes/RouteEditor.svelte');
   import ServicesIndex from './routes/ServicesIndex.svelte';
   const loadServiceEditor = () => import('./routes/ServiceEditor.svelte');
+  const loadMenus = () => import('./routes/Menus.svelte');
   const loadLogs = () => import('./routes/Logs.svelte');
   import Login from './routes/Login.svelte';
   import NotFound from './routes/NotFound.svelte';
@@ -30,6 +31,8 @@
   import { getPluginText } from '$utils/plugin-i18n';
   import PluginDetailLayout from './routes/PluginDetailLayout.svelte';
   const loadDesignSystem = () => import('./routes/DesignSystem.svelte');
+  import { menus, resetMenus, refreshMenus, updateMenuFallback } from '$stores/menus';
+  import { effectiveMenu, fallbackMenuCatalog } from '$components/domain/menu/menu-model';
   import { LoadingIndicator } from '$components/industrial';
 
   let logoutBusy = $state(false);
@@ -47,7 +50,7 @@
   ]));
   const applicationReady = $derived(protectedInitialized && protectedIdentity === authenticationIdentity);
 
-  onDestroy(() => { destroyed = true; initializationGeneration++; protectedGeneration++; });
+  onDestroy(() => { destroyed = true; initializationGeneration++; protectedGeneration++; resetMenus(); });
   $effect(() => {
     if (!$isAuthenticated) protectedInitialized = false;
     if ($authMode?.mode === 'plugin' && !$isAuthenticated) loginPageActive = true;
@@ -122,7 +125,7 @@
     if (path === '/login') window.location.hash = '#/';
   }
 
-  async function handleLogout(): Promise<void> {
+  async function handleLogout(opener: HTMLElement): Promise<void> {
     if (logoutBusy || $authMode?.mode !== 'plugin' || !$isAuthenticated) return;
     const revision = getAuthStateRevision();
     const current = () => !destroyed && isAuthenticationStateCurrent(revision);
@@ -131,7 +134,9 @@
       const warnings = [$_('login.logoutConfirm')];
       if ($settingsDirty) warnings.push($_('settings.leaveWarning'));
       if ($dashboardDirty) warnings.push($_('dashboardLayout.discardMessage'));
+      if ($menuDirty) warnings.push($_('menus.leaveWarning'));
       const accepted = await confirmAction({
+        opener,
         title: $_('login.logout'), message: warnings.join(' '),
         confirmText: $_('confirmDialog.confirm'), cancelText: $_('confirmDialog.cancel'),
       });
@@ -140,6 +145,8 @@
         if (destroyed || !isAuthenticationStateCurrent(settledRevision)) return;
         settingsDirty.set(false);
         dashboardDirty.set(false);
+        menuDirty.set(false);
+        resetMenus();
         pluginList.set([]);
         loginPageActive = true;
         window.location.hash = '#/login';
@@ -151,37 +158,26 @@
     }
   }
 
-  // Navigation items share a sliding active indicator in the header.
-  // Guard against $isLoading: svelte-i18n raises if `$_` is called before its
-  // initial locale resource finishes loading. The translation stores get
-  // re-evaluated automatically once $isLoading flips to false.
-  const navItems = $derived($isLoading
-    ? []
-    : (() => {
-        const items: Array<{ href: string; label: string; isActive: boolean }> = [
-          { href: '/#/',         label: $_('nav.dashboard'),     isActive: ($location === '/' || ($location === '/login' && $authMode?.mode === 'anonymous')) },
-          { href: '/#/routes',   label: $_('nav.routes'),        isActive: $location.startsWith('/routes') },
-          { href: '/#/services', label: $_('nav.services'),      isActive: $location.startsWith('/services') },
-          { href: '/#/logs',     label: $_('nav.logs'),          isActive: $location === '/logs' },
-        ];
-        // Plugin nav contributions
-        $pluginList.forEach((plugin) => {
-          if (!plugin.enabled) return;
-          const navs = plugin.metadata?.contributes?.navigation;
-          if (navs) {
-            navs.forEach((nav) => {
-              if ((nav.target === 'header' || nav.target === 'sidebar')) {
-                items.push({
-                  href: `/#/extensions/${plugin.name}${nav.path}`,
-                  label: getPluginText(nav.label, plugin.name, $_),
-                  isActive: $location.startsWith(`/extensions/${plugin.name}${nav.path}`),
-                });
-              }
-            });
-          }
-        });
-        return items;
-      })());
+  const fallbackCatalog = $derived(fallbackMenuCatalog($pluginList));
+  let menuIdentity = '';
+  let menuContributions = '';
+  $effect(() => {
+    const activeIdentity = applicationReady && $isAuthenticated ? JSON.stringify([authenticationIdentity, $subject, $authMode, getAuthStateRevision()]) : '';
+    const signature = JSON.stringify(fallbackCatalog);
+    if (activeIdentity !== menuIdentity) {
+      menuIdentity = activeIdentity;
+      menuContributions = signature;
+      resetMenus(activeIdentity ? fallbackCatalog : []);
+      if (activeIdentity) void refreshMenus();
+    } else if (activeIdentity && signature !== menuContributions) {
+      menuContributions = signature;
+      updateMenuFallback(fallbackCatalog);
+      void refreshMenus();
+    }
+  });
+  const menuItems = $derived($isLoading ? [] : effectiveMenu($menus.snapshot.layout, $menus.snapshot.catalog,
+    $location === '/login' && $authMode?.mode === 'anonymous' ? '/' : $location,
+    page => page.source === 'plugin' ? getPluginText(page.label, page.pluginName ?? '', $_) : $_(page.label), $_('header.management')));
 
   const isOnLogin = $derived($location === '/login');
 </script>
@@ -201,13 +197,14 @@
       <!-- Top accent hairline -->
       <div class="h-px bg-gradient-to-r from-transparent via-nexus-500 to-transparent"></div>
 
-      <AppHeader items={navItems} managementPage={$location === '/config' ? 'configuration' : $location.startsWith('/plugins') ? 'plugins' : null}
+      <AppHeader items={menuItems}
         showLogout={$authMode?.mode === 'plugin' && $isAuthenticated} {logoutBusy} onLogout={handleLogout} />
     {/if}
 
     <!-- ===== Routed content ============================================ -->
     <main class="flex-1 flex flex-col">
       <ConfigurationPublicationBanner />
+      {#if $menus.error}<div role="status" class="border-b border-amber-500/40 bg-carbon-900 px-4 py-2 text-sm text-amber-400">{$_('menus.loadFailed')}</div>{/if}
       {#if $location === '/' || ($location === '/login' && $authMode?.mode === 'anonymous')}
         <Dashboard />
       {:else if $location === '/routes'}
@@ -224,6 +221,8 @@
         <LazyPage load={loadServiceEditor} props={{ params: {} }} />
       {:else if $location === '/logs'}
         <LazyPage load={loadLogs} props={{}} />
+      {:else if $location === '/menus'}
+        <LazyPage load={loadMenus} props={{}} />
       {:else if $location === '/config'}
         <LazyPage load={loadConfiguration} props={{}} />
       {:else if $location === '/design'}
@@ -252,5 +251,6 @@
   </div>
 {/if}
 
+<svelte:window onfocus={() => { if (applicationReady && $isAuthenticated) void refreshMenus(); }} />
 <ToastContainer />
 <ConfirmationHost />

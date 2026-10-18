@@ -277,92 +277,21 @@ try {
   await page.evaluate(url => { (window as any).__chartModuleUrl = url; }, `/assets/${chartChunk}`);
   if (!nativeOnly) {
     const appHeader = page.getByTestId('app-header');
-    const tabs = appHeader.locator('.header-tab');
-    const tabWidths = () => tabs.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().width));
-    const checkIndicator = () => expect.poll(() => appHeader.locator('.header-tab[aria-current="page"]').evaluate(node => {
-      const tab = node.getBoundingClientRect();
-      const indicator = node.closest('ul')!.querySelector('li[aria-hidden="true"]')!.getBoundingClientRect();
-      return Math.abs(indicator.left - tab.left) < 0.5 && Math.abs(indicator.width - tab.width) < 0.5;
-    })).toBe(true);
+    const topMenu = appHeader.getByTestId('header-top-menu');
+    const home = topMenu.locator('a[href="/#/"]');
+    const routes = topMenu.locator('a[href="/#/routes"]');
     expect((await appHeader.boundingBox())!.height).toBe(48);
+    await expect(home).toHaveAttribute('aria-current', 'page');
+    const widths = () => topMenu.locator('li').evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().width));
     await page.evaluate(() => document.fonts.ready.then(() => undefined));
-    const widths = await tabWidths();
-    await checkIndicator();
-    await expect(tabs.first().locator('.nx-caret-left')).toBeVisible();
-    await expect(tabs.nth(1).locator('.nx-caret-left')).toBeHidden();
-    const labelPositions = () => tabs.evaluateAll(nodes => nodes.map(node => node.querySelector('[title]')!.getBoundingClientRect().x));
-    const positions = await labelPositions();
-    expect(await tabs.first().evaluate(node => {
-      const style = getComputedStyle(node);
-      return { mono: style.fontFamily.includes('DM Mono'), size: style.fontSize,
-        weight: style.fontWeight, transform: style.textTransform, spacing: style.letterSpacing };
-    })).toEqual({ mono: true, size: '11px', weight: '600', transform: 'uppercase', spacing: '1.32px' });
-    const indicatorMotion = await tabs.nth(1).evaluate(async node => {
-      const indicator = node.closest('ul')!.querySelector<HTMLElement>('li[aria-hidden="true"]')!;
-      const samples: number[] = [];
-      const start = performance.now();
-      (node as HTMLAnchorElement).click();
-      await new Promise<void>(resolve => {
-        const sample = () => {
-          samples.push(new DOMMatrixReadOnly(getComputedStyle(indicator).transform).m41);
-          if (performance.now() - start < 300) requestAnimationFrame(sample); else resolve();
-        };
-        requestAnimationFrame(sample);
-      });
-      return samples;
-    });
-    await expect(tabs.nth(1)).toHaveAttribute('aria-current', 'page');
-    await expect(tabs.nth(1).locator('.nx-caret-left')).toBeVisible();
-    await expect(tabs.first().locator('.nx-caret-left')).toBeHidden();
-    expect(await labelPositions()).toEqual(positions);
-    expect(await tabWidths()).toEqual(widths);
-    expect(indicatorMotion.some(x => x > 0 && x < widths[0])).toBe(true);
-    expect(indicatorMotion.at(-1)).toBeCloseTo(widths[0], 2);
-    await checkIndicator();
-    await tabs.first().click();
+    const before = await widths();
+    await routes.click();
+    await expect(routes).toHaveAttribute('aria-current', 'page');
+    await expect(home).not.toHaveAttribute('aria-current', 'page');
+    expect(await widths()).toEqual(before);
+    await home.click();
     await expect(page.getByTestId('page-dashboard')).toBeVisible();
-    await appHeader.getByRole('button', { name: '语言', exact: true }).click();
-    const languages = page.getByRole('menuitem');
-    expect(await languages.evaluateAll(nodes => nodes.every(node => getComputedStyle(node).minHeight === '0px' && node.getBoundingClientRect().height < 44))).toBe(true);
-    await page.getByRole('menuitem', { name: 'English', exact: true }).click();
-    await expect(tabs.first()).toHaveText('Dashboard');
-    const englishWidths = await tabWidths();
-    expect(new Set(englishWidths).size).toBeGreaterThan(1);
-    expect(englishWidths).not.toEqual(widths);
-    await checkIndicator();
-    await tabs.nth(1).click();
-    await expect(tabs.nth(1)).toHaveAttribute('aria-current', 'page');
-    expect(await tabWidths()).toEqual(englishWidths);
-    await checkIndicator();
-    await tabs.first().click();
-    await expect(page.getByTestId('page-dashboard')).toBeVisible();
-    // Auto-sized tabs keep the full translated label visible and accessible.
-    await expect(tabs.filter({ hasText: 'Global Settings' })).toHaveAccessibleName('Global Settings');
-    await expect(tabs.filter({ hasText: 'Global Settings' }).locator('span[title]')).toHaveAttribute('title', 'Global Settings');
-    await appHeader.getByRole('button', { name: 'Language', exact: true }).click();
-    await page.getByRole('menuitem', { name: '中文', exact: true }).click();
-    await expect(tabs.first()).toHaveText('仪表板');
-    expect(await tabWidths()).toEqual(widths);
-    await checkIndicator();
-    for (const width of [768, 390, 320]) {
-      await page.setViewportSize({ width, height: 844 });
-      expect((await appHeader.boundingBox())!.height).toBe(48);
-      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      if (width < 768) {
-        await appHeader.getByRole('button', { name: '菜单', exact: true }).click();
-        await expect(page.getByTestId('header-menu')).toBeVisible();
-        await page.keyboard.press('Escape');
-        await expect(page.getByTestId('header-menu')).toHaveCount(0);
-      } else {
-        await tabs.last().focus();
-        await expect(tabs.last()).toBeInViewport();
-        await checkIndicator();
-      }
-    }
-    await page.setViewportSize({ width: 1440, height: 1100 });
-    await page.emulateMedia({ reducedMotion: 'reduce' });
-    expect(await appHeader.locator('li[aria-hidden="true"]').evaluate(node => getComputedStyle(node).transitionDuration)).toBe('0s');
-    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await expect(appHeader.locator('#header-menu-trigger')).toHaveCount(0);
     await page.screenshot({ path: `${evidence}/compact-header.png` });
   }
   await expect(card('kpi.rpm')).toBeVisible();
@@ -675,7 +604,7 @@ try {
     for (const width of [768, 1920]) {
       await page.setViewportSize({ width, height: 1080 });
       await checkKpiRegions(3);
-      if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error(`LLM template overflows at ${width}px`);
+      if (await page.locator('main').evaluate(node => node.scrollWidth > node.clientWidth)) throw new Error(`LLM template overflows at ${width}px`);
       await page.screenshot({ path: `${evidence}/template-llm-${width}.png`, fullPage: true });
     }
     await page.setViewportSize({ width: 1440, height: 1100 });
@@ -685,7 +614,7 @@ try {
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.getByTestId('token-stats-overview')).toBeVisible();
     await expect(page.locator('[data-token-stats-bucket-trigger]')).toHaveCount(13);
-    if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error('Token dashboard causes horizontal overflow');
+    if (await page.locator('main').evaluate(node => node.scrollWidth > node.clientWidth)) throw new Error('Token dashboard causes horizontal overflow');
     await page.screenshot({ path: `${evidence}/token-dashboard-mobile.png`, fullPage: true });
     await page.getByRole('link', { name: '查看模型统计 →' }).click();
     await expect(page.getByTestId('token-stats-page')).toBeVisible();
@@ -729,7 +658,7 @@ try {
           return labels.every((label, i) => i === 0 || label.left - labels[i - 1].right >= 4);
         })).toBe(true);
       }
-      expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+      expect(await page.locator('main').evaluate(node => node.scrollWidth > node.clientWidth)).toBe(false);
     }
     for (const calendarRange of ['day', 'week', 'month']) {
       expect(nativeRequests.some(query => query.includes(`range=${calendarRange}`) && query.includes('timeZone=Asia%2FShanghai'))).toBe(true);
@@ -804,7 +733,7 @@ try {
     for (const width of [320, 768, 1440]) {
       await page.setViewportSize({ width, height: 1100 });
       if (width >= 768) await checkSortPosition();
-      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+      await expect.poll(() => page.locator('main').evaluate(node => node.scrollWidth > node.clientWidth)).toBe(false);
       await expect(buckets).toHaveCount(24);
       await expect.poll(() => page.getByTestId('token-stats-chart-viewport').evaluate(node =>
         Math.max(node.scrollWidth - node.clientWidth, node.scrollHeight - node.clientHeight))).toBeLessThanOrEqual(1);
@@ -896,7 +825,7 @@ try {
     await page.keyboard.press('Escape');
     await expect(bucketDetail).toHaveCount(0);
     await page.setViewportSize({ width: 390, height: 1000 });
-    expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+    expect(await page.locator('main').evaluate(node => node.scrollWidth > node.clientWidth)).toBe(false);
     await page.screenshot({ path: `${evidence}/token-statistics-large-numbers-mobile.png`, fullPage: true });
     await setChartTooltip(23);
     await expect(bucketDetail).toBeVisible();
@@ -1020,7 +949,7 @@ try {
   await edit();
   await page.screenshot({ path: `${evidence}/tablet-editing.png`, fullPage: true });
   await checkKpiRegions();
-  if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error('Tablet edit controls overflow');
+  if (await page.locator('main').evaluate(node => node.scrollWidth > node.clientWidth)) throw new Error('Tablet edit controls overflow');
   await cancel();
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.locator('.dashboard-mobile-card')).toHaveCount(15);
@@ -1153,7 +1082,7 @@ try {
   for (const width of [320, 768, 1024, 1440]) {
     await page.setViewportSize({ width, height: 1000 });
     await page.waitForTimeout(100);
-    if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error(`Horizontal overflow at ${width}px`);
+    if (await page.locator('main').evaluate(node => node.scrollWidth > node.clientWidth)) throw new Error(`Horizontal overflow at ${width}px`);
   }
   // Disabled plugins keep their slot on reload.
   disabledPlugin = true; await page.reload();

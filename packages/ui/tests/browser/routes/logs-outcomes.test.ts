@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { startUiRuntime } from '../../../../../tests/helpers/ui-runtime';
 import { configurationRuntimeFixture, publicationFixture } from '../../helpers/publication';
+import { menuSnapshot, fulfillMenuIcons } from '../../helpers/menus';
 
 let runtime: Awaited<ReturnType<typeof startUiRuntime>>, browser: Browser;
 beforeAll(async () => {
@@ -31,6 +32,8 @@ async function withLogs(answer: (request: Request) => Promise<Response>, run: (p
       const json = (value:unknown) => route.fulfill({json:value});
       if(url.pathname === '/api/auth/mode') return json({mode:'anonymous',publicOrigin:runtime.origin});
       if(url.pathname === '/api/auth/verify') return json({success:true,mode:'anonymous',subject:{id:'anonymous',provider:'anonymous'}});
+      if(url.pathname === '/api/ui/menus') return json(menuSnapshot());
+      if(url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
       if(url.pathname === '/api/config/runtime') return json(config);
       if(url.pathname === '/api/config') return json({revision:1,content_hash:config.content_hash,config:config.config});
       if(url.pathname === '/api/plugins') return json([]);

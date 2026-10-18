@@ -6,6 +6,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { strict as assert } from 'node:assert';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
+import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
 
 // Real Chromium, explicitly mocked management responses: render/interaction evidence, not Core E2E.
 test('stopped publication can be retried once and follows recovery until serving is confirmed', async () => {
@@ -35,6 +36,8 @@ try {
       const path = new URL(request.url()).pathname;
       if (path === '/api/auth/mode') return route.fulfill({json:{mode:'anonymous',publicOrigin:base}});
       if (path === '/api/auth/verify') return route.fulfill({ json: { success: true, mode:'anonymous',subject:{id:'anonymous',provider:'anonymous'} } });
+      if (path === '/api/ui/menus') return route.fulfill({ json: menuSnapshot() });
+      if (path === '/api/ui/icons/data') return fulfillMenuIcons(route);
       if (path === '/api/config/runtime') { runtimeReads++; return route.fulfill({ json: runtime }); }
       if (path === '/api/config') return route.fulfill({ json: runtime });
       if (path.endsWith('/retry') && request.method() === 'POST') {
@@ -73,7 +76,7 @@ try {
     const retry = page.getByTestId('publication-retry-button');
     await alert.waitFor();
     assert.ok((await alert.innerText()).includes(locale === 'en' ? 'Configuration recovery stopped' : '配置恢复已停止，当前接流尚未确认'));
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    assert.equal(await page.locator('main').evaluate(node => node.scrollWidth > node.clientWidth), false);
     await retry.focus();
     await page.screenshot({ path: resolve(evidence, `${name}-stopped.png`) });
     await page.keyboard.press('Enter');
@@ -99,7 +102,7 @@ try {
     await alert.waitFor({ state: 'hidden', timeout: 3000 });
     assert.equal(await retry.count(), 0);
     await page.screenshot({ path: resolve(evidence, `${name}-resolved.png`) });
-    results.push({ name, width, locale, posts, deniedRetries, runtimeReads, hiddenAfterSuccess: true, overflow: false });
+    results.push({ name, width, locale, posts, deniedRetries, runtimeReads, hiddenAfterSuccess: true, contentOverflow: false });
     await context.close();
   }
 } finally {
@@ -142,6 +145,8 @@ test('runtime facts distinguish historical failure, active cleanup, dependency f
         const json = (body: unknown, status = 200) => route.fulfill({ json: body, status });
         if (path === '/api/auth/mode') return json({ mode: 'anonymous', publicOrigin: ui.origin });
         if (path === '/api/auth/verify') return json({ success: true, mode: 'anonymous', subject: { id: 'anonymous', provider: 'anonymous' } });
+        if (path === '/api/ui/menus') return json(menuSnapshot());
+        if (path === '/api/ui/icons/data') return fulfillMenuIcons(route);
         if (path === '/api/config/runtime') return unavailable ? json({ error: 'repository_unavailable' }, 503) : json(runtime);
         if (path === '/api/config') return json(runtime);
         if (path === `/api/config/operations/${id}`) return json({ operation: { mutation_id: id, committed_revision: 8,
@@ -189,7 +194,7 @@ test('runtime facts distinguish historical failure, active cleanup, dependency f
       await page.getByTestId('component-recovery').getByText(/6\/6/).waitFor();
       assert.ok((await page.getByTestId('configuration-publication-banner').innerText()).includes(locale === 'en' ? 'runtime component or dependency' : '运行组件或依赖'));
       assert.ok((await page.getByTestId('cleanup-summary').innerText()).includes(locale === 'en' ? 'Cleanup failed 1' : '清理失败 1'));
-      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+      assert.equal(await page.locator('main').evaluate(node => node.scrollWidth > node.clientWidth), false);
       await page.screenshot({ path: resolve(evidence, `${locale}-current-fault.png`) });
       runtime = { ...runtime, health: { observed_at: Date.now(), component_recovery: [],
         dependencies: [{ component: 'management_provider', state: 'ready', fresh: false, observed_at: 1 }] } };

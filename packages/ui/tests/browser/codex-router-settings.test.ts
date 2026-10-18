@@ -4,6 +4,7 @@ import { resolve, extname } from 'node:path';
 import { createMasterPluginCatalogApi } from '../../../core/src/master-runtime/master-plugin-catalog-api';
 import type { PluginManifestRecord } from '../../../core/src/plugin-manifest-catalog/types';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
+import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
 
 browserTest('codex router settings', async () => {
 const dist = resolve(import.meta.dir, '../../dist');
@@ -42,6 +43,8 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
   const json = (value: unknown) => route.fulfill({ json: value });
   if (url.pathname === '/api/auth/mode') return json({ mode: 'anonymous', publicOrigin: url.origin });
   if (url.pathname === '/api/auth/verify') return json({ success: true, mode: 'anonymous' });
+  if (url.pathname === '/api/ui/menus') return json(menuSnapshot());
+  if (url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
   if (url.pathname === '/api/config/runtime') return json(runtime);
   if (url.pathname === '/api/config') return json({ revision: runtime.revision, content_hash: runtime.content_hash, config: runtime.config });
   if (catalogApi.matches(url.pathname)) {
