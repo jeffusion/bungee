@@ -87,7 +87,7 @@ jobs:
         run: |
           set -euo pipefail
           time bun run build
-          tar -czf "$RUNNER_TEMP/build.tgz" packages/{types,llms,ui,core,cli}/dist packages/core/src/ui/assets.ts packages/ui/src/components/native-widgets/generated.ts
+          tar -czf "$RUNNER_TEMP/build.tgz" packages/{types,llms,ui,core,cli}/dist packages/core/src/ui/assets.ts packages/core/src/ui/icon-resources.ts packages/ui/src/components/native-widgets/generated.ts
           jq '{commit: .testCommit, tree: .tree}' "$RUNNER_TEMP/plan/plan.json" > "$RUNNER_TEMP/build.json"
       - name: Complete fast regression
         run: bun scripts/checks/select-tests.ts --plan "$RUNNER_TEMP/plan/plan.json" --phase unit --record "$RUNNER_TEMP/unit.json"
