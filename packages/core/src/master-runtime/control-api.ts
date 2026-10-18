@@ -74,6 +74,7 @@ export type ConfigControlApiOptions = {
     matches(path: string): boolean;
     handle(request: Request, snapshot: RepositorySnapshot): Promise<Response>;
   };
+  readonly menuApi?: import('./menu-api').MenuApi;
   readonly statsApi?: {
     matches(path: string): boolean;
     handle(request: Request): Promise<Response>;
@@ -934,6 +935,7 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
       const upstreamToggleMatch = /^\/api\/upstreams\/([^/]+)\/enabled$/.exec(path);
       const pluginToggleMatch = /^\/api\/plugins\/([^/]+)\/(enable|disable)$/.exec(path);
       const pluginControlMatch = /^\/api\/plugins\/[^/]+\/control(?:\/|$)/.test(path);
+      const menuRequest = serializedOptions.menuApi?.matches(path) === true;
       const statsRequest = serializedOptions.statsApi?.matches(path) === true;
       const observabilityRequest = serializedOptions.observabilityApi?.matches(path) === true;
       const pluginCatalogRequest = serializedOptions.pluginCatalogApi?.matches(path) === true;
@@ -944,7 +946,7 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
         || operationMatch !== null || retryMatch !== null
         || upstreamToggleMatch !== null || pluginToggleMatch !== null || pluginControlMatch || statsRequest
         || pluginCatalogRequest || path === '/api/resources/api-key' || /^\/api\/resources\/api-key\/[^/]+\/extensions$/.test(path) || path === '/api/auth/logout';
-      const managedWithObservability = managed || observabilityRequest;
+      const managedWithObservability = managed || observabilityRequest || menuRequest;
       if (!managedWithObservability) return path === '/api' || path.startsWith('/api/') ? notFound() : null;
       try {
         const identity = await serializedOptions.managementAuth?.authenticate(request);
@@ -989,6 +991,22 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
           return provider ? await provider.logout(request) : json({ success: true });
         }
         if (path.startsWith('/api/resources/api-key')) return await resourcesApi(request, serializedOptions);
+        if (menuRequest) {
+          const initialIdentity = serializedOptions.managementAuth!.identity(request)!;
+          const handle = () => {
+            const current = safeSnapshot(serializedOptions);
+            if (current instanceof Response) return Promise.resolve(current);
+            return serializedOptions.menuApi!.handle(request, current, async () => {
+              if (!await serializedOptions.managementAuth!.recheck(request)) return false;
+              const fresh = serializedOptions.managementAuth!.identity(request);
+              return fresh?.provider === initialIdentity.provider
+                && fresh.subject.id === initialIdentity.subject.id
+                && fresh.subject.provider === initialIdentity.subject.provider
+                && await serializedOptions.managementAuth!.authorized(request, 'config.write');
+            });
+          };
+          return request.method === 'PUT' ? await serializeMutation(serializedOptions, handle) : await handle();
+        }
         if (statsRequest) return await serializedOptions.statsApi!.handle(request);
         if (observabilityRequest) return await serializedOptions.observabilityApi!.handle(request);
         if (pluginCatalogRequest) return serializedOptions.pluginCatalogApi!.handle(request, snapshot);

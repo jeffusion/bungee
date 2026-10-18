@@ -57,7 +57,7 @@ test('migration 2 preserves baseline data and rolls back a failed upgrade', () =
     db.close(); db = null;
     const repository = ConfigRepository.open(path);
     expect(repository.getDatabase().query('SELECT * FROM configuration_revisions').all()).toEqual(before);
-    expect(repository.getDatabase().query('SELECT * FROM schema_migrations').all()).toHaveLength(2);
+    expect(repository.getDatabase().query('SELECT * FROM schema_migrations').all()).toHaveLength(CONFIG_MIGRATIONS.length);
     expect(repository.getSnapshot().revision).toBe(1);
     repository.close();
     const reopened = ConfigRepository.open(path);
@@ -101,12 +101,12 @@ test('migration 2 rollback and reopen preserve multiple operation, worker and re
     }
     repository.close();
     db = new Database(path, { readwrite: true, strict: true });
-    // These feature tables are empty: removing only migration 2's additions
-    // creates the exact baseline schema around unchanged baseline business rows.
-    for (const table of ['configuration_retirement_retry_requests','configuration_retirement_evidence', 'configuration_retirements', 'configuration_publication_serving_sets', 'runtime_recovery_tickets', 'runtime_recovery_budget']) {
+    // Remove later feature tables to reconstruct the exact baseline schema
+    // around unchanged baseline business rows before testing the upgrade.
+    for (const table of ['ui_menu_layout', 'configuration_retirement_retry_requests','configuration_retirement_evidence', 'configuration_retirements', 'configuration_publication_serving_sets', 'runtime_recovery_tickets', 'runtime_recovery_budget']) {
       db.run(`DROP TABLE ${table}`);
     }
-    db.run('DELETE FROM schema_migrations WHERE version=2');
+    db.run('DELETE FROM schema_migrations WHERE version>=2');
     verifySchemaFingerprint(db, 1);
     const tables = db.query<{ name: string }, []>("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map(row => row.name);
     const snapshot = (database: Database) => Object.fromEntries(tables.map(table => [table,

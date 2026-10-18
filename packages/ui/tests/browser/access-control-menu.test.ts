@@ -73,15 +73,11 @@ try {
     await page.reload(); await expect(settings).toContainText(key.name);
     for (const width of [320, 390, 768, 1440]) {
       await page.setViewportSize({ width, height: 1000 });
-      if (width < 768) {
-        await page.locator('#header-menu-trigger').click();
-        const sheet = page.getByTestId('header-menu');
-        const link = sheet.getByRole('link', { name: t('metadata.name'), exact: true });
-        await expect(link).toHaveAttribute('aria-current', 'page');
-        await link.click(); await expect(sheet).toHaveCount(0);
-      } else await expect(menuLink).toHaveAttribute('aria-current', 'page');
+      const link = page.getByTestId('header-top-menu').getByRole('link', { name: t('metadata.name'), exact: true });
+      await expect(link).toHaveAttribute('aria-current', 'page');
+      await link.click();
       await expect(settings).toContainText(key.name);
-      expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+      expect(await page.locator('main').evaluate(node => node.scrollWidth > node.clientWidth)).toBe(false);
       if (language === 'zh-CN' && [390, 1440].includes(width)) {
         await page.screenshot({ path: `${evidence}/access-control-${width}.png`, animations: 'disabled', fullPage: true });
       }

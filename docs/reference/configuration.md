@@ -46,6 +46,34 @@ For stopped cleanup of an active `draining` operation, the same endpoint returns
 
 The response also includes typed dependency freshness, component recovery budget and retirement cleanup facts. Current serving health is independent of historical terminal publication errors; stale observations are not treated as current health. Physical exit and cleanup success are separate member fields.
 
+### Instance navigation API
+
+Navigation is separate from the proxy aggregate. `GET /api/ui/menus` returns
+`revision`, the page `catalog`, the ordered `layout`, and `iconRevision`.
+`PUT /api/ui/menus` accepts exactly `{ "expected_revision": 0, "layout": [] }`;
+replace the example layout with the complete page/group tree. A successful save
+returns the new snapshot immediately, without configuration publication.
+Conflicting revisions return `409` with `error: "stale_revision"` and `active`;
+invalid layouts return `422`, unavailable storage returns `503`.
+
+Layout nodes are pages (`kind`, `pageId`, `visible`, optional `icon`) or one-level
+groups (`kind`, `id`, `title`, `visible`, optional `icon`, `children`). A null title
+is reserved for the translated default `group:system`. Every page occurs at most
+once. Icon IDs use `collection:name`; unknown new page IDs and unavailable icon
+overrides are rejected. Previously saved pages removed from the catalog remain
+editable. Unseen available contributions append to saved layouts automatically.
+Navigation contributions from one plugin with the same path identify one page;
+the first declaration supplies its label and default icon.
+
+Offline icon reads use `GET /api/ui/icons/collections`,
+`GET /api/ui/icons/search?collection=lucide&q=server&offset=0&limit=48` (maximum
+96 results per page), and `GET /api/ui/icons/data?ids=lucide:server,tabler:home`
+(maximum 64 IDs). Responses carry their resource `revision`; data responses
+contain `icons` and `missing`; a missing or retired collection does not prevent
+valid IDs in the same batch from resolving. Read endpoints require `config.read`; menu writes
+require `config.write` and the normal management write checks. Icon responses use
+private ETag revalidation. Menu settings are excluded from proxy import/export.
+
 ### Aggregate schema
 
 Every write replaces one complete `ConfigurationAggregate`. Entity IDs are stable UUIDs; `position` controls deterministic ordering; routes reference services by `service_id`.

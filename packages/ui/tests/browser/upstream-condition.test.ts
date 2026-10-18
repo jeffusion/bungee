@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { parseNormalizeCompileAggregate } from '../../../core/src/config-storage/aggregate';
+import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
 
 browserTest('upstream condition', async () => {
 const uiRoot = fileURLToPath(new URL('../../dist/', import.meta.url));
@@ -49,6 +50,8 @@ try {
       const respond = (json: unknown, status = 200) => route.fulfill({ json, status });
       if (url.pathname === '/api/auth/mode') return respond({ mode: 'anonymous', publicOrigin: `http://127.0.0.1:${server.port}` });
       if (url.pathname === '/api/auth/verify') return respond({ success: true, mode: 'anonymous', subject: { id: 'anonymous', provider: 'anonymous' } });
+      if (url.pathname === '/api/ui/menus') return respond(menuSnapshot());
+      if (url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
       if (url.pathname === '/api/plugin-translations') return respond({});
       if (url.pathname === '/api/plugins') return respond([]);
       if (url.pathname === '/api/plugins/schemas') return respond({});

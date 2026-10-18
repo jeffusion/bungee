@@ -1,9 +1,12 @@
 import { rm } from 'node:fs/promises';
+import { generateIconResources } from './generate-icon-resources';
 import { resolve } from 'node:path';
 import { pluginRuntimeBuildSource } from '../src/plugin-manifest-catalog/runtime-identity';
 
 const packageRoot = resolve(import.meta.dir, '..');
 const outputDirectory = resolve(packageRoot, 'dist');
+
+await generateIconResources();
 
 await rm(outputDirectory, { recursive: true, force: true });
 

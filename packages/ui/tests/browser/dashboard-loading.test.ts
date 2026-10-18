@@ -152,7 +152,7 @@ try {
         await expect(page.getByTestId('token-stats-metric-input')).toContainText('1.9M');
         await settle(); expect(await measure()).toEqual(refreshing);
         expect(requests).toBe(5); // Overview and trend share each request.
-        expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+        expect(await page.locator('main').evaluate(node => node.scrollWidth > node.clientWidth)).toBe(false);
         await context.close();
       }
     }

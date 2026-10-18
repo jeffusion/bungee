@@ -4,7 +4,7 @@
 
 | 数据库 | 内容 | 执行者 |
 |---|---|---|
-| `bungee.db` | 配置、revision、发布、恢复、监督元数据 | 配置存储 Worker |
+| `bungee.db` | 配置、revision、发布、恢复、监督元数据及实例菜单布局 | 配置存储 Worker |
 | `plugin-state.db` | 插件状态、密钥、KV、命令日志、可靠事件、快照 | 插件存储 Worker |
 | `access.db` | 请求日志、统计、插件观察数据 | 观察 Worker；数据面日志写入仍在请求 Worker |
 
@@ -93,6 +93,11 @@ RPC 使用真实业务期限；超期 callback 不能被当成已回收。连续
 迁移在各库的执行 Worker 内完成；普通内存配置读取不参与迁移或维护扫描。
 
 ## 配置记录、导入和恢复
+
+实例菜单布局使用独立记录和菜单 revision，通过同一存储 Worker 的 CAS 短事务更新。
+菜单保存不改变代理配置 revision，不创建发布操作或更替数据面 Worker。
+布局随实例数据库备份保存，不进入代理配置导入和导出。图标只保存集合与名称标识；
+离线图标数据属于发布资源，不写入数据库。
 
 配置库保存当前规范化的 settings、services、routes、upstreams、插件 binding 和 activation，以及 revision、操作、发布、恢复和监督元数据。插件业务状态不能写进配置聚合；会话触碰也不能产生成套配置历史。
 

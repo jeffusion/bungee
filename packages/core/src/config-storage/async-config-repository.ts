@@ -180,6 +180,13 @@ export class AsyncConfigRepository {
     if(unexpected){try{this.options.onWorkerFailure?.(error);}catch{/* Notification cannot strand callers. */}}
   }
 
+  getMenuLayout(...args: Parameters<ConfigRepository['getMenuLayout']>): Promise<ReturnType<ConfigRepository['getMenuLayout']>> {
+    return this.rpc('getMenuLayout', ...args);
+  }
+  putMenuLayout(...args: Parameters<ConfigRepository['putMenuLayout']>): Promise<ReturnType<ConfigRepository['putMenuLayout']>> {
+    return this.rpc('putMenuLayout', ...args);
+  }
+
   appendServingSnapshot(...args: Parameters<ConfigRepository['appendServingSnapshot']>): Promise<ReturnType<ConfigRepository['appendServingSnapshot']>> {
     return this.rpc('appendServingSnapshot', ...args);
   }

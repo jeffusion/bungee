@@ -72,6 +72,7 @@ import {
   type MasterRuntimeWorkerPool,
 } from './runtime-contracts';
 import type { MasterSignalController, MasterSignalRuntime } from './signal-handlers';
+import { createMenuApi } from './menu-api';
 import { createConfigControlApi } from './control-api';
 import { hasUnreleasedMasterStatsResource, type MasterStatsApi } from './master-stats';
 import { runtimeUpstreams } from './runtime-upstreams';
@@ -127,7 +128,8 @@ export type MasterProcessRepository = Pick<AsyncConfigRepository,
   | 'getRetirementDescriptorCleanupState' | 'getRuntimeRecoveryBudget' | 'getRuntimeRecoveryStartupGate'
   | 'getPublicationRetirementRetry' | 'requestPublicationRetirementRetry'
   | 'freezePublicationRetirementDrainStart'
-  | 'consumeRuntimeRecoveryRestartTicket' | 'observeRuntimeRecoveryHealth'>;
+  | 'consumeRuntimeRecoveryRestartTicket' | 'observeRuntimeRecoveryHealth'>
+  & Partial<Pick<AsyncConfigRepository, 'getMenuLayout' | 'putMenuLayout'>>;
 export type MasterProcessAdmission = WorkerAdmissionController
   & MasterRuntimeAdmission
   & AdmittedWorkerSelector;
@@ -2054,6 +2056,7 @@ export async function startMasterComposition(
           })));
     };
     let committedManagementProvider = managementAuth?.selected() ?? null;
+    const menuRepository = resources.repository;
     controlApi = createConfigControlApi({
       repository: resources.repository,
       retirementDeadline: (bootId, deadlineNs) => {
@@ -2114,6 +2117,16 @@ export async function startMasterComposition(
       publicationTasks,
       pluginControlApi: resources.pluginControl?.api,
       pluginCatalogApi,
+      menuApi: createMenuApi({ repository: {
+        getMenuLayout: () => {
+          if (!menuRepository.getMenuLayout) return Promise.reject(new Error('menu storage unavailable'));
+          return menuRepository.getMenuLayout();
+        },
+        putMenuLayout: (...args) => {
+          if (!menuRepository.putMenuLayout) return Promise.reject(new Error('menu storage unavailable'));
+          return menuRepository.putMenuLayout(...args);
+        },
+      }, catalog: { records: () => catalogRecords } }),
       pluginControlPreflight: resources.pluginControl === null ? undefined : {
         controlNames: new Set((catalog.records?.() ?? [])
           .filter(({ manifest }) => manifest.control !== undefined)

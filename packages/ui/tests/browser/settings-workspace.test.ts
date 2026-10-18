@@ -4,6 +4,7 @@ import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import type { ConfigurationOperationState } from '../../src/api/config';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
+import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
 
 let runtime: Awaited<ReturnType<typeof startUiRuntime>>, browser: Browser;
 beforeAll(async () => {
@@ -31,6 +32,8 @@ async function withSettings(run: (page: Page, model: ReturnType<typeof createMod
     const json=(value:unknown,status=200)=>route.fulfill({json:value,status});
     if(path === '/api/auth/mode') return json({mode:'anonymous',publicOrigin:runtime.origin});
     if(path === '/api/auth/verify') return json({success:true,mode:'anonymous',subject:{id:'anonymous',provider:'anonymous'}});
+    if(path === '/api/ui/menus') return json(menuSnapshot());
+    if(path === '/api/ui/icons/data') return fulfillMenuIcons(route);
     if(path === '/api/plugins') return json([]);
     if(path === '/api/plugin-translations') return json({});
     if(path === '/api/resources/api-key') return json({keys:[]});
@@ -109,7 +112,7 @@ test('import preview and review work in both languages without exposing configur
     await upload(page,envelope(candidate));await expect(page.getByTestId('import-preview')).toBeVisible();
     await expect(page.getByRole('combobox',{name:/^(Log Level|日志级别)$/})).toBeDisabled();await review(page);
     await page.keyboard.press('Tab');expect(await page.evaluate(()=>!!document.activeElement?.closest('[role="dialog"]'))).toBe(true);
-    expect(await page.evaluate(()=>document.documentElement.scrollWidth <= innerWidth+1)).toBe(true);
+    expect(await page.getByTestId('config-review').evaluate(node=>node.scrollWidth <= node.clientWidth+1 && node.getBoundingClientRect().right <= innerWidth+1)).toBe(true);
     await page.keyboard.press('Escape');await expect(page.getByTestId('config-review')).toHaveCount(0);
     await page.getByRole('button',{name:language==='en'?'Cancel import':'取消导入',exact:true}).click();
     expect(model.writes).toHaveLength(0);

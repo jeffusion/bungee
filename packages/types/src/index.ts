@@ -5,3 +5,4 @@ export * from './daemon-control.js';
 export * from './publication-policy.js';
 export * from './sse-log.js';
 export * from './plugin-config-contract.js';
+export * from './menus.js';

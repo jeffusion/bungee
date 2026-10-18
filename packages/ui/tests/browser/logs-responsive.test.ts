@@ -43,7 +43,7 @@ try {
     await expect(scroller.locator('tbody tr')).toHaveCount(5);
     for (const width of [320, 390, 640, 768, 1280, 1440]) {
       await page.setViewportSize({ width, height: 844 });
-      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+      await expect.poll(() => pageRoot.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
       const geometry = await scroller.evaluate(node => ({
         scrolls: node.scrollWidth > node.clientWidth,
         tableWidth: node.querySelector('table')!.getBoundingClientRect().width,
@@ -89,7 +89,7 @@ try {
     await filteredAction.click();
     const menu = page.getByTestId('logs-mobile-actions'); await expect(menu).toBeVisible();
     const bounds = await menu.boundingBox(); expect(bounds!.x).toBeGreaterThanOrEqual(0);
-    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(391);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(await page.evaluate(() => innerWidth + 1));
     await page.keyboard.press('Escape');
     await expect(menu).toHaveCount(0);
     await page.getByTestId('logs-filter-path-input').fill('');

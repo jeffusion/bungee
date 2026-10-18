@@ -757,26 +757,77 @@ The page title, KPI strip, controls, and body must share one content axis.
 </PanelCard>
 ```
 
-### 5.8 Shell navigation: business vs administration
+### 5.8 Unified shell navigation
 
-The Header's primary navigation belongs to business pages: Dashboard, Routes,
-Services, Request Logs, and enabled plugin navigation contributions. Plugin
-pages are peers of built-in business pages, never children of plugin management.
+Built-in, plugin and administration pages share one instance-wide menu catalog
+and layout. Top-level pages and one-level groups can be reordered, hidden and
+assigned icons in Menu Management. The initial System group contains Global
+Settings, Plugins and Menu Management; it is editable like other groups.
+Language, sign-out and the HUD clock remain separate shell utilities.
 
-Global Settings and Plugins belong exclusively to the right-hand **System**
-dropdown, alongside language selection and authenticated sign-out. Use the
-existing shadcn DropdownMenu primitives; preserve native navigation links and
-the shared unsaved-changes guard. When a management page is active, highlight
-the System trigger and its matching menu item, not an unrelated business tab.
+At every viewport width, navigation renders all effective top-level entries in
+their configured order on one line. Groups open dropdowns. Do not measure the
+available width, collect overflow entries, or switch to a mobile navigation
+panel. Users control horizontal overflow through grouping, names and visibility.
+Highlight the active page or its group without reordering it. Preserve the 48px
+Header height and the 1280px clock breakpoint. Menu Management is an ordinary
+entry in the default System group; its direct route is `/#/menus`.
 
-Below 768px, the **Pages** Sheet contains only business navigation. The separate
-System trigger remains on the Header; do not merge administration back into the
-Sheet. The Pages trigger and Sheet controls use the shared 34px ghost Button
-styling; keep the System trigger at least 44px high. Preserve keyboard dismissal
-and focus restoration, and wait until the menu has released its modal state before
-opening sign-out confirmation. The HUD clock is shown from 1280px upward to
-prioritize page navigation on narrower desktops. Navigation overflow scrolls
-horizontally without changing the Header's height.
+Use native links and the shared unsaved-changes guard; preserve keyboard
+dismissal and focus restoration for group dropdowns. Navigation controls have
+at least a 44px hit target.
+
+Menu icons use 16px fixed slots and follow text colour. Preserve original stroke,
+fill and proportions; icons supplement visible labels. Menu Management previews
+drafts without changing the live Header until save. Support pointer reordering
+and equivalent move/up/down controls. Hidden groups retain individual child
+preferences; empty or unavailable groups do not render in the shell.
+
+Menu icons are resolved by the management server from offline Iconify data.
+The collection registry is extensible; the initial full sets are Lucide, Tabler
+and Carbon. Users can override page and group icons or follow their defaults.
+The chooser searches and pages server-side and fetches previews in batches.
+Do not load the complete icon library in the browser or contact public icon APIs.
+Fixed shell controls keep their owned icons. Verify representative icons and
+existing default menu mappings; do not exhaustively render entire collections.
+
+### 5.9 Menu Management editor
+
+Use a full-width menu tree with compact rows, targeting 48–56px for ordinary
+desktop entries. Long names and validation messages may increase row height.
+Keep the drag handle, clickable current icon, name, visibility switch and action
+menu on the same row. Show the drag handle focus outline for keyboard Tab
+navigation; pointer presses, dragging and pointer focus restoration have no
+outline. Preserve focus itself when moving or cancelling a row.
+Touch targets remain at least 44px; desktop icon controls
+may use 40px targets. Show plugin provenance quietly and reserve status text for
+unavailable entries; do not repeat normal availability and visibility labels.
+
+Dragging previews insertion immediately by reordering the existing rows, without
+adding spacers or expanding gaps. Keep a floating row preview and a dimmed source.
+Row edges select before/after positions; the middle of a group accepts pages.
+Support moving pages between groups and the root, and reject nested groups.
+Commit the preview to the draft on release inside the list. Escape, pointer
+cancellation, window blur or release outside the list restores the original
+arrangement. Dragging never writes to the server or enables concurrent saving.
+The icon collection field uses the shared BSelect component, including its
+keyboard navigation, dismissal and project styling.
+
+Only currently available pages appear in the editor and page catalog. Disabled
+plugin pages are excluded from defaults. Retain their existing saved preferences
+without rendering inactive rows, so enabling the plugin restores its arrangement.
+
+Groups collapse through their name/disclosure control and show their child
+count. Rename groups inline only while editing, with Enter/blur to finish,
+Escape to cancel and validation next to the name. The row action menu owns
+move/up/down, icon reset, rename and dissolve actions. Reparenting and
+removal restore focus to an attached control. Dissolving preserves children.
+
+Keep Save primary, expose Discard only for a changed draft, and place Reload
+and Reset in page actions. Preview and the page catalog open read-only dialogs;
+do not repeat the full tree and top-level order in permanent side panels.
+These controls preserve draft-only editing, conflict handling and the shared
+unsaved-changes guard. Keep all styles component-owned or existing utilities.
 
 ---
 
