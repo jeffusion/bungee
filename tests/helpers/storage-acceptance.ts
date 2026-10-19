@@ -70,6 +70,12 @@ if (await boundedExit(init, 20_000) !== 0) throw new Error('formal initializatio
   const context = await browser.newContext({viewport:{width:390,height:844},locale:'zh-CN'});
   await context.addInitScript(() => { if (location.protocol === 'http:' || location.protocol === 'https:') localStorage.setItem('locale','zh-CN'); });
   const page = await context.newPage();
+  const waitForDashboard = async () => {
+    await page.getByTestId('page-dashboard').waitFor({timeout:20000});
+    // The dashboard mounts before its plugin and menu requests finish.
+    // Settle them before this acceptance deliberately navigates away or reloads.
+    await page.waitForLoadState('networkidle');
+  };
   const pageErrors: string[] = [], consoleErrors: string[] = [];
   let expectedLogoutFailure = false;
   page.on('pageerror',error=>pageErrors.push(error.message));
@@ -97,7 +103,7 @@ if (await boundedExit(init, 20_000) !== 0) throw new Error('formal initializatio
   await page.locator('input[autocomplete="username"]').fill(setup.username);
   await page.locator('input[autocomplete="current-password"]').fill(password);
   await page.locator('form button').click();
-  await page.locator('[data-testid="page-dashboard"]').waitFor({timeout:20000});
+  await waitForDashboard();
   await page.screenshot({path:join(evidence,'login-dashboard.png'),fullPage:true});
   const browserConfig = await context.request.get(base+'/api/config');
   check(browserConfig.status()===200,'browser cookie session not authenticated '+browserConfig.status()+' '+(browserConfig.ok() ? '' : await browserConfig.text()));
@@ -120,7 +126,7 @@ if (await boundedExit(init, 20_000) !== 0) throw new Error('formal initializatio
   await manager.stop(); started=false;
   await manager.start({workers:'1'}); started=true;
   await wait(bearer,prepared.revision+1); await page.goto(base+'/#/');
-  await page.locator('[data-testid="page-dashboard"]').waitFor({timeout:20000});
+  await waitForDashboard();
   check((await context.request.get(base+'/api/config')).status()===200,'browser session lost after restart');
   check((await fetch(`http://127.0.0.1:${ports[0]}/acceptance`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(requestBody)})).status===200,'proxy failed after restart');
   await page.screenshot({path:join(evidence,'dashboard.png'),fullPage:true});
@@ -139,7 +145,7 @@ if (await boundedExit(init, 20_000) !== 0) throw new Error('formal initializatio
   check((await fetch(base+'/api/auth/verify',{headers:bearer})).status===401,'password change retained the old Bearer');
   await page.locator('input[autocomplete="username"]').fill(setup.username);
   await page.locator('input[autocomplete="current-password"]').fill(changedPassword);
-  await page.locator('form button').click();await page.getByTestId('page-dashboard').waitFor();
+  await page.locator('form button').click();await waitForDashboard();
   await page.goto(base+'/#/extensions/user-auth/profile');await settings.waitFor();
   expectedLogoutFailure=true;
   await page.route('**/api/auth/logout',route=>route.fulfill({status:503,json:{error:'provider_unavailable'}}));
@@ -165,8 +171,8 @@ if (await boundedExit(init, 20_000) !== 0) throw new Error('formal initializatio
   await page.setViewportSize({width:390,height:844});await page.goto(base+'/#/login');
   await page.locator('input[autocomplete="username"]').fill('recovered-owner');
   await page.locator('input[autocomplete="current-password"]').fill(recoveredPassword);
-  await page.locator('form button').click();await page.getByTestId('page-dashboard').waitFor();
-  await page.reload();await page.getByTestId('page-dashboard').waitFor();
+  await page.locator('form button').click();await waitForDashboard();
+  await page.reload();await waitForDashboard();
   await page.screenshot({path:join(evidence,'mobile-recovered-dashboard.png'),fullPage:true});
   check((await context.request.get(base+'/api/config')).status()===200,'recovered browser session failed');
   check(pageErrors.length===0,'browser JavaScript errors: '+pageErrors.join(';'));

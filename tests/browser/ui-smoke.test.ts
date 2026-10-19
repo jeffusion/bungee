@@ -461,6 +461,8 @@ for (const [caseIndex, r] of routesToTest.entries()) {
       await form.locator('button:not([type="button"])').click();
       await assertVisibleTestId(PAGE_TEST_IDS.dashboard, caseContext);
       await (await menuResponse).finished();
+      // Menu response consumption schedules icon requests after the dashboard mounts.
+      await page.waitForLoadState('networkidle');
       assert.equal(loginRequests, 1, 'The user-auth login form must submit exactly once.');
       assert.equal(new URL(page.url()).hash, '#/', 'Successful provider login must return to the dashboard.');
     }
