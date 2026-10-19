@@ -1,3 +1,10 @@
+## [6.0.1](https://github.com/jeffusion/bungee/compare/v6.0.0...v6.0.1) (2026-10-19)
+
+
+### Bug Fixes
+
+* **plugins:** align host engine ranges with Bungee 6 ([0f41097](https://github.com/jeffusion/bungee/commit/0f410978f96d8d4526b5ce8ac6491e4c36d3f146))
+
 # [6.0.0](https://github.com/jeffusion/bungee/compare/v5.26.0...v6.0.0) (2026-10-19)
 
 
