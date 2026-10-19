@@ -4,8 +4,8 @@ import dotenv from 'dotenv';
 import { initializeConfigurationDatabase } from './master-runtime/initialize-configuration';
 export { initializeConfigurationDatabase };
 export type * from './gateway/plugin';
-import { readAdministratorRecovery } from './master-runtime/recovery-prompt';
-import { recoverOffline, readRecoveryInput } from './master-runtime/offline-recovery';
+import { writeSetupCodeToTerminal } from './master-runtime/recovery-prompt';
+import { recoverOffline, recoverOfflineAction, readRecoveryInput, type OfflineRecoveryAction } from './master-runtime/offline-recovery';
 export { recoverOffline };
 import { serializeErrorChain } from './master-runtime/error-chain';
 import { clearDaemonBootstrapEnvironment } from './daemon-control/bootstrap';
@@ -79,11 +79,6 @@ if (import.meta.main) {
       if (process.argv.length !== 3) throw new Error('Invalid callback arguments');
       const { oauthCallbackCommand } = await import('./oauth-callback');
       await oauthCallbackCommand();
-    } else if (process.argv.includes('--recover-admin')) {
-      const args = process.argv.slice(2);
-      if (args.length !== 2 || args[0] !== '--recover-admin' || !args[1]) throw new Error('invalid_recovery_arguments');
-      console.log('目标配置数据库：' + args[1]);
-      console.log(JSON.stringify(await recoverOffline(args[1], await readAdministratorRecovery())));
     } else if(process.argv.includes('--prepare-runtime-upgrade')) {
       const args=process.argv.slice(2);
       if(args.length!==2||args[0]!=='--prepare-runtime-upgrade'||!args[1]) throw new Error('invalid_runtime_upgrade_arguments');
@@ -91,8 +86,18 @@ if (import.meta.main) {
       console.log(JSON.stringify(await prepareRuntimeUpgrade(args[1])));
     } else if (process.argv.includes('--recover')) {
       const args = process.argv.slice(2);
-      if (args.length !== 2 || args[0] !== '--recover' || !args[1]) throw new Error('invalid_recovery_arguments');
-      console.log(JSON.stringify(await recoverOffline(args[1], await readRecoveryInput(process.stdin))));
+      if (args[0] !== '--recover' || !args[1] || args[1].startsWith('--')) throw new Error('invalid_recovery_arguments');
+      if (args.length === 2) {
+        console.log(JSON.stringify(await recoverOffline(args[1], await readRecoveryInput(process.stdin))));
+      } else {
+        if (args.length !== 6 || args[2] !== '--plugin' || !args[3] || args[4] !== '--action'
+          || !['issue-setup-code', 'reset', 'release-auth'].includes(args[5]!)) throw new Error('invalid_recovery_arguments');
+        const result = await recoverOfflineAction(args[1], {plugin: args[3], action: args[5] as OfflineRecoveryAction});
+        if (args[5] === 'issue-setup-code') writeSetupCodeToTerminal(result as {code: string; expiresAt: number});
+        else console.log(JSON.stringify(result));
+      }
+    } else if (process.argv.slice(2).some(arg => arg.startsWith('--recover'))) {
+      throw new Error('invalid_recovery_arguments');
     } else if (initIndex >= 0) {
       const configDbPath = process.argv[initIndex + 1];
       if (!configDbPath) throw new Error('Configuration database path is required');
@@ -108,7 +113,7 @@ if (import.meta.main) {
     if (process.argv[2] === 'oauth-callback') {
       console.error('OAuth callback capture failed or was cancelled. Check the local port and restart the login.');
       process.exitCode = 1;
-    } else if (process.argv.includes('--recover') || process.argv.includes('--recover-admin') || process.argv.includes('--prepare-runtime-upgrade')) {
+    } else if (process.argv.slice(2).some(arg => arg.startsWith('--recover')) || process.argv.includes('--prepare-runtime-upgrade')) {
       console.error('Offline recovery failed; no recovery input is logged.');
       process.exitCode = 1;
     } else {

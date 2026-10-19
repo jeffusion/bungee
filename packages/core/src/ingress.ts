@@ -21,5 +21,4 @@ export async function startIngressProcessFromEnvironment(
   ));
 }
 
-let activeIngressProcess: IngressProcessHandle | null = null;
-if (import.meta.main) activeIngressProcess = await startIngressProcessFromEnvironment();
+if (import.meta.main) await startIngressProcessFromEnvironment();

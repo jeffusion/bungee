@@ -1,3 +1,4 @@
+import { readManagementProtection } from './management-protection';
 import type { Database } from 'bun:sqlite';
 import { hashConfigurationContent } from './content-hash';
 import { auditConfigurationTables, verifyActiveRequestIdentity } from './cross-table-audit';
@@ -12,6 +13,7 @@ import { isSqliteBusyError, repositoryFailure } from './sqlite-errors';
 
 function verifyIntegrity(db: Database, allowActiveRecoveryDrift = false, checkDatabasePages = true): void {
   verifySchemaFingerprint(db);
+  readManagementProtection(db);
   verifyRecoveryIntegrity(db, allowActiveRecoveryDrift);
   // Full page scans include plugin history and must not run on routine config reads:
   // blocking the master here can prevent worker supervision leases from renewing.

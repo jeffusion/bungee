@@ -1,6 +1,6 @@
 import { createWebSocketBridge, isWebSocketUpgradeRequest } from '../websocket';
 import { forwardPublicWebSocket } from './websocket';
-import { ANONYMOUS_PRINCIPAL, type DataPrincipal } from '../plugin-extensions';
+import type { DataPrincipal } from '../plugin-extensions';
 import { createPublicRequestForwarder, type AdmittedWorkerSelector } from './forwarding';
 
 export interface PublicListener {

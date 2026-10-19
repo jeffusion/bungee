@@ -2,8 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { snapshotJsonGraph } from '../config-storage/json-preflight';
 import { validateDigest } from '../config-storage/repository-validation';
 import { isLowercaseUuid } from '../config-storage/validation';
-import type { ConfigMasterMessage, ConfigProcessIdentity } from '../config-publication/types';
-import type { ConfigWorkerRuntimeMessage } from '../config-publication/worker-runtime-contract';
+import type { ConfigMasterMessage } from '../config-publication/types';
 import {
   hashSupervisionBody,
   parseWorkerRuntimeSnapshot,
@@ -68,8 +67,6 @@ export class WorkerControllerClientError extends Error {
     super(message, { cause });
   }
 }
-
-type StatusResponse = { readonly message: SupervisionMessage; readonly body: WorkerStatusPayload };
 
 const STATUS_KEYS = [
   'authority', 'boot_nonce', 'content_hash', 'control_port', 'evidence', 'frozen', 'master_generation',

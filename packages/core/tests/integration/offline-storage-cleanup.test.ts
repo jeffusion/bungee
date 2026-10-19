@@ -1,3 +1,4 @@
+import {withRecoveryTerminal, identityRecoveryAnswers} from '../../../../tests/helpers/recovery-terminal';
 import { expect, test, spyOn } from 'bun:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -5,7 +6,7 @@ import { join } from 'node:path';
 import * as stopped from '../../src/master-runtime/stopped-instance-lock';
 import { acquireMasterInstanceLock, type MasterInstanceLock } from '../../src/master-runtime/instance-lock';
 import { initializeConfigurationDatabase } from '../../src/master-runtime/initialize-configuration';
-import { recoverOffline } from '../../src/master-runtime/offline-recovery';
+import { recoverOfflineAction } from '../../src/master-runtime/offline-recovery';
 import { withOfflineStorageSession } from '../../src/master-runtime/offline-storage-session';
 import { PluginStateClient } from '../../src/plugin-state/client';
 import { AsyncConfigRepository } from '../../src/config-storage/async-config-repository';
@@ -60,7 +61,7 @@ test('offline recovery preserves its original error and the locks when config cl
       client.close = async () => { await close(); throw new Error('injected config close failure'); }; return client;
     });
     try {
-      const failure = await recoverOffline(path, { kind: 'identity', plugin: 'local-accounts', payload: {} }).catch(error => error);
+      const failure = await withRecoveryTerminal(() => recoverOfflineAction(path, {plugin:'user-auth',action:'reset'}), identityRecoveryAnswers('admin','tiny','Operator recovery')).catch(error => error);
       expect(failure).toBeInstanceOf(AggregateError);
       if (!(failure instanceof AggregateError)) throw failure;
       expect(failure.cause).toHaveProperty('message', 'invalid_password');
@@ -76,11 +77,11 @@ test('invalid secret material opens no plugin Worker and permits corrected offli
     try {
       process.env.BUNGEE_PLUGIN_SECRETS_KEY = 'invalid-key';
       await expect(initializeConfigurationDatabase({ configDbPath: path })).rejects.toThrow();
-      await expect(recoverOffline(path, { kind: 'identity', plugin: 'local-accounts', payload: {} })).rejects.toThrow();
+      await expect(withRecoveryTerminal(() => recoverOfflineAction(path, {plugin:'user-auth',action:'reset'}), identityRecoveryAnswers('admin','tiny','Operator recovery'))).rejects.toThrow();
       if (previous === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
       else process.env.BUNGEE_PLUGIN_SECRETS_KEY = previous;
       await initializeConfigurationDatabase({ configDbPath: path });
-      await expect(recoverOffline(path, { kind: 'identity', plugin: 'local-accounts', payload: {} })).rejects.toThrow('invalid_password');
+      await expect(withRecoveryTerminal(() => recoverOfflineAction(path, {plugin:'user-auth',action:'reset'}), identityRecoveryAnswers('admin','tiny','Operator recovery'))).rejects.toThrow('invalid_password');
       await initializeConfigurationDatabase({ configDbPath: path });
     } finally {
       if (previous === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;

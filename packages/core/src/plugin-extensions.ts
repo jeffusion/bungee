@@ -12,9 +12,15 @@ export interface ManagementSubject {
   readonly requiresPasswordChange?: boolean;
 }
 export interface ManagementProvider {
+  setupStatus(): Promise<'uninitialized' | 'ready'>;
+  initialize(request: Request): Promise<Response>;
   authenticate(request: Request): Promise<ManagementSubject | null>;
   authorize(subject: ManagementSubject, capability: string): Promise<boolean>;
   login(request: Request): Promise<Response>;
+  /** Public login interactions are dispatched only to the selected provider. */
+  loginOptions?(request: Request): Promise<Response>;
+  beginLogin?(request: Request): Promise<Response>;
+  completeLogin?(request: Request): Promise<Response>;
   logout(request: Request): Promise<Response>;
   bootstrap(input: unknown): Promise<void>;
   hasIdentity(): Promise<boolean>;

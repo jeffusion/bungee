@@ -4,7 +4,7 @@ import { kernelMonotonicNowNs, readKernelDeadlineClockId } from './kernel-monoto
 import type { ChildProcess } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import type { Sha256Digest } from '@jeffusion/bungee-types';
-import type { ConfigMasterMessage, ConfigProcessIdentity, ConfigWorkerMessage, StartWorkerCommand, WorkerDrainedMessage, WorkerDrainFailedMessage, WorkerDrainStartedMessage, WorkerExitDeadlineEvidence } from '../config-publication/types';
+import type { ConfigMasterMessage, ConfigProcessIdentity, StartWorkerCommand, WorkerDrainedMessage, WorkerDrainFailedMessage, WorkerDrainStartedMessage, WorkerExitDeadlineEvidence } from '../config-publication/types';
 import { parseConfigMasterMessage } from '../config-publication/master-messages';
 import type { ConfigWorkerRuntimeMessage } from '../config-publication/worker-runtime-contract';
 import type { ConfigPublicationWorkerProcess, WorkerExitEvidence } from '../config-publication/coordinator-types';

@@ -1,6 +1,6 @@
 import {auxiliaryCredentialIdentity} from './auxiliary-request';
 import { createBodySource } from './body-factory';
-import { readControlledBody, controlledBodyHandle } from './controlled-views';
+import { readControlledBody } from './controlled-views';
 import { ResponseViews } from './response-views';
 import { observeBodyStream } from './body-observation-stream';
 import { RequestRetryAction } from './retry-action';
@@ -13,11 +13,9 @@ import { DataAdmissionError } from '../data-admission/host';
  */
 
 import { logger } from '../logger';
-import { forEach } from 'lodash-es';
 import type { AppConfig, PluginConfigOptions, ResponseModificationRules } from '@jeffusion/bungee-types';
 import type { PluginManifest } from '../plugin.types';
 import type { RequestLogger } from '../logger/request-logger';
-import { processDynamicValue } from '../expression-engine';
 import type { EffectiveRouteConfig, RuntimeUpstream, RequestSnapshot } from '../worker/types';
 import type { PhaseAwareHooks } from '../scoped-plugin-registry';
 import type { AttemptObservationEvent } from '../hooks/plugin-hooks';
@@ -348,7 +346,7 @@ function inspectManagedCredential(upstream: RuntimeUpstream): ManagedCredentialC
 }
 
 async function acquireManagedCredential(
-  upstream: RuntimeUpstream,
+  _upstream: RuntimeUpstream,
   managed: ManagedCredentialContext,
   target: URL,
   expectedPath: string,
@@ -536,8 +534,7 @@ export async function executeForward(
   }
 
   // ===== 1. Prepare route-relative URL and apply route-level path_rewrite =====
-  const targetUrl = new URL(upstream.target);
-  const targetBasePath = targetUrl.pathname;
+  new URL(upstream.target); // Validate the configured target before rewriting the request.
   const routeRelativeUrl = new URL(phase1and2Context?.url.toString() ?? requestSnapshot.url);
 
   if (route.path_rewrite && !requestOverride) {

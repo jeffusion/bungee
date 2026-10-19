@@ -26,7 +26,6 @@ import { AdmissionRegistryError, IngressAdmissionRegistry, type AdmissionRegistr
 import { AdmissionSetError } from './admission-set';
 import { parseAdmissionSet, type AdmissionSet } from './admission-set';
 
-const ZERO_CONTROLLER_ID = '00000000-0000-0000-0000-000000000000';
 const DEFAULT_BODY_BYTES = 1_048_576;
 const DEFAULT_BODY_TIMEOUT_MS = 5_000;
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 20;
@@ -327,7 +326,6 @@ export class IngressSupervisionHttpServer {
   private readonly pid: number;
   private readonly onAttached?: () => void;
   private readonly onShutdown?: () => Promise<void> | void;
-  private leaseExpiresAt: number | null = null;
   private attached = false;
   private frozen = true;
   private deadline: number | null = null;
@@ -492,7 +490,6 @@ export class IngressSupervisionHttpServer {
     acceptAttach(message as AttachMessage, this.credential, this.challenges, this.authority);
     this.attached = true;
     this.frozen = true;
-    this.leaseExpiresAt = null;
     this.registry.setFrozen(true);
     this.scheduleDeadline(attachedAt + this.attachGraceMs);
     this.onAttached?.();
@@ -511,7 +508,6 @@ export class IngressSupervisionHttpServer {
     this.authority.accept(message);
     this.frozen = false;
     this.registry.setFrozen(false);
-    this.leaseExpiresAt = expiry;
     this.scheduleDeadline(expiry);
     return this.statusResponse(message.request_id, {
       controller_epoch: message.controller_epoch,
@@ -709,10 +705,6 @@ export class IngressControllerClient {
     const response = await this.post('/__supervision/command', { message, body }, signal);
     if (signal?.aborted) throw signal.reason;
     return response;
-  }
-
-  private async get(path: string, signal?: AbortSignal): Promise<unknown> {
-    return this.request(path, { method: 'GET' }, signal);
   }
 
   private async post(path: string, body: unknown, signal?: AbortSignal): Promise<unknown> {

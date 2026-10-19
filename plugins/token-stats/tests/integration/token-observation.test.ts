@@ -4,7 +4,7 @@ const dataPlaneRuntime = await createDataPlaneRuntime();
 afterDataPlaneTests(() => dataPlaneRuntime.close());
 import { initializeTokenStatsTestDatabase } from '../../../../packages/core/tests/helpers/token-stats-database';
 const { withTokenStatsMetering } = await import('../../server/storage');
-type StatsTestStorage = ReturnType<typeof withTokenStatsMetering<SQLitePluginStorage>>;
+type StatsTestStorage = ReturnType<typeof withTokenStatsMetering<InstanceType<typeof SQLitePluginStorage>>>;
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import fs from 'node:fs';
@@ -28,7 +28,7 @@ import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../../../../packages/core/
 setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
 const databases: Array<{ db: Database; directory: string }> = [];
-const registries: ScopedPluginRegistry[] = [];
+const registries: InstanceType<typeof ScopedPluginRegistry>[] = [];
 const registryRoots: string[] = [];
 const storageKeys: string[] = [];
 const originalFetch = globalThis.fetch;
@@ -94,7 +94,7 @@ interface GatewayFixture {
   db: Database;
   storage: StatsTestStorage;
   directory: string;
-  registry: ScopedPluginRegistry;
+  registry: InstanceType<typeof ScopedPluginRegistry>;
   config: AppConfig;
   observations: AttemptObservationEvent[];
 }

@@ -8,6 +8,7 @@ import { DEFAULT_REQUEST_MS } from '$utils/route-timeouts';
 export interface ValidationError {
   field: string;
   message: string;
+  level?: 'warning';
 }
 
 export async function validateRoute(route: Partial<Route>, services: Service[] = []): Promise<ValidationError[]> {

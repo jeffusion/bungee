@@ -113,7 +113,7 @@ export function parsePluginManifestText(content: string, source = 'manifest.json
   const contributes = parseContributions(root.contributes, 'contributes');
   const control = parseControl(root.control, 'control');
   const ingress = root.ingress === undefined ? undefined : (() => { const value = record(root.ingress, 'ingress'); exact(value, new Set(['entry']), 'ingress'); return {entry:relativeEntry(string(value.entry,'ingress.entry'),'ingress.entry','main')}; })();
-  const management = root.management === undefined ? undefined : (() => { const value = record(root.management, 'management'); exact(value, new Set(['loginComponent']), 'management'); return { ...optionalProperty('loginComponent', optionalString(value.loginComponent,'management.loginComponent')) }; })();
+  const management = root.management === undefined ? undefined : (() => { const value = record(root.management, 'management'); exact(value, new Set(['loginComponent', 'setupComponent']), 'management'); return { ...optionalProperty('loginComponent', optionalString(value.loginComponent,'management.loginComponent')), ...optionalProperty('setupComponent', optionalString(value.setupComponent,'management.setupComponent')) }; })();
   if ((ingress || management) && !control) throw new PluginManifestCatalogError('control','extensions require control entry');
   const hasControlPlane = parsedCapabilities.includes('controlPlane');
   if (hasControlPlane !== (control !== undefined)) {

@@ -20,6 +20,6 @@ export function createControl(host: ControlHostContext): PluginControl {
             logger.error({ code, index: input.index, total: input.total }, 'llm_adapter_history_rejected');
             throw error;
         } } });
-    return { rpc: [], start() { }, async dispose() { dispose(); } };
+    return { api: [], rpc: [], start() { }, async dispose() { dispose(); } };
 }
 export default { createControl } satisfies ControlPlugin;

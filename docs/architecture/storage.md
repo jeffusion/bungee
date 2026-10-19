@@ -59,14 +59,15 @@ RPC 使用真实业务期限；超期 callback 不能被当成已回收。连续
 
 管理身份由选中的 `ManagementProvider` 插件实现。核心按声明发现 provider，先启动其本地 control 依赖，再启动数据面。
 用户名、密码、会话、登录限流和身份恢复都属于插件；核心不按内置账户插件名分支。
-选中的 provider 不可用时拒绝管理访问。没有启用管理 provider 的配置采用匿名管理；从已有认证配置切换到匿名须通过权限门禁。
+选中的 provider 不可用时拒绝管理访问。没有强制认证且未选择 provider 时采用匿名管理；强制认证 guard 与 provider 激活由配置 Worker 原子持久化。在线停用、替换或导入不能解除；仅停机本地 TTY 的 `release-auth` 可解除并保留身份。
 无关 control 或观察 adapter 初始化失败仅影响依赖该能力的消费者。
 
 `/health` 提供 `live`、`management`、`data`、`degraded`；没有已确认的服务 Worker 时 `data=false`。
 `/health/management` 和 `/health/data` 分别检查对应就绪状态。恢复停止或发布降级不会被报告为数据面正常。
 
-账户插件使用管理员记录、固定会话槽和限流槽。认证仅触碰对应会话；管理员 generation 撤销会话，failureEpoch 使旧限流状态失效。
-普通认证不会记录完整账户命令历史。
+用户认证插件通过既有 durableState／CAS 保存 schema 3 记录，拆分用户、本地凭据、外部身份绑定、登录连接、安全设置和初始化／恢复锚点，不新增插件状态表或迁移。会话、限流和短期认证流程使用固定容量记录。改密、禁用和绑定变化推进对应用户 generation；全局撤销及离线恢复推进 sessionEpoch，恢复同时推进 failureEpoch 使旧限流状态失效。连接代际使配置变更前的相关会话和在途流程失效。clock 以 CAS 保存已观察时间，防止回拨或重启复活过期凭据。普通认证不会记录完整账户命令历史；完整记录约束见[用户认证插件](../../plugins/user-auth/README.md#会话与持久化)。
+
+一次性初始化码只保存摘要；签发前先保存强制认证和 provider 选择，配置与插件状态库均关闭确认后才在 TTY 显示码。离线重置恢复锚点账号，锚点完整时保留账号 ID，允许重建该账号缺失或损坏的身份和本地凭据；不根据用户名猜测锚点。重置撤销全部会话和在途流程，保留其他用户、外部绑定及登录配置，不改变强制认证。非当前 schema 的记录明确拒绝，不转换或自动重新开放初始化。user-auth 不读取、导入、迁移或清理旧账号、Cookie 或 `local-accounts` 命名空间；配置中残留已删除插件的激活记录会报错，不匿名启动。
 
 ## 数据库基线与升级
 
@@ -77,6 +78,8 @@ RPC 使用真实业务期限；超期 callback 不能被当成已回收。连续
 | `bungee.db` | 1 / `current_storage_baseline` | 2 | [配置 schema](../../packages/core/src/config-storage/schema.ts)、[迁移计划](../../packages/core/src/config-storage/migrations/plan.ts) |
 | `access.db` | 001 / `current_access_baseline` | 002 | [日志 schema](../../packages/core/src/migrations/schema.ts)、[迁移注册](../../packages/core/src/migrations/index.ts) |
 | `plugin-state.db` | `PRAGMA user_version=1` | 2 | [插件状态 schema](../../packages/core/src/plugin-state/schema.ts) |
+
+配置库迁移 4（`management_protection`）添加强制认证 guard，记录 required、selected provider 与 generation；它不进入普通配置导入导出。插件状态库继续使用现有表，插件业务记录格式独立于数据库迁移编号。
 
 `configuration_state.schema_version=4` 是内部状态记录格式，不是数据库迁移编号。配置 revision、监督 epoch 和插件记录版本分别标识不同对象。
 

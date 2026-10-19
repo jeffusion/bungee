@@ -35,7 +35,6 @@ import type {
   PluginInitContext,
   PluginScopeInfo,
 } from './hooks';
-import type { AttemptObservationEvent } from './hooks/plugin-hooks';
 import { createPluginHooks } from './hooks';
 import type { Endpoint, PluginConfig, Service } from '@jeffusion/bungee-types';
 import type { PluginStorage, PluginMetadata, PluginConfigField, PluginTranslations } from './plugin.types';
@@ -314,7 +313,6 @@ export class ScopedPluginRegistry {
    * same canonical owner/lifecycle/lease registry as every other consumer.
    */
   readonly serviceHost: PluginServiceHost;
-  private dispatchConfig?: {routes?: any[];services?: Service[]};
   private readonly rpcContexts = new Map<string, import('./plugin-services').PluginServices>();
   private readonly requestLeases = new AsyncLocalStorage<ReadonlyMap<string, () => void>>();
   private readonly dispatchInvocations = new WeakMap<() => void, {callee: unknown; signal: AbortSignal}>();
@@ -1558,7 +1556,6 @@ export class ScopedPluginRegistry {
     services?: Service[];
     [key: string]: any; // 允许额外字段
   }, dependencies?: PluginDependencyGraph): Promise<{ success: number; failed: number }> {
-    this.dispatchConfig = config;
     this.dependencies = dependencies;
     if (dependencies) {
       this.setServiceDependencies(dependencies.declarations());

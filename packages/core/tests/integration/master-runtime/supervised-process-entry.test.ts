@@ -12,7 +12,7 @@ import {
   serializeWorkerSupervisionSeed,
   signSupervisionMessage,
 } from '../../../src/supervision';
-import { TEST_KERNEL_BOOT_ID } from '../../helpers/config-publication-worker-runtime.ts';
+import { TEST_KERNEL_BOOT_ID } from '../../helpers/config-publication-worker-runtime';
 import { TEST_WORKER_TRANSPORT_SECRET } from '../../fixtures/config-worker-private-transport';
 
 const identity = {

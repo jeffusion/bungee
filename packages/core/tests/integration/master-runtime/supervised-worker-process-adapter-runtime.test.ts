@@ -19,7 +19,7 @@ import {
   signWorkerDescriptor,
   type ControllerAuthority,
 } from '../../../src/supervision';
-import { startCurrentMessage, drainMessage, TEST_KERNEL_BOOT_ID } from '../../helpers/config-publication-worker-runtime.ts';
+import { startCurrentMessage, drainMessage, TEST_KERNEL_BOOT_ID } from '../../helpers/config-publication-worker-runtime';
 
 /** Fake exact-process control so adapter initialization never touches the OS. */
 const identityControl: ProcessIdentityControl = {

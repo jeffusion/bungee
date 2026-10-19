@@ -33,7 +33,7 @@ test('real ingress → worker child → upstream preserves compressed/malformed/
   try{
     const json=encoder.encode('{ "model": "codex" }');
     for(const [bytes,coding,type] of [[zstdCompressSync(json),'zstd','application/json'],[gzipSync(json),'gzip','application/json'],[encoder.encode('{invalid'),'identity','application/json'],[new Uint8Array([0,128,255]),'unknown','application/octet-stream'],[encoder.encode(': custom\nevent: arbitrary\ndata: {bad}\n\ndata: [DONE]\n\n'),'identity','text/event-stream']] as const){
-      const res=await Bun.fetch(pipeline.url+'/test',{method:'POST',body:bytes,headers:{'content-type':type,'content-encoding':coding},decompress:false});const output=new Uint8Array(await res.arrayBuffer());expect(res.status).toBe(200);expect(hash(received.at(-1)!.bytes)).toBe(hash(bytes));expect(hash(output)).toBe(hash(bytes));expect(received.at(-1)!.coding).toBe(coding);expect(res.headers.get('content-encoding')).toBe(coding);
+      const res=await Bun.fetch(pipeline.url+'/test',{method:'POST',body:Uint8Array.from(bytes),headers:{'content-type':type,'content-encoding':coding},decompress:false});const output=new Uint8Array(await res.arrayBuffer());expect(res.status).toBe(200);expect(hash(received.at(-1)!.bytes)).toBe(hash(bytes));expect(hash(output)).toBe(hash(bytes));expect(received.at(-1)!.coding).toBe(coding);expect(res.headers.get('content-encoding')).toBe(coding);
     }
   }finally{await pipeline.close();}
 },15000);

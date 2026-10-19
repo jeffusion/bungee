@@ -88,7 +88,7 @@ describe('plugin activation', () => {
     const requests: RequestRecord[] = [];
     install(requests, [accepted('op-auth', 'committed'), Response.json({operation:{mutation_id:'op-auth',state:'converged',result_status:200},workers:[]})]);
     let switched = false;
-    await setPluginEnabled('local-accounts',true,{onAccepted:async accepted=>{
+    await setPluginEnabled('user-auth',true,{onAccepted:async accepted=>{
       expect(accepted.operation_id).toBe('op-auth');
       expect(requests).toHaveLength(1);
       switched = true;
@@ -101,7 +101,7 @@ describe('plugin activation', () => {
     const requests: RequestRecord[] = [];
     install(requests,[accepted('op-auth','committed')]);
     let retained = '';
-    const error = await rejection(setPluginEnabled('local-accounts',true,{onAccepted:async state=>{
+    const error = await rejection(setPluginEnabled('user-auth',true,{onAccepted:async state=>{
       retained = state.operation_id!;
       throw new Error('invalid_credentials');
     }}));

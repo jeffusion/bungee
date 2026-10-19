@@ -36,15 +36,27 @@ export function createProgram() {
 
   program
     .command('recover')
-    .description('Recover a stopped instance using bounded JSON from stdin or a 0600 file')
+    .description('Recover a stopped instance using plugin terminal actions or bounded JSON')
     .option('--file <path>', 'Owner-only 0600 recovery JSON input file')
+    .option('--plugin <name>', 'Management plugin for an interactive offline action')
+    .option('--action <action>', 'Terminal action: issue-setup-code, reset, or release-auth')
     .addHelpText('after', `
 Stop the instance first. Supply one JSON object via stdin or bungee recover --file recovery.json (chmod 600).
-Administrator identity: {"kind":"identity","plugin":"local-accounts","payload":{"username":"admin","password":"<new password, 15-128 characters>","reason":"Lost credentials"}}
+Initialize management access: bungee recover --plugin user-auth --action issue-setup-code
+Reset identity: bungee recover --plugin user-auth --action reset
+Release required authentication locally: bungee recover --plugin user-auth --action release-auth
+These actions require a terminal. Reset asks for the plugin's fields and recovery reason; secret fields are hidden.
 Unresolved usage: {"kind":"plugin-state","plugin":"token-budget","payload":{"keyId":"KEY_ID","requestId":"REQUEST_ID","attemptId":"ATTEMPT_ID","inputTokens":100,"outputTokens":200,"reason":"Verified usage evidence"}}
 Usage counts are replacement totals for the specified attempt, applied to its original period.
 `)
-    .action(recoverCommand);
+    .action(async options => {
+      try { await recoverCommand(options); }
+      catch (error) {
+        console.error(error instanceof Error && error.message === 'recovery_requires_terminal'
+          ? 'Offline recovery action requires an interactive terminal.' : 'Offline recovery failed; no recovery input is logged.');
+        process.exitCode = 1;
+      }
+    });
 
   program
     .command('start')

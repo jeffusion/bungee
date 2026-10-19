@@ -5,7 +5,7 @@ import { reconcilePluginDependencies } from '../../src/master-runtime/reconcile-
 import { createCatalogSnapshotCompiler } from '../../src/config-worker/snapshot-compiler';
 import { buildPluginManifestCatalog } from '../../src/plugin-manifest-catalog';
 import { cleanupCatalogRoots, manifest, tempRoot, writePlugin } from '../helpers/plugin-manifest-catalog';
-import { PROCESS_IDENTITY } from '../helpers/config-publication-worker-runtime.ts';
+import { PROCESS_IDENTITY } from '../helpers/config-publication-worker-runtime';
 
 afterEach(cleanupCatalogRoots);
 

@@ -5,9 +5,9 @@ const scope = globalThis as unknown as { onmessage(event: MessageEvent<any>): vo
 let repository: ConfigRepository;
 scope.onmessage = ({ data }) => {
   if (data.method === 'open') {
-    repository = ConfigRepository.open(data.args[0]);
+    repository = ConfigRepository.open(data.args[0], {offline:data.args[1].offline,compileOptions:{pluginSchemas:new Map(),managementProviders:new Set(data.args[1].managementProviders)}});
     scope.postMessage({ id: data.id, ok: true, result: {
-      snapshot: repository.getSnapshot(), supervision: repository.getSupervisionState(),
+      ...repository.getControlProjection(), supervision: repository.getSupervisionState(),
     } });
   } else if (data.method === 'commitPrepared') {
     // Durable success followed by lost acknowledgement is deliberately ambiguous

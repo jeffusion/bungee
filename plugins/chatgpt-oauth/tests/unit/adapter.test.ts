@@ -116,9 +116,7 @@ describe('ChatGPT OAuth adapter', () => {
       ['https://chatgpt.com', '/codex/alpha/search', 'POST'],
       ['https://chatgpt.com', '/alpha/search/extra', 'POST'],
     ]) {
-      const context = request(path!, false);
-      context.url = new URL(origin! + path!);
-      context.method = method!;
+      const context = { ...request(path!, false), url: new URL(origin! + path!), method: method! };
       const body = context.body;
       const adapter = new ChatgptOauthAdapter();
       adapter.beforeRequest(context);

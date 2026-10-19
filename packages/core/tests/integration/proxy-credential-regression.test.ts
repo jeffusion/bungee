@@ -470,7 +470,7 @@ describe('proxy credential regressions', () => {
           await new Promise((resolve) => setTimeout(resolve, 25));
         },
       }),
-    } as unknown as ScopedPluginRegistry);
+    } as unknown as InstanceType<typeof ScopedPluginRegistry>);
 
     const entries: Array<Record<string, unknown>> = [];
     const outcomes = new Map<string, { outcome: string; success: boolean; code?: string }>();
@@ -825,7 +825,7 @@ describe('proxy credential regressions', () => {
     } as unknown as PluginRegistry);
     const credentialCalls: Array<{ method: string; attemptId?: string }> = [];
     let providerEndpoint: RpcEndpointHandle | undefined;
-    let serviceHost!: PluginServiceHost;
+    let serviceHost!: InstanceType<typeof PluginServiceHost>;
     serviceHost = new PluginServiceHost('worker', {
       identity: (plugin, scope) => ({ endpoint: `fixture:${plugin}:${scope}`, instance: 'credential-regression', generation: 1, catalog: 'fixture-catalog', subject: plugin }),
       resolvePlacement: () => providerEndpoint === undefined ? null : { kind: 'endpoint', endpoint: providerEndpoint },

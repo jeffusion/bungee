@@ -1,12 +1,9 @@
 import type { HeldProcessLifetimeGuardFacts } from './process-lifetime-guard';
-import { randomUUID } from 'node:crypto';
 import type { Server } from 'bun';
 import { snapshotJsonGraph } from '../config-storage/json-preflight';
 import { parseConfigMasterMessage } from '../config-publication/master-messages';
 import type {
   ConfigProcessIdentity,
-  DrainWorkerCommand,
-  StartWorkerCommand,
 } from '../config-publication/types';
 import type { ConfigWorkerRuntimeController, ConfigWorkerRuntimeMessage, ConfigWorkerRuntimeResult } from '../config-publication/worker-runtime-contract';
 import {
@@ -22,7 +19,6 @@ import {
   type AttachMessage,
   type CommandEnvelope,
   type ControllerAuthority,
-  type PendingChallenge,
   type ProcessIdentity,
   type StatusMessage,
   type SupervisionMessage,
@@ -231,7 +227,6 @@ export class WorkerSupervisionHttpServer {
   private contentHash: string | null = null;
   private pluginCatalogHash: string | null = null;
   private evidence: WorkerStatusEvidence = { kind: 'candidate' };
-  private descriptorDirty = false;
   private publishedAuthority: ControllerAuthority | null = null;
   private terminating = false;
 
@@ -390,14 +385,13 @@ export class WorkerSupervisionHttpServer {
     const body: WorkerDescriptorBody = { schema: 'bungee-worker-descriptor-v1', role: 'worker', ...descriptorFacts, evidence,
       ...(this.lifetimeGuard === undefined ? {} : { lifetime_guard: this.lifetimeGuard }) };
     await writeWorkerDescriptor(this.descriptorPath, body, this.credential.process_key, this.descriptorWriteOptions);
-    this.descriptorDirty = false;
   }
 
   private async refreshDescriptorBestEffort(): Promise<void> {
     try {
       await this.updateDescriptor();
     } catch {
-      this.descriptorDirty = true;
+      // A failed refresh does not change the last signed descriptor.
     }
   }
 

@@ -29,10 +29,11 @@ export function createManagementAuthFixture(aggregate: () => ConfigurationAggreg
       return Response.json({}, {status: token && sessions.authenticate(token) ? 200 : 401});
     },
     async logout() { return Response.json({success: true}); },
+    setupStatus: async () => 'ready', async initialize() {return Response.json({initialized:true});},
     async bootstrap() {}, hasIdentity: async () => true, async revokeSessions() { activeSessions.clear(); },
   };
   const host = { get: () => options.provider ? {status:'ready', admission:true, control:{management:provider}} : undefined } as unknown as PluginControlHost;
   const authAggregate = options.provider ? () => ({...aggregate(), plugin_activations:[{plugin_name:'test-provider'}]}) : aggregate;
-  const managementAuth = new ManagementAuthentication(host, authAggregate, new Set(options.provider ? ['test-provider'] : []));
+  const managementAuth = new ManagementAuthentication(host, authAggregate, new Set(options.provider ? ['test-provider'] : []), undefined, () => ({required:options.provider === true, selectedProvider:options.provider ? 'test-provider' : null,generation:0}));
   return { sessions, current, next, managementAuth, dispose: () => activeSessions.clear() };
 }

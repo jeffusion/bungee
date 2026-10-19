@@ -9,7 +9,6 @@ import { loadImmutableControlArtifact } from './artifact-loader';
 import type { SecretKeyMaterial } from './secret-store';
 import type {
   BoundAttemptContext,
-  ControlApiHandlerContext,
   ControlBindingIdentity,
   ControlHostContext,
   ControlPlugin,

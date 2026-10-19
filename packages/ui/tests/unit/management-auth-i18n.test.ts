@@ -4,15 +4,21 @@ import { get } from 'svelte/store';
 import { _, addMessages, init, locale, waitLocale } from 'svelte-i18n';
 import en from '../../src/i18n/locales/en.json';
 import zh from '../../src/i18n/locales/zh-CN.json';
-import manifest from '../../../../plugins/local-accounts/manifest.json';
+import manifest from '../../../../plugins/user-auth/manifest.json';
 import { accountError } from '../../src/components/domain/plugin/activation-state';
-import { loginFailure } from '../../../../plugins/local-accounts/ui/login-errors';
+import { loginFailure } from '../../../../plugins/user-auth/ui/login-errors';
 
 const surfaces = [
-  '../../../../plugins/local-accounts/ui/Login.svelte',
-  '../../../../plugins/local-accounts/ui/Settings.svelte',
+  '../../../../plugins/user-auth/ui/Login.svelte',
+  '../../../../plugins/user-auth/ui/Settings.svelte',
   '../../src/components/domain/plugin/PluginActivationDialog.svelte',
-  '../../../../plugins/local-accounts/ui/RecoveryHelp.svelte',
+  '../../src/routes/Setup.svelte',
+  '../../../../plugins/user-auth/ui/Setup.svelte',
+  '../../../../plugins/user-auth/ui/RecoveryHelp.svelte',
+  '../../../../plugins/user-auth/ui/Profile.svelte',
+  '../../../../plugins/user-auth/ui/Users.svelte',
+  '../../../../plugins/user-auth/ui/LoginSettings.svelte',
+  '../../../../plugins/user-auth/ui/SessionPolicy.svelte',
 ];
 const read = (path: string) => Bun.file(new URL(path, import.meta.url)).text();
 const flatten = (value: Record<string, any>, prefix = ''): Record<string, string> => Object.fromEntries(
@@ -41,22 +47,22 @@ test('fresh login uses bundled plugin messages in both locales without loading t
   addMessages('en', en); addMessages('zh-CN', zh);
   // The login path registers only the selected provider, not /plugin-translations.
   for (const language of ['en', 'zh-CN']) {
-    const messages = bundled[language].plugins['local-accounts'];
+    const messages = bundled[language].plugins['user-auth'];
     expect(messages).toEqual(manifest.translations[language as keyof typeof manifest.translations]);
-    addMessages(language, { plugins: { 'local-accounts': messages } });
+    addMessages(language, { plugins: { 'user-auth': messages } });
   }
   init({ initialLocale: 'en', fallbackLocale: 'zh-CN' });
   for (const language of ['en', 'zh-CN']) {
     locale.set(language); await waitLocale();
-    const messages = bundled[language].plugins['local-accounts'];
+    const messages = bundled[language].plugins['user-auth'];
     for (const [key, text] of Object.entries(messages)) {
       const values = Object.fromEntries([...text.matchAll(/\{(\w+)\}/g)].map(match => [match[1], `<${match[1]}>`]));
-      const rendered = get(_)(`plugins.local-accounts.${key}`, { values });
+      const rendered = get(_)(`plugins.user-auth.${key}`, { values });
       expect(rendered).toBe(text.replace(/\{(\w+)\}/g, (_, name) => `<${name}>`));
     }
-    expect(get(_)(`plugins.local-accounts.${loginFailure(new Error('invalid_credentials')).key}`)).toBe(messages['login.errors.invalid_credentials']);
-    expect(get(_)('plugins.local-accounts.recovery.summary')).toBe(messages['recovery.summary']);
-    for (const key of ['loginTitle', 'stateUnavailable', 'initializationFailed', 'loginComponentUnavailable']) {
+    expect(get(_)(`plugins.user-auth.${loginFailure(new Error('invalid_credentials')).key}`)).toBe(messages['login.errors.invalid_credentials']);
+    expect(get(_)('plugins.user-auth.recovery.summary')).toBe(messages['recovery.summary']);
+    for (const key of ['loginTitle', 'setupTitle', 'stateUnavailable', 'initializationFailed', 'loginComponentUnavailable', 'setupComponentUnavailable', 'setupRecovery']) {
       expect(get(_)(`management.${key}`)).not.toBe(`management.${key}`);
     }
   }
@@ -67,7 +73,7 @@ test('fresh login uses bundled plugin messages in both locales without loading t
   expect(loader).toContain('if (!isCurrent()) return false');
 });
 
-test('activation and settings retain their existing host copy while provider login owns errors and recovery', async () => {
+test('activation and user profile retain translated errors while provider login owns recovery', async () => {
   const core = flatten(en.pluginActivation);
   expect(Object.keys(core).sort()).toEqual(Object.keys(flatten(zh.pluginActivation)).sort());
   expect(Object.keys(flatten(en.management)).sort()).toEqual(Object.keys(flatten(zh.management)).sort());
@@ -86,15 +92,15 @@ test('activation and settings retain their existing host copy while provider log
   expect(login).toContain('error = failure.key');
   expect(login).toContain('{t(error)}');
   expect(login).not.toContain('core(error)');
-  const settings = await read(surfaces[1]);
-  expect(settings).toContain('error = result.key');
-  expect(settings).toContain('{core(error)}');
+  const profile = await read(surfaces[6]);
+  expect(profile).toContain('settings.errors.');
+  expect(profile).toContain('{t(error)}');
   const dialog = await read(surfaces[2]);
   expect(dialog).toContain('message = translated.key');
   expect(dialog).toContain('{stageText(stage)}');
   expect(dialog).toContain("stage = 'submitting'");
   expect(dialog).not.toContain('message = translated.message');
-  for (const file of [surfaces[0], surfaces[1]]) {
+  for (const file of [surfaces[0], surfaces[1], ...surfaces.slice(6)]) {
     const source = await read(file);
     for (const match of source.matchAll(/\bt\('(login\.[^']+|settings\.[^']+)'/g)) {
       expect(manifest.translations.en[match[1] as keyof typeof manifest.translations.en]).toBeTruthy();

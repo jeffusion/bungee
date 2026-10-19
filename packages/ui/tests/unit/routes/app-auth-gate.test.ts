@@ -7,7 +7,6 @@ test('startup restores the session once before protected initialization; no glob
   const startup = source.slice(source.indexOf('async function initializeAuthenticatedSession'), source.indexOf('onMount(async'));
   expect(startup.indexOf('await restoreManagementSession()')).toBeGreaterThanOrEqual(0);
   expect(startup.indexOf('await restoreManagementSession()')).toBeLessThan(startup.indexOf('await protectedInitialize('));
-  expect(startup).toContain("if (mode.mode === 'plugin') window.location.hash = '#/login'");
   expect(startup).not.toContain('get(location)');
   expect(startup).not.toContain('initialLocation');
   expect(startup).toContain('destroyed || generation !== initializationGeneration');
@@ -66,7 +65,7 @@ test('normal hash changes retain the login capability and completion leaves only
   expect(loginKey).not.toContain('$location');
   const completion = app.slice(app.indexOf('function handleLoginCompleted'), app.indexOf('const fallbackCatalog'));
   expect(completion).toContain("const path = window.location.hash.replace(/^#/, '').split('?', 1)[0]");
-  expect(completion).toMatch(/if \(destroyed\) return;[\s\S]*loginPageActive = false;[\s\S]*if \(path === '\/login'\) window\.location\.hash = '#\/';/);
+  expect(completion).toMatch(/if \(destroyed\) return;[\s\S]*loginPageActive = false;[\s\S]*if \(path === '\/login' \|\| path === '\/setup'\) window\.location\.hash = '#\/';/);
   for (const staleNavigation of ['get(location)', 'navigationCurrent', 'capturedLocation', 'startsWith']) expect(completion).not.toContain(staleNavigation);
   const login = await read('../../../src/routes/Login.svelte');
   expect(login).not.toContain('$stores/navigation-guard');
@@ -103,13 +102,13 @@ test('activation only blocks new management enablement without this bundle’s p
   expect(source).toContain('hasManagementLoginComponent(plugin.name, plugin.management.loginComponent)');
   expect(source).toMatch(/if \([^\n]*loginUnavailable[^\n]*\) return/);
   expect(source).toMatch(/disabled=\{[^}]*loginUnavailable/);
-  expect(source).toContain("import RecoveryHelp from '@plugins/local-accounts/ui/RecoveryHelp.svelte'");
-  // Preserve setup, publication confirmation, accepted-operation recovery and disable flows.
+  for (const removed of ['RecoveryHelp', 'passwordConfirmation', 'createAccount', '/auth/setup?plugin=']) expect(source).not.toContain(removed);
+  // Preserve identity verification, publication confirmation, accepted-operation recovery and disable flows.
   for (const existing of ['managementSetup:', 'await waitForMode()', 'await establishSession()', 'async function recover()', "stage = accepted ? 'acceptedIncomplete'"]) expect(source).toContain(existing);
 });
 
 test('plugin login has no host auth dependencies, endpoint prop or completion events', async () => {
-  const source = await read('../../../../../plugins/local-accounts/ui/Login.svelte');
+  const source = await read('../../../../../plugins/user-auth/ui/Login.svelte');
   expect(source).toContain("_, isManagementLoginStaleError, type ManagementLoginContext } from '@bungee/plugin-sdk'");
   for (const forbidden of ['$api/', '$stores/', 'accountError', 'createEventDispatcher', 'endpoint', "dispatch('login'", 'pluginActivation.', '$components/domain/plugin/RecoveryHelp']) expect(source).not.toContain(forbidden);
   expect(source.indexOf('requireLoginSuccess(result)')).toBeLessThan(source.indexOf('await activeContext.complete()'));
@@ -134,7 +133,7 @@ test('shell logout is host-owned, guards drafts and only navigates after verifie
   expect(action.indexOf('await endSession(')).toBeLessThan(action.indexOf('dashboardDirty.set(false)'));
   expect(action.indexOf('await endSession(')).toBeLessThan(action.indexOf("window.location.hash = '#/login'"));
   expect(action).toContain("toast.show($_('login.logoutFailed'), 'error')");
-  for (const forbidden of ['local-accounts', 'requestPluginControl', 'secureChannel', 'onRefresh', 'common.refresh']) expect(app).not.toContain(forbidden);
+  for (const forbidden of ['user-auth', 'requestPluginControl', 'secureChannel', 'onRefresh', 'common.refresh']) expect(app).not.toContain(forbidden);
   const header = await read('../../../src/components/shell/AppHeader.svelte');
   for (const removed of ['secureChannel', 'StatusBadge', '>SECURE<', '>OPEN<']) expect(header).not.toContain(removed);
   // Desktop and mobile share one independent button and the host's guarded action.

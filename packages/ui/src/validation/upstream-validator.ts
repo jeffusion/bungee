@@ -14,7 +14,7 @@ let cachedTransformers: string[] | null = null;
 async function getAvailableTransformers(): Promise<string[]> {
   if (cachedTransformers === null) {
     try {
-      cachedTransformers = await PluginsAPI.getAll();
+      cachedTransformers = (await PluginsAPI.list()).map(plugin => plugin.name);
     } catch (error) {
       console.warn('Failed to fetch transformers from API, using fallback:', error);
       // 如果API失败，使用fallback列表
@@ -102,7 +102,7 @@ export function validateWeights(upstreams: Upstream[]): ValidationError[] {
     errors.push({
       field: 'endpoints',
       message: '警告：所有上游服务器都已禁用，路由将无法处理请求',
-      level: 'warning' as any // 警告级别，不阻止保存
+      level: 'warning' // 警告级别，不阻止保存
     });
   }
 

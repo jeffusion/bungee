@@ -124,7 +124,7 @@ export interface PluginManifest {
   services?: import('./plugin-services').PluginServiceDeclarations;
   /** Optional control-plane runtime capability. */
   ingress?: { entry: string };
-  management?: { loginComponent?: string };
+  management?: { loginComponent?: string; setupComponent?: string };
   control?: {
     entry: string;
     rpc: Array<{

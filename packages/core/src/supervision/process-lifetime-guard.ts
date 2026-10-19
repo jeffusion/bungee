@@ -27,8 +27,8 @@ export type ProcessLifetimeGuardProbe =
 
 type Native = { flock(fd: number, operation: number): number; fcntl(fd: number, operation: number): number;
   ioctl(fd: number, operation: number): number; errno(): number; inheritedLock?(fd: number): boolean; filesystem?(path: string): boolean };
-let native: Native | undefined;
-let nativeLibrary: unknown;
+// Keep the native library alive for as long as its cached function pointers.
+let native: (Native & { readonly library: unknown }) | undefined;
 function functions(): Native {
   if (native !== undefined) return native;
   if (process.platform !== 'linux' && process.platform !== 'darwin') throw new Error('process lifetime guard is unsupported in this domain');
@@ -46,9 +46,8 @@ function functions(): Native {
         ...(process.platform === 'darwin' ? { statfs64: { args: ['ptr', 'ptr'] as const, returns: 'i32' as const },
           proc_pidfdinfo: { args: ['i32', 'i32', 'i32', 'ptr', 'i32'] as const, returns: 'i32' as const } } : {}),
       });
-      nativeLibrary = library;
       const symbols = library.symbols as unknown as Record<string, (...args: number[]) => number>;
-      native = { flock: symbols.flock!, fcntl: symbols.fcntl!, ioctl: symbols.ioctl!, errno: () => {
+      native = { library, flock: symbols.flock!, fcntl: symbols.fcntl!, ioctl: symbols.ioctl!, errno: () => {
         const address = symbols[process.platform === 'darwin' ? '__error' : '__errno_location']!();
         return new Int32Array(toArrayBuffer(address as Pointer, 0, 4))[0]!;
       }, ...(process.platform === 'darwin' ? { inheritedLock(fd: number) {

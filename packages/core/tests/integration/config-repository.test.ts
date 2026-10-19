@@ -1076,7 +1076,7 @@ describe('ConfigRepository schema enforcement and corruption handling', () => {
       WHERE type='table' AND name NOT LIKE 'sqlite_%'`).all();
 
     // When / Then
-    expect(definitions).toHaveLength(21);
+    expect(definitions).toHaveLength(22);
     expect(definitions.every(({ sql }) => sql.includes('STRICT'))).toBe(true);
     expect(() => inspector.run(`INSERT INTO services (id,position,name,policy_json)
       VALUES ('10000000-0000-4000-8000-000000000099','wrong','bad','{}')`)).toThrow();

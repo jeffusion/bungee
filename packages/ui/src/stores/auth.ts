@@ -1,6 +1,6 @@
 import { get, writable } from 'svelte/store';
 export interface ManagementSubject { id: string; provider: string }
-export interface ManagementAuthMode {mode:'anonymous'|'plugin';initialized?:boolean;publicOrigin?:string;provider?:{name:string;loginComponent?:string}}
+export interface ManagementAuthMode {mode:'anonymous'|'plugin';initialized?:boolean;publicOrigin?:string;provider?:{name:string;loginComponent?:string;setupComponent?:string}}
 export const token = writable<string | null>(null);
 export const csrfToken = writable<string | null>(null);
 export const subject = writable<ManagementSubject | null>(null);

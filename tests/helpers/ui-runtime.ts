@@ -76,7 +76,8 @@ export async function startUiRuntime(options: UiRuntimeOptions) {
               await Promise.all(Object.values(optimizer?.metadata.discovered ?? {}).map(dependency => dependency.processing));
             }));
           } finally {
-            server?.httpServer?.closeAllConnections();
+            const httpServer = server?.httpServer;
+            if (httpServer && 'closeAllConnections' in httpServer) httpServer.closeAllConnections();
             await server?.close();
           }
         }

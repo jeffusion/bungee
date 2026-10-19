@@ -25,8 +25,21 @@
       "vite/client",
       "bun-types"
     ],
+    "typeRoots": [
+      "../../node_modules/@types",
+      "../../node_modules"
+    ],
     "baseUrl": ".",
     "paths": {
+      "svelte": [
+        "../../node_modules/svelte"
+      ],
+      "svelte/*": [
+        "../../node_modules/svelte/*"
+      ],
+      "@jeffusion/bungee-core/plugin": [
+        "../core/src/gateway/plugin.ts"
+      ],
       "@bungee/plugin-sdk": [
         "src/plugin-sdk/index.ts"
       ],

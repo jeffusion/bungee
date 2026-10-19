@@ -641,6 +641,7 @@ describe('P4 canonical Host control ↔ worker peer integration', () => {
     const proof: PluginExecutorProof = {
       source: {process: 'control', instance: MASTER_GENERATION, generation: 1, catalog: CATALOG},
       physical: await captureProcessIdentity(process.pid, marker), boot: await readKernelBootId(),
+      guard: null, retired: false,
     };
     const control = await createControlSide(DEFAULT_PEERS, true, () => proof);
     const worker = await connectWorker(control, WORKER_INSTANCE, BOOT_NONCE);

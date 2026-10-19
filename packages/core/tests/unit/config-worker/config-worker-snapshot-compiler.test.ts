@@ -4,7 +4,7 @@ import { createCatalogSnapshotCompiler } from '../../../src/config-worker/snapsh
 import { hashConfigurationContent, parseNormalizeCompileAggregate } from '../../../src/config-storage';
 import { PluginManifestCatalog } from '../../../src/plugin-manifest-catalog';
 import { BUILTINS } from '../../helpers/plugin-manifest-catalog';
-import { PROCESS_IDENTITY } from '../../helpers/config-publication-worker-runtime.ts';
+import { PROCESS_IDENTITY } from '../../helpers/config-publication-worker-runtime';
 
 let catalog: PluginManifestCatalog;
 

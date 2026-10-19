@@ -77,7 +77,7 @@ export const api = {
   delete: <T>(path: string) => request<T>(path, { method: 'DELETE' })
 };
 
-/** Fixed cookie-auth login transport for a selected management provider. */
+/** Fixed cookie-only login transport for a selected management provider. */
 export function managementLogin<T = unknown>(provider: string, input: unknown): Promise<T> {
   if (!provider.trim()) throw new Error('management_login_provider_invalid');
   return request<T>('/auth/login', {
@@ -88,7 +88,7 @@ export function managementLogin<T = unknown>(provider: string, input: unknown): 
 }
 
 /** Cookie-only host auth reads; plugin input cannot select an endpoint or transport. */
-export function readManagementAuth<T>(endpoint: 'mode' | 'verify'): Promise<T> {
+export function readManagementAuth<T>(endpoint: 'mode' | 'verify' | 'setup'): Promise<T> {
   return request<T>(`/auth/${endpoint}`, { preserveSessionOnUnauthorized: true }, API_BASE, { cookieOnly: true });
 }
 
@@ -107,4 +107,12 @@ export function requestPluginControl<T>(plugin: string, path: string, method: 'G
   return request<T>(`/plugins/${encodeURIComponent(plugin)}/control${path}`, {
     ...options, method, signal, ...(method === 'GET' ? {} : { body: JSON.stringify(body === undefined ? {} : body) }),
   }, '/api');
+}
+
+/** Initialization is pinned to the selected provider at the fixed same-origin host endpoint. */
+export function managementSetup(provider: string, input: unknown): Promise<unknown> {
+  if (!provider.trim()) throw new Error('management_setup_provider_invalid');
+  return request('/auth/setup', {
+    method: 'POST', body: JSON.stringify(input), preserveSessionOnUnauthorized: true,
+  }, API_BASE, { provider });
 }

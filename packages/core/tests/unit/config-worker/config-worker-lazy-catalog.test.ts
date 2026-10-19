@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { createConfigWorkerRuntimeController } from '../../../src/config-publication';
-import { fakeLifecycle, startMessage } from '../../helpers/config-publication-worker-runtime.ts';
+import { fakeLifecycle, startMessage } from '../../helpers/config-publication-worker-runtime';
 
 test('lazy runtime compilation is deferred until the first worker command', async () => {
   let loads = 0;

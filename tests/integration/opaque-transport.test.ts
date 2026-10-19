@@ -11,10 +11,10 @@ const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('h
 const config = (target:string, route:Record<string,unknown> = {}, endpoint:Record<string,unknown> = {}):AppConfig => ({port:0,routes:[{path:'/test',...route,endpoints:[{target,...endpoint}]}]} as AppConfig);
 const logging = { accessLogWriter:{write(){},updateResponseBodyId(){},updateProtocolOutcome(){}},fileLogWriter:{write(){}} };
 async function run(payload:Uint8Array,coding:string,route:Record<string,unknown>={},endpoint:Record<string,unknown>={}, type='application/json') {
-  let received:Uint8Array | undefined; let headers:Headers | undefined;
+  let received:Uint8Array<ArrayBuffer> | undefined; let headers:Headers | undefined;
   const upstream = Bun.serve({port:0,hostname:'127.0.0.1',async fetch(req){ received = new Uint8Array(await req.arrayBuffer()); headers = req.headers; return new Response(received,{headers:{'content-type':type,...(req.headers.get('content-encoding')?{'content-encoding':req.headers.get('content-encoding')!}:{})}}); }});
   try {
-    const response = await handleRequest(new Request('http://gateway/test',{method:'POST',body:payload,headers:{'content-type':type,...(coding?{'content-encoding':coding}:{})}}),config(upstream.url.origin,route,endpoint),{logging});
+    const response = await handleRequest(new Request('http://gateway/test',{method:'POST',body:Uint8Array.from(payload),headers:{'content-type':type,...(coding?{'content-encoding':coding}:{})}}),config(upstream.url.origin,route,endpoint),{logging});
     const bytes = new Uint8Array(await response.arrayBuffer()); return {response,bytes,received:received!,headers:headers!};
   } finally { await upstream.stop(true); }
 }
@@ -56,7 +56,7 @@ describe('opaque transport',()=>{
   test('false/null/zero/empty values survive readonly JSON',async()=>{for(const value of [false,null,0,'']){const bytes=encoder.encode(JSON.stringify(value));const source=new BodySource(new Response(bytes).body,1024);try{expect(await source.json('read')).toBe(value);expect(hash(new Uint8Array(await new Response(source.take()).arrayBuffer()))).toBe(hash(bytes));}finally{source.dispose();}}});
   test('necessary parsing enforces encoding, corruption and limits',async()=>{
     for(const [bytes,coding,status] of [[encoder.encode('{}'),'unknown',415],[encoder.encode('bad'),'gzip',400],[encoder.encode('{bad'),'',400]] as const){const source=new BodySource(new Response(bytes).body,1024,coding);try{await expect(source.json('necessary')).rejects.toMatchObject({status});}finally{source.dispose();}}
-    const source=new BodySource(new Response(gzipSync(encoder.encode(' '.repeat(4096)))).body,1024,'gzip');try{await expect(source.json('necessary')).rejects.toMatchObject({status:413});}finally{source.dispose();}
+    const source=new BodySource(new Response(Uint8Array.from(gzipSync(encoder.encode(' '.repeat(4096))))).body,1024,'gzip');try{await expect(source.json('necessary')).rejects.toMatchObject({status:413});}finally{source.dispose();}
   });
 });
 
@@ -82,7 +82,7 @@ test('Route body format selection overrides Endpoint and SSE remains raw',async(
 test('configured retry buffers and replays the exact compressed wire',async()=>{
   const payload=zstdCompressSync(encoder.encode('{ "model": "m" }'));let attempts=0;const hashes:string[]=[];
   const upstream=Bun.serve({port:0,hostname:'127.0.0.1',async fetch(req){hashes.push(hash(new Uint8Array(await req.arrayBuffer())));return new Response('ok',{status:++attempts===1?503:200});}});
-  try{const res=await handleRequest(new Request('http://gateway/test',{method:'POST',body:payload,headers:{'content-type':'application/json','content-encoding':'zstd'}}),config(upstream.url.origin,{retry:{enabled:true,retry_on:[503],max_retries:1}}),{logging});expect(res.status).toBe(200);await res.text();expect(hashes).toEqual([hash(payload),hash(payload)]);}finally{await upstream.stop(true);}
+  try{const res=await handleRequest(new Request('http://gateway/test',{method:'POST',body:Uint8Array.from(payload),headers:{'content-type':'application/json','content-encoding':'zstd'}}),config(upstream.url.origin,{retry:{enabled:true,retry_on:[503],max_retries:1}}),{logging});expect(res.status).toBe(200);await res.text();expect(hashes).toEqual([hash(payload),hash(payload)]);}finally{await upstream.stop(true);}
 });
 test('Content-Length rejects before dispatch; raw chunked limit cancels source',async()=>{
   let calls=0;const upstream=Bun.serve({port:0,hostname:'127.0.0.1',fetch(){calls++;return new Response('ok');}});

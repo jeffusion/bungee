@@ -1,5 +1,3 @@
-import type { ChartOptions } from 'chart.js';
-
 /**
  * 创建图表标题配置
  */
@@ -38,7 +36,7 @@ export function createLegendConfig(
 
   return {
     display,
-    position: position as const,
+    position,
     labels: {
       padding,
       font: { size: fontSize },
@@ -112,7 +110,7 @@ export function createScaleConfig(
  */
 export function createTooltipConfig(mode: 'index' | 'nearest' = 'index', intersect: boolean = false) {
   return {
-    mode: mode as const,
+    mode,
     intersect
   };
 }

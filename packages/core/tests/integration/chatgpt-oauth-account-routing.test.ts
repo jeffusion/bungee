@@ -93,7 +93,7 @@ describe('ChatGPT OAuth account routing', () => {
         });
       }) as typeof fetch;
 
-      let registry: ScopedPluginRegistry | undefined;
+      let registry: InstanceType<typeof ScopedPluginRegistry> | undefined;
       try {
         for (const reverse of [false, true]) {
           const nextConfig = structuredClone(config);

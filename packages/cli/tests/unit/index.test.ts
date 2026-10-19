@@ -54,3 +54,22 @@ describe('management command registration', () => {
   });
 
 });
+
+describe('offline recovery command registration',()=>{
+ test('exposes only explicit plugin actions and structured file input',async()=>{
+  const cli=createProgram(),registered=cli.commands.find(candidate=>candidate.name()==='recover')!;
+  let parsed:Record<string,string>={};registered.action(options=>{parsed=options;});
+  await cli.parseAsync(['node','bungee','recover','--plugin','user-auth','--action','reset']);
+  expect(parsed).toMatchObject({plugin:'user-auth',action:'reset'});
+  expect(registered.helpInformation()).toContain('issue-setup-code');
+  expect(registered.helpInformation()).toContain('release-auth');
+  expect(registered.helpInformation()).not.toContain('local-accounts');
+ });
+});
+
+test('offline action validation rejects ambiguous input before resolving a launch',async()=>{
+ const {recoverCommand}=await import('../../src/commands/recover');
+ for(const options of [{plugin:'user-auth'}, {action:'reset'}, {plugin:'user-auth',action:'unknown'}, {plugin:'user-auth',action:'reset',file:'input.json'}, {plugin:'../user-auth',action:'reset'}]){
+  await expect(recoverCommand(options)).rejects.toThrow('invalid_recovery_arguments');
+ }
+});

@@ -55,6 +55,7 @@ function validateCatalogReferences(records: readonly PluginManifestRecordBase[])
     }
     const ownComponents = new Set((record.manifest.ui?.components ?? []).map(value => value.name));
     if (record.manifest.management?.loginComponent && !ownComponents.has(record.manifest.management.loginComponent)) throw new PluginManifestCatalogError(record.name, 'management loginComponent must be a declared UI component');
+    if (record.manifest.management?.setupComponent && !ownComponents.has(record.manifest.management.setupComponent)) throw new PluginManifestCatalogError(record.name, 'management setupComponent must be a declared UI component');
     for (const extension of record.manifest.contributes?.resourceExtensions ?? []) if (!ownComponents.has(extension.component)) throw new PluginManifestCatalogError(record.name, 'resource component must be a declared UI component');
     for (const field of fields(record.configSchema)) {
       if (field.catalogPlugin !== undefined && !names.has(field.catalogPlugin)) {
@@ -126,6 +127,7 @@ export class PluginManifestCatalog {
   toCompileOptions(): ConfigurationCompileOptions {
     return Object.freeze({
       rejectLegacyAuth: true,
+      managementProviders: new Set([...this.#records.values()].filter(record => record.manifest.management).map(record => record.name)),
       pluginSchemas: this.schemaEntries(),
       pluginConstraints: new Map([...this.#records].map(([name, record]) => [name, record.manifest.configConstraints ?? []])),
       availablePlugins: new Set(this.#records.keys()),

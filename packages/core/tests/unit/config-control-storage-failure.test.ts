@@ -1,30 +1,30 @@
 import { expect, test } from 'bun:test';
 import { createConfigControlApi } from '../../src/master-runtime/control-api';
 import { ConfigurationStorageResultUnknownError, hashConfigurationContent, parseNormalizeCompileAggregate } from '../../src/config-storage';
+import { ManagementAuthentication } from '../../src/master-runtime/management-auth';
+import type { PluginControlHost } from '../../src/plugin-control';
 import type { ConfigurationOperation } from '../../src/config-storage';
 
 function harness(unknownCommit: boolean, committed?: () => Promise<void>) {
-  const aggregate = { logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [] };
+  const aggregate = { logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [] as {plugin_name:string}[] };
   const events: string[] = [];
   const operation: ConfigurationOperation = { mutation_id: 'original-id', request_hash: hashConfigurationContent(aggregate),
     expected_revision: 1, committed_revision: 2, kind: 'config', state: 'committed', result_status: null,
     error_code: null, error_detail: null, target_worker_count: 1, drain_recovery_generation: 0,
     last_drain_recovery_previous_generation: null, created_at: 1, updated_at: 1 };
-  const identity = { subject: { id: 'fixture', capabilities: [] }, provider: null };
+  let snapshot = {revision:1,content_hash:hashConfigurationContent(aggregate),aggregate};
   const options = {
-    managementAuth: {
-      authenticate: async () => identity, identity: () => identity, recheck: async () => true,
-      authorized: async () => true, validateWrite: async () => undefined, selected: () => null,
-    } as never,
+    managementAuth: new ManagementAuthentication({get:()=>null} as unknown as PluginControlHost,()=>snapshot.aggregate,new Set()),
     repository: {
-      getSnapshot: () => ({ revision: 1, content_hash: hashConfigurationContent(aggregate), aggregate }),
+      getSnapshot: () => snapshot,
       getCurrentRecovery: async () => null,
       getActivePublication: async () => null,
       getOperationState: async () => { events.push('operation.read'); return { operation, workers: [] }; },
       commit: async () => {
         events.push('commit');
         if (unknownCommit) throw new ConfigurationStorageResultUnknownError('commitPrepared', 'original-id');
-        return { kind: 'committed' as const, snapshot: { revision: 2, content_hash: hashConfigurationContent(aggregate), aggregate }, operation };
+        snapshot = {revision:2,content_hash:hashConfigurationContent(aggregate),aggregate:{...aggregate,plugin_activations:[{plugin_name:'control'}]}};
+        return { kind: 'committed' as const, snapshot, operation };
       },
     },
     onConfigurationCommitted: committed,

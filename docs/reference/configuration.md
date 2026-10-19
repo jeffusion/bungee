@@ -14,7 +14,7 @@ The configuration and telemetry overrides must be absolute paths. `CONFIG_PATH`,
 
 ## Authentication
 
-Management is anonymous and proxy routes are public by default. The optional 管理认证 (`local-accounts`) plugin establishes or verifies a single administrator and enables management sessions; disabling it restores anonymous management. 访问控制 (`key-access`) owns API Keys and the protected-route set in its plugin settings. Route and Service editors have no authentication fields. See [authentication and plugin usage](../guides/authentication.md).
+Management is anonymous and proxy routes are public by default. The optional 用户认证 (`user-auth`) plugin is initialized using a setup code issued offline in a local terminal. Mandatory management protection persists independently of ordinary configuration export and import; only offline `release-auth` restores anonymous management. 访问控制 (`key-access`) owns API Keys and the protected-route set in its plugin settings. Route and Service editors have no authentication fields. See [authentication and plugin usage](../guides/authentication.md).
 
 Key permissions and route protection are separate: selecting allowed routes does not protect them; protection is edited separately. Revoking the final Key does not remove protection. Public requests stay anonymous even if they carry a Key and do not consume that Key's rate or token budget. Disabling access control requires explicitly removing all route protections and satisfying plugin dependencies.
 
@@ -127,7 +127,7 @@ Submit it with a unique mutation ID:
 }
 ```
 
-The `aggregate` field is the complete object shown above. Enabling the management provider requires an established or verified administrator. Disabling it requires the current live administrator session and returns to anonymous management. Full writes and imports enforce the same transition, dependency and route-protection guards; a configuration import cannot bypass them.
+The `aggregate` field is the complete object shown above. Management protection and provider activation are written atomically by the configuration storage Worker. Once protected, online disabling, replacing the selected provider or importing an aggregate without it is rejected. The mandatory-protection record is excluded from ordinary snapshots; an import cannot release it. The offline `issue-setup-code` action selects protection before initialization, and only offline `release-auth` releases it. Full writes and imports also enforce dependency and route-protection guards.
 
 ### 发布期限（`publication`）
 

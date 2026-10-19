@@ -18,7 +18,7 @@ export interface TapInfo {
 /**
  * 已注册的 Tap 项
  */
-export interface Tap<T extends any[], R = void> {
+export interface Tap<_T extends any[], _R = void> {
   info: TapInfo;
   type: 'sync' | 'async' | 'promise';
   fn: (...args: any[]) => any;

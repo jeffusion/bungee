@@ -8,7 +8,6 @@ import { processDynamicValue, type ExpressionContext } from '../expression-engin
 import { analyzeExpressionDependencies, hasBodyModification } from '../utils/expression-dependencies';
 import type { RequestContext } from '../hooks';
 import type { InboundChain } from '../scoped-plugin-registry';
-import type { SSEEnvelope } from '../plugin.types';
 import { applyBodyRules } from '../worker/rules/modifier';
 import { type BodySource, bodySourceFor, BodyBufferLease, BodyProcessingError, isJsonMediaType, isObjectBody, readBodyChunk, reconcileEntityHeaders } from '../worker/request/body-source';
 import { parseBodyParserLimit } from '../config-storage/global-scalars';

@@ -3,7 +3,7 @@ import { DEFAULT_PUBLICATION_POLICY } from '@jeffusion/bungee-types';
 import { createConfigWorkerRuntimeController as createRuntimeController, type ConfigWorkerLifecycle } from '../../../src/config-publication';
 import { parseConfigWorkerMessage } from '../../../src/config-publication/messages';
 import { compileRuntimeConfigSnapshot } from '../../../src/config-storage';
-import { IDS, PLUGIN_CATALOG_HASH, PRIVATE_PORT, PROCESS_IDENTITY, aggregate, drainMessage, expectMessage, fakeLifecycle, type Handle, startCurrentMessage, startMessage, statusReport } from '../../helpers/config-publication-worker-runtime.ts';
+import { IDS, PLUGIN_CATALOG_HASH, PRIVATE_PORT, PROCESS_IDENTITY, aggregate, drainMessage, expectMessage, fakeLifecycle, type Handle, startCurrentMessage, startMessage, statusReport } from '../../helpers/config-publication-worker-runtime';
 
 const TEST_BOOT_ID = 'linux:11111111-1111-4111-8111-111111111111';
 function createConfigWorkerRuntimeController<ServingHandle>(

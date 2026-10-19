@@ -1,3 +1,4 @@
+import type { DispatchRequestInput } from '@jeffusion/bungee-core/plugin';
 import {expect, test, spyOn} from 'bun:test';
 import {createPluginHooks} from '../../../../packages/core/src/hooks';
 import {catalogValidatorsRpc} from '../../contract';
@@ -12,9 +13,11 @@ const validatorKey = (input: Parameters<typeof catalogKeys>[0], bindings: Parame
 function request(method = 'GET', version = '0.162.1') {
   const url = new URL(`http://local/codex/${method === 'GET' ? 'models' : 'responses'}`);
   if (method === 'GET') url.searchParams.set('client_version', version);
+  const headers: Record<string, string> = {Authorization: 'Bearer private-token', 'ChatGPT-Account-Id': 'account', Version: version};
+  const targets: DispatchRequestInput['targets'] = [];
   return {context: {method, originalUrl: new URL(url), url, routeId: '/codex/', requestId: crypto.randomUUID(), clientIP: 'local',
-    headers: {Authorization: 'Bearer private-token', 'ChatGPT-Account-Id': 'account', Version: version}, body: {model: 'native'}},
-    targets: [], principal: {domain: 'data', keyId: 'key', credentialVersion: 1}, servingRevision: 7, signal: new AbortController().signal};
+    headers, body: {model: 'native'}},
+    targets, principal: {domain: 'data', keyId: 'key', credentialVersion: 1}, servingRevision: 7, signal: new AbortController().signal};
 }
 
 test('directory and generation partition by entry, revision, identity, original credentials, account, client and bindings', () => {

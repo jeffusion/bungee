@@ -24,10 +24,11 @@ browserTest('unified header navigation, group keyboard lifecycle, locales and se
       const mockApi = (route: Route) => {
         const url = new URL(route.request().url());
         const json = (value: unknown) => route.fulfill({ json: value });
-        if (url.pathname === '/api/auth/mode') return json({ mode, publicOrigin: url.origin,
-          ...(mode === 'plugin' ? { provider: { name: 'local-accounts', loginComponent: 'LocalAccountsLogin' } } : {}) });
+        if (url.pathname === '/api/auth/mode') return json({ mode, initialized: true, publicOrigin: url.origin,
+          ...(mode === 'plugin' ? { provider: { name: 'user-auth', loginComponent: 'UserAuthLogin' } } : {}) });
         if (url.pathname === '/api/auth/verify') return json({ mode, success: authenticated,
-          ...(authenticated ? { subject: { id: mode === 'plugin' ? 'test-user' : 'anonymous', provider: mode === 'plugin' ? 'local-accounts' : 'anonymous' }, csrfToken: 'test-csrf' } : {}) });
+          ...(authenticated ? { subject: { id: mode === 'plugin' ? 'test-user' : 'anonymous',
+            provider: mode === 'plugin' ? 'user-auth' : 'anonymous' }, csrfToken: 'test-csrf' } : {}) });
         if (url.pathname === '/api/auth/logout') { authenticated = false; logoutCalls++; return json({ success: true }); }
         if (url.pathname === '/api/ui/menus') return json(snapshot);
         if (url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
@@ -82,8 +83,25 @@ browserTest('unified header navigation, group keyboard lifecycle, locales and se
       await expect(languages).toHaveAttribute('aria-label', alternateCode === 'en' ? 'Language' : '语言');
       expect(await page.evaluate(() => localStorage.getItem('locale'))).toBe(alternateCode);
       if (mode === 'plugin') {
-        await logout.click(); await expect(logout).toBeDisabled();
-        await page.getByTestId('confirmation-cancel').click(); await expect(logout).toBeFocused(); expect(logoutCalls).toBe(0);
+        for (const width of [1440, 320]) {
+          await page.setViewportSize({ width, height: 900 });
+          await logout.click();
+          const confirmation = page.getByRole('dialog');
+          await expect(confirmation).toBeVisible(); await expect(logout).toBeDisabled();
+          const message = alternateCode === 'zh-CN' ? '退出后需要重新登录才能访问管理界面。' : 'You will need to sign in again to access the dashboard.';
+          await expect(confirmation.locator('[data-dialog-body]')).toContainText(message);
+          await expect(confirmation.locator('header')).not.toContainText(message);
+          await expect(confirmation.getByTestId('industrial-confirmation')).toHaveText(message);
+          await expect(confirmation).toHaveAccessibleDescription(message);
+          const bounds = await confirmation.getByTestId('industrial-confirmation').boundingBox();
+          expect(bounds!.height).toBeGreaterThan(0);
+          await confirmation.evaluate(async element => { await Promise.all(element.getAnimations({subtree:true}).map(animation => animation.finished.catch(() => {}))); });
+          await page.screenshot({path: `${evidence}/logout-confirmation-${language}-${width}.png`});
+          expect(logoutCalls).toBe(0);
+          await confirmation.getByTestId('confirmation-cancel').click();
+          await expect(confirmation).toHaveCount(0); await expect(logout).toBeFocused();
+          await expect(logout).toBeEnabled(); expect(logoutCalls).toBe(0);
+        }
         await logout.click(); await page.getByTestId('confirmation-accept').click();
         await expect(header).toHaveCount(0); await expect(page.getByTestId('page-login')).toBeVisible(); expect(logoutCalls).toBe(1);
       }

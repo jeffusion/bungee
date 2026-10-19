@@ -60,7 +60,6 @@ async function checkRateLimit(
   let rps: number;
   let burst: number;
   try {
-    const expression = rateLimit.key_expression === undefined ? '$client_ip' : rateLimit.key_expression;
     key = resolveRateLimitKey(route, trustedPeer, context);
     ({ rps, burst } = rateLimitPolicy(route));
   } catch {

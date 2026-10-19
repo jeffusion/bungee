@@ -121,7 +121,7 @@ export type StrictPluginManifest = Readonly<{
   uiExtensionMode: PluginUiExtensionMode;
   engines: Readonly<{ bungee: string; node?: string }>;
   ingress?: Readonly<{ entry: string }>;
-  management?: Readonly<{ loginComponent?: string }>;
+  management?: Readonly<{ loginComponent?: string; setupComponent?: string }>;
   control?: Readonly<{
     entry: string;
     rpc: readonly Readonly<{ name: string; access: 'bound-attempt' }>[];

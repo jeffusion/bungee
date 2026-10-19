@@ -20,12 +20,15 @@ scope.onmessage = (event) => {
   try {
     if (closed || !Array.isArray(request.args)) throw new ConfigRepositoryError('invalid_command', 'storage request is invalid');
     if (request.method === 'open') {
-      if (repository !== null || request.args.length !== 1 || typeof request.args[0] !== 'string') {
+      if (repository !== null || request.args.length !== 2 || typeof request.args[0] !== 'string' ||
+          typeof request.args[1] !== 'object' || request.args[1] === null || typeof request.args[1].offline !== 'boolean' ||
+          !Array.isArray(request.args[1].managementProviders) || request.args[1].managementProviders.some((name: unknown) => typeof name !== 'string')) {
         throw new ConfigRepositoryError('invalid_command', 'storage open request is invalid');
       }
-      repository = ConfigRepository.open(request.args[0]);
+      repository = ConfigRepository.open(request.args[0], { offline: request.args[1].offline,
+        compileOptions: { pluginSchemas: new Map(), managementProviders: new Set(request.args[1].managementProviders) } });
       scope.postMessage({ id, ok: true, result: {
-        snapshot: repository.getSnapshot(), supervision: repository.getSupervisionState(),
+        ...repository.getControlProjection(), supervision: repository.getSupervisionState(),
       } });
       return;
     }

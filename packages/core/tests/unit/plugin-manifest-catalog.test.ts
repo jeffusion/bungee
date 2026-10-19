@@ -64,13 +64,13 @@ describe('PluginManifestCatalog filesystem snapshot', () => {
       'key-access',
       'key-rate-limit',
       'llm-protocol-adapter',
-      'local-accounts',
       'model-mapping',
       'models-dev',
       'signature-repair',
       'token-budget',
       'token-metering',
       'token-stats',
+      'user-auth',
     ]);
     expect(second.names()).toEqual(first.names());
     expect(second.hash).toBe(first.hash);

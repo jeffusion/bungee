@@ -30,7 +30,7 @@ export type ConfigWorkerServingHandle = {
 };
 
 type LifecycleFetch = (request: Request) => Response | Promise<Response>;
-type WebSocketFetch = (request:Request,server?:Bun.Server<any>) => Response|undefined|Promise<Response|undefined>;
+type WebSocketFetch = (request:Request,server?:Bun.Server<WebSocketBridgeData>) => Response|undefined|Promise<Response|undefined>;
 
 export type ServingRequestContext = {
   readonly servingRevision: number;

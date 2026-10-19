@@ -15,12 +15,6 @@ import { getEffectiveWeight } from '../utils/slow-start';
 import { filterByCondition } from './condition-filter';
 import { runtimeState, getActiveRequestCount, tryAcquireHalfOpenSlot } from '../state/runtime-state';
 
-type RecordLike = Record<string, unknown>;
-
-function isRecordLike(value: unknown): value is RecordLike {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 function getTrimmedString(value: unknown): string | undefined {
   if (typeof value === 'string') {
     const trimmed = value.trim();
@@ -90,7 +84,7 @@ function selectWeightedRandom(upstreams: RuntimeUpstream[], route?: EffectiveRou
 
 const rrCursors = new Map<string, number>();
 
-function selectRoundRobin(stateKey: string, upstreams: RuntimeUpstream[], route?: EffectiveRouteConfig): RuntimeUpstream | undefined {
+function selectRoundRobin(stateKey: string, upstreams: RuntimeUpstream[], _route?: EffectiveRouteConfig): RuntimeUpstream | undefined {
   const healthy = healthFilter(upstreams);
   if (healthy.length === 0) return undefined;
   const cursor = rrCursors.get(stateKey) ?? 0;

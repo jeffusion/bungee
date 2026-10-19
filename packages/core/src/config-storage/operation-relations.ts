@@ -1,3 +1,4 @@
+import { readManagementRequestIdentity } from './management-protection';
 import type { Database } from 'bun:sqlite';
 import type { ConfigurationOperation, ConfigurationOperationWorker, RepositorySnapshot } from './repository-types';
 import { ConfigRepositoryError } from './repository-types';
@@ -14,6 +15,7 @@ export function validateActiveOperationIdentity(
   if (operation.committed_revision !== snapshot.revision || operation.expected_revision !== snapshot.revision - 1 ||
       revision === null || revision.content_hash !== snapshot.content_hash || revision.kind !== operation.kind ||
       revision.created_at !== operation.created_at || operation.request_hash !== hashConfigurationRequest({
+        ...readManagementRequestIdentity(db, operation.mutation_id),
         kind: operation.kind, expected_revision: operation.expected_revision, aggregate: snapshot.aggregate,
         target_worker_slots: workers.map(worker => worker.worker_slot).sort((left, right) => left - right),
       })) {

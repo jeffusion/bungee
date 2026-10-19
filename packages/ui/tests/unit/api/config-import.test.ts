@@ -9,6 +9,7 @@ import {
   commitConfiguration,
   getConfigurationOperation,
   type ConfigurationSnapshot,
+  type ConfigurationImportPreview,
 } from '../../../src/api/config';
 import { preCommitRejection } from '../../../src/components/domain/config/publication-state';
 import { ApiError } from '../../../src/api/client';
@@ -100,7 +101,7 @@ describe('configuration snapshot import', () => {
   test('previews the original sealed snapshot through the server without writing or mutating it', async () => {
     const requests:RequestRecord[]=[];
     const original=envelope(['current-token']), before=JSON.stringify(original);
-    const report={valid:true,errors:[],aggregate:activeAggregate};
+    const report: ConfigurationImportPreview={valid:true,errors:[],aggregate:activeAggregate};
     install(requests,[Response.json(report)]);
     expect(await validateImport(original)).toEqual(report);
     expect(requests).toHaveLength(1); expect(requests[0].url).toBe('/api/config/validate');

@@ -1,3 +1,4 @@
+import { readManagementRequestIdentity } from './management-protection';
 import type { Database } from 'bun:sqlite';
 import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { hashConfigurationContent, hashConfigurationRequest } from './content-hash';
@@ -28,6 +29,7 @@ export type AuditedConfigurationState = {
   readonly activeRevisionRow: RevisionRow;
   readonly activeOperation: ConfigurationOperation | null;
   readonly activeTargetSlots: readonly number[];
+  readonly managementIdentity: ReturnType<typeof readManagementRequestIdentity> | null;
 };
 
 export function auditConfigurationTables(db: Database): AuditedConfigurationState {
@@ -96,6 +98,7 @@ export function auditConfigurationTables(db: Database): AuditedConfigurationStat
   return {
     activeRevision: state.active_revision,
     activeRevisionRow, activeOperation, activeTargetSlots,
+    managementIdentity: activeOperation === null ? null : readManagementRequestIdentity(db, activeOperation.mutation_id),
   };
 }
 
@@ -106,6 +109,7 @@ export function verifyActiveRequestIdentity(
   const operation = audited.activeOperation;
   if (operation === null) return;
   const requestHash = hashConfigurationRequest({
+    ...audited.managementIdentity,
     kind: operation.kind,
     expected_revision: operation.expected_revision,
     aggregate,

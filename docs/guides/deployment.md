@@ -29,7 +29,7 @@ CLI state lives under `~/.bungee/`:
 
 Storage Workers validate schema and migration prefixes before serving. The observation Worker selects and checks the journal mode using the SQLite runtime actually loaded by Bun; installing a separate sqlite3 CLI does not change that runtime. If an existing WAL database conflicts with the selected mode, startup fails before migrations. Stop the whole instance and back up SQLite side files before offline conversion; never delete a WAL file as a conversion method. See [storage contracts](../architecture/storage.md) and [journal selection](../../packages/core/src/access-database.ts).
 
-Management is anonymous and proxy routes are public by default. `bungee init` initializes storage and its encryption key. Enable 管理认证 (`local-accounts`) for a single administrator session, and 访问控制 (`key-access`) to create Keys and explicitly protect routes. Disabling management authentication restores anonymous management; a failed or missing selected plugin does not. See [authentication](./authentication.md).
+Management is anonymous and proxy routes are public by default. `bungee init` initializes storage and persists its encryption key. To protect management with 用户认证 (`user-auth`), stop the instance, run `bungee recover --plugin user-auth --action issue-setup-code` in a local terminal, then start and complete `/#/setup`. Only the offline `release-auth` action restores anonymous management; online disabling, replacement, import or provider failure cannot release protection. Enable 访问控制 (`key-access`) separately to create Keys and explicitly protect routes. See [authentication](./authentication.md).
 
 ## Docker Compose
 
@@ -42,6 +42,8 @@ docker compose ps
 docker compose logs -f bungee
 ```
 
+For management authentication, stop the original container and use a temporary interactive container with the same image, original volumes and environment; follow [offline initialization and recovery](offline-recovery.md). Do not run recovery against a running instance or an empty replacement volume.
+
 The supplied compose file requires `BUNGEE_PLUGIN_SECRETS_KEY` for encrypted plugin credentials. It is separate from API Keys, which are created and revoked through their lifecycle API rather than a core token list. The compose file persists `/usr/app/data` and `/usr/app/logs`; it does not mount a configuration file. It publishes the public listener and binds management to host loopback by default.
 
 The public data listener is `0.0.0.0:8088` and is proxy-only. The management
@@ -52,7 +54,7 @@ under `/plugins`, and health is `/health`. The design page is
 In the official bridge setup, the container management listener is explicitly
 `BUNGEE_MANAGEMENT_HOST=0.0.0.0`, while Compose publishes on host loopback.
 Set `BUNGEE_MANAGEMENT_PUBLISH_PORT` if host port `8089` is occupied, or set
-`BUNGEE_MANAGEMENT_PUBLISH_HOST=0.0.0.0` for LAN access. Management is anonymous unless 管理认证 is enabled, then it requires the administrator session. Configure HTTPS and an explicit public Origin for external browser access.
+`BUNGEE_MANAGEMENT_PUBLISH_HOST=0.0.0.0` for LAN access. Management is anonymous unless 管理认证 is enabled, then it requires the administrator session. Configure an explicit public HTTP or HTTPS Origin for browser access; HTTPS is recommended in production.
 
 ## Environment
 
@@ -61,7 +63,7 @@ Set `BUNGEE_MANAGEMENT_PUBLISH_PORT` if host port `8089` is occupied, or set
 | `PORT` | Public proxy/Ingress listener port; default `8088`; public data mapping |
 | `BUNGEE_MANAGEMENT_HOST` | Management listener host; standalone default `127.0.0.1`; Docker Compose sets `0.0.0.0` inside the container |
 | `BUNGEE_MANAGEMENT_PORT` | Management listener port; default `8089` |
-| `BUNGEE_PUBLIC_ORIGIN` | Public HTTPS Origin for administrator Cookie/CSRF |
+| `BUNGEE_PUBLIC_ORIGIN` | Explicit public HTTP/HTTPS Origin for management callbacks and Cookie/CSRF; HTTPS recommended in production |
 | `BUNGEE_TRUSTED_MANAGEMENT_PROXIES` | Comma-separated exact proxy IPs allowed to provide one client IP |
 | `BUNGEE_MANAGEMENT_PUBLISH_HOST` | Docker host address for management; default `127.0.0.1` |
 | `BUNGEE_MANAGEMENT_PUBLISH_PORT` | Docker host port for management; default `8089` |

@@ -1,9 +1,10 @@
 import {afterEach,expect,test} from 'bun:test';
+import {mockFetch} from '../../helpers/fetch';
 import {get} from 'svelte/store';
 import {readAuthMode,verifyToken} from '../../../src/api/auth';
 import {isAuthenticated,logout,restoreSession,token,beginAuthenticationHandoff} from '../../../src/stores/auth';
 const originalFetch=globalThis.fetch;
-function respond(body:unknown,status=200){globalThis.fetch=async()=>Response.json(body,{status});}
+function respond(body:unknown,status=200){globalThis.fetch=mockFetch(async()=>Response.json(body,{status}));}
 afterEach(()=>{globalThis.fetch=originalFetch;logout();});
 test('Origin precheck consumes the authoritative public mode without inferring it from the browser hostname',async()=>{
   respond({mode:'anonymous',publicOrigin:'http://127.0.0.1:28089'});
@@ -19,7 +20,7 @@ test('unconfirmed new cookie session does not destroy the recovery wizard, while
 });
 test('successful cookie verification restores the session without a legacy Key',async()=>{
   token.set(null);
-  respond({success:true,subject:{id:'owner-id',provider:'local-accounts',},csrfToken:'verified-csrf'});
+  respond({success:true,subject:{id:'owner-id',provider:'user-auth',},csrfToken:'verified-csrf'});
   expect((await verifyToken({preserveSessionOnFailure:true})).success).toBe(true);
   expect(get(isAuthenticated)).toBe(true);
   expect(get(token)).toBeNull();
@@ -29,7 +30,7 @@ test('background and late 401s cannot destroy a handoff, ordinary post-handoff 4
   const {api} = await import('../../../src/api/client');
   restoreSession({success:true});
   const responses: Array<(value:Response)=>void> = [];
-  globalThis.fetch = () => new Promise<Response>(resolve=>responses.push(resolve));
+  globalThis.fetch = mockFetch(() => new Promise<Response>(resolve=>responses.push(resolve)));
   const before = api.get('/config/runtime').catch(error=>error);
   const end = beginAuthenticationHandoff();
   const during = api.get('/config/runtime').catch(error=>error);

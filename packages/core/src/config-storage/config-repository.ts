@@ -1,3 +1,6 @@
+import { readManagementProtection, readManagementRequestIdentity } from './management-protection';
+import { hashConfigurationRequest } from './content-hash';
+import { validateMutationId } from './repository-validation';
 import { readMenuLayout, writeMenuLayout } from './menu-store';
 import type { MenuLayout } from '@jeffusion/bungee-types';
 import * as retirementStore from './retirement-store';
@@ -36,6 +39,8 @@ import {
   succeedRecovery,
 } from './recovery-store';
 import type {
+  ManagementProtection,
+  ControlProjection,
   ActiveConfigurationPublication,
   CommitConfigurationCommandV1,
   CommitConfigurationResult,
@@ -138,6 +143,66 @@ export class ConfigRepository {
     return this.db;
   }
 
+  getManagementProtection(): ManagementProtection {
+    return runRepositoryAction(() => withConsistentRead(this.db, () => Object.freeze(readManagementProtection(this.db))));
+  }
+
+  getControlProjection(): ControlProjection {
+    const projection = runRepositoryAction(() => withConsistentRead(this.db, () => ({
+      snapshot: readActiveRevision(this.db) === this.snapshot.revision ? this.snapshot : freezeSnapshot(readRepositorySnapshot(this.db)),
+      managementProtection: Object.freeze(readManagementProtection(this.db)),
+    })));
+    this.snapshot = projection.snapshot;
+    return projection;
+  }
+
+  /** Exclusive stopped-instance operation; ordinary commit never receives this authority. */
+  setManagementProviderOffline(provider: string | null, operationId: string, now: number): ControlProjection {
+    if (this.options.offline !== true) throw new ConfigRepositoryError('invalid_command', 'management protection changes require an offline repository');
+    if (typeof operationId !== 'string' || !validateMutationId(operationId) || !Number.isSafeInteger(now) || now < 0 ||
+        (provider !== null && typeof provider !== 'string')) {
+      throw new ConfigRepositoryError('invalid_command', 'offline management command is invalid');
+    }
+    runRepositoryAction(() => this.mutationTransaction(() => {
+      const existing = readOperation(this.db, operationId);
+      if (existing !== null) {
+        const identity = readManagementRequestIdentity(this.db, operationId);
+        if (!identity.offline_management || identity.management_provider !== provider) {
+          throw new ConfigRepositoryError('idempotency_key_reused', 'offline management operation ID has different input');
+        }
+        return;
+      }
+      const providers = this.options.compileOptions?.managementProviders;
+      if (provider !== null && !providers?.has(provider)) {
+        throw new ConfigRepositoryError('invalid_configuration', 'offline management provider is not in the catalog');
+      }
+      const snapshot = readRepositorySnapshot(this.db);
+      const protection = readManagementProtection(this.db);
+      const aggregate = structuredClone(snapshot.aggregate);
+      const activations = aggregate.plugin_activations.filter(({ plugin_name }) =>
+        plugin_name !== protection.selectedProvider && !providers?.has(plugin_name));
+      if (provider !== null) activations.push({ plugin_name: provider });
+      // Existing settings and bindings are already audited. Only activation selection changes here.
+      const prepared = prepareCommitCommand({
+        mutation_id: operationId, expected_revision: snapshot.revision,
+        aggregate: { ...aggregate, plugin_activations: activations }, kind: 'config', created_at: now, target_worker_slots: [],
+      });
+      const offlinePrepared = { ...prepared, managementProvider: provider,
+        requestHash: hashConfigurationRequest({ kind: prepared.kind, expected_revision: prepared.expectedRevision,
+          aggregate: prepared.aggregate, target_worker_slots: [], management_provider: provider, offline_management: true }),
+      };
+      const result = commitTransaction(this.db, offlinePrepared, this.options, snapshot, true);
+      if (result.kind !== 'committed') {
+        throw new ConfigRepositoryError(result.kind === 'recovery_in_progress' ? 'recovery_in_progress' : 'invalid_operation',
+          `offline management change cannot proceed (${result.kind})`);
+      }
+      beginOperationPublication(this.db, operationId, now);
+      markOperationDraining(this.db, operationId, now);
+      finalizeOperationPublication(this.db, operationId, { outcome: 'converged', old_workers_exited: true }, now);
+    }));
+    return this.getControlProjection();
+  }
+
   getSnapshot(): RepositorySnapshot {
     return this.snapshot;
   }
@@ -185,15 +250,16 @@ export class ConfigRepository {
   /** Executes a main-thread compiled command in the exclusive storage thread. */
   commitPrepared(prepared: PreparedCommitCommand): CommitConfigurationResult {
     try {
-      const decision = this.mutationTransaction(() => commitTransaction(this.db, prepared, this.options, this.snapshot));
+      const decision = this.mutationTransaction(() => {
+        const result = commitTransaction(this.db, prepared, this.options, this.snapshot);
+        readManagementProtection(this.db);
+        return result;
+      });
       if (decision.kind === 'committed') {
-        this.snapshot = freezeSnapshot({
-          revision: decision.operation.committed_revision,
-          content_hash: prepared.contentHash,
-          aggregate: prepared.aggregate,
-        });
+        this.snapshot = freezeSnapshot({ revision: decision.operation.committed_revision, content_hash: prepared.contentHash, aggregate: prepared.aggregate });
         return { kind: 'committed', snapshot: this.snapshot, operation: decision.operation };
       }
+      if (decision.kind === 'duplicate') this.getControlProjection();
       return decision;
     } catch (error) {
       if (error instanceof ConfigRepositoryError) throw error;

@@ -24,6 +24,7 @@
   const loadMenus = () => import('./routes/Menus.svelte');
   const loadLogs = () => import('./routes/Logs.svelte');
   import Login from './routes/Login.svelte';
+  import Setup from './routes/Setup.svelte';
   import NotFound from './routes/NotFound.svelte';
   import ToastContainer from '$components/shell/ToastContainer.svelte';
   import PluginHost from '$components/shell/PluginHost.svelte';
@@ -95,7 +96,11 @@
       modeReady = true;
       loginPageActive = mode.mode === 'plugin' && !get(isAuthenticated);
       if (!get(isAuthenticated)) {
-        if (mode.mode === 'plugin') window.location.hash = '#/login';
+        if (mode.mode === 'plugin') {
+          const path = window.location.hash.replace(/^#/, '').split('?', 1)[0];
+          if (mode.initialized === false) window.location.hash = '#/setup';
+          else if (path !== '/login') window.location.hash = '#/login';
+        }
         return true;
       }
       return await protectedInitialize(() => generation === initializationGeneration);
@@ -122,7 +127,13 @@
     if (destroyed) return;
     loginPageActive = false;
     const path = window.location.hash.replace(/^#/, '').split('?', 1)[0];
-    if (path === '/login') window.location.hash = '#/';
+    if (path === '/login' || path === '/setup') window.location.hash = '#/';
+  }
+
+  function handleSetupCompleted(): void {
+    if (destroyed) return;
+    loginPageActive = true;
+    window.location.hash = '#/login';
   }
 
   async function handleLogout(opener: HTMLElement): Promise<void> {
@@ -187,7 +198,9 @@
   <div class="min-h-screen flex items-center justify-center bg-carbon-950">
     <LoadingIndicator label="INITIALIZING" size="lg" height="none" />
   </div>
-{:else if modeReady && $authMode?.mode === 'plugin' && (!$isAuthenticated || loginPageActive || isOnLogin)}
+{:else if modeReady && $authMode?.mode === 'plugin' && $authMode.initialized === false}
+  <Setup onCompleted={handleSetupCompleted} />
+{:else if modeReady && $authMode?.mode === 'plugin' && (!$isAuthenticated || loginPageActive || isOnLogin || $location === '/setup')}
   {#key ($isAuthenticated && !loginPageActive ? 'restored' : 'login')}<Login onAuthenticated={handleAuthenticated} onCompleted={handleLoginCompleted} />{/key}
 {:else if !modeReady || !$isAuthenticated || !protectedInitialized}
   <div class="min-h-screen flex items-center justify-center p-4 bg-carbon-950"><p role="alert" class="text-sm text-red-400">{$_(initializationError || 'management.stateUnavailable')}</p></div>

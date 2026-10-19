@@ -1,5 +1,5 @@
 import { get } from 'svelte/store';
-import { managementLogin } from './client';
+import { managementLogin, ApiError } from './client';
 import { fetchAuthMode, fetchCookieVerifiedSession, ManagementAuthenticationError, type AuthMode } from './auth';
 import {
   authMode, beginAuthenticationHandoff, commitManagementSession, getAuthStateRevision,
@@ -42,8 +42,29 @@ export function createManagementLoginContext(options: ManagementLoginContextOpti
     && matchesProvider(get(authMode), provider);
   const stale = () => new StaleManagementLoginError();
 
+  async function interaction<T>(endpoint: 'options' | 'start', input?: unknown): Promise<T> {
+    if (!isCurrent()) throw stale();
+    if (completePromise || completed) throw new ManagementAuthenticationError('management_login_completing');
+    try {
+      const response = await fetch(`/api/auth/login/${endpoint}`, {
+        method: endpoint === 'options' ? 'GET' : 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-Bungee-Auth-Provider': provider.name },
+        ...(endpoint === 'start' ? { body: JSON.stringify(input) } : {}),
+      });
+      const data = await response.json();
+      if (!isCurrent()) throw stale();
+      if (!response.ok) throw new ApiError(response.status, data, typeof data?.error === 'string' ? data.error : 'management_login_failed');
+      return data as T;
+    } catch (error) {
+      if (!isCurrent()) throw stale();
+      throw error;
+    }
+  }
+
   const context: ManagementLoginContext = Object.freeze({
     provider,
+    loginOptions: <T>() => interaction<T>('options'),
+    beginLogin: (input: { methodId: string; returnTo?: string }) => interaction<{ authorizationUrl: string; flowId: string }>('start', { methodId: input.methodId, ...(input.returnTo === undefined ? {} : { returnTo: input.returnTo }) }),
     async login(input: unknown): Promise<unknown> {
       if (!isCurrent()) throw stale();
       if (completePromise || completed) throw new ManagementAuthenticationError('management_login_completing');
@@ -86,7 +107,7 @@ export function createManagementLoginContext(options: ManagementLoginContextOpti
           throw new ManagementAuthenticationError('management_login_read_failed');
         }
         if (!isCurrent()) throw stale();
-        if (mode.mode !== 'plugin' || mode.provider?.name !== provider.name || mode.publicOrigin !== provider.publicOrigin
+        if (mode.mode !== 'plugin' || mode.initialized !== true || mode.provider?.name !== provider.name || mode.publicOrigin !== provider.publicOrigin
           || !verified.success || verified.mode !== 'plugin'
           || !verified.subject?.id || verified.subject.provider !== provider.name) {
           throw new ManagementAuthenticationError('management_login_verify_mismatch');

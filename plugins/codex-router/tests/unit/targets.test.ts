@@ -1,3 +1,4 @@
+import type { PluginConfigValue } from '@jeffusion/bungee-types';
 import {fieldValueSatisfies} from '../../../../packages/core/src/plugin-manifest-catalog/plugin-field-value';
 import {expect,test} from 'bun:test';
 import {validateGatewayTargets} from '../../../../packages/core/src/config-storage/gateway-target-validation';
@@ -27,5 +28,6 @@ test('gateway reference schema accepts binding protocol but rejects invalid valu
   const field = { name: 'target', type: 'gateway_target', label: 'Target', required: true } as any;
   expect(fieldValueSatisfies(field, { type: 'route', id: 'b' })).toBe(true);
   for (const protocol of ['responses', 'chat_completions', 'anthropic_messages']) expect(fieldValueSatisfies(field, { type: 'service', id: 's', protocol })).toBe(true);
-  for (const target of [{ type: 'route', id: 'b', protocol: 'unknown' }, { type: 'route', id: 'b', protocol: null }, { type: 'route', id: 'b', injected: true }, { type: 'service', protocol: 'responses' }]) expect(fieldValueSatisfies(field, target)).toBe(false);
+  const invalidTargets: PluginConfigValue[] = [{ type: 'route', id: 'b', protocol: 'unknown' }, { type: 'route', id: 'b', protocol: null }, { type: 'route', id: 'b', injected: true }, { type: 'service', protocol: 'responses' }];
+  for (const target of invalidTargets) expect(fieldValueSatisfies(field, target)).toBe(false);
 });

@@ -151,7 +151,7 @@ Bungee ships with a built-in **industrial dark dashboard** — a single control 
 ![Bungee configuration center — system settings, auth, logging, cleanup, and runtime operations](docs/showcase/bungee-07-config.png)
 
 - System settings: port, worker count, log level, body size limit.
-- Management listening, body logging, max body size and retention days; anonymous management and public routes by default, with optional single-administrator authentication and Key access control described in the [authentication guide](./docs/guides/authentication.md).
+- Management listening, body logging, max body size and retention days; anonymous management and public routes by default, with optional management account authentication and Key access control described in the [authentication guide](./docs/guides/authentication.md).
 - Manual log cleanup and revisioned configuration editing from one panel.
 
 </details>
@@ -237,7 +237,7 @@ Bungee uses a revisioned configuration aggregate:
 - Configuration changes are CAS commits that produce a new revision and asynchronous publication operation
 - Configuration import/export uses sealed `bungee export --file snapshot.json` / `bungee import --file snapshot.json` snapshots; database upgrades append migrations separately
 
-Management is anonymous and routes are public by default. Enable **管理认证** (`local-accounts`) to establish or verify one administrator, and **访问控制** (`key-access`) to manage Keys and explicitly protect routes. Route and Service editors do not contain authentication fields. Key permissions and route protection are separate; revoking the last Key keeps protected routes protected.
+Management is anonymous and routes are public by default. To require management login, stop the instance and run `bungee recover --plugin user-auth --action issue-setup-code` in a local terminal, then start it and complete `/#/setup` with the one-time code. The **用户认证** (`user-auth`) plugin provides management sessions; releasing authentication requires the offline `release-auth` action. Enable **访问控制** (`key-access`) to manage Keys and explicitly protect routes. Route and Service editors do not contain authentication fields. Key permissions and route protection are separate; revoking the last Key keeps protected routes protected.
 
 See [Configuration Guide](./docs/reference/configuration.md) for the current schema and the [authentication guide](./docs/guides/authentication.md) for optional protection.
 

@@ -6,7 +6,7 @@ export const STORAGE_METHODS = [
   'getMenuLayout', 'putMenuLayout',
   'getPublicationRetirementRetry','requestPublicationRetirementRetry',
   'freezePublicationRetirementDrainStart',
-  'commitPrepared', 'appendServingSnapshot', 'getServingSnapshot', 'claimController',
+  'getControlProjection', 'setManagementProviderOffline', 'commitPrepared', 'appendServingSnapshot', 'getServingSnapshot', 'claimController',
   'getActivePublication', 'getOperation', 'getOperationState', 'getCurrentOperationState',
   'getRecovery', 'getCurrentRecovery', 'getLatestRecovery', 'createManualRecovery',
   'claimRecoveryAttempt', 'scheduleRecoveryRetry', 'succeedRecovery', 'stopRecovery', 'requeueRecovery',
@@ -19,15 +19,14 @@ export type StorageMethod = typeof STORAGE_METHODS[number];
 export type StorageParameters<M extends StorageMethod> = Parameters<ConfigRepository[M]>;
 export type StorageResult<M extends StorageMethod> = ReturnType<ConfigRepository[M]>;
 export const READ_METHODS: ReadonlySet<StorageMethod> = new Set([
-  'getMenuLayout',
-  'getPublicationRetirementRetry',
+  'getControlProjection', 'getMenuLayout', 'getPublicationRetirementRetry',
   'getPublicationServingSet', 'getServingSnapshot', 'getActivePublication', 'getOperation', 'getOperationState',
   'getCurrentOperationState', 'getRecovery', 'getCurrentRecovery', 'getLatestRecovery', 'verify',
   'getRetirementDescriptorCleanupState', 'getRetiredWorkerInstanceIds', 'getPublicationRetirement', 'getRuntimeRecoveryBudget', 'getRuntimeRecoveryStartupGate',
 ]);
 
 export type StorageRequest =
-  | { readonly id: number; readonly method: 'open'; readonly args: readonly [string] }
+  | { readonly id: number; readonly method: 'open'; readonly args: readonly [string, { readonly offline: boolean; readonly managementProviders: readonly string[] }] }
   | { readonly id: number; readonly method: 'close'; readonly args: readonly [] }
   | { [M in StorageMethod]: { readonly id: number; readonly method: M; readonly args: StorageParameters<M> } }[StorageMethod];
 

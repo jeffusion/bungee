@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import postcss, { type ChildNode, type Root } from 'postcss';
-import { parse } from 'svelte/compiler';
+import { parse, type AST } from 'svelte/compiler';
 import { uiImports } from './ui-source';
 
 // Ignore formatting/comments, but retain selectors, declarations and enclosing
@@ -76,5 +76,6 @@ export function stylesheetImports(source: string, file = 'input.ts'): string[] {
 }
 
 export function componentStyleAttributes(source: string): string[] {
-  return parse(source).css?.attributes.map(attribute => attribute.name).filter(name => name === 'global' || name === 'src') ?? [];
+  const attributes: AST.Attribute[] = parse(source, { modern: true }).css?.attributes ?? [];
+  return attributes.map(attribute => attribute.name).filter(name => name === 'global' || name === 'src');
 }

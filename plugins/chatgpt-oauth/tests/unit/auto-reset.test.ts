@@ -1,6 +1,7 @@
+import { controlHost } from '../helpers/control-host';
 import { describe, expect, test } from 'bun:test';
 import type { SecretStore, SecretValue, PluginControl, ControlHostContext } from '../../../../packages/core/src/plugin-control/contracts';
-import { AccountStore } from '../../server/accounts';
+import { AccountStore, ACCOUNT_STORE_KEY } from '../../server/accounts';
 import { AUTO_RESET_LEAD_MS, AUTO_RESET_INTERVAL_MS, isAutoResetDue, type AutoResetTimer } from '../../server/auto-reset';
 import { createControl } from '../../server/control';
 import type { FetchLike } from '../../server/oauth';
@@ -78,7 +79,7 @@ async function setup(enabled = true) {
   const restart = async () => {
     for (const item of controls) await item.dispose();
     const timer = new VirtualTimer(() => now);
-    const control = createControl({ signal: host.signal, secretStore: store } as ControlHostContext,
+    const control = createControl(controlHost(store, host.signal),
       { fetchImpl, now: () => now, autoResetTimer: timer });
     controls.push(control);
     await control.start();
@@ -327,7 +328,15 @@ describe('automatic reset, simulation only', () => {
     for (const status of ['disabled', 'reauth_required', 'revoked'] as const) {
       const s = await setup();
       try {
-        await s.accounts.setStatus(s.account.id, status);
+        if (status === 'revoked') {
+          const secret = s.store.value;
+          if (!secret) throw new Error('missing simulation account aggregate');
+          const aggregate = JSON.parse(secret.value) as { accounts: Array<{ id: string; status: string }> };
+          const account = aggregate.accounts.find(item => item.id === s.account.id);
+          if (!account) throw new Error('missing simulation account');
+          account.status = status;
+          await s.store.compareAndSet(ACCOUNT_STORE_KEY, secret.version, JSON.stringify(aggregate));
+        } else await s.accounts.setStatus(s.account.id, status);
         await s.timer.fire();
         expect(s.requests).toEqual([]);
       } finally { await s.dispose(); }
@@ -367,7 +376,7 @@ describe('automatic reset, simulation only', () => {
   test('atomic persistent claims allow only one scheduler to POST', async () => {
     const s = await setup();
     const otherTimer = new VirtualTimer();
-    const other = createControl({ signal: s.host.signal, secretStore: s.store } as ControlHostContext, {
+    const other = createControl(controlHost(s.store, s.host.signal), {
       now: () => NOW, autoResetTimer: otherTimer,
       fetchImpl: async (_url, init) => {
         if (init?.method === 'POST') { s.posts.push(JSON.parse(String(init.body))); return json({ code: 'reset', windows_reset: 1 }); }

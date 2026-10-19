@@ -42,9 +42,8 @@ import {
 import type { MutableRequestContext as HookMutableRequestContext } from '../hooks';
 import type { AttemptObservationEvent, AttemptObservationOutcome } from '../hooks/plugin-hooks';
 import { getTrustedDataIdentity, getTrustedWorkerPeer } from '../config-worker/private-transport';
-import { isStreamingResponse as isSSEResponse } from '../worker/response/streaming-response';
 import { BodyProcessingError, isJsonMediaType, type BodySource } from '../worker/request/body-source';
-import { analyzeExpressionDependencies, hasBodyModification } from '../utils/expression-dependencies';
+import { analyzeExpressionDependencies } from '../utils/expression-dependencies';
 import { collectPluginBodyRequirements } from '../scoped-plugin-registry';
 // Every HTTP body participates in completion/drain; SSE terminal inference is separate.
 function isStreamingResponse(response: Response): boolean { return response.body !== null; }

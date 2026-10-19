@@ -17,7 +17,7 @@ test('local init migrates exact database without credentials and refuses a live 
   const ingress=await acquireMasterInstanceLock(join(dir,'ingress.instance.lock'));
   try {await expect(initializeConfigurationDatabase({configDbPath:path})).rejects.toThrow('held');}finally{await ingress.release();}
   const repository=ConfigRepository.open(path);try{expect(repository.getDatabase().query("SELECT name FROM sqlite_master WHERE name IN ('api_keys','plugin_durable_records','secret_store_objects')").all()).toEqual([]);}finally{repository.close();}
-  const plugin=await PluginStateClient.open(join(dir,'plugin-state.db'));try{expect(await plugin.durableState('local-accounts').list()).toEqual([]);}finally{await plugin.close();}
+  const plugin=await PluginStateClient.open(join(dir,'plugin-state.db'));try{expect(await plugin.durableState('user-auth').list()).toEqual([]);}finally{await plugin.close();}
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 
@@ -35,6 +35,6 @@ test('built core exports inert storage initialization SDK and local CLI never em
   const binary=join(dir,'bungee-runtime');
   const compile=Bun.spawn([process.execPath,'build',entry,join(dir,'config-storage-worker.js'),join(dir,'plugin-state-worker.js'),join(dir,'observability-worker.js'),'--compile','--outfile',binary],{stdout:'pipe',stderr:'pipe'});expect(await compile.exited).toBe(0);
   const native=Bun.spawn([binary,'--initialize-config',join(dir,'native','bungee.db')],{stdout:'pipe',stderr:'pipe',env:{...process.env,BUNGEE_ROLE:'master'}});const nativeOutput=await new Response(native.stdout).text()+await new Response(native.stderr).text();expect(await native.exited).toBe(0);expect(nativeOutput).not.toContain('bng_management_');
-  const state=await PluginStateClient.open(join(dir,'native','plugin-state.db'));try{expect(await state.durableState('local-accounts').list()).toEqual([]);}finally{await state.close();}
+  const state=await PluginStateClient.open(join(dir,'native','plugin-state.db'));try{expect(await state.durableState('user-auth').list()).toEqual([]);}finally{await state.close();}
  }finally{await rm(dir,{recursive:true,force:true});}
 },30000);

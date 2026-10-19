@@ -18,7 +18,7 @@ export function auxiliaryCredentialIdentity(headers:Headers,model:string,upstrea
 }
 
 /** Bound by the host to a single parent and frozen serving configuration. */
-export async function executeAuxiliaryRequest(parent:Request,config:AppConfig,entry:RouteConfig,runtime:HandleRequestRuntimeContext|undefined,input:GatewayAuxiliaryRequest,signal:AbortSignal,targets:readonly import('./contracts').GatewayDispatchTarget[]):Promise<GatewayAuxiliaryResult> {
+export async function executeAuxiliaryRequest(parent:Request,config:AppConfig,_entry:RouteConfig,runtime:HandleRequestRuntimeContext|undefined,input:GatewayAuxiliaryRequest,signal:AbortSignal,targets:readonly import('./contracts').GatewayDispatchTarget[]):Promise<GatewayAuxiliaryResult> {
   if(runtime?.auxiliary)throw new DataAdmissionError(422,'auxiliary_recursion_forbidden');
   if(!targets.some(target=>target.type===input.target.type && target.id===input.target.id))throw new DataAdmissionError(403,'dispatch_target_not_declared');
   if(input.protocol!=='responses' || typeof input.model!=='string' || !input.model)throw new DataAdmissionError(422,'auxiliary_request_invalid');

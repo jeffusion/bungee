@@ -20,7 +20,7 @@ import {
   signSupervisionMessage,
   signWorkerDescriptor,
 } from '../../../src/supervision';
-import { drainMessage, startCurrentMessage, startMessage, TEST_KERNEL_BOOT_ID } from '../../helpers/config-publication-worker-runtime.ts';
+import { drainMessage, startCurrentMessage, startMessage, TEST_KERNEL_BOOT_ID } from '../../helpers/config-publication-worker-runtime';
 
 const ROOT = new Uint8Array(32).fill(5);
 const AUTHORITY = { controller_epoch: 1, controller_id: '83000000-0000-4000-8000-000000000001' } as const;

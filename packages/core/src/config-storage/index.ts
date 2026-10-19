@@ -23,6 +23,8 @@ export type {
   BeginWorkerAttemptResult,
   FinalizePublicationOutcome,
   RepositorySnapshot,
+  ManagementProtection,
+  ControlProjection,
   ServingSnapshotKey,
   WorkerAttemptReason,
   WorkerPublicationResult,
