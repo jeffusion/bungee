@@ -34,9 +34,15 @@ test('native Token host and shared range keep current metrics usable', () => run
 
     const nativeCard = card('plugin:native:token-stats:token-stats-time');
     const overviewCard = card('plugin:native:token-stats:token-stats-overview');
-    const serviceBounds = (await card('health.services').boundingBox())!, timeBounds = (await nativeCard.boundingBox())!;
-    expect(Math.abs(serviceBounds.y - timeBounds.y)).toBeLessThan(1);
-    expect(timeBounds.x).toBeGreaterThanOrEqual(serviceBounds.x + serviceBounds.width);
+    // KPI fitting can move both cards between protocol calls. Measure one frame
+    // and wait for the final layout rather than comparing two different frames.
+    const placement = () => nativeCard.evaluate(node => {
+      const service = node.parentElement!.querySelector('[data-card-id="health.services"]')!;
+      const serviceBounds = service.getBoundingClientRect(), timeBounds = node.getBoundingClientRect();
+      return { rowOffset: Math.abs(serviceBounds.y - timeBounds.y), columnGap: timeBounds.x - serviceBounds.right };
+    });
+    await expect.poll(async () => (await placement()).rowOffset).toBeLessThan(1);
+    await expect.poll(async () => (await placement()).columnGap).toBeGreaterThanOrEqual(0);
     await expect(page.locator('[data-card-id^="plugin:native:intruder:"]')).toHaveCount(0);
     await expect(page.getByTestId('token-stats-model-row')).toHaveCount(0);
     for (const metric of ['input', 'output', 'cost']) await expect(page.getByTestId(`token-stats-metric-${metric}`)).toBeVisible();
