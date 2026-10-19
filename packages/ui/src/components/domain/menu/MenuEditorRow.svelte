@@ -91,7 +91,7 @@
         {#if node.kind === 'page'}
           <DropdownMenu.Sub>
             <DropdownMenu.SubTrigger {disabled} class={itemClass}>{t('moveTo')}</DropdownMenu.SubTrigger>
-            <DropdownMenu.SubContent sideOffset={4} fitViewport overlap strategy="fixed" class="max-h-[min(24rem,calc(100dvh-24px))] w-56 max-w-[calc(100vw-24px)] overflow-y-auto border-carbon-500 bg-carbon-900 text-zinc-200">
+            <DropdownMenu.SubContent sideOffset={4} fitViewport overlap class="max-h-[min(24rem,calc(100dvh-24px))] w-56 max-w-[calc(100vw-24px)] overflow-y-auto border-carbon-500 bg-carbon-900 text-zinc-200">
               <DropdownMenu.Item class={itemClass} disabled={disabled || group === null} onclick={() => relocate(() => onTarget?.(null))}>{t('root')}</DropdownMenu.Item>
               {#each groups as target}<DropdownMenu.Item class={itemClass} disabled={disabled || target.id === group} onclick={() => relocate(() => onTarget?.(target.id))}>{target.label}</DropdownMenu.Item>{/each}
             </DropdownMenu.SubContent>
