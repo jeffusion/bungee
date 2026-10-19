@@ -1,3 +1,10 @@
+## [6.0.2](https://github.com/jeffusion/bungee/compare/v6.0.1...v6.0.2) (2026-10-19)
+
+
+### Bug Fixes
+
+* **core:** remove unavailable plugin records before startup ([5d5b967](https://github.com/jeffusion/bungee/commit/5d5b9672ed6d5a66913b28d404c02a91bf370d2f))
+
 ## [6.0.1](https://github.com/jeffusion/bungee/compare/v6.0.0...v6.0.1) (2026-10-19)
 
 
