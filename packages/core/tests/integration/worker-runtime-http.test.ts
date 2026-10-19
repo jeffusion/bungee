@@ -208,8 +208,8 @@ async function realShutdownFixture(options: {
     get forceCalls() { return forceCalls; }, get shutdownCalls() { return shutdownCalls; } };
 }
 
-function runtimeClient(baseUrl: string, fixture: Awaited<ReturnType<typeof workerFixture>>, fetcher?: typeof fetch, sequence = 10_000) {
-  const client = new WorkerControllerClient({ baseUrl, credential: fixture.credential, authority: AUTHORITY, fetch: fetcher });
+function runtimeClient(baseUrl: string, fixture: Awaited<ReturnType<typeof workerFixture>>, fetcher?: typeof fetch, sequence = 10_000, timers?: WorkerControllerClientTimers) {
+  const client = new WorkerControllerClient({ baseUrl, credential: fixture.credential, authority: AUTHORITY, fetch: fetcher, timers });
   // The primary controller obtained this signed status through the real worker before this observer probes its runtime endpoint.
   (client as any).lastStatus = fixture.client.cachedStatus;
   (client as any).sequence = sequence;
@@ -805,35 +805,48 @@ describe('worker runtime signed HTTP integration', () => {
 
   test('uses one 750ms absolute runtime deadline across queue waiting and does not retry', async () => {
     const fixture = await workerFixture();
-    let runtimeRequests = 0;
-    let delayedResponse: Promise<unknown> | undefined;
-    const proxy = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: async (request) => {
-      if (new URL(request.url).pathname === '/__supervision/runtime') {
-        runtimeRequests += 1;
-        delayedResponse = Bun.sleep(850);
-        await delayedResponse;
-      }
-      return fetch(`http://127.0.0.1:${fixture.worker.port}${new URL(request.url).pathname}`, {
-        method: request.method, headers: request.headers, body: request.body,
-      });
+    const clock = virtualTimers();
+    const originalNow = Date.now, epoch = originalNow();
+    let runtimeRequests = 0, release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started: (() => void)[] = [];
+    const firstStarted = new Promise<void>(resolve => { started[0] = resolve; });
+    const secondStarted = new Promise<void>(resolve => { started[1] = resolve; });
+    const responses: Promise<Response>[] = [];
+    const proxy = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: request => {
+      const response = (async () => {
+        if (new URL(request.url).pathname === '/__supervision/runtime') {
+          started[runtimeRequests++]?.();
+          await gate;
+        }
+        return fetch(`http://127.0.0.1:${fixture.worker.port}${new URL(request.url).pathname}`, {
+          method: request.method, headers: request.headers, body: request.body,
+        });
+      })();
+      responses.push(response);return response;
     } });
-    const client = runtimeClient(`http://127.0.0.1:${proxy.port}`, fixture);
+    const client = runtimeClient(`http://127.0.0.1:${proxy.port}`, fixture, undefined, 10_000, clock.timers);
     try {
       await serve(fixture);
-      const first = client.runtimeSnapshot().catch((error) => error);
-      while (runtimeRequests === 0) await Bun.sleep(5);
-      const started = Date.now();
-      const queued = await withTimeout(client.runtimeSnapshot().catch((error) => error), 1_200);
-      expect(queued).toMatchObject({ code: 'timeout' });
-      expect(Date.now() - started).toBeLessThan(950);
-      expect(await first).toMatchObject({ code: 'timeout' });
-      // The queued call may expire before it reaches the transport when the
-      // event loop resumes after its absolute deadline. Either way, neither
-      // call may retry.
-      expect(runtimeRequests).toBeGreaterThanOrEqual(1);
-      expect(runtimeRequests).toBeLessThanOrEqual(2);
-      await delayedResponse;
+      Date.now = () => epoch + clock.now;
+      let firstSettled = false, queuedSettled = false;
+      const first = client.runtimeSnapshot().catch(error => error).then(value => { firstSettled = true;return value; });
+      await withTimeout(firstStarted, 1_200);
+      clock.advance(250);
+      const queued = client.runtimeSnapshot().catch(error => error).then(value => { queuedSettled = true;return value; });
+      clock.advance(499);await Bun.sleep(0);
+      expect(firstSettled).toBe(false);expect(queuedSettled).toBe(false);expect(runtimeRequests).toBe(1);
+      clock.advance(1);
+      expect(await withTimeout(first, 1_200)).toMatchObject({ code: 'timeout' });
+      await withTimeout(secondStarted, 1_200);
+      clock.advance(249);await Bun.sleep(0);
+      expect(queuedSettled).toBe(false);
+      clock.advance(1);
+      expect(await withTimeout(queued, 1_200)).toMatchObject({ code: 'timeout' });
+      expect(runtimeRequests).toBe(2);
     } finally {
+      Date.now = originalNow;
+      release();await Promise.allSettled(responses);
       client.disconnect(false);
       await proxy.stop(true);
       await stop(fixture);
