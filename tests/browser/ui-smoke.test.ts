@@ -1,10 +1,11 @@
 import { test as browserTest } from 'bun:test';
 import { startUiRuntime } from '../helpers/ui-runtime';
-import { chromium, type Page } from 'playwright';
+import { chromium, type Page, type Request } from 'playwright';
 import assert from 'node:assert/strict';
 import * as fs from 'fs';
 import * as path from 'path';
 import { configurationRuntimeFixture, publicationFixture } from '../../packages/ui/tests/helpers/publication';
+import { menuSnapshot, fulfillMenuIcons } from '../../packages/ui/tests/helpers/menus';
 
 browserTest('ui smoke', async () => {
 const uiRuntime = await startUiRuntime({ mode: 'built-page' });
@@ -125,6 +126,7 @@ const pageErrors: PageErrorLog[] = [];
 const consoleErrors: ConsoleErrorLog[] = [];
 const failedRequests: FailedRequestLog[] = [];
 const criticalFailures: FailedRequestLog[] = [];
+const menuIconRequests: Request[] = [];
 const timeline: SmokeTimelineEntry[] = [];
 const failureDiagnosticPaths: FailureDiagnosticPaths[] = [];
 const smokeStartedAt = Date.now();
@@ -219,6 +221,10 @@ page.on('pageerror', (err) => {
   pageErrors.push({ message: err.message, stack: err.stack });
 });
 
+page.on('request', request => {
+  if (new URL(request.url()).pathname === '/api/ui/icons/data') menuIconRequests.push(request);
+});
+
 page.on('console', (msg) => {
   if (msg.type() === 'error') {
     consoleErrors.push({ text: msg.text(), location: msg.location() });
@@ -263,6 +269,10 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async (route) => {
     });
   } else if (pathname === '/api/auth/login/options') {
     await route.fulfill({json:{local:{enabled:true,turnstile:{enabled:false}},methods:[]}});
+  } else if (pathname === '/api/ui/menus') {
+    await route.fulfill({json: menuSnapshot()});
+  } else if (pathname === '/api/ui/icons/data') {
+    await fulfillMenuIcons(route);
   } else if (pathname === '/api/auth/login') {
     assert.equal(route.request().method(), 'POST');
     assert.deepEqual(route.request().postDataJSON(), { username: 'smoke-admin', password: 'smoke-password', transport: 'cookie' });
@@ -461,8 +471,16 @@ for (const [caseIndex, r] of routesToTest.entries()) {
       await form.locator('button:not([type="button"])').click();
       await assertVisibleTestId(PAGE_TEST_IDS.dashboard, caseContext);
       await (await menuResponse).finished();
-      // Menu response consumption schedules icon requests after the dashboard mounts.
-      await page.waitForLoadState('networkidle');
+      await page.waitForFunction(() => {
+        const icons = [...document.querySelectorAll('[data-testid="app-header"] [data-menu-icon]')];
+        return icons.length > 0 && icons.every(icon => icon.getAttribute('data-icon-state') === 'ready');
+      });
+      // A previous icon revision can still have an in-flight batch after current icons render.
+      await Promise.all(menuIconRequests.map(async request => {
+        const response = await request.response();
+        assert.ok(response, 'Menu icon requests must receive a response before navigation.');
+        assert.equal(await response.finished(), null, 'Menu icon requests must finish before navigation.');
+      }));
       assert.equal(loginRequests, 1, 'The user-auth login form must submit exactly once.');
       assert.equal(new URL(page.url()).hash, '#/', 'Successful provider login must return to the dashboard.');
     }
