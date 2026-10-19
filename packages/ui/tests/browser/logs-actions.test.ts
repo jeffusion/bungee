@@ -1,5 +1,6 @@
 import { test as browserTest } from 'bun:test';
 import { chromium, expect } from 'playwright/test';
+import {collectApiEvidence} from '../helpers/editors/api-evidence';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
 import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
@@ -14,9 +15,10 @@ try {
     const text = await Bun.file(new URL(`../../src/i18n/locales/${language}.json`, import.meta.url)).json();
     for (const [width, height] of [[320, 568], [390, 600], [667, 375], [900, 480], [1440, 480]]) {
       const mobile = width < 768;
-      const page = await browser.newPage({ viewport: { width, height }, locale: language, hasTouch: mobile, isMobile: mobile });
-      const errors: string[] = []; const queries: URL[] = [];
-      page.on('pageerror', error => errors.push(error.message));
+      const context = await browser.newContext({ viewport: { width, height }, locale: language, hasTouch: mobile, isMobile: mobile });
+      try {
+      const page = await context.newPage();
+      const evidence=collectApiEvidence(page),errors=evidence.errors; const queries: URL[] = [];
       const config = configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null,
         retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 }));
       const now = Date.now();
@@ -26,6 +28,7 @@ try {
       await page.addInitScript(language => { localStorage.setItem('locale', language); localStorage.setItem('logsAutoRefresh', 'true'); }, language);
       await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
         const url = new URL(route.request().url());
+        if (route.request().method() !== 'GET') { errors.push(`Unexpected API ${route.request().method()} ${url.pathname}`); return route.fulfill({status: 500, json: {error: 'unexpected_method'}}); }
         if (url.pathname === '/api/auth/mode') return route.fulfill({ json: { mode: 'anonymous', publicOrigin: url.origin } });
         if (url.pathname === '/api/auth/verify') return route.fulfill({ json: { success: true, mode: 'anonymous', subject: { id: 'anonymous', provider: 'anonymous' } } });
         if (url.pathname === '/api/config/runtime') return route.fulfill({ json: config });
@@ -41,12 +44,16 @@ try {
         if (url.pathname === '/api/resources/api-key') return route.fulfill({ json: { keys: [] } });
         if (url.pathname === '/api/logs') { queries.push(url); return route.fulfill({ json: { data: [row], total: 1, totalPages: 1, page: 1, limit: 50 } }); }
         if (url.pathname === '/api/logs/export') return route.fulfill({ contentType: 'text/csv', body: 'requestId,status\nrequest,200\n' });
-        return route.fulfill({ json: {} });
+        if (url.pathname === '/api/plugin-translations') return route.fulfill({ json: {} });
+        if (url.pathname === '/api/logs/cleanup/config') return route.fulfill({ json: { enabled: false, retentionDays: 1, scheduleIntervalHours: 1, isActive: false } });
+        errors.push(`Unexpected API GET ${url.pathname}`);
+        return route.fulfill({ status: 500, json: {error: 'unexpected_request'} });
       });
       await page.goto(baseUrl + '/#/logs');
       await expect(page.getByTestId('logs-table-scroll')).toBeVisible();
       const trigger = page.getByRole('button', { name: mobile ? text.logs.actions : width < 1280 ? text.logs.filters : text.logs.moreFilters, exact: true });
-      const triggerElement = await trigger.elementHandle();
+      const triggerNode=await trigger.elementHandle();
+      try {
       await trigger.click();
       const panel = mobile ? page.getByTestId('logs-mobile-actions') : page.getByRole('menu');
       await expect(panel).toBeVisible();
@@ -95,9 +102,27 @@ try {
       }
       await page.keyboard.press('Escape');
       await expect(panel).toHaveCount(0);
-      expect(await triggerElement!.evaluate(node => document.activeElement === node)).toBe(true);
-      expect(errors).toEqual([]);
-      await page.close();
+      await expect.poll(()=>triggerNode!.evaluate(node=>document.activeElement===node)).toBe(true);
+      if(width===390){
+    const actionName = language === 'zh-CN' ? '操作' : 'Actions';
+    const action = page.getByTestId('page-logs').getByRole('button', { name: actionName, exact: true });
+    await expect(action).toBeVisible();
+    await expect(action.locator('.nx-pill-accent')).toHaveCount(0);
+    await expect(action.locator('span')).toHaveCount(0);
+    await page.getByTestId('logs-filter-path-input').fill('test');
+    const filteredAction = page.getByTestId('page-logs').getByRole('button', { name: `${actionName} 1`, exact: true });
+    await expect(filteredAction).toBeVisible(); await expect(filteredAction.locator('.nx-feature-tag')).toHaveText('1');
+    await filteredAction.click();
+    const menu = page.getByTestId('logs-mobile-actions'); await expect(menu).toBeVisible();
+    const bounds = await menu.boundingBox(); expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(await page.evaluate(() => innerWidth + 1));
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
+    await page.getByTestId('logs-filter-path-input').fill('');
+      }
+      expect(errors).toEqual([]); evidence.verify();
+      } finally { await triggerNode?.dispose(); }
+       } finally { await context.close(); }
       console.log(`Logs actions passed: ${language} ${width}x${height}`);
     }
   }

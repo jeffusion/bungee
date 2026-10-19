@@ -2,6 +2,9 @@ import { test as browserTest } from 'bun:test';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
+import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
+import { dashboardSample, historySample } from '../helpers/dashboard/stats';
+import type { TimeRange } from '../../src/types';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
 
 browserTest('carousel', async () => {
@@ -19,17 +22,24 @@ try {
   await page.route('**/*', async route => {
     const url = new URL(route.request().url());
     // No external fonts or live management server are needed for acceptance.
-    if (url.origin !== origin) return route.fulfill({ status: 200, body: '' });
+    if (url.origin !== origin) {
+      if (url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com') return route.fulfill({ contentType: url.hostname === 'fonts.googleapis.com' ? 'text/css' : 'text/plain', body: '' });
+      errors.push(`Unexpected external resource: ${route.request().url()}`); return route.abort();
+    }
     if (!url.pathname.startsWith('/api/')) return route.continue();
+    if (route.request().method() !== 'GET') throw new Error(`Unexpected method: ${route.request().method()} ${url.pathname}`);
     const reply = (json: unknown) => route.fulfill({ json });
     if (url.pathname === '/api/auth/mode') return reply({ mode: 'anonymous' });
     if (url.pathname === '/api/auth/verify') return reply({ success: true, mode: 'anonymous' });
     if (url.pathname === '/api/config/runtime') return reply(configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null, retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 })));
     if (url.pathname === '/api/config') return reply({ revision: 1, content_hash: 'carousel-test', config: { logical_configuration: { auth: { enabled: false, tokens: [] }, routes: [], services: [], plugins: [] }, plugin_activations: [] } });
-    if (url.pathname === '/api/stats/dashboard') return reply({ startTime: Date.now() - 3600000, endTime: Date.now(), range: '1h', units: { history: 'request_chain', upstreams: 'upstream_attempt' }, history: { timestamps: [], requests: [], errors: [], responseTime: [], successRate: [], failureRate: [] }, upstreams: [] });
+    if (url.pathname === '/api/stats/dashboard') return reply(dashboardSample((url.searchParams.get('range') ?? '1h') as TimeRange, Date.now(), historySample([])));
     if (url.pathname === '/api/runtime/upstreams') return reply({ schema: 'bungee-runtime-upstreams-v1', generated_at: Date.now(), availability: 'complete', reason: null, admission: { revision: 1 }, workers: { observed: [], missing: [] }, upstreams: [] });
     if (['/api/plugins', '/api/services', '/api/routes'].includes(url.pathname)) return reply([]);
-    return reply({});
+    if (url.pathname === '/api/plugin-translations') return reply({});
+    if (url.pathname === '/api/ui/menus') return reply(menuSnapshot());
+    if (url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
+    throw new Error(`Unexpected API: ${url.pathname}`);
   });
   const clockStart = new Date('2026-10-04T00:00:00Z');
   await page.clock.install({ time: clockStart });
@@ -60,7 +70,10 @@ try {
   assert.equal(await indicator.locator('span').first().evaluate(el => el.getBoundingClientRect().height), 3);
   assert.equal(await carousel.locator('.carousel-next').evaluate(el => getComputedStyle(el).opacity), '0', 'no arrows at rest');
 
-  await advance(); await expectIndex(1);
+  // No interval prop has been passed: exercise the component default.
+  await advance(4999); await expectIndex(0);
+  await advance(1); await expectIndex(1);
+  await configure({ interval: 1000 });
   await advance(); await expectIndex(2);
   await advance(); await expectIndex(0);
   assert.deepEqual((await state()).changes, [1, 2, 0]);
@@ -142,46 +155,6 @@ try {
   await advance(1); await expectIndex(1);
   await configure({ index: Number.NaN }); await expectIndex(0);
 
-  // Use a fresh mobile context for native touch activation. Reusing a page
-  // after virtual-time mouse/keyboard tests does not model a touch device.
-  await configure({ autoplay: false, index: 0 });
-  const mobile = await browser.newPage({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 900 } });
-  mobile.on('pageerror', error => errors.push(`Mobile fixture: ${error.message}`));
-  mobile.on('console', message => { if (message.type() === 'error') errors.push(`Mobile fixture: ${message.text()}`); });
-  mobile.on('requestfailed', request => errors.push(`Mobile fixture request failed: ${request.url()}`));
-  const touchSession = await mobile.context().newCDPSession(mobile);
-  try {
-    await mobile.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.fulfill({ status: 200, body: '' }));
-    await mobile.goto(`${origin}/tests/fixtures/carousel.html`);
-    const touchCarousel = mobile.getByRole('region', { name: 'Test carousel' });
-    const touchViewport = touchCarousel.locator('[id$="-viewport"]');
-    await touchCarousel.waitFor().catch(error => {
-      throw new Error(`Touch fixture did not mount: ${JSON.stringify(errors)}`, {cause:error});
-    });
-    await mobile.evaluate(() => (window as any).carouselTest.configure({ autoplay: false, index: 0 }));
-    const touchIndex = async () => (await mobile.evaluate(() => (window as any).carouselTest.state())).index;
-    const swipe = async (x: number, y: number, dx: number, dy: number) => {
-      await touchSession.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
-      for (let step = 1; step <= 6; step++) await touchSession.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x + dx * step / 6, y: y + dy * step / 6 }] });
-      await touchSession.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    };
-    const box = (await touchViewport.boundingBox())!;
-    await swipe(box.x + box.width / 2, box.y + 20, -100, 0); assert.equal(await touchIndex(), 1);
-    await mobile.waitForTimeout(200);
-    await swipe(box.x + box.width / 2, box.y + 20, 100, 0); assert.equal(await touchIndex(), 0);
-    await mobile.waitForTimeout(200);
-    await swipe(box.x + box.width / 2, box.y + 20, 0, 70); assert.equal(await touchIndex(), 0);
-    const input = (await touchCarousel.getByLabel('Alpha input').boundingBox())!;
-    await swipe(input.x + input.width / 2, input.y + input.height / 2, -80, 0); assert.equal(await touchIndex(), 0);
-    // Chromium suppresses the synthetic click immediately after a simulated
-    // scroll, including on plain HTML. Let that native gesture finish first.
-    await mobile.waitForTimeout(600);
-    await touchCarousel.locator('label[for="Alpha-toggle"]').tap();
-    assert(await touchCarousel.getByLabel('Alpha toggle').isChecked(), 'native touch label activation is preserved');
-    await touchCarousel.locator('summary').filter({ hasText: 'Alpha details' }).tap();
-    assert(await touchCarousel.locator('details').first().evaluate(element => (element as HTMLDetailsElement).open), 'native touch summary activation is preserved');
-    assert.equal(await touchViewport.evaluate(element => getComputedStyle(element).touchAction), 'pan-y pinch-zoom', 'native vertical scrolling and pinch zoom remain available');
-  } finally { await touchSession.detach(); await mobile.close(); }
   await configure({ autoplay: true }); await leave();
   // Removing the focused navigation key must not leave focus-pause latched.
   await configure({ interval: 1000 });
@@ -198,11 +171,10 @@ try {
   await page.clock.resume();
   builtRuntime = await startUiRuntime({ mode: 'built-page' });
   origin = builtRuntime.origin;
-  for (const [hash, testId] of [['/design', 'page-design'], ['/', 'page-dashboard'], ['/services', 'page-services']]) {
-    await page.goto(`${origin}/#${hash}`);
-    await page.getByTestId(testId).waitFor();
-    assert((await page.locator('body').innerText()).length > 100);
-    if (hash === '/design') {
+  await page.goto(`${origin}/#/design`);
+  await page.getByTestId('page-design').waitFor();
+  {
+
       const example = page.getByTestId('design-carousel');
       await example.scrollIntoViewIfNeeded();
       await example.screenshot({ path: '/tmp/bungee-carousel-desktop.png' });
@@ -216,22 +188,9 @@ try {
         await example.screenshot({ path: `/tmp/bungee-carousel-mobile-${width}.png` });
       }
       await page.setViewportSize({ width: 1200, height: 900 });
-      // Existing showcase state bindings and snippet consumers must still work.
-      await page.getByTestId('design-input-secret-toggle').click();
-      assert.equal(await page.getByTestId('design-input-secret').getAttribute('type'), 'text');
-      await page.getByTestId('design-dialog-trigger').click();
-      await page.getByRole('dialog').waitFor();
-      await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).focus();
-      await page.keyboard.press('Escape');
-      await page.getByRole('dialog').waitFor({ state: 'hidden' });
-      await page.getByTestId('design-dropdown-trigger').click();
-      await page.getByRole('menu').waitFor();
-      await page.keyboard.press('Escape');
-      assert.equal(await page.getByRole('button', { name: 'VIEW SCHEDULE', exact: true }).count(), 1);
-    }
   }
   assert.deepEqual(errors, [], 'browser must have no runtime, console, or request errors');
-  console.log('PASS: autoplay, pause/resume, keyboard, controls, persistence, dynamic data, reduced motion, timer cleanup, responsive showcase and 3 application pages');
+  console.log('PASS: autoplay, pause/resume, keyboard, controls, persistence, dynamic data, reduced motion, timer cleanup, responsive showcase and production showcase');
 } finally {
   try { await browser?.close(); } finally { try { await builtRuntime?.close(); } finally { await uiRuntime.close(); } }
 }

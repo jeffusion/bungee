@@ -1,32 +1,37 @@
-import { test } from 'bun:test';
+import { afterAll, beforeAll, test } from 'bun:test';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
-import { chromium } from 'playwright';
-import { resolve, join } from 'node:path';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { expect } from 'playwright/test';
+import { chromium, type Browser } from 'playwright';
+import { resolve } from 'node:path';
+import { collectApiEvidence } from '../helpers/editors/api-evidence';
 import { strict as assert } from 'node:assert';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
 import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
 
+let uiRuntime: Awaited<ReturnType<typeof startUiRuntime>>, browser: Browser;
+beforeAll(async () => {
+  uiRuntime = await startUiRuntime({mode:'built-page'});
+  try { browser = await chromium.launch(); } catch(error) { await uiRuntime.close(); throw error; }
+},120_000);
+afterAll(async () => { try { await browser?.close(); } finally { await uiRuntime?.close(); } });
+
 // Real Chromium, explicitly mocked management responses: render/interaction evidence, not Core E2E.
 test('stopped publication can be retried once and follows recovery until serving is confirmed', async () => {
-const uiRuntime = await startUiRuntime({ mode: 'built-page' });
 const base = uiRuntime.origin, evidence = uiRuntime.evidence;
-let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
 const errors: string[] = [];
 const results: object[] = [];
-try {
-  browser = await chromium.launch({headless:true});
   for (const [name, width, locale] of [['desktop', 1440, 'en'], ['mobile', 390, 'zh-CN']] as const) {
     const context = await browser.newContext({ viewport: { width, height: 1000 } });
+    let releaseRetry=()=>{};
+    try {
     await context.addInitScript(language => localStorage.setItem('locale', language), locale);
     const page = await context.newPage();
     // Recovery behavior does not depend on a remote font service.
     await page.route('https://fonts.googleapis.com/**', route => route.fulfill({status:200,contentType:'text/css',body:''}));
-    page.on('pageerror', error => errors.push(`page: ${error.message}`));
-    page.on('console', message => { if (message.type() === 'error' && !message.text().includes('403 (Forbidden)')) errors.push(`console: ${message.text()}`); });
-    page.on('requestfailed', request => errors.push(`network: ${request.url()} ${request.failure()?.errorText}`));
-    page.on('response', response => { if (response.status() >= 400 && !(response.status() === 403 && response.url().endsWith('/retry'))) errors.push(`HTTP ${response.status()}: ${response.url()}`); });
+    const evidenceApi=collectApiEvidence(page);
+    const errors=evidenceApi.errors;
+    await page.clock.install();
+    await page.clock.pauseAt(new Date());
     let runtime = configurationRuntimeFixture(publicationFixture({ serving_revision: name === 'mobile' ? null : 7 }));
     let posts = 0;
     let deniedRetries = 0;
@@ -34,15 +39,17 @@ try {
     await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
       const request = route.request();
       const path = new URL(request.url()).pathname;
+      const retryPath = `/api/config/operations/${runtime.publication.operation!.operation_id}/retry`;
+      if(request.method() !== 'GET' && !(request.method() === 'POST' && path === retryPath)) {errors.push(`Unexpected ${request.method()} ${path}`);return route.fulfill({status:500,json:{error:'unexpected_method'}});}
       if (path === '/api/auth/mode') return route.fulfill({json:{mode:'anonymous',publicOrigin:base}});
       if (path === '/api/auth/verify') return route.fulfill({ json: { success: true, mode:'anonymous',subject:{id:'anonymous',provider:'anonymous'} } });
       if (path === '/api/ui/menus') return route.fulfill({ json: menuSnapshot() });
       if (path === '/api/ui/icons/data') return fulfillMenuIcons(route);
       if (path === '/api/config/runtime') { runtimeReads++; return route.fulfill({ json: runtime }); }
       if (path === '/api/config') return route.fulfill({ json: runtime });
-      if (path.endsWith('/retry') && request.method() === 'POST') {
+      if (path === retryPath && request.method() === 'POST') {
         if (deniedRetries === 0) {
-          deniedRetries++;
+          deniedRetries++; evidenceApi.expectStatus(route,403);
           return route.fulfill({ status: 403, json: { error: 'forbidden' } });
         }
         posts++;
@@ -54,7 +61,7 @@ try {
         runtime = configurationRuntimeFixture({ ...runtime.publication, retryable: false,
           recovery: { ...runtime.publication.recovery!, recovery_id: body.request_id, trigger: 'manual',
             state: 'running', attempt_count: 1, final_reason_code: null } });
-        await new Promise(resolve => setTimeout(resolve, 250));
+        await new Promise<void>(resolve => releaseRetry=resolve);
         return route.fulfill({ status: 202, json: runtime.publication.recovery });
       }
       if (path === '/api/runtime/upstreams') return route.fulfill({ json: {
@@ -90,46 +97,44 @@ try {
     await retry.focus();
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => (document.querySelector('[data-testid="publication-retry-button"]') as HTMLButtonElement)?.disabled === true);
+    await expect.poll(()=>posts).toBe(1);
+    releaseRetry();
     await retry.waitFor({ state: 'hidden' });
     assert.equal(posts, 1);
     const reads = runtimeReads;
-    await page.waitForTimeout(1200);
-    assert.ok(runtimeReads > reads, 'active recovery polls every second');
+    await page.clock.runFor(999);
+    assert.equal(runtimeReads, reads, 'active recovery does not poll before one second');
+    await page.clock.runFor(1);
+    await expect.poll(() => runtimeReads).toBeGreaterThan(reads);
     assert.ok((await page.getByTestId('publication-recovery-attempts').innerText()).includes('1/6'));
     await page.screenshot({ path: resolve(evidence, `${name}-running.png`) });
     runtime = configurationRuntimeFixture({ ...runtime.publication, serving_complete: true,
       serving_revision: 8, recovery: { ...runtime.publication.recovery!, state: 'succeeded', final_reason_code: 'target_serving' } });
+    await page.clock.runFor(1000);
     await alert.waitFor({ state: 'hidden', timeout: 3000 });
     assert.equal(await retry.count(), 0);
     await page.screenshot({ path: resolve(evidence, `${name}-resolved.png`) });
     results.push({ name, width, locale, posts, deniedRetries, runtimeReads, hiddenAfterSuccess: true, contentOverflow: false });
-    await context.close();
+    evidenceApi.verify();
+    } finally {releaseRetry(); await context.close();}
   }
-} finally {
-  try { await browser?.close(); } finally { await uiRuntime.close(); }
-}
 assert.deepEqual(errors, []);
 console.log(JSON.stringify({ management: 'mocked', results, errors, evidence }, null, 2));
 
 }, 120_000);
 
 test('runtime facts distinguish historical failure, active cleanup, dependency failure and stale reads in both languages', async () => {
-  const ui = await startUiRuntime({ mode: 'built-page' });
-  const evidence = await mkdtemp(join(tmpdir(), 'bungee-runtime-facts-'));
-  let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
-  const errors: string[] = [];
-  try {
-    browser = await chromium.launch({ headless: true });
+  const ui = uiRuntime;
+  const evidence = ui.evidence;
+    const errors: string[] = [];
     for (const [locale, width] of [['en', 1440], ['zh-CN', 390]] as const) {
       const context = await browser.newContext({ viewport: { width, height: 1000 } });
+      try {
       await context.addInitScript(language => localStorage.setItem('locale', language), locale);
       const page = await context.newPage();
       await page.route('https://fonts.googleapis.com/**', route => route.fulfill({ status: 200, contentType: 'text/css', body: '' }));
-      page.on('pageerror', error => errors.push(error.message));
-      page.on('console', message => {
-        if (message.type() === 'error' && !message.text().includes('503 (Service Unavailable)')) errors.push(message.text());
-      });
-      page.on('requestfailed', request => errors.push(`${request.url()}: ${request.failure()?.errorText}`));
+      const evidenceApi=collectApiEvidence(page);
+      const errors=evidenceApi.errors;
       let unavailable = false;
       let writes = 0;
       const id = '10000000-0000-4000-8000-000000000001';
@@ -141,8 +146,8 @@ test('runtime facts distinguish historical failure, active cleanup, dependency f
       runtime = { ...runtime, health: { observed_at: Date.now(), component_recovery: [], dependencies: [] } };
       await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
         const request = route.request(), path = new URL(request.url()).pathname;
-        if (request.method() !== 'GET') { writes++; errors.push(`Unexpected write: ${path}`); }
-        const json = (body: unknown, status = 200) => route.fulfill({ json: body, status });
+        if (request.method() !== 'GET') { writes++; errors.push(`Unexpected write: ${path}`); return route.fulfill({status:500,json:{error:'unexpected_method'}}); }
+        const json = (body: unknown, status = 200) => { if(status >= 400) evidenceApi.expectStatus(route,status); return route.fulfill({ json: body, status }); };
         if (path === '/api/auth/mode') return json({ mode: 'anonymous', publicOrigin: ui.origin });
         if (path === '/api/auth/verify') return json({ success: true, mode: 'anonymous', subject: { id: 'anonymous', provider: 'anonymous' } });
         if (path === '/api/ui/menus') return json(menuSnapshot());
@@ -210,9 +215,10 @@ test('runtime facts distinguish historical failure, active cleanup, dependency f
       assert.ok((await page.getByTestId('settings-serving-state').innerText()).toLowerCase().includes(locale === 'en' ? 'unknown' : '未知'));
       assert.equal(writes, 0);
       await page.screenshot({ path: resolve(evidence, `${locale}-stale.png`) });
-      await context.close();
+      evidenceApi.verify();
+      } finally {await context.close();}
     }
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ management: 'mocked', locales: ['en', 'zh-CN'], errors, evidence }));
-  } finally { try { await browser?.close(); } finally { await ui.close(); } }
+
 }, 120_000);

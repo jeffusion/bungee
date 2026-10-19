@@ -1,8 +1,10 @@
 
     <script>
+      import { tick } from 'svelte';
       import LazyPage from '../../../../src/components/shell/LazyPage.svelte';
       import Page from './page.svelte';
       let load = $state(() => new Promise(resolve => { window.finishFirst = () => resolve({ default: Page }); }));
+      window.finishFirstAndFlush = async () => { window.finishFirst(); await tick(); };
       let props = $state({ name: 'first' });
       window.rename = name => { props = { name }; };
       window.replaceLoader = () => {

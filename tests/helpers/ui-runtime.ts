@@ -1,5 +1,5 @@
 import { createServer as createPortProbe } from 'node:net';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { extname, join, resolve, sep, relative, posix } from 'node:path';
 import type { Alias } from 'vite';
@@ -17,7 +17,11 @@ export async function startUiRuntime(options: UiRuntimeOptions) {
   const close = () => closing ??= (async () => {
     const failures: unknown[] = [];
     try { await stop?.(); } catch (error) { failures.push(error); }
-    try { await rm(evidence, { recursive: true, force: true }); } catch (error) { failures.push(error); }
+    // Vite caches are disposable; screenshots and failure diagnostics outlive the server.
+    try {
+      await rm(join(evidence, 'cache'), { recursive: true, force: true });
+      if ((await readdir(evidence)).length === 0) await rm(evidence, { recursive: true });
+    } catch (error) { failures.push(error); }
     if (failures.length) throw new AggregateError(failures, 'UI test runtime cleanup failed');
   })();
   try {

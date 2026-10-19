@@ -4,6 +4,8 @@ import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import type { ConfigurationOperationState } from '../../src/api/config';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
+import { collectApiEvidence } from '../helpers/editors/api-evidence';
+import { recordResponseDelivery, holdResponseJson, waitForResponseReceipt, releaseResponseJson, waitForResponseDelivery } from '../helpers/editors/response-delivery';
 import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
 
 let runtime: Awaited<ReturnType<typeof startUiRuntime>>, browser: Browser;
@@ -23,13 +25,19 @@ function operation(id: string, state: 'converged' | 'committed' | 'degraded' = '
     state, result_status:state === 'converged' ? 200 : null,error_code:null,error_detail:null } as ConfigurationOperationState['operation'], workers:[] };
 }
 async function withSettings(run: (page: Page, model: ReturnType<typeof createModel>) => Promise<void>, width=1440, language='en', route='config') {
-  const context = await browser.newContext({viewport:{width,height:900}}), page=await context.newPage();
-  const errors: string[] = []; page.on('pageerror', error=>errors.push(error.message));
-  await page.addInitScript(language=>localStorage.setItem('locale',language),language);
+  const context = await browser.newContext({viewport:{width,height:900}});
   const model=createModel();
+  try {
+  const page=await context.newPage();
+  const evidence=collectApiEvidence(page),errors=evidence.errors;
+  await recordResponseDelivery(page,'/api/config/validate');
+  await page.route('https://fonts.googleapis.com/**',route=>route.fulfill({contentType:'text/css',body:''}));
+  await page.addInitScript(language=>localStorage.setItem('locale',language),language);
   await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/,async route=>{
     const request=route.request(), path=new URL(request.url()).pathname, method=request.method();
-    const json=(value:unknown,status=200)=>route.fulfill({json:value,status});
+    const json=(value:unknown,status=200)=>{if(status>=400)evidence.expectStatus(route,status);return route.fulfill({json:value,status});};
+    const allowedWrite = method === 'PUT' && path === '/api/config' || method === 'POST' && ['/api/config/import','/api/config/validate','/api/logs/cleanup'].includes(path);
+    if(method !== 'GET' && !allowedWrite) {errors.push(`Unexpected ${method} ${path}`);return json({error:'unexpected_method'},500);}
     if(path === '/api/auth/mode') return json({mode:'anonymous',publicOrigin:runtime.origin});
     if(path === '/api/auth/verify') return json({success:true,mode:'anonymous',subject:{id:'anonymous',provider:'anonymous'}});
     if(path === '/api/ui/menus') return json(menuSnapshot());
@@ -43,37 +51,35 @@ async function withSettings(run: (page: Page, model: ReturnType<typeof createMod
     if(path === '/api/config' && method === 'GET') return json({revision:model.revision,content_hash:digest,config:model.saved});
     if(path === '/api/logs') return json({data:[],total:0,totalPages:0,page:1,limit:50});
     if(path === '/api/logs/cleanup/config') return model.cleanupRefreshFailure && model.cleanupWrites ? json({error:'offline'},503) : json({enabled:true,retentionDays:1,scheduleIntervalHours:1,isActive:true});
-    if(path === '/api/logs/cleanup') {model.cleanupWrites++;return model.cleanupStatus ? json({error:'rejected'},model.cleanupStatus) : json({success:true});}
-    if(path === '/api/config/export') {model.exports++;return json(envelope(model.saved));}
-    if(path === '/api/config/validate') {
+    if(path === '/api/logs/cleanup' && method === 'POST') {model.cleanupWrites++;return model.cleanupStatus ? json({error:'rejected'},model.cleanupStatus) : json({success:true});}
+    if(path === '/api/config/export' && method === 'GET') {model.exports++;return json(envelope(model.saved));}
+    if(path === '/api/config/validate' && method === 'POST') {
       const body=request.postDataJSON(); model.validations.push(body);
-      if(model.validationGate) await model.validationGate;
       return body.envelope ? json({valid:true,errors:[],aggregate:body.envelope.aggregate}) : json({valid:true,errors:[]});
     }
     if(path === '/api/config' && method === 'PUT' || path === '/api/config/import' && method === 'POST') {
       const body=request.postDataJSON(); model.writes.push({method,path,body}); model.id=body.mutation_id;
       if(model.rejection) return json({error:model.rejection,reason:'lease_margin',message:'PRIVATE-ERROR',aggregate:{secret:'PRIVATE-ERROR'}},model.status);
-      if(model.networkFailure) return route.abort('connectionreset');
-      if(model.nonJson) return route.fulfill({status:503,contentType:'text/plain',body:'PRIVATE-ERROR'});
+      if(model.networkFailure) {evidence.expectFailure(request,'net::ERR_CONNECTION_RESET');return route.abort('connectionreset');}
+      if(model.nonJson) {evidence.expectStatus(route,503);return route.fulfill({status:503,contentType:'text/plain',body:'PRIVATE-ERROR'});}
       model.saved=body.aggregate ?? body.envelope.aggregate;model.revision=43;
       return json({...operation(model.id,model.active?'committed':'converged'),operation_id:model.id,revision:43},202);
     }
-    if(path.startsWith('/api/config/operations/')) {model.queries++;return model.queryStatus ? json({error:'unavailable'},model.queryStatus) : json(operation(model.id,model.queryState));}
+    if(path === `/api/config/operations/${model.id}` && method === 'GET') {model.queries++;return model.queryStatus ? json({error:'unavailable'},model.queryStatus) : json(operation(model.id,model.queryState));}
     errors.push(`Unexpected API ${method} ${path}`);return json({error:'unexpected_request'},500);
   });
-  try {
     await page.goto(`${runtime.origin}/#/${route}`);
     if (route === 'config') {
       await expect(page.getByTestId('logging-max-size')).toHaveValue('50');
       await expect(page.getByRole('combobox',{name:/^(Log Level|日志级别)$/})).toBeEnabled();
     } else await expect(page.getByTestId('logs-maintenance')).toBeVisible();
-    await run(page,model);expect(errors).toEqual([]);
-  } finally { model.releaseValidation?.(); await context.close(); }
+    await run(page,model);expect(errors).toEqual([]);evidence.verify();
+  } finally { await context.close(); }
 }
 function createModel() {
   return {saved:aggregate(),revision:42,id:'',writes:[] as Array<{method:string;path:string;body:any}>,validations:[] as any[],exports:0,
     active:false,queryState:'converged' as 'converged'|'degraded',cleanupWrites:0,cleanupStatus:0,cleanupRefreshFailure:false,queries:0,rejection:'',status:503,networkFailure:false,nonJson:false,queryStatus:0,runtimeUnavailable:false,
-    validationGate:undefined as Promise<void>|undefined,releaseValidation:undefined as (()=>void)|undefined};
+};
 }
 async function review(page:Page) {
   await page.getByTestId('config-save-button').click();
@@ -151,6 +157,7 @@ test('an unknown response is queried by its original operation identity and surv
     await page.getByRole('button',{name:'Check this publication',exact:true}).click();
     await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','terminal');
     expect(model.queries).toBeGreaterThan(0);expect(model.writes).toHaveLength(1);
+    await expect(page.getByTestId('settings-serving-state')).toContainText('r43');
     await page.reload();await expect(page.getByTestId('logging-max-size')).toHaveValue('52');expect(model.writes).toHaveLength(1);
   });
 },60_000);
@@ -166,11 +173,14 @@ test('a failed serving refresh cannot show retained data as fresh and recovers o
 
 test('later import selection wins over a slow earlier validation response',async()=>{
   await withSettings(async(page,model)=>{
-    model.validationGate=new Promise(resolve=>model.releaseValidation=resolve);
+    await holdResponseJson(page,'first-import',{method:'POST',path:'/api/config/validate',bodyIncludes:'"log_level":"debug"'});
     const first=aggregate();first.logical_configuration.log_level='debug';await upload(page,envelope(first));
     await expect.poll(()=>model.validations.length).toBe(1);
-    model.validationGate=undefined;const second=aggregate();second.logical_configuration.log_level='error';await upload(page,envelope(second));
-    await expect(page.getByTestId('import-preview')).toBeVisible();model.releaseValidation!();
+    const firstImportResponse=await waitForResponseReceipt(page,'first-import');
+    const second=aggregate();second.logical_configuration.log_level='error';await upload(page,envelope(second));
+    await expect(page.getByTestId('import-preview')).toBeVisible();
+    await releaseResponseJson(page,firstImportResponse);
+    await waitForResponseDelivery(page,firstImportResponse);
     await review(page);expect(model.validations.at(-1).aggregate.logical_configuration.log_level).toBe('error');expect(model.writes).toHaveLength(0);
   });
 },60_000);

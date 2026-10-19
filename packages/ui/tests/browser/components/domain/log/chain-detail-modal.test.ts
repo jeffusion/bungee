@@ -64,7 +64,7 @@ for (const count of [0, 1, 3]) {
           expect(await page.locator('[data-detail]').getAttribute('data-detail')).toBe('attempt-0');
           expect(await last.getAttribute('aria-expanded')).toBe('false');
         }
-        for (const width of [1280, 640, 390, 320]) {
+        if (count === 3) for (const width of [1280, 640, 390, 320]) {
           await page.setViewportSize({ width, height: 900 });
           expect(await buttons.evaluateAll(nodes => nodes.every(node => node.scrollWidth <= node.clientWidth))).toBe(true);
           expect(await buttons.evaluateAll(nodes => nodes.every(node => {

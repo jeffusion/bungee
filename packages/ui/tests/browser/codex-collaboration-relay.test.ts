@@ -5,9 +5,10 @@ import { expect } from 'playwright/test';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 import { createMasterPluginCatalogApi } from '../../../core/src/master-runtime/master-plugin-catalog-api';
 import type { PluginManifestRecord } from '../../../core/src/plugin-manifest-catalog/types';
+import { observeNetwork } from '../helpers/dashboard/network';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
 
-const fixture = resolve(import.meta.dir, '../fixtures/protocol-adapter.html');
+const fixture = resolve(import.meta.dir, '../fixtures/dashboard/router.html');
 const manifest = await Bun.file(new URL('../../../../plugins/codex-router/manifest.json', import.meta.url)).json();
 const catalogApi = createMasterPluginCatalogApi({ catalog: { records: () => [{ name: manifest.name, manifest, configSchema: manifest.configSchema } as PluginManifestRecord] } });
 const catalogSnapshot = { aggregate: { plugin_activations: [{ plugin_name: manifest.name }] } } as never;
@@ -26,19 +27,15 @@ afterAll(async () => { try { await browser?.close(); } finally { await runtime?.
 async function connectFixture(page: Page) {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
-  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
-  page.on('requestfailed', request => {
-    const path = new URL(request.url()).pathname;
-    const reason = request.failure()?.errorText;
-    // Search changes and dropdown dismissal intentionally abort catalog requests.
-    if (path === '/api/plugins/codex-router/control/catalog' && reason === 'net::ERR_ABORTED') return;
-    errors.push(`request failed: ${path}: ${reason}`);
-  });
+    observeNetwork(page, errors);
   const config = configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null, retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 }));
   config.config.logical_configuration.routes = [{ id: routeId, position: 0, path: '/relay-route', plugins: [], endpoints: [] }];
   config.config.logical_configuration.services = [{ id: serviceId, position: 0, name: 'relay-service', plugins: [], endpoints: [] }];
+  await page.route('https://fonts.googleapis.com/**', route => route.fulfill({ contentType: 'text/css', body: '' }));
+  await page.route('https://fonts.gstatic.com/**', route => route.fulfill({ body: '' }));
   await page.route(`${runtime.origin}/api/**`, async route => {
     const url = new URL(route.request().url());
+    if (route.request().method() !== 'GET') throw new Error(`Unexpected method: ${route.request().method()} ${url.pathname}`);
     if (url.pathname === '/api/auth/mode') return route.fulfill({ json: { mode: 'anonymous', publicOrigin: runtime.origin } });
     if (url.pathname === '/api/config') return route.fulfill({ json: { revision: config.revision, content_hash: config.content_hash, config: config.config } });
     if (catalogApi.matches(url.pathname)) {
@@ -61,8 +58,8 @@ async function connectFixture(page: Page) {
 
 for (const language of ['zh-CN', 'en']) test(`collaboration relay enable, validate, save, reopen and remove: ${language}`, async () => {
   const context = await browser.newContext({ viewport: { width: 390, height: 850 } });
-  const page = await context.newPage();
   try {
+    const page = await context.newPage();
     const { errors } = await connectFixture(page);
     await page.addInitScript(language => localStorage.setItem('locale', language), language);
     const zh = language === 'zh-CN';
@@ -104,6 +101,7 @@ for (const language of ['zh-CN', 'en']) test(`collaboration relay enable, valida
     await expect(save).toBeDisabled();
     await expect(dialog.getByRole('alert')).toContainText(zh ? '请选择有效的中继模型' : 'Select a valid relay model');
     await model.fill('arbitrary-model');
+    await expect(page.getByTestId('search-select-viewport').getByText(manifest.translations[language]['editor.empty'], { exact: true })).toBeVisible();
     await expect(page.getByRole('option')).toHaveCount(0);
     await model.press('Enter');
     await expect(save).toBeDisabled();
@@ -127,9 +125,9 @@ for (const language of ['zh-CN', 'en']) test(`collaboration relay enable, valida
     await save.click();
     await expect(dialog).toHaveCount(0);
     await expect(page.getByTestId('saved-bindings')).toContainText(`"collaborationRelay":{"target":{"type":"service","id":"${serviceId}","protocol":"responses"},"model":"gpt-relay"}`);
-    await expect(page.getByTestId('protocol-adapter-fixture')).toContainText(`gpt-relay · Responses · ${zh ? '服务' : 'Service'}: relay-service`);
-    await expect(page.getByTestId('protocol-adapter-fixture')).not.toContainText('[object Object]');
-    await expect(page.getByTestId('protocol-adapter-fixture')).not.toContainText('plugins.codex-router');
+    await expect(page.getByTestId('router-fixture')).toContainText(`gpt-relay · Responses · ${zh ? '服务' : 'Service'}: relay-service`);
+    await expect(page.getByTestId('router-fixture')).not.toContainText('[object Object]');
+    await expect(page.getByTestId('router-fixture')).not.toContainText('plugins.codex-router');
     await page.getByRole('button', { name: labels.edit, exact: true }).click();
     await expect(toggle).toHaveAttribute('aria-checked', 'true');
     await expect(model).toHaveValue('gpt-relay');
@@ -163,8 +161,8 @@ for (const language of ['zh-CN', 'en']) test(`collaboration relay enable, valida
 
 for (const invalid of ['missing-target', 'invalid-type', 'invalid-protocol', 'missing-model']) test(`collaboration relay rejects loaded ${invalid}`, async () => {
   const context = await browser.newContext({ viewport: { width: 1440, height: 950 } });
-  const page = await context.newPage();
   try {
+    const page = await context.newPage();
     const { errors } = await connectFixture(page);
     await page.addInitScript(() => localStorage.setItem('locale', 'zh-CN'));
     const relay = { target: { type: invalid === 'invalid-type' ? 'upstream' : 'service', id: invalid === 'missing-target' ? 'missing-service' : serviceId, protocol: invalid === 'invalid-protocol' ? 'chat_completions' : 'responses' }, model: invalid === 'missing-model' ? '' : 'gpt-relay' };
@@ -193,8 +191,8 @@ for (const invalid of ['missing-target', 'invalid-type', 'invalid-protocol', 'mi
 
 for (const language of ['zh-CN', 'en']) test(`Codex summaries resolve route paths and service names after reload: ${language}`, async () => {
   const context = await browser.newContext({ viewport: { width: 1440, height: 950 } });
-  const page = await context.newPage();
   try {
+    const page = await context.newPage();
     const { errors, config } = await connectFixture(page);
     await page.addInitScript(language => localStorage.setItem('locale', language), language);
     const zh = language === 'zh-CN';

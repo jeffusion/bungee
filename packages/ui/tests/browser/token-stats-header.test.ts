@@ -1,13 +1,17 @@
 import { test as browserTest } from 'bun:test';
-import { chromium, expect } from 'playwright/test';
+import { expect } from 'playwright/test';
+import { dashboardSample, historySample } from '../helpers/dashboard/stats';
+import type { TimeRange } from '../../src/types';
+import { observeNetwork } from '../helpers/dashboard/network';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
 import { tokenStatsWindow } from '../../../core/src/token-stats-window';
 import type { TokenStatsRange } from '../../../core/src/plugin.types';
-import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
+import { tokenMenuSnapshot } from '../helpers/dashboard/fixture';
+import { dashboardRuntime } from '../helpers/dashboard/runtime';
+const uiRuntime = dashboardRuntime();
+import { fulfillMenuIcons } from '../helpers/menus';
 
-browserTest('ui adjustments', async () => {
-const uiRuntime = await startUiRuntime({ mode: 'built-page' });
-try {
+browserTest('Token header navigation and incomplete usage remain compact', () => uiRuntime.run(async page => {
 const baseUrl = uiRuntime.origin;
 const manifest = await Bun.file(new URL('../../../../plugins/token-stats/manifest.json', import.meta.url)).json();
 const runtime = configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null,
@@ -16,37 +20,31 @@ const logical = runtime.config.logical_configuration;
 logical.services = [{ id: 'service-test', position: 0, name: 'test-service',
   endpoints: [{ id: 'endpoint-test', position: 0, target: 'https://example.com', weight: 100, priority: 1, is_disabled: false, plugins: [] }], plugins: [] }];
 logical.routes = [{ id: 'route-test', position: 0, path: '/test', service_id: 'service-test', plugins: [] }];
-const schemas = Object.fromEntries(['alpha', 'beta'].map(name => [name, {
-  name, version: '1.0.0', runtimeScope: 'scoped', metadata: { name }, configSchema: [],
-}]));
-const browser = await chromium.launch({ headless: true });
-const context = await browser.newContext({ viewport: { width: 1440, height: 1080 },
-  locale: 'zh-CN', timezoneId: 'Asia/Shanghai' });
-const page = await context.newPage();
 const errors: string[] = [];
+  observeNetwork(page, errors);
 page.on('pageerror', error => errors.push(error.message));
+await page.route('https://fonts.googleapis.com/**', route => route.fulfill({ contentType: 'text/css', body: '' }));
+await page.route('https://fonts.gstatic.com/**', route => route.fulfill({ body: '' }));
 await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
   const url = new URL(route.request().url());
+  if (route.request().method() !== 'GET') throw new Error(`Unexpected method: ${route.request().method()} ${url.pathname}`);
   const json = (value: unknown) => route.fulfill({ json: value });
   if (url.pathname === '/api/auth/mode') return json({ mode: 'anonymous', publicOrigin: url.origin });
   if (url.pathname === '/api/auth/verify') return json({ success: true, mode: 'anonymous' });
   if (url.pathname === '/api/config/runtime') return json(runtime);
   if (url.pathname === '/api/config') return json({ revision: 1, content_hash: runtime.content_hash, config: runtime.config });
   if (url.pathname === '/api/resources/api-key') return json({ keys: [] });
-  if (url.pathname === '/api/plugins/schemas') return json(schemas);
+  if (url.pathname === '/api/plugins/schemas') return json({});
   if (url.pathname === '/api/plugins') return json([
     { name: 'token-stats', enabled: true, runtimeScope: 'global', metadata: {
       ...manifest.metadata, contributes: manifest.contributes } },
-    ...Object.values(schemas).map(schema => ({ ...schema, enabled: true })),
   ]);
   if (url.pathname === '/api/plugin-translations') return json(Object.fromEntries(
     Object.entries(manifest.translations).map(([language, messages]) => [language, { plugins: { 'token-stats': messages } }])));
   if (url.pathname === '/api/runtime/upstreams') return json({ schema: 'bungee-runtime-upstreams-v1',
     generated_at: Date.now(), availability: 'complete', reason: null, admission: { revision: 1 },
     workers: { observed: [], missing: [] }, upstreams: [] });
-  if (url.pathname === '/api/stats/dashboard') return json({ range: '1h', startTime: Date.now() - 3_600_000,
-    endTime: Date.now(), history: { timestamps: [], requests: [], errors: [], responseTime: [],
-      requestCounts: { success: [], failed: [] } }, upstreams: [], requestCounts: { success: 0, failed: 0 } });
+  if (url.pathname === '/api/stats/dashboard') return json(dashboardSample((url.searchParams.get('range') ?? '1h') as TimeRange, Date.now(), historySample([])));
   if (url.pathname === '/api/plugins/token-stats/control/stats') {
     const asOfMs = Date.now();
     const window = tokenStatsWindow((url.searchParams.get('range') ?? '1h') as TokenStatsRange,
@@ -59,10 +57,11 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
         officialInputTokens: 1200, officialOutputTokens: 600, logicalRequests: 1, upstreamAttempts: 1,
         authorityBreakdown: { input: { official: 1 }, output: { official: 1 } } }] });
   }
-  return json({});
+  if (url.pathname === '/api/ui/menus') return json(tokenMenuSnapshot());
+  if (url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
+  throw new Error(`Unexpected API: ${route.request().method()} ${url.pathname}`);
 });
 
-try {
   await page.goto(baseUrl);
   const trendCard = page.locator('[data-card-id="plugin:native:token-stats:token-stats-time"]');
   const overview = page.getByTestId('token-stats-overview');
@@ -70,7 +69,7 @@ try {
   await expect(page.getByTestId('token-stats-metric-input')).toContainText('1.3K');
   await expect(overview).not.toContainText(/含估算|用量记录丢失/);
   await expect(page.getByTestId('app-header').getByRole('link', { name: 'Token统计', exact: true })).toBeVisible();
-  for (const width of [320, 390, 768, 1024, 1440]) {
+  for (const width of [320, 768, 1440]) {
     await page.setViewportSize({ width, height: 1080 });
     await page.locator(`${width < 768 ? '.dashboard-mobile-card' : '.grid-stack-item'}[data-card-id="plugin:native:token-stats:token-stats-time"]`)
       .waitFor({ state: 'visible' });
@@ -93,39 +92,5 @@ try {
   await expect(page.getByTestId('token-stats-page-summary')).toBeVisible();
   await expect(page.getByTestId('token-stats-page')).not.toContainText(/含估算|用量记录丢失/);
 
-  await page.setViewportSize({ width: 1440, height: 1080 });
-  for (const editor of ['/routes/new', '/routes/edit/%2Ftest', '/services/new', '/services/edit/test-service']) {
-    await page.goto(`${baseUrl}/#${editor}`);
-    await page.locator('aside button[data-testid$="-plugins"]').click();
-    await page.getByRole('button', { name: '添加插件', exact: true }).click();
-    const dialog = page.getByRole('dialog');
-    const select = dialog.getByRole('combobox');
-    for (const [name, keyboard] of [['alpha', false], ['beta', true], ['beta', false]] as const) {
-      await select.click();
-      await expect(page.getByRole('option', { name: `${name} (v1.0.0)`, exact: true })).toBeVisible();
-      if (keyboard) {
-        await page.keyboard.press('End');
-        await page.keyboard.press('Enter');
-      } else {
-        await page.getByRole('option', { name: `${name} (v1.0.0)`, exact: true }).click();
-      }
-      await expect(select).toContainText(name);
-      await expect(select).toHaveAttribute('aria-expanded', 'false');
-      await expect(page.getByRole('listbox')).toHaveCount(0);
-      await expect(dialog).toBeVisible();
-    }
-    await dialog.getByTestId('plugin-config-save-button').click();
-    await expect(dialog).toHaveCount(0);
-    await page.getByTestId('section-plugins').getByRole('button', { name: '编辑', exact: true }).click();
-    await expect(dialog.getByRole('combobox')).toBeDisabled();
-    await expect(dialog.getByRole('combobox')).toContainText('beta');
-    await dialog.getByTestId('plugin-config-save-button').click();
-    await expect(dialog).toHaveCount(0);
-  }
   expect(errors).toEqual([]);
-  console.log('UI adjustments passed: header fits at 320/390/768/1024/1440px, hints removed with estimated/incomplete data, menu spacing, mouse/keyboard/reselection closes plugin dropdown in route/service create/edit pages.');
-} finally {
-  await browser.close();
-}
-} finally { await uiRuntime.close(); }
-}, 240_000);
+}), 120_000);

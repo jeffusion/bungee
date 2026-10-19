@@ -1,23 +1,19 @@
-import { test as browserTest } from 'bun:test';
-import { chromium, expect } from 'playwright/test';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { test } from 'bun:test';
+import { expect } from 'playwright/test';
+import { mkdirSync } from 'node:fs';
+import { dashboardSample, historySample } from '../helpers/dashboard/stats';
+import type { TimeRange } from '../../src/types';
+import { observeNetwork } from '../helpers/dashboard/network';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
+import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
 import { defaultLayout, LAYOUT_KEY, type CardDefinition } from '../../src/components/dashboard/layout';
-import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
-
-browserTest('dashboard loading', async () => {
-const uiRuntime = await startUiRuntime({ mode: 'built-page' });
-try {
-// Delay real UI requests with fixtures so each intermediate layout is observable.
-const base = uiRuntime.origin;
+import { dashboardRuntime } from '../helpers/dashboard/runtime';
+const uiRuntime = dashboardRuntime();
 const evidence = process.env.DASHBOARD_EVIDENCE_DIR ?? '/tmp/bungee-dashboard-loading';
 const manifest = await Bun.file(new URL('../../../../plugins/token-stats/manifest.json', import.meta.url)).json();
 const runtime = configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null,
   retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 }));
 mkdirSync(evidence, { recursive: true });
-const browser = await chromium.launch({ headless: true });
-const errors: string[] = [];
-const results: object[] = [];
 const narrowLayout = defaultLayout(['overview', 'time'].map((id): CardDefinition => ({
   id: `plugin:native:token-stats:token-stats-${id}`, title: `plugins.token-stats.widgets.${id}.title`,
   description: '', group: 'plugin', tag: 'TOKEN', pluginName: 'token-stats', w: 12, h: 4,
@@ -25,16 +21,17 @@ const narrowLayout = defaultLayout(['overview', 'time'].map((id): CardDefinition
 })));
 narrowLayout.cards.find(card => card.id.endsWith('token-stats-overview'))!.w = 6;
 
-try {
-  for (const language of ['zh-CN', 'en']) {
-    for (const width of [320, 390, 768, 1024, 1440, 1920]) {
-      for (const custom of width === 1440 ? [false, true] : [false]) {
-        const context = await browser.newContext({ viewport: { width, height: 1080 }, locale: language });
-        await context.addInitScript(({ language, layout, key }) => {
+
+// Each entry selects a different rendering or sizing branch; translations are sampled once per branch.
+for (const [language, width, custom] of [['zh-CN', 390, false], ['en', 768, false], ['zh-CN', 1440, false], ['en', 1440, true]] as const)
+test(`Token loading preserves geometry: ${language}/${width}/${custom ? 'custom' : 'default'}`, () => uiRuntime.run(async page => {
+ const base = uiRuntime.origin;
+ const errors: string[] = [];
+  const network = observeNetwork(page, errors);
+        await page.addInitScript(({ language, layout, key }) => {
           localStorage.setItem('locale', language);
           if (layout) localStorage.setItem(key, JSON.stringify(layout));
         }, { language, layout: custom ? narrowLayout : null, key: LAYOUT_KEY });
-        const page = await context.newPage();
         page.on('pageerror', error => errors.push(error.message));
         let response: 'success' | 'empty' | 'error' = 'success';
         let input = 1200;
@@ -42,8 +39,11 @@ try {
         let release!: () => void;
         let gate = new Promise<void>(resolve => { release = resolve; });
         const delayNext = () => { gate = new Promise<void>(resolve => { release = resolve; }); };
+        await page.route('https://fonts.googleapis.com/**', route => route.fulfill({ contentType: 'text/css', body: '' }));
+        await page.route('https://fonts.gstatic.com/**', route => route.fulfill({ body: '' }));
         await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
           const url = new URL(route.request().url());
+          if (route.request().method() !== 'GET') throw new Error(`Unexpected method: ${route.request().method()} ${url.pathname}`);
           const json = (value: unknown) => route.fulfill({ json: value });
           if (url.pathname === '/api/auth/mode') return json({ mode: 'anonymous', publicOrigin: url.origin });
           if (url.pathname === '/api/auth/verify') return json({ success: true, mode: 'anonymous' });
@@ -57,14 +57,11 @@ try {
           if (url.pathname === '/api/runtime/upstreams') return json({ schema: 'bungee-runtime-upstreams-v1',
             generated_at: Date.now(), availability: 'complete', reason: null, admission: { revision: 1 },
             workers: { observed: [], missing: [] }, upstreams: [] });
-          if (url.pathname === '/api/stats/dashboard') return json({ range: url.searchParams.get('range'),
-            startTime: Date.now() - 3_600_000, endTime: Date.now(), units: { history: 'request_chain', upstreams: 'upstream_attempt' },
-            history: { timestamps: [], requests: [], errors: [], responseTime: [], requestCounts: { success: [], failed: [] } },
-            upstreams: [], requestCounts: { success: 0, failed: 0 } });
+          if (url.pathname === '/api/stats/dashboard') return json(dashboardSample((url.searchParams.get('range') ?? '1h') as TimeRange, Date.now(), historySample([])));
           if (url.pathname === '/api/plugins/token-stats/control/stats') {
             requests++;
             await gate;
-            if (response === 'error') return route.fulfill({ status: 503, json: { error: 'unavailable' } });
+            if (response === 'error') { network.expectHttpError(route.request(), 503); return route.fulfill({ status: 503, json: { error: 'unavailable' } }); }
             const empty = response === 'empty';
             return json({ groupBy: 'time', asOfMs: Date.now(), bucketMs: 300_000, data: [],
               logicalRequests: empty ? 0 : 1, upstreamAttempts: empty ? 0 : 1,
@@ -72,7 +69,9 @@ try {
               estimatedCostUsd: empty ? 0 : 0.078,
               authorityBreakdown: { input: { official: 1 }, output: { official: 1 } } });
           }
-          return json({});
+          if (url.pathname === '/api/ui/menus') return json(menuSnapshot());
+          if (url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
+          throw new Error(`Unexpected API: ${route.request().method()} ${url.pathname}`);
         });
         const overview = page.getByTestId('token-stats-overview');
         const overviewCard = page.locator('[data-card-id="plugin:native:token-stats:token-stats-overview"]');
@@ -129,7 +128,7 @@ try {
           await settle();
           const loaded = await measure();
           expect(loaded, `${language}/${width}/${custom}/${outcome}: loading and loaded geometry match`).toEqual(loading);
-          results.push({ language, width, custom, outcome, rowHeight: loaded.rowHeight });
+
           if (language === 'zh-CN' && !custom && outcome === 'success' && [390, 1440].includes(width)) {
             await page.screenshot({ path: `${evidence}/loaded-${width}.png`, animations: 'disabled',
               clip: { x: 0, y: 0, width, height: width === 1440 ? 560 : 1000 } });
@@ -153,13 +152,6 @@ try {
         await settle(); expect(await measure()).toEqual(refreshing);
         expect(requests).toBe(5); // Overview and trend share each request.
         expect(await page.locator('main').evaluate(node => node.scrollWidth > node.clientWidth)).toBe(false);
-        await context.close();
-      }
-    }
-  }
-  expect(errors).toEqual([]);
-  writeFileSync(`${evidence}/report.json`, JSON.stringify({ results, errors }, null, 2));
-  console.log(JSON.stringify({ cases: results.length, errors, evidence }));
-} finally { await browser.close(); }
-} finally { await uiRuntime.close(); }
-}, 240_000);
+
+ network.assertSettled(); expect(errors).toEqual([]);
+}, { viewport: { width, height: 1080 }, locale: language }), 120_000);

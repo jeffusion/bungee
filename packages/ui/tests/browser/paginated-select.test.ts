@@ -1,31 +1,34 @@
-import { test as browserTest } from 'bun:test';
+import {collectApiEvidence} from '../helpers/editors/api-evidence';
+import { editorFixture } from '../helpers/editors/component-fixture';
+import { test as browserTest, test } from 'bun:test';
 import { chromium, expect } from 'playwright/test';
-import { resolve, extname } from 'node:path';
+import {startUiRuntime} from '../../../../tests/helpers/ui-runtime';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
+import { recordResponseDelivery, holdResponseJson, waitForResponseReceipt, releaseResponseJson, waitForResponseDelivery } from '../helpers/editors/response-delivery';
 import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
+
+const { withPage } = editorFixture(['select']);
 
 browserTest('paginated select', async () => {
 const manifest = await Bun.file(new URL('../../../../plugins/token-stats/manifest.json', import.meta.url)).json();
 const runtime = configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null,
   retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 }));
-const dist = resolve(import.meta.dir, '../../dist');
-const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request) {
-  const path = new URL(request.url).pathname;
-  const file = resolve(dist, `.${path === '/' ? '/index.html' : path}`);
-  if (!file.startsWith(dist + '/')) return new Response(null, { status: 404 });
-  return new Response(Bun.file(file), { headers: { 'Content-Type': {
-    '.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css', '.svg': 'image/svg+xml',
-  }[extname(file)] ?? 'application/octet-stream' } });
-} });
-const browser = await chromium.launch({ headless: true }).catch(async error => { await server.stop(true); throw error; });
+const uiRuntime=await startUiRuntime({mode:'built-page'});
+let browser:Awaited<ReturnType<typeof chromium.launch>>|undefined;
+try {
+browser=await chromium.launch({headless:true});
 const page = await browser.newPage({ locale: 'zh-CN', viewport: { width: 1440, height: 1050 } });
-const errors: string[] = [], queries: { kind: string; search: string; provider: string; page: number }[] = [];
-let holdPage = false, releasePage: (() => void) | undefined, failPage = false, holdSearch = false, releaseSearch: (() => void) | undefined;
+await recordResponseDelivery(page, '/api/plugins/token-stats/control/models');
+await page.route('https://fonts.googleapis.com/**',route=>route.fulfill({contentType:'text/css',body:''}));
+const evidence=collectApiEvidence(page),errors=evidence.errors;
+const queries: { kind: string; search: string; provider: string; page: number }[] = [];
+let holdPage = false, releasePage: (() => void) | undefined, failPage = false;
 let version = 1;
 let mappings = [{ source: 'saved-source', provider: 'alpha', model: 'alpha-saved' }];
-page.on('pageerror', error => errors.push(error.message));
 await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
   const url = new URL(route.request().url()), path = url.pathname;
+  const method = route.request().method();
+  if (method !== 'GET' && !(method === 'PUT' && path === '/api/plugins/token-stats/control/pricing/mappings')) { errors.push(`Unexpected ${method} ${path}`); return route.fulfill({status: 500, json: {error: 'unexpected_method'}}); }
   const json = (value: unknown) => route.fulfill({ json: value });
   if (path === '/api/auth/mode') return json({ mode: 'anonymous', publicOrigin: url.origin });
   if (path === '/api/auth/verify') return json({ success: true, mode: 'anonymous' });
@@ -50,8 +53,7 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
     const requestedPage = Number(url.searchParams.get('page') ?? 1);
     queries.push({ kind, search, provider, page: requestedPage });
     if (holdPage && requestedPage === 2) { holdPage = false; await new Promise<void>(resolve => { releasePage = resolve; }); }
-    if (holdSearch && search === 'old-query') { holdSearch = false; await new Promise<void>(resolve => { releaseSearch = resolve; }); }
-    if (failPage && requestedPage === 2) { failPage = false; return route.fulfill({ status: 500, json: { error: 'fixture_failure' } }); }
+    if (failPage && requestedPage === 2) { failPage = false; evidence.expectStatus(route,500); return route.fulfill({ status: 500, json: { error: 'fixture_failure' } }); }
     const values = search === 'empty' || search === 'custom-alias' ? [] : search ? [search]
       : Array.from({ length: requestedPage === 3 ? 1 : 50 }, (_, index) => `${kind === 'client' ? 'source' : provider}-${requestedPage}-${index}`);
     const models = kind === 'client' ? values : values.map(model => ({ provider, model, name: model }));
@@ -68,10 +70,11 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
   if (path === '/api/plugins/token-stats/control/stats') return json({ groupBy: 'time', asOfMs: Date.now(), bucketMs: 300_000,
     data: [], logicalRequests: 0, upstreamAttempts: 0, totalInputTokens: 0, totalOutputTokens: 0, estimatedCostUsd: 0,
     authorityBreakdown: { input: {}, output: {} } });
-  return route.fulfill({ status: 404, json: { error: 'unexpected_fixture_request' } });
+  errors.push(`Unexpected API ${method} ${path}`);
+  return route.fulfill({ status: 500, json: { error: 'unexpected_fixture_request' } });
 });
 try {
-  await page.goto(`${server.url}#/plugins/token-stats/pricing`);
+  await page.goto(`${uiRuntime.origin}/#/plugins/token-stats/pricing`);
   const settings = page.getByTestId('token-stats-settings');
   await expect(settings).toBeVisible();
   const row = page.getByTestId('price-model-mapping').first();
@@ -97,16 +100,29 @@ try {
   expect(queries.filter(query => query.kind === 'client' && query.page === 2)).toHaveLength(1);
   releasePage!();
   await expect(page.getByRole('option')).toHaveCount(100);
-  await source.press('ArrowUp'); await source.press('Enter');
+  await source.press('ArrowUp');
+  await expect(page.getByRole('option')).toHaveCount(101);
+  await source.press('Enter');
   await expect(source).toHaveValue('source-2-49'); await expect(source).toBeFocused();
   await expect(viewport).toHaveCount(0);
+  await holdResponseJson(page,'reopen-source',{method:'GET',path:'/api/plugins/token-stats/control/models',query:{search:'',page:'1'}});
   await source.click();
+  const reopenedResponse=await waitForResponseReceipt(page,'reopen-source');
+  await releaseResponseJson(page,reopenedResponse);await waitForResponseDelivery(page,reopenedResponse);
   await expect(page.getByRole('option')).toHaveCount(50);
   await source.fill('uncommitted'); await source.press('Escape');
   await expect(source).toHaveValue('source-2-49'); await expect(source).toBeFocused();
-  await source.click(); holdSearch = true; await source.fill('old-query');
-  await expect.poll(() => typeof releaseSearch).toBe('function');
-  await source.fill('new-query'); releaseSearch!();
+  await holdResponseJson(page,'before-old-search',{method:'GET',path:'/api/plugins/token-stats/control/models',query:{search:'',page:'1'}});
+  await source.click();
+  const searchOpeningResponse=await waitForResponseReceipt(page,'before-old-search');
+  await releaseResponseJson(page,searchOpeningResponse);await waitForResponseDelivery(page,searchOpeningResponse);
+  await holdResponseJson(page,'old-search',{method:'GET',path:'/api/plugins/token-stats/control/models',query:{search:'old-query',page:'1'}});
+  await source.fill('old-query');
+  const oldSearchResponse=await waitForResponseReceipt(page,'old-search');
+  await source.fill('new-query');
+  await expect(page.getByRole('option', { name: 'new-query', exact: true })).toBeVisible();
+  await releaseResponseJson(page,oldSearchResponse);
+  await waitForResponseDelivery(page,oldSearchResponse);
   await expect(page.getByRole('option', { name: 'new-query', exact: true })).toBeVisible();
   expect(queries.find(query => query.search === 'new-query')?.page).toBe(1);
   await expect(page.getByRole('option', { name: 'old-query', exact: true })).toHaveCount(0);
@@ -150,19 +166,25 @@ try {
   await target.press('ArrowUp'); await target.press('Enter');
   await expect(target).toBeFocused();
   await page.getByTestId('price-mappings-save').click();
-  expect(mappings[0]).toEqual({ source: 'custom-alias', provider: 'alpha', model: 'alpha-1-49' });
+  await expect.poll(()=>mappings[0]).toEqual({ source: 'custom-alias', provider: 'alpha', model: 'alpha-1-49' });
   // A second mapping must never resolve the first row's input; removing an active
   // search also releases its listeners and prevents a delayed response reopening it.
   await page.getByRole('button', { name: '添加映射', exact: true }).click();
   const second = page.getByTestId('price-model-mapping').last();
   const secondInput = second.getByTestId('client-model-input');
   await expect(page.getByTestId('client-model-input')).toHaveCount(2);
-  await secondInput.click(); holdSearch = true; releaseSearch = undefined; await secondInput.fill('old-query');
-  await expect.poll(() => typeof releaseSearch).toBe('function');
+  await secondInput.click();
+  await expect(page.getByRole('option',{name:'source-1-0',exact:true})).toBeVisible();
+  await holdResponseJson(page,'removed-row-search',{method:'GET',path:'/api/plugins/token-stats/control/models',query:{search:'old-query',page:'1'}});
+  await secondInput.fill('old-query');
+  const removedRowResponse=await waitForResponseReceipt(page,'removed-row-search');
+  expect(removedRowResponse).not.toBe(oldSearchResponse);
   await second.getByRole('button', { name: '移除', exact: true }).click();
-  await expect(page.getByTestId('price-model-mapping')).toHaveCount(1); releaseSearch!();
+  await expect(page.getByTestId('price-model-mapping')).toHaveCount(1);
+  await releaseResponseJson(page,removedRowResponse);
+  await waitForResponseDelivery(page,removedRowResponse);
   await expect(source).toHaveValue('custom-alias'); await expect(viewport).toHaveCount(0);
-  await page.goto(`${server.url}#/design`);
+  await page.goto(`${uiRuntime.origin}/#/design`);
   const demo = page.getByTestId('design-search-select'); await expect(demo).toBeVisible();
   const demoInput = demo.getByRole('combobox', { name: '搜索选择 / Search selection' });
   await demoInput.focus(); await demoInput.press('ArrowDown');
@@ -186,13 +208,60 @@ try {
   const custom = page.getByRole('combobox', { name: '自定义选择 / Custom selection' });
   await custom.click(); await custom.fill('custom-local'); await custom.press('Enter'); await expect(custom).toHaveValue('custom-local');
   await page.getByRole('button', { name: 'Clear selection' }).click(); await expect(custom).toHaveValue('');
-  await page.goto(`${server.url}#/`);
+  await page.goto(`${uiRuntime.origin}/#/`);
   await expect(page.getByTestId('page-dashboard')).toBeVisible();
   await expect(page.getByTestId('token-stats-overview')).toHaveAttribute('aria-busy', 'false');
-  expect(errors).toEqual([]);
+  expect(errors).toEqual([]);evidence.verify();
   console.log('Unified searchable BSelect passed: field input, incremental mouse/keyboard loading, retained results and retry, cancellation/stale responses, filter reset, confirmed custom values, local filtering and responsive layout. APIs are fixtures.');
 } catch (error) {
   console.log({ queries: queries.slice(-5), active: await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 250)), footer: await page.getByTestId('search-select-footer').textContent().catch(() => '') });
   await page.screenshot({ path: '/tmp/bungee-scroll-select-failure.png', fullPage: true }); throw error;
-} finally { try { await browser.close(); } finally { await server.stop(true); } }
+} finally { releasePage?.(); }
+} finally { try { await browser?.close(); } finally { await uiRuntime.close(); } }
 }, 240_000);
+
+test('single selection distinguishes an explicit empty option from its placeholder and emits once on clear', async () => {
+  for (const placeholder of [false, true]) {
+    await withPage(`scenario=select&value=final${placeholder ? '&placeholder' : ''}`, async page => {
+      const select = page.getByRole('combobox', { name: 'Selection' });
+      await expect(select).toContainText('Final');
+      await select.hover();
+      await page.getByRole('button', { name: 'Clear selection' }).click();
+      await expect(select).toContainText(placeholder ? 'Choose a type' : 'All types');
+      await expect(page.getByTestId('selection')).toContainText('"calls":[""]');
+      await expect(page.getByRole('button', { name: 'Clear selection' })).toHaveCount(0);
+
+    });
+  }
+  await withPage('scenario=select', async page => {
+    const select = page.getByRole('combobox', { name: 'Selection' });
+    await expect(select).toContainText('All types');
+    await select.click();
+    await page.getByRole('option', { name: 'Final', exact: true }).click();
+    await expect(select).toContainText('Final');
+    await expect(page.getByTestId('selection')).toContainText('"calls":["final"]');
+  });
+  await withPage('scenario=select&value=loading-model-id', async page => {
+    await expect(page.getByRole('combobox', { name: 'Selection' })).toContainText('loading-model-id');
+  });
+}, 60_000);
+
+test('multiple selection and tags remove and clear the bound value arrays', async () => {
+  for (const mode of ['multiple', 'tags']) await withPage(`scenario=select&mode=${mode}`, async page => {
+    await page.getByRole('button', { name: 'Remove All types' }).click();
+    await expect(page.getByTestId('selection')).toContainText('"values":["final"]');
+    await page.getByRole('button', { name: 'Remove Final' }).hover();
+    await page.getByRole('button', { name: 'Clear selection' }).click();
+    await expect(page.getByTestId('selection')).toContainText('"values":[]');
+    await expect(page.getByTestId('selection')).toContainText('"calls":[["final"],[]]');
+  });
+}, 60_000);
+
+test('automatic select width stays stable across a shorter selected label', async () => {
+  await withPage('scenario=select&autoWidth', async page => {
+    const select=page.getByRole('combobox',{name:'Selection'});
+    await expect(select).toContainText('All types');const before=(await select.boundingBox())!.width;
+    await select.click();await page.getByRole('option',{name:'Final',exact:true}).click();
+    await expect(select).toContainText('Final');expect(Math.abs((await select.boundingBox())!.width-before)).toBeLessThanOrEqual(1);
+  });
+},60_000);

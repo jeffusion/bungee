@@ -1,8 +1,8 @@
 import { mount } from 'svelte';
 import { addMessages, locale, waitLocale } from 'svelte-i18n';
 import '$i18n';
-import '../../../packages/ui/src/app.css';
-import Fixture from './EditorComponents.svelte';
+import '../../../src/app.css';
+import Fixture from './key-policy.svelte';
 import keyManifest from '@plugins/key-access/manifest.json';
 for (const [language, messages] of Object.entries(keyManifest.translations)) {
   const nested: Record<string, any> = {};
