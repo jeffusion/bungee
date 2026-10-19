@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -482,14 +482,39 @@ describe('IPC physical progress and orphan resources',()=>{
     expect(client.health().failure).toBeNull();await client.close();expect(client.health().closeConfirmed).toBe(true);expect(cleanups).toBe(1);
   });
   test('late source ACK is reclaimed and no orphan pin blocks collection',async()=>{
-    let cleanups=0;const client=await fault('late-source',{requestTimeoutMs:300,onDiagnostic:event=>{if(event.event==='cleanup_ack')cleanups++;}});
+    const requestTimeoutMs=30_000;
+    let cleanups=0;const client=await fault('late-source',{requestTimeoutMs,onDiagnostic:event=>{if(event.event==='cleanup_ack')cleanups++;}});
+    const path=join(dirs.at(-1)!,'late-source.db');
     const snapshots=client.snapshotStore('owner',{id:'late',schemaVersion:1,maxVersions:1,chunkBytes:3});
-    await snapshots.publish(1,new Uint8Array([1,2,3]));
-    expect(await failure(snapshots.current())).toMatchObject({code:'request_timeout'});
-    await waitForState(()=>client.health().pendingCount===0);
-    await snapshots.publish(2,new Uint8Array([4,5,6]));
-    expect(await snapshots.version(1)).toBeNull();expect(cleanups).toBe(1);
-    expect(await failure(snapshots.current())).toMatchObject({code:'request_timeout'});await client.close();expect(cleanups).toBe(2);
+    async function timeoutCurrent(sequence:number) {
+      const schedule=globalThis.setTimeout;
+      let expire:(()=>void)|undefined;
+      let pending:Promise<unknown>;
+      try {
+        // Drive only this request's caller timer, after the real worker owns its source.
+        globalThis.setTimeout=((callback:(...args:any[])=>void,delay?:number,...args:any[])=>{
+          const timer=schedule(callback,delay,...args);
+          if(delay===requestTimeoutMs)expire=()=>{clearTimeout(timer);callback(...args);};
+          return timer;
+        }) as typeof setTimeout;
+        pending=failure(snapshots.current());
+      } finally { globalThis.setTimeout=schedule; }
+      await waitForState(()=>existsSync(`${path}.source-${sequence}.ready`));
+      expect(expire).toBeFunction();expire!();
+      expect(await pending).toMatchObject({code:'request_timeout'});
+    }
+    try {
+      await snapshots.publish(1,new Uint8Array([1,2,3]));
+      await timeoutCurrent(1);writeFileSync(`${path}.source-1.release`,'');
+      await waitForState(()=>client.health().pendingCount===0);
+      await snapshots.publish(2,new Uint8Array([4,5,6]));
+      expect(await snapshots.version(1)).toBeNull();expect(cleanups).toBe(1);
+      await timeoutCurrent(2);const closing=client.close();writeFileSync(`${path}.source-2.release`,'');
+      await closing;expect(cleanups).toBe(2);
+    } finally {
+      for(const sequence of [1,2])writeFileSync(`${path}.source-${sequence}.release`,'');
+      await client.close();
+    }
   });
   test('SQL probes prove long business progress without imposing the ordinary request deadline',async()=>{
     const healthy=deferred<void>(),finish=deferred<any>(),started=deferred<void>();let failures=0;
