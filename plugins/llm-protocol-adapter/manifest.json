@@ -17,7 +17,7 @@
   ],
   "uiExtensionMode": "none",
   "engines": {
-    "bungee": "^5.0.0"
+    "bungee": "^6.0.0"
   },
   "metadata": {
     "name": "metadata.name",

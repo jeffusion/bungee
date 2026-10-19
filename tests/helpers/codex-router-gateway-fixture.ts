@@ -45,7 +45,7 @@ export async function createCodexRouterGatewayFixture(): Promise<GatewayFixture>
     await writeFile(join(probePath, 'manifest.json'), JSON.stringify({
       name: CODEX_PROCESS_PROBE, version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin',
       capabilities: ['hooks', 'dynamicRuntimeLoad'], runtimeScope: 'scoped', main: 'server/index.ts',
-      uiExtensionMode: 'none', engines: {bungee: '^5.0.0'}, configSchema: [
+      uiExtensionMode: 'none', engines: {bungee: '^6.0.0'}, configSchema: [
         {name: 'priority', type: 'number', label: 'Observer priority', default: -1000},
       ],
     }));

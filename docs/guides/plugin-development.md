@@ -16,7 +16,7 @@
   "runtimeScope": "scoped",
   "capabilities": ["hooks", "dynamicRuntimeLoad"],
   "uiExtensionMode": "none",
-  "engines": { "bungee": "^5.0.0" },
+  "engines": { "bungee": "^6.0.0" },
   "configSchema": []
 }
 ```

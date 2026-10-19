@@ -10,7 +10,7 @@ function manifest(overrides: Record<string, unknown> = {}): Record<string, unkno
     name: 'strict-plugin', version: '1.0.0', builtin: true, schemaVersion: 3,
     artifactKind: 'runtime-plugin', main: 'server/index.ts',
     capabilities: ['hooks', 'dynamicRuntimeLoad'], uiExtensionMode: 'none',
-    engines: { bungee: '^4.2.0 || ^5.0.0' }, configSchema: [], ...overrides,
+    engines: { bungee: '^6.0.0' }, configSchema: [], ...overrides,
   };
 }
 
@@ -55,20 +55,22 @@ describe('parsePluginManifestText', () => {
     expect(parsed.engines.bungee).toBe('>= 4.2.0');
   });
 
-  test('accepts the 4.x/5.x compatibility range but rejects 6.x', () => {
-    const range = '^4.2.0 || ^5.0.0';
-    for (const version of ['4.2.0', '4.9.99', '5.0.0']) {
+  test('accepts a union of major ranges but rejects the next major', () => {
+    const range = '^5.0.0 || ^6.0.0';
+    for (const version of ['5.0.0', '5.9.99', '6.0.0']) {
       expect(() => validateEngineRange(range, 'engines.bungee', version)).not.toThrow();
     }
-    expect(() => validateEngineRange(range, 'engines.bungee', '6.0.0')).toThrow('engine mismatch');
+    expect(() => validateEngineRange(range, 'engines.bungee', '7.0.0')).toThrow('engine mismatch');
     expect(parsePluginManifestText(JSON.stringify(manifest({ engines: { bungee: range } }))).engines.bungee).toBe(range);
   });
 
-  test('Token Stats v3 declares and enforces 5.x-only compatibility', async () => {
+  test('Token Stats declares and enforces 6.x-only compatibility', async () => {
     const text = await Bun.file(resolve(import.meta.dir, '../../../../plugins/token-stats/manifest.json')).text();
     const value = JSON.parse(text) as { engines: { bungee: string } };
-    expect(value.engines.bungee).toBe('^5.0.0');
-    expect(() => validateEngineRange(value.engines.bungee, 'engines.bungee', '4.9.99')).toThrow('engine mismatch');
+    expect(value.engines.bungee).toBe('^6.0.0');
+    for (const version of ['5.9.99', '7.0.0']) {
+      expect(() => validateEngineRange(value.engines.bungee, 'engines.bungee', version)).toThrow('engine mismatch');
+    }
     expect(() => parsePluginManifestText(text)).not.toThrow();
   });
 
@@ -86,11 +88,11 @@ describe('parsePluginManifestText', () => {
       [{ capabilities: ['hooks', 'hooks'] }, 'capabilities'],
       [{ uiExtensionMode: 'native-runtime' }, 'uiExtensionMode'],
       [{ version: '1.0.0-alpha.01' }, 'version'],
-      [{ engines: { bungee: '^4.2.0 || ^5.0.0', mystery: true } }, 'unknown field'],
-      [{ engines: { bungee: '^6.0.0' } }, 'engine mismatch'],
+      [{ engines: { bungee: '^6.0.0', mystery: true } }, 'unknown field'],
+      [{ engines: { bungee: '^5.0.0' } }, 'engine mismatch'],
       [{ engines: { bungee: 'latest' } }, 'engine'],
-      [{ engines: { bungee: '^4.2.0 || ^5.0.0', node: 'latest' } }, 'engine'],
-      [{ engines: { bungee: '^4.2.0 || ^5.0.0', node: '>999.0.0' } }, 'engine mismatch'],
+      [{ engines: { bungee: '^6.0.0', node: 'latest' } }, 'engine'],
+      [{ engines: { bungee: '^6.0.0', node: '>999.0.0' } }, 'engine mismatch'],
       [{ uiExtensionMode: 'native-static', capabilities: ['hooks'] }, 'capability/ui mode mismatch'],
       [{ uiExtensionMode: 'none', capabilities: ['hooks', 'nativeWidgetsStatic'] }, 'capability/ui mode mismatch'],
       [{ uiExtensionMode: 'sandbox-iframe', capabilities: ['hooks'] }, 'capability/ui mode mismatch'],

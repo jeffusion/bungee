@@ -106,7 +106,7 @@ function providerRecord(): PluginManifestRecord {
     manifest: {
       name: 'provider', version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin', main: 'main.ts',
       capabilities: ['api', 'dynamicRuntimeLoad', 'controlPlane'], runtimeScope: 'global', uiExtensionMode: 'none',
-      engines: { bungee: '^4.3.0 || ^5.0.0' }, control: { entry: 'control.ts', rpc: [] }, configSchema: [],
+      engines: { bungee: '^6.0.0' }, control: { entry: 'control.ts', rpc: [] }, configSchema: [],
     },
   };
 }
