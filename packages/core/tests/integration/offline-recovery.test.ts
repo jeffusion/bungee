@@ -144,15 +144,29 @@ test('built local recovery reads stdin without logging rejected identity secrets
  }finally{await rm(dir,{recursive:true,force:true});}
 },15000);
 
-test('missing selected plugin cannot silently bypass identity recovery',async()=>{
+test('offline setup removes obsolete plugin records and preserves their business state',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'bungee-recover-missing-'));const path=join(dir,'config.db');
  try{
   const repository=ConfigRepository.open(path);try{
    const snapshot=repository.getSnapshot();
    expect(repository.commit({mutation_id:'missing-auth',expected_revision:snapshot.revision,aggregate:{...snapshot.aggregate,plugin_activations:[{plugin_name:'missing-provider'}]},kind:'config',created_at:Date.now(),target_worker_slots:[0]}).kind).toBe('committed');
+   repository.beginPublication('missing-auth',Date.now());
+   repository.beginWorkerAttempt('missing-auth',0,0,'initial',Date.now());
+   repository.recordWorkerResult('missing-auth',0,{kind:'converged',attempt_no:1,applied_revision:snapshot.revision+1},Date.now());
+   repository.markDraining('missing-auth',Date.now());
+   repository.finalizePublication('missing-auth',{outcome:'converged',old_workers_exited:true},Date.now());
   }finally{repository.close();}
-  await expect(recoverOffline(path,{kind:'identity',plugin:'user-auth',payload:{}})).rejects.toThrow('not_installed');
-  const checked=ConfigRepository.open(path);try{expect(checked.getDatabase().query("SELECT name FROM sqlite_master WHERE name IN ('api_keys','plugin_durable_records','secret_store_objects')").all()).toEqual([]);}finally{checked.close();}
+  const state=await PluginStateClient.open(join(dir,'plugin-state.db'),{initialize:true});
+  try{await state.durableState('missing-provider').transact([{key:'retained',expectedVersion:0,value:{schema:1,example:true}}]);}finally{await state.close();}
+  const issued=await withTerminal(()=>recoverOfflineAction(path,{plugin:'user-auth',action:'issue-setup-code'})) as {code:string};
+  expect(issued.code.length).toBeGreaterThan(30);
+  const checked=ConfigRepository.open(path);try{
+   expect(checked.getSnapshot().aggregate.plugin_activations).toEqual([{plugin_name:'user-auth'}]);
+   expect(checked.getManagementProtection()).toMatchObject({required:true,selectedProvider:'user-auth'});
+   expect(checked.getDatabase().query("SELECT name FROM sqlite_master WHERE name IN ('api_keys','plugin_durable_records','secret_store_objects')").all()).toEqual([]);
+  }finally{checked.close();}
+  const preserved=await PluginStateClient.open(join(dir,'plugin-state.db'));
+  try{expect((await preserved.durableState('missing-provider').get('retained'))?.value).toEqual({schema:1,example:true});}finally{await preserved.close();}
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 

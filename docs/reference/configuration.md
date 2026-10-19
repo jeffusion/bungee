@@ -14,11 +14,11 @@ The configuration and telemetry overrides must be absolute paths. `CONFIG_PATH`,
 
 ## Authentication
 
-Management is anonymous and proxy routes are public by default. The optional 用户认证 (`user-auth`) plugin is initialized using a setup code issued offline in a local terminal. Mandatory management protection persists independently of ordinary configuration export and import; only offline `release-auth` restores anonymous management. 访问控制 (`key-access`) owns API Keys and the protected-route set in its plugin settings. Route and Service editors have no authentication fields. See [authentication and plugin usage](../guides/authentication.md).
+Management is anonymous and proxy routes are public by default. The optional 用户认证 (`user-auth`) plugin is initialized using a setup code issued offline in a local terminal. Mandatory management protection persists independently of ordinary configuration export and import; use offline `release-auth` to explicitly restore anonymous management. Startup removes records for plugins absent from the installed catalog, including a removed management-provider selection; see [storage contracts](../architecture/storage.md#管理能力与健康). 访问控制 (`key-access`) owns API Keys and the protected-route set in its plugin settings. Route and Service editors have no authentication fields. See [authentication and plugin usage](../guides/authentication.md).
 
 Key permissions and route protection are separate: selecting allowed routes does not protect them; protection is edited separately. Revoking the final Key does not remove protection. Public requests stay anonymous even if they carry a Key and do not consume that Key's rate or token budget. Disabling access control requires explicitly removing all route protections and satisfying plugin dependencies.
 
-Keys, administrator sessions and plugin ledgers are durable runtime state outside ordinary proxy configuration. Persistent guards prevent a missing or failed plugin from reopening protected access. Writes reject global/route `auth` fields; authentication is a plugin capability.
+Keys, administrator sessions and plugin ledgers are durable runtime state outside ordinary proxy configuration. Persistent guards preserve route protection and reject installed-provider failures; startup removal of an absent management provider clears its selection. Writes reject global/route `auth` fields; authentication is a plugin capability.
 
 ## Control API
 
@@ -127,7 +127,7 @@ Submit it with a unique mutation ID:
 }
 ```
 
-The `aggregate` field is the complete object shown above. Management protection and provider activation are written atomically by the configuration storage Worker. Once protected, online disabling, replacing the selected provider or importing an aggregate without it is rejected. The mandatory-protection record is excluded from ordinary snapshots; an import cannot release it. The offline `issue-setup-code` action selects protection before initialization, and only offline `release-auth` releases it. Full writes and imports also enforce dependency and route-protection guards.
+The `aggregate` field is the complete object shown above. Management protection and provider activation are written atomically by the configuration storage Worker. Once protected, online disabling, replacing the selected provider or importing an aggregate without it is rejected. The mandatory-protection record is excluded from ordinary snapshots; an import cannot release it. The offline `issue-setup-code` action selects protection before initialization; use offline `release-auth` for explicit release while the provider remains installed. Full writes and imports also enforce dependency and route-protection guards.
 
 ### 发布期限（`publication`）
 

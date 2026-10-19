@@ -25,11 +25,11 @@ Bungee 的核心是 Route、Service 和代理运行平台。管理入口默认�
 
 Host 负责 provider 选择、初始化页面框架、Cookie 交接和持久 guard；user-auth 负责用户、本地密码、OAuth／OIDC、Turnstile、初始化码、会话、限流和恢复。浏览器访问 `/#/setup`，输入码、账号和两次密码；初始化成功返回登录页，不创建会话。正常登录后由 Host Cookie-only verify 核验，再加载既有 Dashboard、导航与插件 API。所有登录具有相同的完整管理能力，没有角色授权或个人壳。
 
-强制认证独立于 catalog 和普通配置快照。provider 故障、未就绪、目录缺失或状态损坏均拒绝管理访问；在线停用、替换及导入不能解除保护。只有停机、本地 TTY 的 `release-auth` 可以明确解除并保留身份。`reset` 输入新账号、两次隐藏密码及原因，完整身份保留 ID，缺失或损坏时可重建；撤销全部会话与初始化码，不改变强制认证。
+强制认证独立于普通配置快照。已安装 provider 故障、未就绪或状态损坏均拒绝管理访问；在线停用、替换及导入不能解除保护。主动解除使用停机、本地 TTY 的 `release-auth` 并保留身份；启动目录中已不存在的 provider 则随失效插件记录一起清除选择。`reset` 输入新账号、两次隐藏密码及原因，完整身份保留 ID，缺失或损坏时可重建；撤销全部会话与初始化码，不改变强制认证。
 
 密码为 5–32 个 Unicode 字符，使用 Argon2id（64 MiB、3 次迭代）。会话仅保存令牌摘要，默认空闲 30 分钟、绝对寿命 8 小时；空闲可为 0，绝对寿命必须大于 0 且不超过 30 天，策略只影响新会话。改密、禁用和身份绑定变化推进用户 generation，重置与全局撤销推进实例会话代际；持久 clock 的 CAS 观察时间防止回拨复活凭据。浏览器使用 HttpOnly／SameSite=Strict Cookie，HTTPS 标记 Secure；Cookie 写请求校验公开 Origin 和 CSRF。CLI 可取得 Bearer 会话，不自动保存。
 
-插件使用既有 durableState／CAS，在 `user-auth` 命名空间保存 schema 3 记录，不新增插件状态表，不读取、导入、迁移或清理旧账号、Cookie 或 `local-accounts` 命名空间。包含已删除插件激活记录的配置明确报错，不匿名启动。不兼容先前单账号记录，不自动迁移或重开初始化。没有本地自助注册、空注册开关、邮件、MFA 或角色能力；未来如实现真实注册，必须提供默认关闭的开关。OIDC 首次登录开户使用默认关闭的插件级统一开关，连接无独立覆盖；Turnstile 默认关闭，启用后本地密码的 Cookie／Bearer 登录都须验证。完整认证数据和配置契约见 [user-auth](../../plugins/user-auth/README.md)。
+插件使用既有 durableState／CAS，在 `user-auth` 命名空间保存 schema 3 记录，不新增插件状态表，不读取、导入、迁移或清理旧账号、Cookie 或 `local-accounts` 命名空间。已删除插件的激活和绑定由启动目录整理自动移除，原业务状态保留，见[存储契约](storage.md#管理能力与健康)。不兼容先前单账号记录，不自动迁移或重开初始化。没有本地自助注册、空注册开关、邮件、MFA 或角色能力；未来如实现真实注册，必须提供默认关闭的开关。OIDC 首次登录开户使用默认关闭的插件级统一开关，连接无独立覆盖；Turnstile 默认关闭，启用后本地密码的 Cookie／Bearer 登录都须验证。完整认证数据和配置契约见 [user-auth](../../plugins/user-auth/README.md)。
 
 ## 路由保护与 Key 授权
 

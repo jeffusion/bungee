@@ -26,7 +26,7 @@ export const READ_METHODS: ReadonlySet<StorageMethod> = new Set([
 ]);
 
 export type StorageRequest =
-  | { readonly id: number; readonly method: 'open'; readonly args: readonly [string, { readonly offline: boolean; readonly managementProviders: readonly string[] }] }
+  | { readonly id: number; readonly method: 'open'; readonly args: readonly [string, { readonly offline: boolean; readonly managementProviders: readonly string[]; readonly availablePlugins?: readonly string[] }] }
   | { readonly id: number; readonly method: 'close'; readonly args: readonly [] }
   | { [M in StorageMethod]: { readonly id: number; readonly method: M; readonly args: StorageParameters<M> } }[StorageMethod];
 

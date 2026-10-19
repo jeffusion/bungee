@@ -74,7 +74,10 @@ export class AsyncConfigRepository {
   static async open(dbPath: string, options: AsyncConfigRepositoryOptions = {}): Promise<AsyncConfigRepository> {
     const client = new AsyncConfigRepository(options);
     try {
-      const startup = await client.send('open', [dbPath, { offline: options.offline === true, managementProviders: [...(options.compileOptions?.managementProviders ?? [])] }]) as {
+      const startup = await client.send('open', [dbPath, { offline: options.offline === true,
+        managementProviders: [...(options.compileOptions?.managementProviders ?? [])],
+        availablePlugins: options.compileOptions?.availablePlugins === undefined ? undefined : [...options.compileOptions.availablePlugins],
+      }]) as {
         snapshot: RepositorySnapshot; supervision: SupervisionState; managementProtection: ManagementProtection;
       };
       client.installControlProjection(startup);

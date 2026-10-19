@@ -40,7 +40,7 @@ bungee recover --plugin user-auth --action reset
 bungee recover --plugin user-auth --action release-auth
 ```
 
-这是解除强制管理认证的唯一入口，要求整个实例停止并使用本地 TTY。身份数据保留，启动后恢复匿名管理。在线插件停用、配置替换和导入都不能解除保护；provider 故障或目录缺失也不能降级匿名。
+主动解除强制管理认证使用此入口，要求整个实例停止并使用本地 TTY。身份数据保留，启动后恢复匿名管理。在线插件停用、配置替换和导入都不能解除保护；已安装 provider 故障也不能降级匿名。正常启动和离线恢复会自动清理目录中已不存在插件的启用记录；若清理的是所选管理 provider，也会清除其认证选择，详见[存储与生命周期](../architecture/storage.md#管理能力与健康)。
 
 ## 结构化插件状态恢复
 
