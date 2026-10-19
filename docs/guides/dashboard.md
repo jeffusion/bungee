@@ -176,6 +176,6 @@ Major endpoint groups:
 
 ## 5) Security Notes
 
-- Management is anonymous by default. 用户认证 (`user-auth`) protects management after offline initialization. Only the offline, local-terminal `release-auth` action restores anonymous access. A failed or missing selected provider does not bypass authentication. See [authentication](./authentication.md).
+- Management is anonymous by default. 用户认证 (`user-auth`) protects management after offline initialization. Use offline, local-terminal `release-auth` to explicitly restore anonymous access. An installed-provider failure preserves authentication; startup clears an absent provider's selection along with its obsolete plugin records. See [authentication](./authentication.md).
 - Plugin asset serving performs path traversal checks and file-type allowlisting.
 - CSP and additional browser security headers are applied for plugin HTML assets.

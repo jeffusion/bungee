@@ -39,7 +39,7 @@ Turnstile 默认关闭，设置 Site Key、Secret 和允许的 hostname 后可�
 
 CLI 可向 `POST /api/auth/login` 发送 `{username,password,transport:"bearer"}` 获取 Bearer 会话，再通过管理命令的 `--token` 使用；CLI 不自动保存会话，Bearer 与 Cookie 会话不可交换使用。Turnstile 启用时，密码登录还须提交 `turnstileToken`，不能借 Bearer 方式绕过。
 
-强制认证 guard 与 provider 选择持久化在配置库，在线停用、替换或导入都不能解除。唯一解除入口是停机、本地 TTY 执行 `bungee recover --plugin user-auth --action release-auth`；它保留身份数据，启动后恢复匿名管理。已选 provider 故障、状态损坏或目录缺失时保持保护。忘记账号密码时用离线 `reset`，它不改变强制认证状态；详见[离线恢复](offline-recovery.md)。
+强制认证 guard 与 provider 选择持久化在配置库，在线停用、替换或导入都不能解除。主动解除使用停机、本地 TTY 执行 `bungee recover --plugin user-auth --action release-auth`；它保留身份数据，启动后恢复匿名管理。已安装 provider 故障或状态损坏时保持保护；启动目录中已不存在的 provider 会自动清除选择并恢复匿名管理。忘记账号密码时用离线 `reset`，它不改变强制认证状态；详见[离线恢复](offline-recovery.md)。
 
 ## 访问控制与 Key
 
@@ -101,4 +101,4 @@ Key 限速或预算停用后，切换点之后的新请求取消对应限制，�
 
 配置导出不包含 Key、管理员、会话或预算运行账本。备份完整状态时遵循[停机备份](deployment.md#backup)，恢复后核验凭据撤销与账务状态。
 
-用户认证不读取、导入、迁移或清理旧账号、Cookie 或 `local-accounts` 命名空间。含已删除插件激活记录的配置会报错，不能借此匿名启动。
+用户认证不读取、导入、迁移或清理旧账号、Cookie 或 `local-accounts` 命名空间。升级后不存在插件的启用记录和绑定会自动清理，不阻断启动；旧业务状态保留。`local-accounts` 被移除后可重新初始化 `user-auth`，详见[存储与生命周期](../architecture/storage.md#管理能力与健康)。

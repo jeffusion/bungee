@@ -2,7 +2,7 @@ import { readManagementProtection, readManagementRequestIdentity } from './manag
 import { hashConfigurationRequest } from './content-hash';
 import { validateMutationId } from './repository-validation';
 import { readMenuLayout, writeMenuLayout } from './menu-store';
-import type { MenuLayout } from '@jeffusion/bungee-types';
+import type { MenuLayout, PluginBinding, ConfigurationUpstream } from '@jeffusion/bungee-types';
 import * as retirementStore from './retirement-store';
 import * as runtimeRecoveryBudget from './runtime-recovery-budget';
 import { Database } from 'bun:sqlite';
@@ -121,6 +121,7 @@ export class ConfigRepository {
       migrateConfigurationDatabase(db);
       verifyRepositoryIntegrity(db);
       const repository = new ConfigRepository(db, options, freezeSnapshot(readRepositorySnapshot(db)));
+      repository.removeUnavailablePlugins();
       repository.getSnapshot();
       repository.getSupervisionState();
       repository.getRuntimeRecoveryBudget();
@@ -154,6 +155,59 @@ export class ConfigRepository {
     })));
     this.snapshot = projection.snapshot;
     return projection;
+  }
+
+  /** Reconcile installed artifacts before exposing a startup snapshot to any consumer. */
+  private removeUnavailablePlugins(): void {
+    const available = this.options.compileOptions?.availablePlugins;
+    // An omitted catalog is used by integrity/inspection tools; it is not an empty catalog.
+    if (available === undefined) return;
+    runRepositoryAction(() => this.mutationTransaction(() => {
+      const snapshot = readRepositorySnapshot(this.db);
+      const removed = new Set<string>();
+      const installed = (name: string): boolean => {
+        if (available.has(name)) return true;
+        removed.add(name);
+        return false;
+      };
+      const bindings = (values: readonly PluginBinding[]) => values.filter(value => installed(value.name));
+      const endpoints = (values: readonly ConfigurationUpstream[]) => values.map(value => {
+        const { managedBy, ...endpoint } = value;
+        return { ...endpoint, plugins: bindings(value.plugins),
+          ...(managedBy && installed(managedBy.plugin) ? { managedBy } : {}) };
+      });
+      const logical = snapshot.aggregate.logical_configuration;
+      const aggregate = {
+        plugin_activations: snapshot.aggregate.plugin_activations.filter(value => installed(value.plugin_name)),
+        logical_configuration: {
+          ...logical, plugins: bindings(logical.plugins),
+          services: logical.services.map(service => ({ ...service,
+            plugins: bindings(service.plugins), endpoints: endpoints(service.endpoints) })),
+          routes: logical.routes.map(route => ({ ...route, plugins: bindings(route.plugins),
+            ...(route.endpoints === undefined ? {} : { endpoints: endpoints(route.endpoints) }) })),
+        },
+      };
+      if (removed.size === 0) return;
+      const protection = readManagementProtection(this.db);
+      const provider = protection.selectedProvider !== null && available.has(protection.selectedProvider)
+        ? protection.selectedProvider : null;
+      const now = Date.now(), operationId = randomUUID();
+      // Reuse revision/CAS and publication bookkeeping; never edit historical snapshots.
+      // Existing bindings have already been audited. Catalog compilation follows in the master.
+      const prepared = prepareCommitCommand({ mutation_id: operationId, expected_revision: snapshot.revision,
+        aggregate, kind: 'config', created_at: now, target_worker_slots: [] });
+      const command = { ...prepared, managementProvider: provider,
+        requestHash: hashConfigurationRequest({ kind: prepared.kind, expected_revision: prepared.expectedRevision,
+          aggregate: prepared.aggregate, target_worker_slots: [], management_provider: provider, offline_management: true }),
+      };
+      const result = commitTransaction(this.db, command, this.options, snapshot, true);
+      if (result.kind !== 'committed') throw new ConfigRepositoryError('invalid_operation',
+        `plugin catalog reconciliation cannot proceed (${result.kind})`);
+      beginOperationPublication(this.db, operationId, now);
+      markOperationDraining(this.db, operationId, now);
+      finalizeOperationPublication(this.db, operationId, { outcome: 'converged', old_workers_exited: true }, now);
+    }));
+    this.snapshot = freezeSnapshot(readRepositorySnapshot(this.db));
   }
 
   /** Exclusive stopped-instance operation; ordinary commit never receives this authority. */

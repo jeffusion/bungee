@@ -22,11 +22,14 @@ scope.onmessage = (event) => {
     if (request.method === 'open') {
       if (repository !== null || request.args.length !== 2 || typeof request.args[0] !== 'string' ||
           typeof request.args[1] !== 'object' || request.args[1] === null || typeof request.args[1].offline !== 'boolean' ||
-          !Array.isArray(request.args[1].managementProviders) || request.args[1].managementProviders.some((name: unknown) => typeof name !== 'string')) {
+          !Array.isArray(request.args[1].managementProviders) || request.args[1].managementProviders.some((name: unknown) => typeof name !== 'string') ||
+          (request.args[1].availablePlugins !== undefined && (!Array.isArray(request.args[1].availablePlugins) ||
+            request.args[1].availablePlugins.some((name: unknown) => typeof name !== 'string')))) {
         throw new ConfigRepositoryError('invalid_command', 'storage open request is invalid');
       }
       repository = ConfigRepository.open(request.args[0], { offline: request.args[1].offline,
-        compileOptions: { pluginSchemas: new Map(), managementProviders: new Set(request.args[1].managementProviders) } });
+        compileOptions: { pluginSchemas: new Map(), managementProviders: new Set(request.args[1].managementProviders),
+          availablePlugins: request.args[1].availablePlugins === undefined ? undefined : new Set(request.args[1].availablePlugins) } });
       scope.postMessage({ id, ok: true, result: {
         ...repository.getControlProjection(), supervision: repository.getSupervisionState(),
       } });
