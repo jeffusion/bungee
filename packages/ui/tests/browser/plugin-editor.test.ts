@@ -30,18 +30,10 @@ test('plugin editing preserves identity, disabled state and unknown options; can
 
 
 test('plugin mouse selection, keyboard selection and reselection close the dropdown; editing locks plugin identity', async () => {
+  const schemas = Object.fromEntries(['alpha', 'beta'].map(name => [name, {
+    name, version: '1.0.0', runtimeScope: 'scoped', metadata: { name }, configSchema: [],
+  }]));
   await withPage('scenario=plugin', async page => {
-    const schemas = Object.fromEntries(['alpha', 'beta'].map(name => [name, {
-      name, version: '1.0.0', runtimeScope: 'scoped', metadata: { name }, configSchema: [],
-    }]));
-    await page.route(/^https?:\/\/[^/]+\/api\/plugins\/schemas(?:\?.*)?$/, route => {
-      const url=new URL(route.request().url());
-      return route.request().method()==='GET' && url.pathname==='/api/plugins/schemas' && url.searchParams.get('enabledOnly')==='true' && url.searchParams.get('scope')==='route'
-        ? route.fulfill({json:schemas}) : route.fallback();
-    });
-    await page.route('**/api/plugins', route => route.request().method() === 'GET'
-      ? route.fulfill({ json: Object.values(schemas).map(schema => ({ ...schema, enabled: true })) }) : route.fallback());
-    await page.reload();
     await page.getByRole('button', { name: 'Add Plugin', exact: true }).click();
     const dialog = page.getByRole('dialog'), select = dialog.getByRole('combobox');
     for (const [name, keyboard] of [['alpha', false], ['beta', true], ['beta', false]] as const) {
@@ -56,5 +48,15 @@ test('plugin mouse selection, keyboard selection and reselection close the dropd
     await page.getByRole('button', { name: 'Edit', exact: true }).last().click();
     await expect(dialog.getByRole('combobox')).toBeDisabled(); await expect(dialog.getByRole('combobox')).toContainText('beta');
     await dialog.getByTestId('plugin-config-save-button').click(); await expect(dialog).toHaveCount(0);
-  });
+  }, { beforeMount: async page => {
+    // Install this case's catalog before mounting instead of aborting the first
+    // catalog requests with a reload while they may still be in flight.
+    await page.route(/^https?:\/\/[^/]+\/api\/plugins\/schemas(?:\?.*)?$/, route => {
+      const url=new URL(route.request().url());
+      return route.request().method()==='GET' && url.pathname==='/api/plugins/schemas' && url.searchParams.get('enabledOnly')==='true' && url.searchParams.get('scope')==='route'
+        ? route.fulfill({json:schemas}) : route.fallback();
+    });
+    await page.route('**/api/plugins', route => route.request().method() === 'GET'
+      ? route.fulfill({ json: Object.values(schemas).map(schema => ({ ...schema, enabled: true })) }) : route.fallback());
+  } });
 }, 60_000);
