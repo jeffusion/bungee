@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { settle, supervisionFixture } from '../../helpers/master-runtime-supervision.ts';
+import { settle, supervisionFixture } from '../../helpers/master-runtime-supervision';
 
 test('controlled failure during listener startup cannot report started or expose a ready port',async()=>{
   const failures:Error[]=[];

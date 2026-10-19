@@ -178,15 +178,6 @@ type QueueTask<Result> = {
   readonly signal: AbortSignal;
 };
 
-function isConnectionUnavailable(error: unknown, seen = new Set<unknown>()): boolean {
-  if (error === null || (typeof error !== 'object' && typeof error !== 'function') || seen.has(error)) return false;
-  seen.add(error);
-  const value = error as { readonly code?: unknown; readonly message?: unknown; readonly cause?: unknown };
-  const text = `${typeof value.code === 'string' ? value.code : ''} ${typeof value.message === 'string' ? value.message : ''}`.toLowerCase();
-  return text.includes('econnrefused') || text.includes('connection refused') || text.includes('unable to connect')
-    || isConnectionUnavailable(value.cause, seen);
-}
-
 export class MasterIngressController implements WorkerAdmissionController {
   private readonly spawn: typeof spawnChild;
   private readonly startupTimeoutMs: number;

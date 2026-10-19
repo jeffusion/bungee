@@ -28,7 +28,6 @@ import type { PluginServiceHost } from '../../plugin-services';
  */
 let pluginRegistry: PluginRegistry | null = null;
 let pluginRuntimeOrchestrator: PluginRuntimeOrchestrator | null = null;
-let lastPluginRuntimeReconcileResult: PluginRuntimeOrchestratorApplyResult | null = null;
 
 /**
  * Gets the current plugin registry instance
@@ -86,7 +85,6 @@ export async function initializePluginRuntime(
 
   const result = await pluginRuntimeOrchestrator.applyConfig(config);
   pluginRegistry = pluginRuntimeOrchestrator.getPluginRegistry();
-  lastPluginRuntimeReconcileResult = result;
 
   logger.debug({ generation: result.generation }, 'Plugin runtime initialized via orchestrator');
   return result;
@@ -101,7 +99,6 @@ export async function reconcilePluginRuntime(
 
   const result = await pluginRuntimeOrchestrator.applyConfig(config);
   pluginRegistry = pluginRuntimeOrchestrator.getPluginRegistry();
-  lastPluginRuntimeReconcileResult = result;
 
   logger.debug({ generation: result.generation }, 'Plugin runtime reconciled via orchestrator');
   return result;
@@ -168,5 +165,4 @@ export async function cleanupPluginRegistry(): Promise<void> {
   }
 
   pluginRegistry = null;
-  lastPluginRuntimeReconcileResult = null;
 }

@@ -12,6 +12,7 @@ const COMMAND_FIELDS = new Set([
 ]);
 
 export type PreparedCommitCommand = {
+  readonly managementProvider: string | null;
   readonly mutationId: string;
   readonly expectedRevision: number;
   readonly aggregate: ConfigurationAggregate;
@@ -56,11 +57,14 @@ export function prepareCommitCommand(
     if (typeof slot !== 'number') throw new ConfigRepositoryError('invalid_command', 'worker slot must be a number');
     return slot;
   }).sort((left, right) => left - right);
+  const providers = aggregate.plugin_activations.filter(({ plugin_name }) => compileOptions?.managementProviders?.has(plugin_name));
+  if (providers.length > 1) throw new ConfigRepositoryError('invalid_configuration', 'multiple management providers are selected');
+  const managementProvider = providers[0]?.plugin_name ?? null;
   return {
-    mutationId, expectedRevision, aggregate, kind, createdAt, targetSlots,
+    managementProvider, mutationId, expectedRevision, aggregate, kind, createdAt, targetSlots,
     contentHash: hashConfigurationContent(aggregate),
     requestHash: hashConfigurationRequest({
-      kind, expected_revision: expectedRevision, aggregate, target_worker_slots: targetSlots,
+      kind, expected_revision: expectedRevision, aggregate, target_worker_slots: targetSlots, management_provider: managementProvider,
     }),
   };
 }

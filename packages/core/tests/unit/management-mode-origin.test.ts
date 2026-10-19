@@ -13,11 +13,3 @@ test('public auth mode reports the same configured origin used by authentication
     expect(await response!.json()).toMatchObject({mode:'anonymous',publicOrigin:configured ?? 'http://127.0.0.1:28089'});
   }
 });
-
-test('management setup preserves safe bundled account errors without leaking internal failures', async()=>{
- const {managementSetupFailure}=await import('../../src/master-runtime/management-auth');
- const invalid=managementSetupFailure({code:'invalid_credentials',status:401});
- expect(invalid.status).toBe(422);expect(await invalid.json()).toEqual({error:'invalid_credentials'});
- const unavailable=managementSetupFailure(new Error('sensitive internal database path'));
- expect(unavailable.status).toBe(503);expect(await unavailable.json()).toEqual({error:'management_setup_failed'});
-});

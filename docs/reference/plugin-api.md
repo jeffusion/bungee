@@ -25,7 +25,7 @@
 | `uiExtensionMode` | none、native-static 或 sandbox-iframe |
 | `ui.components` | 构建期原生组件名称及相对入口 |
 | `contributes` | API、导航、widgets、设置及资源扩展声明 |
-| `management.loginComponent` | 已声明的原生登录组件名称 |
+| `management.loginComponent`, `management.setupComponent` | 已声明的原生登录、一次性初始化组件名称 |
 | `translations` | 按语言组织的插件 namespace 翻译 |
 
 完整可运行例子见[最小插件](../guides/plugin-development.md#创建插件)。严格字段和组合约束由 [manifest parser](../../packages/core/src/plugin-manifest-catalog/manifest-parser.ts)维护。声明能力是 Host 授权边界，不是 JavaScript 代码安全沙箱。
@@ -153,29 +153,35 @@ hooks.onStreamChunk.tap('example', envelope => {
 
 `native-static` 组件随 UI 构建注册，不能运行时任意注入 Svelte 模块；iframe 扩展使用沙箱协议，不能当作原生组件访问宿主。导航是业务页入口，设置和 widget 使用对应 contributes 字段，不使用旧 handler/settingsPage 示范。
 
-插件 UI 遵循[UI 指引](../../packages/ui/AGENTS.md)和[工业规范](../../packages/ui/docs/INDUSTRIAL_DESIGN_SYSTEM.md)。宿主提供 widget 外框，组件不重复绘制卡片。类型和示例见 [UI SDK](../../packages/ui/src/plugin-sdk)及[local-accounts manifest](../../plugins/local-accounts/manifest.json)。
+插件 UI 遵循[UI 指引](../../packages/ui/AGENTS.md)和[工业规范](../../packages/ui/docs/INDUSTRIAL_DESIGN_SYSTEM.md)。宿主提供 widget 外框，组件不重复绘制卡片。类型和示例见 [UI SDK](../../packages/ui/src/plugin-sdk)及[user-auth manifest](../../plugins/user-auth/manifest.json)。
 
 ## 管理认证登录界面
 
-管理认证插件可通过 manifest 声明自己的登录组件。`management.loginComponent` 必须引用 `ui.components` 中的组件名；组件随 `native-static` UI bundle 编译、发布，并应与运行它的 Bungee 版本匹配。
+管理认证插件通过 manifest 声明登录与一次性初始化组件。`management.loginComponent` 和 `management.setupComponent` 必须引用 `ui.components` 中的组件名；组件随 `native-static` UI bundle 编译、发布，并应与运行它的 Bungee 版本匹配。
 
 ```json
 {
   "uiExtensionMode": "native-static",
   "ui": {
     "components": [
-      { "name": "ExampleManagementLogin", "entry": "ui/ManagementLogin.svelte" }
+      { "name": "ExampleManagementLogin", "entry": "ui/ManagementLogin.svelte" },
+      { "name": "ExampleManagementSetup", "entry": "ui/ManagementSetup.svelte" }
     ]
   },
-  "management": { "loginComponent": "ExampleManagementLogin" }
+  "management": {
+    "loginComponent": "ExampleManagementLogin",
+    "setupComponent": "ExampleManagementSetup"
+  }
 }
 ```
 
-登录组件使用 `@bungee/plugin-sdk` 导出的纯类型 `ManagementLoginContext`。上下文类型如下；它不提供可变 endpoint、平台 store 或通用认证实现。`login` 的结果为 `unknown`，必须按插件自己的响应协议进行运行时收窄和解释；只有确认插件登录成功后才调用 `complete()`。平台会独立核验登录模式、provider 和已验证会话，不接受插件提供的 subject 或 token 作为认证结论。
+登录组件使用 `@bungee/plugin-sdk` 导出的纯类型 `ManagementLoginContext`。上下文类型如下；它不提供可变 endpoint、平台 store 或通用认证实现。`login` 的结果为 `unknown`，必须按插件自己的响应协议进行运行时收窄和解释；只有确认插件登录成功后才调用 `complete()`。平台会独立使用 Cookie-only verify 核验登录模式、provider 和会话，再初始化既有 Dashboard、导航与插件 API，不接受插件提供的 subject 或 token 作为认证结论。
 
 ```typescript
 export interface ManagementLoginContext {
   readonly provider: Readonly<{ name: string; publicOrigin: string }>;
+  loginOptions<T = unknown>(): Promise<T>;
+  beginLogin(input: { methodId: string; returnTo?: string }): Promise<{ authorizationUrl: string; flowId: string }>;
   login(input: unknown): Promise<unknown>;
   complete(): Promise<void>;
 }
@@ -202,11 +208,24 @@ async function submitLogin(context: ManagementLoginContext, payload: unknown): P
 
 登录组件负责凭据输入、认证步骤、错误与恢复帮助；平台负责通用页面框架、路由、会话验证及登录后的初始化导航。静态翻译必须在登录前可用，并放在插件自己的 namespace 中。不要依赖登录事件、导入 Dashboard 的 `$api`／`$stores`、自行恢复宿主会话，或通过公开插件 catalog 查找登录组件；组件缺失时平台应显示不可用状态，不能退回匿名管理。
 
-登录上下文提交请求时会绑定当前 provider。provider 已变化时请求以 `409 authentication_provider_changed` 拒绝；未携带绑定 header 的 API 调用不具有该 provider 变化检查。Cookie 会话优先；请求代次保护只能避免过期结果污染当前 UI 状态，不能撤销已创建的服务端会话，也不能消除浏览器全部 Cookie 竞态。
+登录上下文提交请求时会绑定当前 provider。provider 已变化时请求以 `409 authentication_provider_changed` 拒绝；未携带绑定 header 的 API 调用不具有该 provider 变化检查。浏览器交接只接受 Cookie 会话；请求代次保护只能避免过期结果污染当前 UI 状态，不能撤销已创建的服务端会话，也不能消除浏览器全部 Cookie 竞态。
 
-当前 JSON login 接口不支持直接 OAuth GET callback 或重定向。需要此类协议时，必须另行设计只精确路由到当前 provider 的匿名协议入口；不能把它当作本登录上下文已有能力。
+JSON login 保留原有凭据交接。可选 `ManagementProvider.loginOptions`、`beginLogin`、`completeLogin` 分别通过固定 `GET /api/auth/login/options`、`POST /api/auth/login/start` 和 `GET /api/auth/login/callback/:methodId` 分派到当前 provider；未实现时返回 501。start 校验公开 Origin 和 provider 绑定。回调保留 provider 的重定向及多条 Set-Cookie；provider 切换后丢弃旧响应。Host 不解释协议业务，也不开放任意匿名插件路径；登录交互响应不缓存。
 
-这项扩展只把管理认证的登录内容交给 provider。激活向导中的 username/password/bootstrap 仍由宿主负责，不属于此登录组件接口。
+初始化组件使用 `@bungee/plugin-sdk` 导出的纯类型 `ManagementSetupContext`：
+
+```typescript
+export interface ManagementSetupContext {
+  readonly provider: Readonly<{ name: string; publicOrigin: string }>;
+  initialize(input: unknown): Promise<void>;
+}
+```
+
+Host 将初始化请求绑定当前 provider 与页面生命周期，通过固定 `POST /api/auth/setup` 调用 `ManagementProvider.initialize(request)`。user-auth 的输入为 `{setupCode, username, password, passwordConfirmation}`，不接受 `code` 别名。Host 负责公开 Origin 校验和初始化框架，插件验证一次性码、字段与限流，并原子建立身份。初始化成功回登录页，不创建会话，也不执行登录后的 Dashboard 初始化。
+
+`ManagementProvider.setupStatus()` 返回 `uninitialized` 或 `ready`。未初始化时 Host 只呈现受限初始化入口；状态或组件不可用时拒绝访问，不匿名放行。code 的签发、重签与身份恢复通过停机 TTY 能力完成，不通过在线激活向导收集凭据。具体账号、码及会话策略见 [user-auth](../../plugins/user-auth/README.md)。
+
+`OfflineRecoveryCapability.kind: identity` 仅通过停机后的本地 TTY action 调用。重置字段由插件的 `prompts` 声明，Host 关闭输入历史并隐藏 `secret: true` 的输入；Host 不解释账号或密码规则。结构化 stdin 和 owner-only 文件只接受 `kind: plugin-state`，不能调用身份恢复能力。输入限制与操作入口见[离线恢复](../guides/offline-recovery.md)。
 
 
 ---

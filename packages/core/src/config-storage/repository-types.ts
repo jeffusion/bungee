@@ -110,6 +110,17 @@ export type FinalizePublicationOutcome =
   | { readonly outcome: 'degraded'; readonly error_code: 'old_worker_drain_failed'; readonly error_detail: string;
       readonly retired_without_exit_proof: true; readonly recovery_disposition: ConfigurationRecoveryDisposition };
 
+export type ManagementProtection = {
+  readonly required: boolean;
+  readonly selectedProvider: string | null;
+  readonly generation: number;
+};
+
+export type ControlProjection = {
+  readonly snapshot: RepositorySnapshot;
+  readonly managementProtection: ManagementProtection;
+};
+
 export type RepositorySnapshot = CommittedConfigurationSnapshot;
 
 export type ServingSnapshotKey = {
@@ -176,6 +187,7 @@ export class ConfigRepositoryError extends Error {
 }
 
 export type ConfigRepositoryOptions = {
+  readonly offline?: boolean;
   readonly compileOptions?: ConfigurationCompileOptions;
   readonly faultInjection?: (stage: 'after_materialization' | 'after_targets' | 'after_automatic_recovery') => void;
 };

@@ -3,7 +3,6 @@
  * Constructs ExpressionContext for dynamic value processing
  */
 
-import { logger } from '../../logger';
 import type { ExpressionContext } from '../../expression-engine';
 import type { RequestSnapshot } from '../types';
 
@@ -45,7 +44,7 @@ export interface RequestContextResult {
 export async function buildRequestContext(
   req: Request,
   rewrittenPath: { pathname: string; search: string },
-  requestLog: any
+  _requestLog: any
 ): Promise<RequestContextResult> {
   const url = new URL(req.url);
   let parsedBody: Record<string, any> = {};
@@ -110,7 +109,7 @@ export async function buildRequestContext(
 export function buildRequestContextFromSnapshot(
   snapshot: RequestSnapshot,
   rewrittenPath: { pathname: string; search: string },
-  requestLog: any
+  _requestLog: any
 ): RequestContextResult {
   const url = new URL(snapshot.url);
 

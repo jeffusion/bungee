@@ -71,7 +71,7 @@ export interface Plugin {
   description?: string;
   enabled: boolean;
   metadata?: PluginMetadata;
-  management?: {loginComponent?:string};
+  management?: {loginComponent?:string;setupComponent?:string};
   dependencies?: Record<string,string>;
   dependents?: string[];
   ready?: boolean;

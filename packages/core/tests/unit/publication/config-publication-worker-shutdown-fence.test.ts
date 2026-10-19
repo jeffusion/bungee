@@ -6,7 +6,7 @@ import {
   drainMessage,
   fakeLifecycle,
   startMessage,
-} from '../../helpers/config-publication-worker-runtime.ts';
+} from '../../helpers/config-publication-worker-runtime';
 
 const createConfigWorkerRuntimeController: typeof createRuntime = (options) => createRuntime({ ...options,
   bootId: 'linux:11111111-1111-4111-8111-111111111111', bootNonce: 'c0000000-0000-4000-8000-000000000001' });

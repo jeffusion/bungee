@@ -9,9 +9,9 @@
     if (!open) queueMicrotask(() => { const answer = decision ?? false; decision = null; answerConfirmation(answer); });
   }
 </script>
-<IndustrialDialog open={$confirmation !== null} title={last?.title ?? ''} description={last?.message ?? ''} returnFocus={last?.opener} closeLabel={last?.cancelText ?? 'Close'}
+<IndustrialDialog open={$confirmation !== null} title={last?.title ?? ''} description="" returnFocus={last?.opener} closeLabel={last?.cancelText ?? 'Close'}
   onOpenChange={changed}>
-  {#snippet body()}<div data-testid="industrial-confirmation"></div>{/snippet}
+  {#snippet body()}<Dialog.Description data-testid="industrial-confirmation" class="text-sm leading-relaxed text-zinc-300 break-words">{last?.message}</Dialog.Description>{/snippet}
   {#snippet footer()}
     <Dialog.Close class="nx-btn-outline" on:click={() => decision = false} data-testid="confirmation-cancel">{last?.cancelText}</Dialog.Close>
     <Dialog.Close class="nx-btn-primary" on:click={() => decision = true} data-testid="confirmation-accept">{last?.confirmText}</Dialog.Close>

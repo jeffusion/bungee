@@ -12,10 +12,11 @@ import { DAEMON_AUTHORIZATION_HEADER, DAEMON_BOOT_HEADER, DAEMON_INSTANCE_HEADER
 import { installMasterSignalHandlers } from '../../../src/master-runtime/signal-handlers';
 import { WorkerAdmissionRegistry } from '../../../src/public-listener/admission-registry';
 import { runtimePluginState } from '../../helpers/runtime-plugin-state';
-import type { RepositorySnapshot } from '../../../src/config-storage';
+import type { ControlProjection, RepositorySnapshot } from '../../../src/config-storage';
 import { throwIfPublicationCancelled } from '../../../src/config-publication/publication-runner';
 
 const HASH: Sha256Digest = `sha256:${'a'.repeat(64)}`;
+const ANONYMOUS_MANAGEMENT_PROTECTION = Object.freeze({required:false,selectedProvider:null,generation:0});
 const OPTIONS = Object.freeze({
   configDbPath: '/work/data/bungee.db',
   configDbLockPath: '/work/data/bungee.db.lock',
@@ -51,8 +52,7 @@ function fixture(
   let managementOptions: any = null;
   let controlOptions: any = null;
   let ingressMutationReadiness: { readonly ready: true } | { readonly ready: false; readonly reason: string } = { ready: true };
-  let failReadinessSnapshotOnThirdRead = false;
-  let readinessSnapshotReads = 0;
+  let failReadinessSnapshot = false;
   let workerDisconnects = 0;
   let publishedVersion = 0;
   const cleanupProcess = {
@@ -71,8 +71,10 @@ function fixture(
   };
   const unused = (): never => { throw new Error('unused fake method'); };
   const repository = {
+    getManagementProtection: () => ANONYMOUS_MANAGEMENT_PROTECTION,
+    refreshControlProjection: async (): Promise<ControlProjection> => ({snapshot:repository.getSnapshot(),managementProtection:ANONYMOUS_MANAGEMENT_PROTECTION}),
     getSnapshot: realRuntime ? () => {
-      if (failReadinessSnapshotOnThirdRead && readinessSnapshotReads++ === 2) throw new Error('readiness snapshot failed');
+      if (failReadinessSnapshot) { failReadinessSnapshot = false; throw new Error('readiness snapshot failed'); }
       return recoverySnapshot();
     } : recoverySnapshot,
     getServingSnapshot: async () => null,
@@ -96,6 +98,24 @@ function fixture(
     recordWorkerResult: unused,
     markDraining: unused,
     finalizePublication: unused,
+    freezePublicationRetirementDrainStart: unused,
+    getPublicationServingSet: unused,
+    freezePublicationServingSet: unused,
+    confirmPublicationServingMemberExit: unused,
+    getPublicationRetirement: unused,
+    freezePublicationRetirement: unused,
+    recordPublicationRetirementEvidence: unused,
+    stopPublicationRetirement: unused,
+    retryPublicationRetirement: unused,
+    markPublicationRetirementReleased: unused,
+    getRetiredWorkerInstanceIds: unused,
+    getRetirementDescriptorCleanupState: unused,
+    getRuntimeRecoveryBudget: unused,
+    getRuntimeRecoveryStartupGate: unused,
+    getPublicationRetirementRetry: unused,
+    requestPublicationRetirementRetry: unused,
+    consumeRuntimeRecoveryRestartTicket: unused,
+    observeRuntimeRecoveryHealth: unused,
     close: async () => { events.push('repository.close'); },
     claimControllerWithCapability: async (_capability: unknown, controllerId: string) => {
       fail('claim');
@@ -316,7 +336,7 @@ function fixture(
   return { dependencies, events, factoryOptions: () => factoryOptions, managementOptions: () => managementOptions, controlOptions: () => controlOptions,
     workerDisconnects: () => workerDisconnects,
     setIngressMutationReadiness: (value: typeof ingressMutationReadiness) => { ingressMutationReadiness = value; },
-    failNextReadinessSnapshot: () => { failReadinessSnapshotOnThirdRead = true; readinessSnapshotReads = 0; },
+    failNextReadinessSnapshot: () => { failReadinessSnapshot = true; },
   };
 }
 
@@ -832,12 +852,15 @@ describe('master process composition', () => {
       processHandle = await startMasterComposition(dependencies);
       const controlApi = managementOptions()?.controlApi;
       if (controlApi === undefined) throw new Error('composed control API missing');
-      failNextReadinessSnapshot();
+      const body = new TextEncoder().encode(JSON.stringify({expected_revision:7,
+        aggregate:{logical_configuration:{services:[],routes:[],plugins:[]},plugin_activations:[]},
+        mutation_id:'composition-readiness-repository-failure'}));
       const response = await controlApi.handle(new Request('http://127.0.0.1/api/config', {
         method: 'PUT',
-        body: JSON.stringify({ expected_revision: 7,
-          aggregate: { logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [] },
-          mutation_id: 'composition-readiness-repository-failure' }),
+        // Guard reads complete before the body is consumed; fail the configuration read itself.
+        body: new ReadableStream<Uint8Array>({pull(controller) {
+          failNextReadinessSnapshot();controller.enqueue(body);controller.close();
+        }}, {highWaterMark:0}),
       }));
       expect(response?.status).toBe(503);
       expect(await response?.json()).toMatchObject({ error: 'repository_unavailable' });
@@ -1041,6 +1064,8 @@ function recoveryDependencies(input: {
   let publishedVersion = 0;
   let preparedAdmission: {admission_sequence:number}|null = null;
   const repository = {
+    getManagementProtection: () => ANONYMOUS_MANAGEMENT_PROTECTION,
+    refreshControlProjection: async (): Promise<ControlProjection> => ({snapshot:repository.getSnapshot(),managementProtection:ANONYMOUS_MANAGEMENT_PROTECTION}),
     getSnapshot: () => input.getSnapshot?.() ?? snapshot,
     getActivePublication: async () => input.getActivePublication?.() ?? null,
     getServingSnapshot: async () => null,

@@ -1,21 +1,28 @@
 import { expect, test } from 'bun:test';
 import { resolveNativeNavigation } from '../../src/components/native-widgets/navigation-resolution';
-import accounts from '../../../../plugins/local-accounts/manifest.json';
+import { resolveNativeSettings } from '../../src/components/native-widgets/settings-resolution';
+import accounts from '../../../../plugins/user-auth/manifest.json';
 import budget from '../../../../plugins/token-budget/manifest.json';
 
-test('account and budget menus resolve owned native pages without plugin settings entries', () => {
+test('user management and profile have owned menu pages, while sign-in configuration belongs to plugin settings', () => {
+  expect(accounts.contributes.navigation.map(page => page.path)).toEqual(['/users', '/profile']);
+  expect(accounts.contributes.navigation.map(page => accounts.translations['zh-CN'][page.label as keyof typeof accounts.translations['zh-CN']])).toEqual(['用户管理', '用户信息']);
   for (const manifest of [accounts, budget]) {
-    expect('settings' in manifest.contributes).toBe(false);
-    expect('nativeSettingsComponent' in manifest.contributes).toBe(false);
-    const page = manifest.contributes.navigation[0]!;
-    expect(page.target).toBe('header');
-    const component = () => {};
-    expect(resolveNativeNavigation({ name: manifest.name, enabled: true, metadata: { contributes: manifest.contributes } },
-      page.path, { [page.component]: component }, { [page.component]: manifest.name })).toEqual({ kind: 'native', component });
-    expect(manifest.ui.components.some(item => item.name === page.component)).toBe(true);
+    for (const page of manifest.contributes.navigation) {
+      expect(page.target).toBe('header');
+      if (page.target !== 'header') throw new Error('Expected header navigation');
+      const component = () => {};
+      expect(resolveNativeNavigation({name: manifest.name, enabled: true, metadata: {contributes: {navigation: [{...page, target: page.target}]}}},
+        page.path, {[page.component]: component}, {[page.component]: manifest.name})).toEqual({kind: 'native', component});
+      expect(manifest.ui.components.some(item => item.name === page.component)).toBe(true);
+    }
   }
-  expect(accounts.translations['zh-CN'][accounts.contributes.navigation[0]!.label]).toBe('认证管理');
-  expect(budget.translations['zh-CN'][budget.contributes.navigation[0]!.label]).toBe('Token预算');
-  expect(accounts.management.loginComponent).toBe('LocalAccountsLogin');
+  expect(accounts.contributes.settings).toBe('/settings');
+  const component = () => {};
+  const plugin = {name: accounts.name, enabled: true, metadata: {contributes: {settings: accounts.contributes.settings, nativeSettingsComponent: accounts.contributes.nativeSettingsComponent}}};
+  expect(resolveNativeSettings(plugin, '/settings', {UserAuthSettings: component}, {UserAuthSettings: accounts.name})).toEqual({kind: 'native', component});
+  expect(resolveNativeNavigation(plugin, '/settings', {UserAuthSettings: component}, {UserAuthSettings: accounts.name})).toBeNull();
+  expect('settings' in budget.contributes).toBe(false);
+  expect(accounts.management.loginComponent).toBe('UserAuthLogin');
   expect(budget.contributes.resourceExtensions[0]!.component).toBe('TokenBudgetKeyPolicy');
 });

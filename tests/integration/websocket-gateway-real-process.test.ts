@@ -70,7 +70,7 @@ beforeAll(async()=>{
       expect(request.headers.get('authorization')).toBe('Bearer fixture-api-key');
       expect(request.headers.has('x-bungee-internal-data-identity')).toBe(false);
       handshakeCount++;
-      if (server.upgrade(request)) return;
+      if (server.upgrade(request, { data: undefined })) return;
       return new Response('fixture only',{status:400});
     },
     websocket:{message(socket,message){

@@ -101,16 +101,19 @@ test('migration 2 rollback and reopen preserve multiple operation, worker and re
     }
     repository.close();
     db = new Database(path, { readwrite: true, strict: true });
-    // Remove later feature tables to reconstruct the exact baseline schema
-    // around unchanged baseline business rows before testing the upgrade.
+    // Remove the later schema additions around unchanged baseline business rows.
+    db.run('DROP TABLE management_protection');
+    db.run('ALTER TABLE configuration_operations DROP COLUMN management_provider');
+    db.run('ALTER TABLE configuration_operations DROP COLUMN offline_management');
     for (const table of ['ui_menu_layout', 'configuration_retirement_retry_requests','configuration_retirement_evidence', 'configuration_retirements', 'configuration_publication_serving_sets', 'runtime_recovery_tickets', 'runtime_recovery_budget']) {
       db.run(`DROP TABLE ${table}`);
     }
     db.run('DELETE FROM schema_migrations WHERE version>=2');
     verifySchemaFingerprint(db, 1);
     const tables = db.query<{ name: string }, []>("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map(row => row.name);
+    const columns = new Map(tables.map(table => [table, db!.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all().map(row => row.name).join(',')]));
     const snapshot = (database: Database) => Object.fromEntries(tables.map(table => [table,
-      database.query(`SELECT * FROM ${table}`).all().map(row => JSON.stringify(row)).sort()]));
+      database.query(`SELECT ${columns.get(table)} FROM ${table}`).all().map(row => JSON.stringify(row)).sort()]));
     const before = snapshot(db);
     expect(db.query('SELECT * FROM configuration_operations').all()).toHaveLength(3);
     expect(db.query('SELECT * FROM configuration_operation_workers').all()).toHaveLength(6);
@@ -128,12 +131,12 @@ test('migration 2 rollback and reopen preserve multiple operation, worker and re
     try {
       const actual = snapshot(upgraded.getDatabase());
       // Only the migration ledger gains an entry; all existing business/history rows remain byte-for-byte equivalent.
-      expect({ ...actual, schema_migrations: before.schema_migrations }).toEqual(before);
+      expect({ ...actual, schema_migrations: before.schema_migrations } as Record<string, unknown>).toEqual(before as Record<string, unknown>);
       expect(upgraded.getSnapshot().revision).toBe(4);
       upgraded.verify();
     } finally { upgraded.close(); }
     const reopened = ConfigRepository.open(path);
-    try { expect({ ...snapshot(reopened.getDatabase()), schema_migrations: before.schema_migrations }).toEqual(before); reopened.verify(); }
+    try { expect({ ...snapshot(reopened.getDatabase()), schema_migrations: before.schema_migrations } as Record<string, unknown>).toEqual(before as Record<string, unknown>); reopened.verify(); }
     finally { reopened.close(); }
   } finally { db?.close(); try { repository.close(); } catch {} rmSync(directory, { recursive: true, force: true }); }
 });

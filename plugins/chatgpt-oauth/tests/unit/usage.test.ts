@@ -1,9 +1,9 @@
+import { controlHost } from '../helpers/control-host';
 import { describe, expect, test } from 'bun:test';
 import type { ControlHostContext, SecretStore, SecretValue } from '../../../../packages/core/src/plugin-control/contracts';
 import { AccountStore } from '../../server/accounts';
 import { createControl } from '../../server/control';
 import type { CodexTokenSet, FetchLike } from '../../server/oauth';
-// @ts-expect-error Cross-layer contract test intentionally imports the UI JavaScript parser.
 import { accountUsage, resetOutcome } from '../../ui/account-model.js';
 
 class FakeSecretStore implements SecretStore {
@@ -67,14 +67,14 @@ async function setup(fetchImpl: FetchLike, now?: () => number, timeoutMs?: numbe
   const store = new FakeSecretStore();
   const account = await new AccountStore(store).create('A', token());
   const hostController = new AbortController();
-  const host: ControlHostContext = { signal: hostController.signal, secretStore: store };
+  const host: ControlHostContext = controlHost(store, hostController.signal);
   const control = createControl(host, { fetchImpl, now, timeoutMs });
   return { store, account, control, host, hostController };
 }
 
 function api(control: ReturnType<typeof createControl>, handler: string, request: Request, signal = new AbortController().signal): Promise<Response> {
   const declaration = control.api.find((item) => item.handler === handler)!;
-  return Promise.resolve(declaration.invoke({ signal, secretStore: (undefined as never), request, requestSignal: signal }));
+  return Promise.resolve(declaration.invoke({ ...controlHost(new FakeSecretStore(), signal), request, requestSignal: signal }));
 }
 
 describe('ChatGPT usage control', () => {

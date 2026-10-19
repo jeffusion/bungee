@@ -9,6 +9,7 @@ export interface ConfigurationCompileOptions {
   readonly pluginDependencies?: import('../plugin-dependencies').PluginDependencyGraph;
   readonly pluginConstraints?: ReadonlyMap<string, readonly PluginConfigConstraint[]>;
   readonly pluginSchemas: ReadonlyMap<string, readonly ReadonlyPluginConfigField[]>;
+  readonly managementProviders?: ReadonlySet<string>;
   readonly globalPlugins?: ReadonlySet<string>;
   readonly availablePlugins?: ReadonlySet<string>;
   readonly pluginCatalogHash?: Sha256Digest;

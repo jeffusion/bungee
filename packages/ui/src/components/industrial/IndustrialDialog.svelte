@@ -31,7 +31,7 @@
     <header class="nx-panel-head shrink-0 pr-14">
       <div class="min-w-0 space-y-1.5">
         <div class="nx-panel-head-title"><span class="nx-stripe shrink-0" aria-hidden="true"></span><Dialog.Title class="font-mono text-sm font-bold uppercase tracking-command break-words">{title}</Dialog.Title></div>
-        <Dialog.Description class="text-sm text-zinc-400 break-words">{description}</Dialog.Description>
+        {#if description}<Dialog.Description class="text-sm text-zinc-400 break-words">{description}</Dialog.Description>{/if}
       </div>
     </header>
     <div data-dialog-body class="min-h-0 px-4 py-4 space-y-4" class:overflow-y-auto={scrollBody} class:overflow-visible={!scrollBody}>

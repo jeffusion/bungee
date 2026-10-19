@@ -239,6 +239,7 @@ describe('token-stats attempt observer', () => {
     await Bun.sleep(20);
     expect(readRows(fixture.db)).toHaveLength(0);
     const row = await tasks[0]!();
+    if (row === undefined) throw new Error('expected estimated attempt row');
     expect(row).toMatchObject({ input_source: 'estimated', output_source: 'estimated' });
     expect(row.input_tokens).toBeGreaterThan(0);
     expect(row.output_tokens).toBeGreaterThan(0);
@@ -451,7 +452,7 @@ describe('token-stats attempt observer', () => {
     // All observer callbacks returned immediately; exactly 256 rows are accepted
     // and the 257th is dropped by the bounded queue.
     const acceptedRows = await waitForRows(fixture.db, 256);
-    expect(await fixture.storage.uncached().get(REPORTING_INCOMPLETE_KEY)).toBe(true);
+    expect(await fixture.storage.uncached().get<boolean>(REPORTING_INCOMPLETE_KEY)).toBe(true);
     expect((await new TokenStatsRepository(fixture.storage).query('1h', 'model')).reportingIncomplete).toBe(true);
     expect(acceptedRows.map((row) => row.request_id).sort()).toEqual(
       Array.from({ length: 256 }, (_, index) => `queue-${index}`).sort(),

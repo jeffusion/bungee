@@ -1,3 +1,4 @@
+import { readManagementProtection, writeManagementProtection } from './management-protection';
 import type { Database } from 'bun:sqlite';
 import { replaceActiveMaterialization } from './materialize';
 import { operationFromRow, type OperationRow } from './operation-store';
@@ -20,6 +21,7 @@ export function commitTransaction(
   prepared: PreparedCommitCommand,
   options: ConfigRepositoryOptions,
   snapshot: RepositorySnapshot,
+  offlineManagement = false,
 ): CommitDecision {
   const existing = sqliteGet<OperationRow, [string]>(db, `SELECT mutation_id,request_hash,expected_revision,
     committed_revision,kind,target_worker_count,state,result_status,error_code,error_detail,
@@ -58,6 +60,13 @@ export function commitTransaction(
   if (state.active_revision === Number.MAX_SAFE_INTEGER) {
     throw new ConfigRepositoryError('repository_failure', 'configuration revision limit reached');
   }
+  const protection = readManagementProtection(db);
+  if (!offlineManagement && protection.required && prepared.managementProvider !== protection.selectedProvider) {
+    throw new ConfigRepositoryError('invalid_configuration', 'selected management provider can only be changed offline');
+  }
+  if (prepared.managementProvider !== null && !prepared.aggregate.plugin_activations.some(a => a.plugin_name === prepared.managementProvider)) {
+    throw new ConfigRepositoryError('invalid_configuration', 'selected management provider activation is missing');
+  }
   const committedRevision = state.active_revision + 1;
   replaceActiveMaterialization(db, prepared.aggregate);
   options.faultInjection?.('after_materialization');
@@ -70,6 +79,9 @@ export function commitTransaction(
     prepared.mutationId, prepared.requestHash, prepared.expectedRevision, committedRevision,
     prepared.kind, prepared.targetSlots.length, prepared.createdAt, prepared.createdAt,
   ]);
+  db.run('UPDATE configuration_operations SET management_provider=?,offline_management=? WHERE mutation_id=?',
+    [prepared.managementProvider, offlineManagement ? 1 : 0, prepared.mutationId]);
+  writeManagementProtection(db, protection, prepared.managementProvider);
   for (const workerSlot of prepared.targetSlots) {
     db.run(`INSERT INTO configuration_operation_workers
       (mutation_id,worker_slot,target_revision,drain_recovery_generation,

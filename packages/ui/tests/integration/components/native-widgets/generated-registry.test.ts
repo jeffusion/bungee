@@ -26,13 +26,14 @@ test('real repository generation retains dashboard and settings components with 
     expect(generated).toMatch(/generatedWidgetRegistry[\s\S]*\n  ChatgptQuotaWidget,/);
     expect(generated).toMatch(/generatedWidgetRegistry[\s\S]*\n  TokenStatsChart,/);
     expect(generated).toMatch(/generatedWidgetRegistry[\s\S]*\n  ChatgptAccountsPage,/);
-    expect(generated).toContain("LocalAccountsLogin: 'local-accounts'");
+    expect(generated).toContain("UserAuthLogin: 'user-auth'");
+    expect(generated).toContain("UserAuthSetup: 'user-auth'");
     const translations = JSON.parse(generated.match(/export const generatedPluginTranslations = ([\s\S]*?) as const;/)![1]);
-    const manifest = await Bun.file(new URL('../../../../../../plugins/local-accounts/manifest.json', import.meta.url)).json();
+    const manifest = await Bun.file(new URL('../../../../../../plugins/user-auth/manifest.json', import.meta.url)).json();
     for (const locale of ['en', 'zh-CN']) {
       expect(Object.keys(translations[locale])).toEqual(['plugins']);
-      expect(Object.keys(translations[locale].plugins)).toEqual(['local-accounts']);
-      expect(translations[locale].plugins['local-accounts']).toEqual(manifest.translations[locale]);
+      expect(Object.keys(translations[locale].plugins)).toEqual(['user-auth']);
+      expect(translations[locale].plugins['user-auth']).toEqual(manifest.translations[locale]);
     }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
@@ -42,8 +43,8 @@ test('public login messages are generated only from the selected plugin director
   try {
     const pluginsDirectory = join(directory, 'plugins');
     await mkdir(pluginsDirectory);
-    const pluginDirectory = join(pluginsDirectory, 'local-accounts');
-    await cp(fileURLToPath(new URL('../../../../../../plugins/local-accounts', import.meta.url)), pluginDirectory, { recursive: true });
+    const pluginDirectory = join(pluginsDirectory, 'user-auth');
+    await cp(fileURLToPath(new URL('../../../../../../plugins/user-auth', import.meta.url)), pluginDirectory, { recursive: true });
     const manifestFile = join(pluginDirectory, 'manifest.json');
     const manifest = JSON.parse(await readFile(manifestFile, 'utf8'));
     // This case tests copied-manifest isolation, translations, and UI ownership only.
@@ -53,19 +54,24 @@ test('public login messages are generated only from the selected plugin director
     const outputFile = join(directory, 'generated.ts');
     await generateWidgetRegistry({ pluginsDirectory, outputFile });
     const generated = await readFile(outputFile, 'utf8');
-    expect(generated).toContain("import LocalAccountsLogin from '@plugins/local-accounts/ui/Login.svelte'");
+    expect(generated).toContain("import UserAuthLogin from '@plugins/user-auth/ui/Login.svelte'");
     expect(generated).not.toContain('@plugins/token-stats/');
     const translations = JSON.parse(generated.match(/export const generatedPluginTranslations = ([\s\S]*?) as const;/)![1]);
     for (const locale of ['en', 'zh-CN']) {
       expect(Object.keys(translations[locale])).toEqual(['plugins']);
-      expect(Object.keys(translations[locale].plugins)).toEqual(['local-accounts']);
-      expect(translations[locale].plugins['local-accounts']).toEqual(manifest.translations[locale]);
+      expect(Object.keys(translations[locale].plugins)).toEqual(['user-auth']);
+      expect(translations[locale].plugins['user-auth']).toEqual(manifest.translations[locale]);
     }
     expect(generated).not.toMatch(/import\s*\(/);
     manifest.management.loginComponent = 'ForeignLogin';
     await writeFile(manifestFile, JSON.stringify(manifest));
     // Reuse the catalog's ownership validation; no separate login ownership system.
     await expect(generateWidgetRegistry({ pluginsDirectory, outputFile })).rejects.toThrow('management loginComponent must be a declared UI component');
+    expect(await readFile(outputFile, 'utf8')).toBe(generated);
+    manifest.management.loginComponent = 'UserAuthLogin';
+    manifest.management.setupComponent = 'ForeignSetup';
+    await writeFile(manifestFile, JSON.stringify(manifest));
+    await expect(generateWidgetRegistry({ pluginsDirectory, outputFile })).rejects.toThrow('management setupComponent must be a declared UI component');
     expect(await readFile(outputFile, 'utf8')).toBe(generated);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

@@ -12,13 +12,13 @@ import type { ConfigProcessIdentity, ConfigPublicationIdentity, StartConfigWorke
 import {
   MasterConfigPublicationError,
   type ConfigPublicationRepository,
-  ConfigPublicationWorkerFactory,
-  MasterPublicationOutcome,
-  PublicationClock,
-  PublicationFailure,
-  PublicationScheduler,
-  ServingConfigWorker,
-  WorkerAdmissionController,
+  type ConfigPublicationWorkerFactory,
+  type MasterPublicationOutcome,
+  type PublicationClock,
+  type PublicationFailure,
+  type PublicationScheduler,
+  type ServingConfigWorker,
+  type WorkerAdmissionController,
 } from './coordinator-types';
 import { classifyRecoveryError } from './recovery-disposition';
 import { allDrainExitsConfirmed, drainFailures, drainWorkersUntilKnown } from './drain-workers';

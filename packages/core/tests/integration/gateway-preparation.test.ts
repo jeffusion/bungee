@@ -42,7 +42,7 @@ test('reuse follows authorization and actual credential identity, and skips mode
     const result=await input.executeAuxiliary({...auxiliary,reuse:async identity=>{reuseCount++;expect(identity.scope).toBeTruthy();return {cached:'value'};}});
     expect(result).toMatchObject({kind:'reused',value:{cached:'value'}});return {};
   }});
-  try{const response=await env.send();await response.text();expect(response.status).toBe(200);expect(reuseCount).toBe(1);expect(env.calls).toHaveLength(1);expect(env.budgets).toHaveLength(1);expect(env.budgets[0].requestId).toBe(env.settlements.find(value=>value.sent)?.requestId);}finally{await env.close();}
+  try{const response=await env.send();await response.text();expect(response.status).toBe(200);expect(reuseCount).toBe(1);expect(env.calls).toHaveLength(1);expect(env.budgets).toHaveLength(1);const settlement=env.settlements.find(value=>value.sent);if(!settlement)throw Error('missing sent settlement');expect(env.budgets[0].requestId).toBe(settlement.requestId);}finally{await env.close();}
 });
 test('client account metadata cannot establish a credential scope; null scope is explicit to the reuse consumer',async()=>{
   const headers=new Headers({authorization:'Bearer credential','account-id':'untrusted'});

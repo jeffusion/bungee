@@ -46,7 +46,7 @@ export class ResponseViews {
   }
   context<T extends object>(context:T):T {
     this.currentContext=context;this.updateContext();
-    Object.defineProperty(context,WATERFALL_VIEW_TRANSFORM,{value:async(next:Response|RawResponseResult,previous:Response|RawResponseResult)=>{
+    Object.defineProperty(context,WATERFALL_VIEW_TRANSFORM,{value:async(next:Response|RawResponseResult,_previous:Response|RawResponseResult)=>{
       const nextResponse=next instanceof Response?next:next.response;
       this.accept(nextResponse);
       return next instanceof Response?this.value:{...next,response:this.value};

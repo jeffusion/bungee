@@ -29,7 +29,7 @@ The container health check queries the internal management listener. To run the 
 docker compose exec bungee sh -c 'wget -qO- "http://127.0.0.1:${BUNGEE_MANAGEMENT_PORT:-8089}/health/management"'
 ```
 
-Management is anonymous unless a ManagementProvider is selected. The local-accounts plugin supplies administrator Cookie/Bearer sessions; proxy API Keys are a separate plugin capability. A failed selected provider does not restore anonymous access.
+Management is anonymous until protection is selected. The user-auth plugin supplies management Cookie/Bearer sessions independently of proxy API Keys. To initialize it, stop the original container and use a temporary interactive container with the same image, data volumes and environment; see [offline recovery](./docs/guides/offline-recovery.md). Releasing protection requires the offline `release-auth` action. Online disabling, configuration replacement or import cannot release it, and a failed selected provider does not restore anonymous access.
 
 ## Persistence
 

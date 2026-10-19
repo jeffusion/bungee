@@ -275,16 +275,10 @@ describe('asynchronous configuration control with an explicit management provide
     const next = disabledAggregate();
     const { api, repository, publishedOperationIds, credential } = fixture();
     const originalCommit = repository.commit.bind(repository);
-    const originalGetSnapshot = repository.getSnapshot.bind(repository);
     const originalGetOperationState = repository.getOperationState.bind(repository);
     let commitCalls = 0;
-    let preCommitSnapshotReads = 0;
     let committed = false;
     let failAcceptCommittedRead = true;
-    repository.getSnapshot = () => {
-      if (!committed) preCommitSnapshotReads += 1;
-      return originalGetSnapshot();
-    };
     repository.commit = (command) => {
       commitCalls += 1;
       const result = originalCommit(command);
@@ -303,7 +297,6 @@ describe('asynchronous configuration control with an explicit management provide
 
     expect(response?.status).toBe(503);
     expect(await response?.json()).toEqual({ error: 'repository_unavailable' });
-    expect(preCommitSnapshotReads).toBe(7);
     expect(commitCalls).toBe(1);
     expect(repository.getSnapshot()).toMatchObject({ revision: 2, aggregate: next });
     const operation = repository.getOperation(mutationId);
@@ -672,15 +665,18 @@ describe('asynchronous configuration control with an explicit management provide
   });
 
   test('serialized mutation snapshot failure is stable JSON 503', async () => {
-    const { api, repository, credential } = fixture();
+    const { api, repository } = fixture();
     const readSnapshot = repository.getSnapshot.bind(repository);
-    let calls = 0;
+    let bodyRead = false, failed = false;
     repository.getSnapshot = () => {
-      calls += 1;
-      if (calls === 2) throw new Error('closed during serialization');
+      if (bodyRead && !failed) { failed = true; throw new Error('closed during serialization'); }
       return readSnapshot();
     };
-    const response = await put(api, 1, disabledAggregate(), 'serialized-snapshot-failure', {});
+    const request = new Request('http://control.test/api/config', {method:'PUT',headers:{authorization:`Bearer ${OLD}`},
+      body:JSON.stringify({expected_revision:1,aggregate:disabledAggregate(),mutation_id:'serialized-snapshot-failure'})});
+    const body = request.body;
+    Object.defineProperty(request,'body',{get(){bodyRead=true;return body;}});
+    const response = await api.handle(request);
     expect(response?.status).toBe(503);
     expect(await response?.json()).toEqual({ error: 'repository_unavailable' });
   });

@@ -28,7 +28,7 @@ function consumingUpstreamFetch(mockFetch: typeof fetch): typeof fetch {
 }
 
 const roots: string[] = [];
-const registries: ScopedPluginRegistry[] = [];
+const registries: InstanceType<typeof ScopedPluginRegistry>[] = [];
 const byteObserverCompletions: Promise<void>[] = [];
 function trackedByteObserver(...args: Parameters<typeof createAttemptResponseObserver>) {
   args[8] = {maxBytes:1024*1024,...args[8]};

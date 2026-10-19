@@ -22,7 +22,7 @@ import {
   type ControllerAuthority,
 } from '../../src/supervision';
 import { WorkerControllerClient } from '../../src/master-runtime/supervised-worker-client';
-import { aggregate, drainMessage, PROCESS_IDENTITY, startCurrentMessage } from '../helpers/config-publication-worker-runtime.ts';
+import { aggregate, drainMessage, PROCESS_IDENTITY, startCurrentMessage } from '../helpers/config-publication-worker-runtime';
 
 const ROOT = new Uint8Array(32).fill(4);
 const BOOT = '70000000-0000-4000-8000-000000000001';

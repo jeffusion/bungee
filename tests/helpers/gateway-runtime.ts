@@ -284,7 +284,7 @@ export async function recordOwnedWorkers(
 }
 
 export async function waitUntil(
-  predicate: () => Promise<boolean>, message: string, timeoutMs = SETUP_TIMEOUT_MS,
+  predicate: () => boolean | Promise<boolean>, message: string, timeoutMs = SETUP_TIMEOUT_MS,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;

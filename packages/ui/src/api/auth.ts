@@ -7,7 +7,7 @@ import {
 } from '$stores/auth';
 
 export interface LoginResponse { success:boolean; mode?:'anonymous'|'plugin'; error?:string; subject?:ManagementSubject; csrfToken?:string }
-export interface AuthMode { mode:'anonymous'|'plugin'; initialized?:boolean; publicOrigin?:string; provider?:{name:string;loginComponent?:string} }
+export interface AuthMode { mode:'anonymous'|'plugin'; initialized?:boolean; publicOrigin?:string; provider?:{name:string;loginComponent?:string;setupComponent?:string} }
 let modeReadGeneration = 0;
 let verifyGeneration = 0;
 let restoreGeneration = 0;
@@ -79,6 +79,17 @@ export async function restoreManagementSession(): Promise<AuthMode> {
   } catch (error) {
     if (isStaleRestoreError(error)) throw error;
     throw new ManagementAuthenticationError('management_session_read_failed');
+  }
+  if (mode.mode === 'plugin') {
+    if (!mode.provider?.name || !mode.publicOrigin || typeof mode.initialized !== 'boolean') {
+      throw new ManagementAuthenticationError('management_session_provider_invalid');
+    }
+    if (!mode.initialized) {
+      commitAuthMode(mode);
+      token.set(null);
+      restoreSession({ success: false });
+      return mode;
+    }
   }
   let result: LoginResponse;
   try {

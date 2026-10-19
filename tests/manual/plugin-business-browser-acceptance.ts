@@ -1,3 +1,5 @@
+import { prepareManagementInitialization, initializeManagementAccount } from '../helpers/management-initialization';
+import { pluginStateFixturePath } from '../helpers/plugin-state-fixture';
 /**
  * Real browser acceptance against the current dist, never an existing deployment.
  * Run: bun tests/manual/plugin-business-browser-acceptance.ts --evidence-dir /tmp/bungee-browser
@@ -71,27 +73,14 @@ async function get(path: string): Promise<any> {
   assert.equal(response.status(), 200, `${path}: ${response.status()} ${text}`);
   return JSON.parse(text);
 }
-async function mutateReady(path: string, body: unknown) {
-  const init = { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) };
-  let last: any;
-  await waitUntil(async () => {
-    const result = await raw(path, init);
-    last = { status: result.response.status, body: result.body };
-    if (result.response.status === 202) return true;
-    const payload = result.body as any;
-    assert(result.response.status === 503 && payload.error === 'control_recovering'
-      && ['admission_recovering', 'retired_pending', 'lease_margin'].includes(payload.reason), JSON.stringify(last));
-    return false;
-  }, `mutation admission did not clear: ${path}`, 45_000).catch(error => { throw new Error(`${cleanError(error)} last=${JSON.stringify(last)}`); });
-}
 async function publication(revision?: number, authenticated = false) {
   const state = await waitForAuthPublication({ base: management, revision, timeoutMs: 45_000,
     childExited: () => master!.child.exitCode !== null || master!.child.signalCode !== null,
     childDiagnostic: () => ({ pid: master!.child.pid, exitCode: master!.child.exitCode }),
-    ...(authenticated ? { fetch: async (input: any, init: any) => {
+    ...(authenticated ? { fetch: Object.assign(async (input: string | URL | Request) => {
       const response = await context!.request.get(String(input), { timeout: 10_000 });
-      return new Response(await response.body(), { status: response.status(), headers: response.headers() });
-    } } : {}),
+      return new Response(Uint8Array.from(await response.body()), { status: response.status(), headers: response.headers() });
+    }, { preconnect: () => {} }) } : {}),
   });
   assert.equal(state.workers.length, 2);
   await recordOwnedWorkers(master!, state.workers);
@@ -129,7 +118,7 @@ async function saveAliases(expected: any[]) {
 }
 try {
   fixture = await createGatewayFixture({ prefix: 'models-dev-gateway', plugins: ['models-dev', 'token-metering', 'token-stats', 'model-mapping'] });
-  for (const name of ['local-accounts', 'key-access', 'token-budget']) {
+  for (const name of ['user-auth', 'key-access', 'token-budget']) {
     await cp(resolve(`packages/core/dist/plugins/${name}`), join(fixture.pluginsPath, name), { recursive: true, errorOnExist: true });
   }
   lease = await reservePortBlock();
@@ -167,8 +156,10 @@ try {
   });
   assert.equal(settings.response.status, 200, settings.text);
   const password = `Browser-${randomBytes(12).toString('hex')}!`;
-  await mutateReady('/api/plugins/local-accounts/enable', { expected_revision: initial.revision + 1, mutation_id: randomUUID(),
-    managementSetup: { username: 'browser-owner', password, passwordConfirmation: password } });
+  await stopOwnedMaster(master); master = undefined;
+  const prepared = await prepareManagementInitialization(fixture.configDbPath, fixture.pluginsPath);
+  master = await spawnMaster(fixture, lease, owned => { master = owned; }, 'debug');
+  await initializeManagementAccount(management, prepared.code, 'browser-owner', password);
   const denied = await fetch(management + '/api/config', { signal: AbortSignal.timeout(5000) });
   assert.equal(denied.status, 401, 'account mode must reject anonymous management');
   await denied.body?.cancel();
@@ -201,12 +192,12 @@ try {
     assert.equal(result.status(), 200, await result.text());
     csrf = (await result.json()).csrfToken;
     assert(csrf && (await context!.cookies()).some(cookie => cookie.httpOnly), 'real cookie session was not created');
-    assert.equal((await get('/api/plugins/local-accounts/control/self')).administrator.username, 'browser-owner');
+    assert.equal((await get('/api/plugins/user-auth/control/self')).administrator.username, 'browser-owner');
     await publication(initial.revision + 2, true);
     await navigate('models-dev', '/catalog/status', 'models-dev-settings');
     await page!.getByTestId('models-dev-interval').waitFor();
   });
-  assert(csrf, 'browser login failed; dependent steps require a real authenticated session');
+  assert(steps.at(-1)?.status === 'passed' && csrf, 'browser login failed; dependent steps require a real authenticated session');
   await step('models-dev-settings-boundaries-and-save', async () => {
     const before = await get('/api/plugins/models-dev/control/catalog/status');
     assert.equal(await page!.getByTestId('models-dev-interval').inputValue(), '24');
@@ -299,7 +290,7 @@ try {
     await waitUntil(async () => { status = await get('/api/plugins/models-dev/control/catalog/status');
       return status.state === 'ready' && !status.refreshing && status.modelCount > 0 && status.providerCount > 0;
     }, 'real models.dev refresh did not become ready', 65_000);
-    const read = new Database(fixture!.configDbPath, { readonly: true });
+    const read = new Database(pluginStateFixturePath(fixture!.configDbPath), { readonly: true });
     try {
       const rows = read.query('SELECT key, payload FROM plugin_communication_records WHERE namespace = ? ORDER BY key').all('models-dev') as any[];
       const metaRow = rows.find(row => row.key.endsWith(`:${status.version}:m`));

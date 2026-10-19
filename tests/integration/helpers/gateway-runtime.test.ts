@@ -197,6 +197,7 @@ test('waits for each controlled READY signal before sampling worker identity', a
   worker.unref();
   try {
     const identity = await captureReadyWorkerIdentity(worker, workerInstanceId);
+    if (worker.pid === undefined) throw new Error('ready worker has no PID');
     expect(identity.pid).toBe(worker.pid);
     expect(identity.processInstanceId).toBe(workerInstanceId);
     expect(await probeProcessIdentity(identity)).toBe('exact');

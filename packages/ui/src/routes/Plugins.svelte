@@ -96,36 +96,11 @@
     return Array.from(caps);
   }
 
-  // Only enabled plugins expose their settings and contributed pages.
-  function getPluginActions(
-    plugin: Plugin
-  ): Array<{ kind: 'config' | 'page'; label: string; href: string }> {
-    if (!plugin.enabled) return [];
-    const c = plugin.metadata?.contributes;
-    const actions: Array<{ kind: 'config' | 'page'; label: string; href: string }> = [];
-
-    // Page action (rare; first nav contribution wins)
-    const navItems = c?.navigation ?? [];
-    const firstNavPath = navItems[0]?.path;
-    if (firstNavPath) {
-      actions.push({
-        kind: 'page',
-        label: $_('plugins.capability.page'),
-        href: `/#/extensions/${plugin.name}${firstNavPath}`,
-      });
-    }
-
-    // Config action — preferred CTA; pushed last so it ends up primary
-    const settingsPath = c?.settings || plugin.metadata?.ui?.settings;
-    if (settingsPath) {
-      actions.push({
-        kind: 'config',
-        label: $_('plugins.settings'),
-        href: `/#/plugins/${plugin.name}${settingsPath}`,
-      });
-    }
-
-    return actions;
+  // Business pages belong to the main navigation; plugin cards expose settings only.
+  function getPluginSettings(plugin: Plugin): string | null {
+    if (!plugin.enabled) return null;
+    const path = plugin.metadata?.contributes?.settings || plugin.metadata?.ui?.settings;
+    return path ? `/#/plugins/${plugin.name}${path}` : null;
   }
 
   const filterOptions = $derived($isLoading ? [] : [
@@ -258,7 +233,7 @@
         {@const caps = capabilitiesOf(plugin)}
         {@const blockedReason = activationBlockedReason(plugin, pluginDisplayName, $_)}
         {@const dependencies = Object.keys(plugin.dependencies ?? {})}
-        {@const actions = getPluginActions(plugin)}
+        {@const settingsHref = getPluginSettings(plugin)}
         {@const displayName = getPluginText(plugin.metadata?.name, plugin.name, $_) || plugin.name}
         {@const description = getPluginText(plugin.metadata?.description, plugin.name, $_)}
         {@const versionLabel = plugin.version && plugin.version !== 'unknown' ? `v${plugin.version}` : $_('plugins.unversioned')}
@@ -337,28 +312,11 @@
                 </span>
               </div>
 
-              {#if actions.length > 0}
-                <div class="flex items-center gap-1">
-                  {#each actions as action, i (action.kind)}
-                    {@const isPrimary = i === actions.length - 1}
-                    <a
-                      href={action.href}
-                      class={isPrimary ? 'nx-btn-primary nx-btn-sm' : 'nx-btn-ghost nx-btn-sm'}
-                    >
-                      {#if action.kind === 'config'}
-                        <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2">
-                          <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                          <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                        </svg>
-                      {:else if action.kind === 'page'}
-                        <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="1.8">
-                          <path stroke-linecap="round" stroke-linejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                        </svg>
-                      {/if}
-                      {action.label}
-                    </a>
-                  {/each}
-                </div>
+              {#if settingsHref}
+                <a href={settingsHref} class="nx-btn-primary nx-btn-sm">
+                  <PluginIcon icon="settings" sizeClass="h-3 w-3" />
+                  {$_('plugins.settings')}
+                </a>
               {/if}
             </div>
           </div>

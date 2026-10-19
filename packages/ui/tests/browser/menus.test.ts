@@ -1,7 +1,7 @@
 import { test } from 'bun:test';
 import { chromium, expect, type Page, type Route } from 'playwright/test';
 import { mkdirSync } from 'node:fs';
-import { BUILTIN_MENU_PAGES, type MenuLayout, type MenuPage, type MenuSnapshot } from '@jeffusion/bungee-types';
+import { BUILTIN_MENU_PAGES, type MenuLayout, type MenuNode, type MenuPage, type MenuSnapshot } from '@jeffusion/bungee-types';
 import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
@@ -32,8 +32,8 @@ test('menu editor saves, reloads, preserves conflicted drafts, guards navigation
     const iconBatches: string[][] = [];
     await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
       const url = new URL(route.request().url()), json = (value: unknown) => route.fulfill({ json: value });
-      if (url.pathname === '/api/auth/mode') return json({ mode: 'plugin', publicOrigin: url.origin, provider: { name: 'local-accounts', loginComponent: 'LocalAccountsLogin' } });
-      if (url.pathname === '/api/auth/verify') return json({ mode: 'plugin', success: true, subject: { id: 'editor', provider: 'local-accounts' }, csrfToken: 'test-csrf' });
+      if (url.pathname === '/api/auth/mode') return json({ mode: 'plugin', initialized: true, publicOrigin: url.origin, provider: { name: 'user-auth', loginComponent: 'UserAuthLogin' } });
+      if (url.pathname === '/api/auth/verify') return json({ mode: 'plugin', success: true, subject: { id: 'editor', provider: 'user-auth' }, csrfToken: 'test-csrf' });
       if (url.pathname === '/api/plugins') return json([]);
       if (url.pathname === '/api/config/runtime') return json(configuration);
       if (url.pathname === '/api/config') return json({ revision: 1, content_hash: configuration.content_hash, config: configuration.config });
@@ -223,7 +223,7 @@ test('disabled plugins disappear when menu refresh fails and recover their saved
     let enabled = true, menuUnavailable = false, failedReads = 0, writes = 0;
     const plugin: MenuPage = { id: 'plugin:test:%2Fpage', label: 'Test page', href: '/#/extensions/test/page',
       source: 'plugin', pluginName: 'test', defaultIcon: 'lucide:puzzle', available: true };
-    const snapshot = menuSnapshot();
+    const snapshot = {...menuSnapshot()};
     snapshot.catalog = [...snapshot.catalog, plugin];
     snapshot.layout = [{ kind: 'page', pageId: plugin.id, visible: true, icon: 'tabler:home' }, ...snapshot.layout];
     await page.route('**/api/**', route => {
@@ -280,10 +280,10 @@ test('compact menu actions support keyboard reordering, reparenting, validation,
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
     await page.addInitScript(() => localStorage.setItem('locale', 'en'));
     const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
-    const initial = menuSnapshot();
+    const initial = {...menuSnapshot()};
     initial.layout = initial.layout.map(node => node.kind === 'page' && node.pageId === 'builtin:services' ? { ...node, icon: 'tabler:home' } : node);
     const configuration = configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null, retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 }));
-    let saved: MenuLayout | null = null;
+    const captured: {layout: MenuLayout | null} = {layout: null};
     await page.route('**/api/**', route => {
       const request = route.request(), path = new URL(request.url()).pathname, json = (value: unknown) => route.fulfill({ json: value });
       if (path === '/api/auth/mode') return json({ mode: 'anonymous', publicOrigin: runtime.origin });
@@ -292,7 +292,7 @@ test('compact menu actions support keyboard reordering, reparenting, validation,
       if (path === '/api/config/runtime') return json(configuration);
       if (path === '/api/ui/icons/data') return fulfillMenuIcons(route);
       if (path === '/api/ui/menus') {
-        if (request.method() === 'PUT') { saved = request.postDataJSON().layout; return json({ ...initial, layout: saved, revision: 2 }); }
+        if (request.method() === 'PUT') { captured.layout = request.postDataJSON().layout; return json({ ...initial, layout: captured.layout, revision: 2 }); }
         return json(initial);
       }
       return json({});
@@ -346,7 +346,7 @@ test('compact menu actions support keyboard reordering, reparenting, validation,
       (element as HTMLElement).click();
       (document.querySelector('[data-testid="menus-save"]') as HTMLButtonElement).click();
     });
-    await expect(page.getByTestId('confirmation-cancel')).toBeVisible(); expect(saved).toBeNull();
+    await expect(page.getByTestId('confirmation-cancel')).toBeVisible(); expect(captured.layout).toBeNull();
     await closeDialogWithEscape(page);
     await expect(editor.getByRole('button', { name: 'Page actions', exact: true })).toBeFocused();
     await moveTo('System');
@@ -383,8 +383,8 @@ test('compact menu actions support keyboard reordering, reparenting, validation,
     await expect(system).toHaveCount(0); await expect(editor.getByRole('button', { name: 'Add group', exact: true })).toBeFocused();
     for (const id of ['builtin:configuration', 'builtin:plugins', 'builtin:menus']) await expect(row(id).getByRole('switch')).not.toBeChecked();
     await save.click(); await expect(save).toBeDisabled();
-    expect(saved?.filter(node => node.kind === 'page')).toHaveLength(7);
-    expect(new Set(saved?.map(node => node.kind === 'page' ? node.pageId : node.id)).size).toBe(7);
+    expect(captured.layout?.filter(node => node.kind === 'page')).toHaveLength(7);
+    expect(new Set(captured.layout?.map(node => node.kind === 'page' ? node.pageId : node.id)).size).toBe(7);
     for (const width of [1440, 768, 390, 320]) {
       await page.setViewportSize({ width, height: 1000 });
       await expect.poll(() => editor.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
@@ -404,9 +404,10 @@ test('menu drag feedback supports boundaries and groups, while disabled plugin p
     const inactiveRoot = { kind: 'page', pageId: 'plugin:inactive:%2Froot', visible: false, icon: 'tabler:home' } as const;
     const inactiveChild = { ...inactiveRoot, pageId: 'plugin:inactive:%2Fchild' };
     const pluginPage = (id: string, available: boolean): MenuPage => ({ id, label: id, href: '/#/extensions/inactive/' + id.split('%2F')[1], source: 'plugin', pluginName: 'inactive', defaultIcon: 'lucide:puzzle', available });
-    let snapshot = menuSnapshot(), saved: MenuLayout | null = null;
+    let snapshot = {...menuSnapshot()};
+    const captured: {layout: MenuLayout | null} = {layout: null};
     snapshot = { ...snapshot, catalog: [...snapshot.catalog, pluginPage(inactiveRoot.pageId, false), pluginPage(inactiveChild.pageId, false)],
-      layout: snapshot.layout.flatMap(node => node.kind === 'group' ? [{ ...node, children: [node.children[0], inactiveChild, ...node.children.slice(1)] }]
+      layout: snapshot.layout.flatMap<MenuNode>(node => node.kind === 'group' ? [{ ...node, children: [node.children[0], inactiveChild, ...node.children.slice(1)] }]
         : node.pageId === 'builtin:routes' ? [node, inactiveRoot] : [node]) };
     snapshot.layout = [...snapshot.layout, { kind: 'group', id: 'group:other', title: 'Other', visible: true, children: [] }];
     await page.route('**/api/**', route => {
@@ -416,7 +417,7 @@ test('menu drag feedback supports boundaries and groups, while disabled plugin p
       if (path === '/api/plugins') return json([]);
       if (path === '/api/ui/icons/data') return fulfillMenuIcons(route);
       if (path === '/api/ui/menus') {
-        if (route.request().method() === 'PUT') { saved = route.request().postDataJSON().layout; snapshot = { ...snapshot, layout: saved!, revision: snapshot.revision + 1 }; }
+        if (route.request().method() === 'PUT') { captured.layout = route.request().postDataJSON().layout; snapshot = { ...snapshot, layout: captured.layout!, revision: snapshot.revision + 1 }; }
         return json(snapshot);
       }
       return json({});
@@ -496,8 +497,8 @@ test('menu drag feedback supports boundaries and groups, while disabled plugin p
     await expect(name).toBeFocused(); await name.fill('Operations'); await name.press('Enter');
     await row('group:system').getByRole('switch').uncheck(); await save.click();
     await expect(page.getByTestId('menus-status')).toHaveText('Menu layout saved.'); await expect(save).toBeDisabled();
-    expect(saved?.find(node => node.kind === 'page' && node.pageId === inactiveRoot.pageId)).toEqual(inactiveRoot);
-    const storedGroup = saved?.find(node => node.kind === 'group' && node.id === 'group:system');
+    expect(captured.layout?.find(node => node.kind === 'page' && node.pageId === inactiveRoot.pageId)).toEqual(inactiveRoot);
+    const storedGroup = captured.layout?.find(node => node.kind === 'group' && node.id === 'group:system');
     expect(storedGroup?.kind === 'group' && storedGroup.children.find(node => node.pageId === inactiveChild.pageId)).toEqual(inactiveChild);
     const savedOrder = await rootOrder();
     await beginDrag('builtin:dashboard'); await hoverRow('group:other', .5); await page.keyboard.press('Escape'); await page.mouse.up();

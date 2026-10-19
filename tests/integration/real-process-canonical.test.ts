@@ -92,7 +92,8 @@ test('port allocation skips a broker-retained block returned by the operating sy
   const retained = makeTestPortBlock(first.port!);
   expect(claimTestPortBlock(retained)).toBeTrue();
   // Return a real listener in the retained range on the first allocation only.
-  const listener = spyOn(Bun, 'serve').mockImplementationOnce(() => first);
+  const httpRuntime: { serve: typeof Bun.serve<undefined> } = Bun;
+  const listener = spyOn(httpRuntime, 'serve').mockImplementationOnce(() => first);
   let lease: PortLease | undefined;
   try {
     lease = await reservePortBlock();
@@ -1700,7 +1701,7 @@ describe.serial('A core lifecycle', () => {
     expect(firstExit.code !== null || firstExit.signal !== null).toBeTrue();
     // The orphan ingress still holds the serving instance lock after master death.
     const {recoverOffline} = await import('../../packages/core/src/master-runtime/offline-recovery');
-    await expect(recoverOffline(state.fixture.dbPath,{kind:'identity',plugin:'local-accounts',payload:{}})).rejects.toThrow('held');
+    await expect(recoverOffline(state.fixture.dbPath,{kind:'identity',plugin:'user-auth',payload:{}})).rejects.toThrow('held');
     await state.daemon.manager.start({ workers: '1', port: String(state.lease.base + 1) });
     state.second = state.daemon.spawned[1]?.child;
     if (state.second === undefined) throw new Error('takeover daemon child was not captured');

@@ -105,13 +105,13 @@ test('control APIs validate mapping targets against the models-dev catalog', asy
   expect(models).toContainEqual({ provider: 'deepseek', providerName: 'DeepSeek', model: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' });
   expect(await (await f.invoke('getPricingMappings')).json()).toEqual({ mappings: [] });
   expect((await f.invoke('configurePricingMappings', 'PUT', mappings)).status).toBe(200);
-  expect(await f.storage.get(PRICE_MODEL_MAPPINGS_KEY)).toEqual(mappings);
+  expect(await f.storage.get<typeof mappings>(PRICE_MODEL_MAPPINGS_KEY)).toEqual(mappings);
   for (const value of [[{ ...mappings[0], model: 'missing-price' }], [{ ...mappings[0], provider: 'unknown' }], [mappings[0], mappings[0]], [{}]]) {
     expect((await f.invoke('configurePricingMappings', 'PUT', value)).status).toBe(400);
-    expect(await f.storage.get(PRICE_MODEL_MAPPINGS_KEY)).toEqual(mappings);
+    expect(await f.storage.get<typeof mappings>(PRICE_MODEL_MAPPINGS_KEY)).toEqual(mappings);
   }
   expect((await f.invoke('configurePricingMappings', 'PUT', [])).status).toBe(200);
-  expect(await f.storage.get(PRICE_MODEL_MAPPINGS_KEY)).toEqual([]);
+  expect(await f.storage.get<typeof mappings>(PRICE_MODEL_MAPPINGS_KEY)).toEqual([]);
 });
 
 test('one pricing reader sees alias edits and removal without a catalog refresh; settlement is pinned', async () => {
@@ -155,5 +155,5 @@ test('edits and deletions validate only changed targets', async () => {
   expect((await f.invoke('configurePricingMappings', 'PUT', [{ ...mappings[0]!, source: 'new-alias' }])).status).toBe(200);
   expect((await f.invoke('configurePricingMappings', 'PUT', [{ ...mappings[0]!, source: 'bad-alias', model: 'missing-price' }])).status).toBe(400);
   expect((await f.invoke('configurePricingMappings', 'PUT', [{ ...mappings[0]!, source: 'bad-provider', provider: 'unknown' }])).status).toBe(400);
-  expect(await f.storage.get(PRICE_MODEL_MAPPINGS_KEY)).toEqual([{ ...mappings[0]!, source: 'new-alias' }]);
+  expect(await f.storage.get<typeof mappings>(PRICE_MODEL_MAPPINGS_KEY)).toEqual([{ ...mappings[0]!, source: 'new-alias' }]);
 });

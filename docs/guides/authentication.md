@@ -1,26 +1,45 @@
 # 管理认证与访问控制使用指南
 
-Bungee 是个人反向代理。基础功能是 Route、Service 和上游转发；管理入口默认匿名，代理路由默认公开。需要限制访问时，在插件中心分别启用“管理认证”和“访问控制”。两者独立，Route 与 Service 编辑器不配置认证。
+Bungee 是个人反向代理。基础功能是 Route、Service 和上游转发；管理入口默认匿名，代理路由默认公开。需要限制访问时，按下文初始化用户认证，并在插件中心按需启用“访问控制”。两者独立，Route 与 Service 编辑器不配置认证。
 
 ## 初始化
 
 先执行 `bungee init`，再执行 `bungee start`。初始化创建 SQLite 配置库和插件状态库，不生成凭证、不建立管理员。原生入口使用 `--initialize-config <配置库绝对路径>`。`BUNGEE_CONFIG_DB_PATH` 可指定配置库，初始化、启动和恢复必须使用同一路径。
 
-数据库要求符合[当前基线](../architecture/storage.md#数据库基线与升级)，配置不接受全局／路由 `auth` 字段。初始化后打开 Dashboard，按需启用管理认证和访问控制，在访问控制插件内创建 Key。
+数据库要求符合[当前基线](../architecture/storage.md#数据库基线与升级)，配置不接受全局／路由 `auth` 字段。未选择管理 provider 时可直接进入 Dashboard；需要保护管理入口时先完成下述本地授权。
 
 ## 管理认证
 
-插件 `local-accounts` 显示为“管理认证”。打开插件原有 switch，向导核对浏览器访问地址，首次建立一个管理员账号并确认密码；已存在管理员时验证该管理员。确认会话建立和发布结果后，管理入口使用账号会话。此功能没有成员、团队或角色设置。
+“用户认证”（`user-auth`）提供多用户管理、本地密码、Google、Microsoft、GitHub 及自定义 OIDC 连接及会话。首次初始化必须由部署服务器上的本地终端授权，不能在在线插件开关中建立账号。
 
-密码为 6–64 个字符，服务端使用 Argon2id 摘要。浏览器通过 HttpOnly、SameSite Cookie 保存会话，HTTPS 使用 Secure；Cookie 写请求校验 Origin 和 CSRF。会话默认空闲 30 分钟或建立 8 小时后失效，策略可在插件设置中调整，改密会撤销管理员所有会话。
+1. 停止整个实例，在本地交互终端执行：
 
-登录页面由当前管理认证插件提供登录内容；平台负责通用页面、验证登录后的会话并初始化管理界面。启用插件时请确保其 UI bundle 与当前 Bungee 版本匹配。启用向导收集插件所需的凭据并调用候选 provider；管理员建立和会话校验由插件实现。
+   ```sh
+   bungee recover --plugin user-auth --action issue-setup-code
+   ```
 
-认证模式下，桌面 Header 和移动端导航菜单提供“退出登录”；匿名模式不展示。平台负责登出确认（包含未保存修改提示），通过固定的 `POST /api/auth/logout` 委托当前插件撤销浏览器 Cookie 会话，再以 Cookie-only `GET /api/auth/verify` 确认会话已失效，才清空页面状态并返回登录页。登出失败保留当前页面和草稿并提示错误，不以清空前端状态冒充会话撤销。登录页没有额外刷新按钮，状态异常时直接刷新浏览器页面；Header 不展示认证方式徽标。
+   CLI 默认使用 `~/.bungee/data/bungee.db`；自定义位置用 `BUNGEE_CONFIG_DB_PATH`，与初始化、启动保持一致。命令要求 stdin、stdout 都是 TTY，运行中的实例或重定向输入会被拒绝。
+2. 宿主先持久化强制认证和 provider 选择，再生成 32 字节随机一次性码。码有效期为 30 分钟，只保存摘要；配置与插件状态数据库均确认关闭后，才在终端显示明文。未完成初始化时重新签发立即撤销旧码；账号已就绪后不能重新签发。
+3. 启动实例，使用公开管理地址访问 `/#/setup`，填写一次性码、账号、密码和确认密码。账号名为 1–64 个 ASCII 字符，只允许字母、数字和 `_ . @ -`，首字符必须为字母或数字，保存为小写。密码为 5–32 个 Unicode 字符，允许空格，不做裁剪。
+4. 初始化成功后回到登录页，以账号密码正常登录。初始化不创建会话；平台使用 Cookie-only `GET /api/auth/verify` 核验登录结果后，才初始化 Dashboard、导航与插件 API。
 
-CLI 可向 `POST /api/auth/login` 发送 `{username,password,transport:"bearer"}` 获取短期 Bearer 会话，然后通过管理命令的 `--token` 使用；CLI 不自动保存会话。
+所有有效登录均有相同的完整管理能力，没有角色授权。插件没有本地自助注册、注册开关、邮件或 MFA；初始化页面只接受本地签发的一次性码。
 
-停用管理认证需要当前有效管理员会话。切换完成后撤销会话并恢复匿名管理，管理员数据保留，重新启用时验证原管理员。已选择认证插件而插件故障或目录缺失时，管理入口拒绝访问，不自动恢复匿名；持久化的认证选择独立于当前插件目录。
+「用户管理」和「用户信息」提供独立菜单页面：前者创建、编辑、禁用用户、重置密码；后者查看当前用户资料、自行改密和验证绑定或解绑身份。「登录管理」位于用户认证插件的内置设置页，维护登录方式、人机验证和会话策略。第三方登录支持多个连接，必须显式配置 `BUNGEE_PUBLIC_ORIGIN`，支持 HTTP／HTTPS，生产环境建议使用 HTTPS。未知身份是否首次自动开户由一个插件级开关统一控制，默认关闭；开启后全部已启用连接接纳的身份都可建立拥有完整管理能力的账号，不按邮箱合并。连接本身没有开户覆盖项。
+
+添加第三方登录时，先选择提供商，再填写 Client ID 和 Client Secret；Microsoft 还需选择账号范围，指定组织时填写 Tenant ID。配置公开 Origin 后，创建弹窗显示回调地址，将其复制到提供商的应用配置中。自定义 OIDC 可填写 Issuer 或 Discovery URL 自动发现，也可手动配置端点。新连接默认关闭，保存后从列表启用，再通过正式登录入口验收；配置保存不代表真实提供商登录已经成功。提供商参数及协议限制见 [user-auth](../../plugins/user-auth/README.md#第三方登录与-turnstile)。
+
+Turnstile 默认关闭，设置 Site Key、Secret 和允许的 hostname 后可启用；开启后 Cookie 与 Bearer 的每次密码登录均需有效挑战，服务端验证失败或网络故障时拒绝登录。本地登录始终保留，详细配置与限制见 [user-auth](../../plugins/user-auth/README.md)。
+
+密码使用 Argon2id（64 MiB、3 次迭代）。浏览器会话使用 HttpOnly、SameSite=Strict Cookie，HTTPS 使用 Secure；Cookie 写请求校验 Origin 和 CSRF。会话默认空闲 30 分钟、绝对寿命 8 小时；空闲时间可设为 0，绝对寿命必须大于 0 且不超过 30 天。策略只影响新会话，已有会话保留创建时的策略。修改密码、禁用用户和绑定变更推进该用户 generation；本地重置和全局撤销推进实例会话代际；持久化时钟防止时间回拨让已过期凭据复活。
+
+登录和初始化内容由当前 provider 的原生组件提供，平台负责页面框架、路由、会话核验与登录后的初始化。组件必须与当前 Bungee 版本匹配；缺失或损坏时拒绝访问，不回退匿名。
+
+认证模式下，桌面 Header 和移动端导航菜单提供“退出登录”；匿名模式不展示。平台负责登出确认（包含未保存修改提示），通过固定的 `POST /api/auth/logout` 委托当前插件撤销浏览器 Cookie 会话，再以 Cookie-only `GET /api/auth/verify` 确认会话已失效，才清空页面状态并返回登录页。登出失败保留当前页面和草稿并提示错误，不以清空前端状态冒充会话撤销。
+
+CLI 可向 `POST /api/auth/login` 发送 `{username,password,transport:"bearer"}` 获取 Bearer 会话，再通过管理命令的 `--token` 使用；CLI 不自动保存会话，Bearer 与 Cookie 会话不可交换使用。Turnstile 启用时，密码登录还须提交 `turnstileToken`，不能借 Bearer 方式绕过。
+
+强制认证 guard 与 provider 选择持久化在配置库，在线停用、替换或导入都不能解除。唯一解除入口是停机、本地 TTY 执行 `bungee recover --plugin user-auth --action release-auth`；它保留身份数据，启动后恢复匿名管理。已选 provider 故障、状态损坏或目录缺失时保持保护。忘记账号密码时用离线 `reset`，它不改变强制认证状态；详见[离线恢复](offline-recovery.md)。
 
 ## 访问控制与 Key
 
@@ -44,7 +63,7 @@ CLI 可向 `POST /api/auth/login` 发送 `{username,password,transport:"bearer"}
 
 | 插件 | 效果与依赖 |
 | --- | --- |
-| `local-accounts`（管理认证） | 单管理员管理会话，与代理 Key 独立 |
+| `user-auth`（用户认证） | 多用户、本地密码、第三方登录与会话，与代理 Key 独立 |
 | `key-access`（访问控制） | Key 生命周期、受保护路由集合、每 Key 路由与最终模型范围 |
 | `key-rate-limit`（Key 请求限速） | 每 Key 的全实例速率和突发容量，依赖访问控制 |
 | `token-budget`（Key Token 预算） | 日／周／月／累计 Token 或 USD 额度，依赖访问控制、计量与统计定价服务 |
@@ -71,13 +90,15 @@ Key 限速或预算停用后，切换点之后的新请求取消对应限制，�
 | --- | --- |
 | `BUNGEE_MANAGEMENT_HOST` | 管理监听地址，默认本地；对外可设置为 `0.0.0.0` |
 | `BUNGEE_MANAGEMENT_PORT` | 管理端口，默认 `8089` |
-| `BUNGEE_PUBLIC_ORIGIN` | 浏览器访问的公开 HTTPS Origin；本地允许 loopback HTTP |
+| `BUNGEE_PUBLIC_ORIGIN` | 浏览器访问的固定 HTTP／HTTPS Origin；生产环境建议 HTTPS |
 | `BUNGEE_TRUSTED_MANAGEMENT_PROXIES` | 可信代理精确 IP，逗号分隔；默认不信任转发头 |
 
-对外部署使用 HTTPS 反向代理，管理入口是否要求登录由管理认证插件决定。可信代理必须覆盖 `X-Forwarded-For` 为一个有效客户端 IP；含多个地址的链不作为登录限速来源。未配置时使用实际连接来源，客户端伪造转发头无效。
+对外部署建议使用 HTTPS 反向代理，管理入口是否要求登录由管理认证插件决定。可信代理必须覆盖 `X-Forwarded-For` 为一个有效客户端 IP；含多个地址的链不作为登录限速来源。未配置时使用实际连接来源，客户端伪造转发头无效。
 
 ## 恢复与备份
 
-无法登录或预算账务待恢复时，先停止整个实例，按[离线恢复指南](offline-recovery.md)调用对应插件能力。恢复不会自动启用插件或改变认证模式。
+无法登录或预算账务待恢复时，先停止整个实例，按[离线恢复指南](offline-recovery.md)调用对应插件能力。身份重置不改变强制认证；签发初始化码会先持久化强制认证，解除则必须显式执行 `release-auth`。
 
 配置导出不包含 Key、管理员、会话或预算运行账本。备份完整状态时遵循[停机备份](deployment.md#backup)，恢复后核验凭据撤销与账务状态。
+
+用户认证不读取、导入、迁移或清理旧账号、Cookie 或 `local-accounts` 命名空间。含已删除插件激活记录的配置会报错，不能借此匿名启动。

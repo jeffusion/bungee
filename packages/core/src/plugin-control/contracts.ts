@@ -151,9 +151,12 @@ export interface PluginControl {
 export type ControlApiTable = readonly ControlApiDeclaration[];
 export type ControlRpcTable = readonly ControlRpcDeclaration[];
 
-export interface OfflineRecoveryContext { readonly durableState: PluginDurableState }
+export interface OfflineRecoveryContext { readonly durableState: PluginDurableState; readonly now?: () => number }
 export interface OfflineRecoveryCapability {
+  /** Identity recovery is terminal-only; structured stdin/files support plugin-state only. */
   readonly kind: 'identity' | 'plugin-state';
+  readonly prompts?: readonly { readonly name: string; readonly label: string; readonly secret: boolean }[];
+  prepareInitialization?(context: OfflineRecoveryContext): Promise<{ code: string; expiresAt: number }>;
   recover(input: unknown, context: OfflineRecoveryContext): unknown | Promise<unknown>;
 }
 

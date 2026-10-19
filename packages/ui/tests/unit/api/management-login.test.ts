@@ -7,7 +7,7 @@ import { isManagementLoginStaleError } from '../../../src/plugin-sdk/management-
 
 const originalFetch = globalThis.fetch;
 const contexts: Array<{ dispose(): void }> = [];
-const providerMode = { mode: 'plugin' as const, provider: { name: 'local-accounts' }, publicOrigin: 'https://management.example' };
+const providerMode = { mode: 'plugin' as const, initialized: true, provider: { name: 'user-auth' }, publicOrigin: 'https://management.example' };
 
 function setup(): void {
   authMode.set(providerMode);
@@ -29,7 +29,7 @@ function successfulFetch(calls: string[] = []): void {
     calls.push(url);
     if (url === '/api/auth/login') return Response.json({ accepted: true });
     if (url === '/api/auth/mode') return Response.json(providerMode);
-    if (url === '/api/auth/verify') return Response.json({ success: true, mode: 'plugin', subject: { id: 'admin', provider: 'local-accounts' }, csrfToken: 'csrf' });
+    if (url === '/api/auth/verify') return Response.json({ success: true, mode: 'plugin', subject: { id: 'admin', provider: 'user-auth' }, csrfToken: 'csrf' });
     throw new Error(`Unexpected request ${url}`);
   }) as typeof fetch;
 }
@@ -103,7 +103,7 @@ test('late mode response after logout or a newer handoff cannot restore a sessio
     globalThis.fetch = ((input) => {
       if (String(input) === '/api/auth/login') return Promise.resolve(Response.json({ accepted: true }));
       if (String(input) === '/api/auth/mode') return new Promise<Response>(resolve => { resolveMode = resolve; });
-      if (String(input) === '/api/auth/verify') return Promise.resolve(Response.json({ success: true, mode: 'plugin', subject: { id: 'admin', provider: 'local-accounts' } }));
+      if (String(input) === '/api/auth/verify') return Promise.resolve(Response.json({ success: true, mode: 'plugin', subject: { id: 'admin', provider: 'user-auth' } }));
       throw new Error(`Unexpected request ${String(input)}`);
     }) as typeof fetch;
     const { context: capability } = context();
@@ -155,7 +155,7 @@ test('a successful verify arriving after a competing authentication handoff is i
   const completion = capability.complete();
   await verifyStarted;
   const endNewHandoff = beginAuthenticationHandoff();
-  resolveVerify(Response.json({ success: true, mode: 'plugin', subject: { id: 'admin', provider: 'local-accounts' } }));
+  resolveVerify(Response.json({ success: true, mode: 'plugin', subject: { id: 'admin', provider: 'user-auth' } }));
   await expectStale(completion);
   endNewHandoff();
   expect(get(isAuthenticated)).toBe(false);
@@ -173,7 +173,7 @@ test('legacy bearer to cookie login to mode/verify commit never sends old bearer
     requests.push({ url, init });
     if (url === '/api/auth/login') return Response.json({ accepted: true });
     if (url === '/api/auth/mode') return Response.json(providerMode);
-    if (url === '/api/auth/verify') return Response.json({ success: true, mode: 'plugin', subject: { id: 'admin', provider: 'local-accounts' } });
+    if (url === '/api/auth/verify') return Response.json({ success: true, mode: 'plugin', subject: { id: 'admin', provider: 'user-auth' } });
     throw new Error(`Unexpected request ${url}`);
   }) as typeof fetch;
   let completed = 0;
@@ -186,7 +186,7 @@ test('legacy bearer to cookie login to mode/verify commit never sends old bearer
     expect(headers.has('authorization')).toBe(false);
     expect(headers.has('x-csrf-token')).toBe(false);
     expect(init?.credentials).toBe('same-origin');
-    if (url === '/api/auth/login') expect(headers.get('x-bungee-auth-provider')).toBe('local-accounts');
+    if (url === '/api/auth/login') expect(headers.get('x-bungee-auth-provider')).toBe('user-auth');
   }
   expect(getToken()).toBeNull();
   expect(get(isAuthenticated)).toBe(true);
@@ -198,7 +198,7 @@ test('legacy verifyToken keeps its bearer transport for existing SDK callers', a
   let headers: Headers | undefined;
   globalThis.fetch = (async (_input, init) => {
     headers = new Headers(init?.headers);
-    return Response.json({ success: true, mode: 'plugin', subject: { id: 'admin', provider: 'local-accounts' } });
+    return Response.json({ success: true, mode: 'plugin', subject: { id: 'admin', provider: 'user-auth' } });
   }) as typeof fetch;
   await verifyToken();
   expect(headers?.get('authorization')).toBe('Bearer legacy-sdk-token');
@@ -239,7 +239,7 @@ test('concurrent and repeated complete share one verification and protected init
   expect(initialized).toBe(1);
   expect(navigated).toBe(1);
   expect(get(isAuthenticated)).toBe(true);
-  expect(get(subject)).toEqual({ id: 'admin', provider: 'local-accounts' });
+  expect(get(subject)).toEqual({ id: 'admin', provider: 'user-auth' });
 });
 
 test('same provider mode refresh does not invalidate a page-scoped context', async () => {
@@ -384,4 +384,37 @@ test('endSession response cannot clear a session established while logout is pen
   await ending;
   expect(getToken()).toBe('new-session-token');
   expect(get(isAuthenticated)).toBe(true);
+});
+
+test('login interactions bind fixed endpoints to the selected provider without bearer or csrf credentials', async () => {
+  setup(); login('unrelated-token');
+  const calls: {url: string; init?: RequestInit}[] = [];
+  globalThis.fetch = (async (input, init) => {
+    calls.push({url: String(input), init});
+    return Response.json(String(input).endsWith('/options') ? {local: {enabled: true}, methods: []} : {authorizationUrl: 'https://identity.example/authorize', flowId: 'flow'});
+  }) as typeof fetch;
+  const created = context();
+  expect(await created.context.loginOptions<{local: {enabled: boolean}; methods: unknown[]}>()).toEqual({local: {enabled: true}, methods: []});
+  const input = {methodId: 'first', returnTo: '/#/', endpoint: '/unexpected', token: 'ignored'};
+  await created.context.beginLogin(input);
+  expect(calls.map(call => call.url)).toEqual(['/api/auth/login/options', '/api/auth/login/start']);
+  expect(calls[1]!.init?.body).toBe(JSON.stringify({methodId: 'first', returnTo: '/#/'}));
+  for (const call of calls) {
+    const headers = new Headers(call.init?.headers);
+    expect(headers.get('x-bungee-auth-provider')).toBe('user-auth');
+    expect(headers.has('authorization')).toBe(false); expect(headers.has('x-csrf-token')).toBe(false);
+    expect(call.init?.credentials).toBe('same-origin');
+  }
+  await expect(created.context.complete()).rejects.toThrow('management_login_not_completed');
+});
+
+test('late login options and start responses cannot outlive the provider page', async () => {
+  for (const endpoint of ['options', 'start'] as const) {
+    setup(); let resolve!: (response: Response) => void;
+    globalThis.fetch = Object.assign(() => new Promise<Response>(done => { resolve = done; }), {preconnect: originalFetch.preconnect});
+    const created = context();
+    const pending = endpoint === 'options' ? created.context.loginOptions() : created.context.beginLogin({methodId: 'first'});
+    created.dispose(); resolve(Response.json({authorizationUrl: 'https://identity.example', flowId: 'flow'}));
+    await expectStale(pending);
+  }
 });

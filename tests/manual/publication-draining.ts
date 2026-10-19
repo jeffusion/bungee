@@ -38,28 +38,33 @@ function ownedArtifact(path: string): string {
   return actual;
 }
 type Ownership = { state: string; database: string; databaseDevice: number; databaseInode: number; generation: string };
-let ownership: Ownership;
+let ownership: Ownership | undefined;
+function requireOwnership(): Ownership {
+  assert.ok(ownership, 'owned instance proof was not initialized');
+  return ownership;
+}
 const readRuntime = async (origin: string) => {
   const response = await fetch(`${origin}/api/config/runtime`); assert.equal(response.status, 200);
   return await response.json();
 };
 async function verifyOwnership() {
+  const owned = requireOwnership();
   const direct = await readRuntime(`http://${local.hostname}:${managementPort}`);
   const ui = await readRuntime(base);
   assert.equal(ui.revision, direct.revision); assert.equal(ui.content_hash, direct.content_hash);
-  const db = statSync(ownedArtifact(ownership.database));
+  const db = statSync(ownedArtifact(owned.database));
   assert.ok(db.isFile(), 'the dedicated helper database must be a real file');
-  assert.equal(db.dev, ownership.databaseDevice); assert.equal(db.ino, ownership.databaseInode);
+  assert.equal(db.dev, owned.databaseDevice); assert.equal(db.ino, owned.databaseInode);
   assert.ok(direct.workers.length > 0, 'the owned helper must have real serving worker descriptors');
   for (const worker of direct.workers) {
-    const path = ownedArtifact(resolve(ownership.state, 'runtime/workers', `${worker.worker_instance_id}.json`));
+    const path = ownedArtifact(resolve(owned.state, 'runtime/workers', `${worker.worker_instance_id}.json`));
     const marker = JSON.parse(readFileSync(path, 'utf8'));
     assert.equal(marker.schema, 'bungee-worker-descriptor-v1'); assert.equal(marker.role, 'worker');
     assert.equal(marker.phase, 'serving'); assert.equal(marker.evidence?.kind, 'ready');
-    assert.equal(marker.master_generation, ownership.generation);
+    assert.equal(marker.master_generation, owned.generation);
     assert.match(marker.descriptor_mac, /^hmac-sha256:[0-9a-f]{64}$/);
     for (const field of ['master_generation', 'worker_instance_id', 'boot_nonce', 'pid', 'revision', 'content_hash']) assert.equal(marker[field], worker[field]);
-    assert.ok(ui.workers.some((reported: any) => reported.worker_instance_id === marker.worker_instance_id && reported.boot_nonce === marker.boot_nonce && reported.master_generation === ownership.generation));
+    assert.ok(ui.workers.some((reported: any) => reported.worker_instance_id === marker.worker_instance_id && reported.boot_nonce === marker.boot_nonce && reported.master_generation === owned.generation));
   }
   return direct;
 }
@@ -185,22 +190,14 @@ try {
   const aggregate = structuredClone(snapshot.config);
   const existingRoute = aggregate.logical_configuration.routes.find((route: { path: string }) => route.path === '/publication-ui-drain');
   assert.equal(existingRoute, undefined, 'use a fresh owned test instance; never reuse or replace an unrelated route');
-  let setup;
-  if (existingRoute) {
-    const bound = aggregate.logical_configuration.services.find((service: { id: string }) => service.id === existingRoute.service_id);
-    assert.ok(bound?.endpoints.some((endpoint: { target: string }) => endpoint.target === upstreamTarget), 'existing probe must bind the intended local service');
-    const current = await json('/config/runtime');
-    setup = { operation_id: current.publication.operation.operation_id };
-  } else {
-    aggregate.logical_configuration.publication = { ...(aggregate.logical_configuration.publication ?? DEFAULT_PUBLICATION_POLICY), drain_timeout_ms: drainSeconds * 1000 };
-    const serviceId = crypto.randomUUID();
-    aggregate.logical_configuration.services.push({ id: serviceId, position: aggregate.logical_configuration.services.length, name: 'Local browser drain acceptance', plugins: [],
-    endpoints: [{ id: crypto.randomUUID(), position: 0, target: upstreamTarget, weight: 100, priority: 1, is_disabled: false, plugins: [] }] });
-    aggregate.logical_configuration.routes.push({ id: crypto.randomUUID(), position: aggregate.logical_configuration.routes.length, path: '/publication-ui-drain', service_id: serviceId, plugins: [] });
-    setup = await json('/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expected_revision: snapshot.revision, mutation_id: crypto.randomUUID(), aggregate }) });
-  }
+  aggregate.logical_configuration.publication = { ...(aggregate.logical_configuration.publication ?? DEFAULT_PUBLICATION_POLICY), drain_timeout_ms: drainSeconds * 1000 };
+  const serviceId = crypto.randomUUID();
+  aggregate.logical_configuration.services.push({ id: serviceId, position: aggregate.logical_configuration.services.length, name: 'Local browser drain acceptance', plugins: [],
+  endpoints: [{ id: crypto.randomUUID(), position: 0, target: upstreamTarget, weight: 100, priority: 1, is_disabled: false, plugins: [] }] });
+  aggregate.logical_configuration.routes.push({ id: crypto.randomUUID(), position: aggregate.logical_configuration.routes.length, path: '/publication-ui-drain', service_id: serviceId, plugins: [] });
+  const setup = await json('/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expected_revision: snapshot.revision, mutation_id: crypto.randomUUID(), aggregate }) });
   receiptPath = resolve(evidence, 'restore-receipt.json');
-  const receipt = { schema: 'publication-owned-restore-v1', ownership, originalConfig: snapshot.config, expectedConfig: aggregate,
+  const receipt = { schema: 'publication-owned-restore-v1', ownership: requireOwnership(), originalConfig: snapshot.config, expectedConfig: aggregate,
     expectedRevision: setup.revision, operationId: setup.operation_id };
   writeFileSync(receiptPath, JSON.stringify(receipt, null, 2));
   const setupTerminal = await waitTerminal(setup.operation_id);
@@ -303,7 +300,7 @@ try {
   assert.equal(await page.getByTestId('publication-retry-button').count(), 0);
   await page.screenshot({ path: resolve(evidence, 'desktop-stream-completed-converged.png'), animations: 'disabled' });
   results.push({ accepted, active: active.publication, waitingStopped: waitingStopped.publication, streamBytes: bytes, streamCompleted: streamEnded, terminal });
-  results.push({ stage: 'restore-ready', receiptPath, ownershipProof: resolve(ownership.state, 'runtime/workers', `${finalRuntime.workers[0].worker_instance_id}.json`) });
+  results.push({ stage: 'restore-ready', receiptPath, ownershipProof: resolve(requireOwnership().state, 'runtime/workers', `${finalRuntime.workers[0].worker_instance_id}.json`) });
   await context.close();
   caseCompleted = true;
 } finally {

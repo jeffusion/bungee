@@ -5,7 +5,7 @@ import { privateRequestHeaders } from './headers';
 import { validateWebSocketRequest, type WebSocketBridge } from '../websocket';
 
 /** Pin the admitted worker for this connection; publication never migrates an open socket. */
-export async function forwardPublicWebSocket(request: Request, server: Bun.Server<any>, bridge: WebSocketBridge,
+export async function forwardPublicWebSocket(request: Request, server: Bun.Server<import('../websocket').WebSocketBridgeData>, bridge: WebSocketBridge,
   options: ForwardPublicRequestOptions, peer?: string): Promise<Response|undefined> {
   const invalid=validateWebSocketRequest(request);
   if (invalid) return invalid;

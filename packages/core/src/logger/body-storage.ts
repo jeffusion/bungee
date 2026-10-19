@@ -299,13 +299,4 @@ export class BodyStorageManager {
     const now = new Date();
     return now.toISOString().split('T')[0];
   }
-
-  /**
-   * 确保 bodies 目录存在
-   */
-  private ensureBodiesDir(): void {
-    if (!fs.existsSync(this.bodiesDir)) {
-      fs.mkdirSync(this.bodiesDir, { recursive: true });
-    }
-  }
 }

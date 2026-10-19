@@ -285,13 +285,4 @@ export class HeaderStorageManager {
     const now = new Date();
     return now.toISOString().split('T')[0];
   }
-
-  /**
-   * 确保 headers 目录存在
-   */
-  private ensureHeadersDir(): void {
-    if (!fs.existsSync(this.headersDir)) {
-      fs.mkdirSync(this.headersDir, { recursive: true });
-    }
-  }
 }

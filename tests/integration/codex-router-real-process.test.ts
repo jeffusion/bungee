@@ -1,3 +1,4 @@
+import WebSocket from '@bungee/ws-client';
 /**
  * Local acceptance: actual master + two supervised Bun workers, production plugins,
  * public ingress and canonical peer RPC. models.dev data and upstream protocols are
@@ -84,7 +85,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
   const pending = new Set<string>(), aborted = new Set<string>();
   const modelQueries: Array<{path: string; clientVersion: string | null; pid: number; etag: string | null}> = [];
   const accountQueries: string[] = [];
-  type ToolRoundTrip={firstRequestId?:string;followupRequestId?:string;wires?:Record<string,string>;outputs?:any[]};
+  type ToolRoundTrip={firstRequestId?:string;followupRequestId?:string;wires?:Record<string,string>;outputs?:Array<{callId:string;content:unknown}>};
   const cliToolRoundTrips=new Map<string,ToolRoundTrip>();
   let collaborationChildModel='org/chat';
   const collaborationCalls:string[]=[];
@@ -227,25 +228,26 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
           const exec=declared.find((tool:any)=>tool.parameters?.properties?.cmd);
           const patch=declared.find((tool:any)=>tool.parameters?.properties?.input && tool.description?.includes('Original input format:'));
           const echo=declared.find((tool:any)=>tool.parameters?.properties?.fixture_echo);
-          const roundTrip=cliToolRoundTrips.get(body.model) ?? {};
+          const roundTrip:ToolRoundTrip=cliToolRoundTrips.get(body.model) ?? {};
           cliToolRoundTrips.set(body.model,roundTrip);
-          roundTrip.outputs=anthropic?body.messages.flatMap((message:any)=>Array.isArray(message.content)?message.content:[])
+          const outputs:NonNullable<ToolRoundTrip['outputs']>=anthropic?body.messages.flatMap((message:any)=>Array.isArray(message.content)?message.content:[])
             .filter((part:any)=>part.type==='tool_result').map((part:any)=>({callId:part.tool_use_id,content:part.content}))
             :body.messages.filter((message:any)=>message.role==='tool').map((message:any)=>({callId:message.tool_call_id,content:message.content}));
-          const content=(id:string)=>JSON.stringify(roundTrip.outputs!.find(item=>item.callId===id)?.content);
+          roundTrip.outputs=outputs;
+          const content=(id:string)=>JSON.stringify(outputs.find(item=>item.callId===id)?.content);
           let requested:any[];
-          if(!roundTrip.outputs.length) {
+          if(!outputs.length) {
             roundTrip.firstRequestId=call.requestId;
             requested=[{id:'call_fixture_exec',tool:exec,arguments:{cmd:`cat fixture-patched.txt; printf '${CLI_EXEC_MARKER}\\n'`,login:false,yield_time_ms:1000,max_output_tokens:1000}}];
-          } else if(roundTrip.outputs.length===1) {
+          } else if(outputs.length===1) {
             if(!content('call_fixture_exec')?.includes('pending') || !content('call_fixture_exec')?.includes(CLI_EXEC_MARKER))return Response.json({error:'fixture_initial_read_missing'},{status:400});
             requested=[{id:'call_fixture_patch',tool:patch,arguments:{input:`*** Begin Patch\n*** Update File: fixture-patched.txt\n@@\n-pending\n+${CLI_PATCH_MARKER}\n*** End Patch\n`}},
               {id:'call_fixture_mcp',tool:echo,arguments:{fixture_echo:CLI_MCP_MARKER}}];
-          } else if(roundTrip.outputs.length===3) {
+          } else if(outputs.length===3) {
             if(!content('call_fixture_patch')?.includes('Success') || !content('call_fixture_mcp')?.includes(CLI_MCP_MARKER))return Response.json({error:'fixture_modification_or_mcp_missing'},{status:400});
             requested=[{id:'call_fixture_readback',tool:exec,arguments:{cmd:'cat fixture-patched.txt',login:false,yield_time_ms:1000,max_output_tokens:1000}}];
           } else {
-            if(roundTrip.outputs.length!==4 || !content('call_fixture_readback')?.includes(CLI_PATCH_MARKER))return Response.json({error:'fixture_readback_missing'},{status:400});
+            if(outputs.length!==4 || !content('call_fixture_readback')?.includes(CLI_PATCH_MARKER))return Response.json({error:'fixture_readback_missing'},{status:400});
             roundTrip.followupRequestId=call.requestId;
             return sse(anthropic?anthropicEvents():chatEvents());
           }
@@ -259,7 +261,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         }
         if ((path.endsWith('/chat/completions') || path.endsWith('/messages')) && JSON.stringify(body.messages).includes(CLI_TOOL_ROUNDTRIP)) {
           const anthropic=path.endsWith('/messages');
-          const cliToolRoundTrip=cliToolRoundTrips.get(body.model) ?? {};
+          const cliToolRoundTrip:ToolRoundTrip=cliToolRoundTrips.get(body.model) ?? {};
           cliToolRoundTrips.set(body.model,cliToolRoundTrip);
           if (!cliToolRoundTrip.firstRequestId) {
             const declared = body.tools.map((tool: any) => anthropic ? {...tool,parameters:tool.input_schema}:tool.function);
@@ -289,11 +291,12 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
           }
           cliToolRoundTrip.followupRequestId = call.requestId;
           if(!anthropic)expect(body.messages.find((message:any)=>message.tool_calls?.length)?.reasoning_content).toBe('fixture tool reasoning');
-          cliToolRoundTrip.outputs = anthropic ? body.messages.flatMap((message:any)=>Array.isArray(message.content)?message.content:[])
+          const outputs:NonNullable<ToolRoundTrip['outputs']> = anthropic ? body.messages.flatMap((message:any)=>Array.isArray(message.content)?message.content:[])
             .filter((block:any)=>block.type==='tool_result').map((block:any)=>({callId:block.tool_use_id,content:block.content}))
             : body.messages.filter((message: any) => message.role === 'tool').map((message: any) => ({callId: message.tool_call_id, content: message.content}));
-          const output=(id:string)=>JSON.stringify(cliToolRoundTrip.outputs!.find(item=>item.callId===id)?.content);
-          if(cliToolRoundTrip.outputs.length!==3 || !output('call_fixture_exec')?.includes(CLI_EXEC_MARKER)
+          cliToolRoundTrip.outputs=outputs;
+          const output=(id:string)=>JSON.stringify(outputs.find(item=>item.callId===id)?.content);
+          if(outputs.length!==3 || !output('call_fixture_exec')?.includes(CLI_EXEC_MARKER)
             || !output('call_fixture_patch')?.includes('Success') || !output('call_fixture_mcp')?.includes(CLI_MCP_MARKER)) {
             return Response.json({error:'fixture_tool_results_incomplete'}, {status:400});
           }
@@ -424,8 +427,8 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     const result=await fetch(`${management}/api/config`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({expected_revision:revision,mutation_id:randomUUID(),aggregate:invalid}),signal:AbortSignal.timeout(5000)});
     expect(result.status).toBe(422);
     expect((await result.json() as any).errors).toContainEqual({code:'invalid_value',path:'logical_configuration.routes[0].plugins[1].options.models[0].target',message:'Dispatch target requires an explicit receiving protocol'});
-    expect((await control('/api/config')).body.revision).toBe(revision);
-    expect((await control('/api/config/runtime')).body.publication.serving_revision).toBe(revision);
+    expect((await control('/api/config')).body).toMatchObject({revision});
+    expect((await control('/api/config/runtime')).body).toMatchObject({publication:{serving_revision:revision}});
   });
 
   test.skipIf(process.env.BUNGEE_CODEX_CLI_PROBE !== '1')('isolated installed CLI can generate through the public native model', async () => {
@@ -514,9 +517,10 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       for (const model of ['org/native', 'org/chat', 'org/anthropic']) for (const stream of [false, true]) {
         expect(await generateCatalogIdentity(model, stream)).toBe(clientEtag);
       }
-      for (const overrides of [
+      const overridesList: Record<string, string>[] = [
         {authorization: `Bearer ${otherToken}`}, {'chatgpt-account-id': 'another-account'}, {version: '0.160.1'}, {version: ''},
-      ]) expect(await generateCatalogIdentity('native-only', false, overrides)).toBeNull();
+      ];
+      for (const overrides of overridesList) expect(await generateCatalogIdentity('native-only', false, overrides)).toBeNull();
       expect(modelQueries.length - beforeQueries).toBe(1);
       const oldEtag = clientEtag;
       nativeCatalogModel = {...original, display_name: 'Updated directory 中文🙂'};

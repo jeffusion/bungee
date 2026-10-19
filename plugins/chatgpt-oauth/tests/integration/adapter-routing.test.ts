@@ -35,8 +35,7 @@ async function forwardSearch(options: {
     : JSON.stringify({ error: 'upstream search failure' });
   try {
     for (const scope of options.combined ? ['route', 'service', 'upstream'] as const : ['upstream'] as const) {
-      await registry.createInstance({ type: scope, routeId,
-        ...(scope === 'upstream' ? { upstreamId: endpointId } : scope === 'service' ? { serviceName } : {}) },
+      await registry.createInstance(scope === 'upstream' ? { type: scope, routeId, upstreamId: endpointId } : scope === 'service' ? { type: scope, routeId, serviceName } : { type: scope, routeId },
       { name: 'chatgpt-oauth', options: { accountRef: 'integration-account' } } as any);
     }
     const manifest = JSON.parse(readFileSync(new URL('../../manifest.json', import.meta.url), 'utf8'));
@@ -161,7 +160,7 @@ describe('ChatGPT OAuth request handler integration', () => {
         ]);
         const registry = new ScopedPluginRegistry(fileURLToPath(new URL('../../../..', import.meta.url)));
         for (const binding of scope === 'combined' ? ['upstream', 'service', 'route'] as const : [scope]) {
-        await registry.createInstance({ type: binding, routeId, ...(binding === 'upstream' ? { upstreamId: 'primary' } : binding === 'service' ? { serviceName: 'terminal' } : {}) },
+        await registry.createInstance(binding === 'upstream' ? { type: binding, routeId, upstreamId: 'primary' } : binding === 'service' ? { type: binding, routeId, serviceName: 'terminal' } : { type: binding, routeId },
           { name: 'chatgpt-oauth', options: { accountRef: 'integration-account' } } as any);
         }
         setScopedPluginRegistry(registry);
@@ -228,7 +227,7 @@ describe('ChatGPT OAuth request handler integration', () => {
     ]);
     const registry = new ScopedPluginRegistry(fileURLToPath(new URL('../../../..', import.meta.url)));
     for (const scope of ['upstream', 'service', 'route'] as const) {
-      await registry.createInstance({ type: scope, routeId, ...(scope === 'upstream' ? { upstreamId: 'primary' } : scope === 'service' ? { serviceName: 'terminal' } : {}) },
+      await registry.createInstance(scope === 'upstream' ? { type: scope, routeId, upstreamId: 'primary' } : scope === 'service' ? { type: scope, routeId, serviceName: 'terminal' } : { type: scope, routeId },
         { name: 'chatgpt-oauth', options: { accountRef: 'integration-account' } } as any);
     }
     setScopedPluginRegistry(registry);

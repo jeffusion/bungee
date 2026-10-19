@@ -32,7 +32,7 @@ Management surface:
 - Route and upstream inspection
 - Runtime statistics and history views
 - Config fetch/update/validation
-- Optional single-administrator management authentication and plugin-owned Key/route access control
+- Optional management account authentication and plugin-owned Key/route access control
 - Plugin management and plugin API integration
 - Log query/stream/export and cleanup operations
 
@@ -41,7 +41,7 @@ Management surface:
 ## Management And Access Plugins
 
 - The plugin center preserves the existing BSwitch appearance. Dependencies or guards disable the switch and show the exact reason.
-- 管理认证 establishes or verifies one administrator, then hands off to a Cookie session. There are no member or role screens. Disabling it requires the current session and returns to anonymous management.
+- 用户认证 (`user-auth`) is initialized with an offline, local-terminal setup code. `/#/setup` accepts the code, account and confirmed password, then returns to login. Cookie-only verification gates the existing Dashboard, navigation and plugin APIs. All logins have full management access; there are no registration, member or role screens. Online disabling cannot release protection; use the offline `release-auth` action.
 - 访问控制 provides API Key and route-protection tabs in its settings page. Creating, editing, or applying a Key saves its allowed routes without changing public access. The route switch controls public access independently, including routes with Key grants; revoking the final Key keeps routes protected.
 - Route and Service editors contain proxy configuration only. Public requests remain anonymous even when carrying a Key, and do not consume Key rate or token budgets.
 - Key rate limits depend on access control; token budgets depend on access control, metering and statistics pricing; statistics depend on metering and models-dev. Metering is a global service and cannot bind to routes or services.
@@ -176,6 +176,6 @@ Major endpoint groups:
 
 ## 5) Security Notes
 
-- Management is anonymous by default. 管理认证 (`local-accounts`) enables a single administrator session; explicit disabling restores anonymous management. A failed or missing selected provider does not bypass authentication. See [authentication](./authentication.md).
+- Management is anonymous by default. 用户认证 (`user-auth`) protects management after offline initialization. Only the offline, local-terminal `release-auth` action restores anonymous access. A failed or missing selected provider does not bypass authentication. See [authentication](./authentication.md).
 - Plugin asset serving performs path traversal checks and file-type allowlisting.
 - CSP and additional browser security headers are applied for plugin HTML assets.

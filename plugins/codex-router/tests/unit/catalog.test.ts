@@ -75,7 +75,7 @@ test('unavailable explicit replacements cannot advertise native capabilities or 
 });
 
 test('source protocol defaults to Responses and binding target accepts only supported receiving protocols', () => {
-  for (const protocol of ['responses', 'chat_completions', 'anthropic_messages']) {
+  for (const protocol of ['responses', 'chat_completions', 'anthropic_messages'] as const) {
     expect(parseBindings([{ ...bindings[0], sourceProtocol: 'responses', target: { ...bindings[0].target, protocol } }])[0].target.protocol).toBe(protocol);
   }
   expect(() => parseBindings([{ ...bindings[0], target: { type: 'service', id: 'target' } }])).toThrow('target_protocol_required');

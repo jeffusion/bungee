@@ -14,6 +14,22 @@ class MemoryStorage implements PluginStorage {
   async set(key: string, value: unknown): Promise<void> { this.values.set(key, value); }
   async delete(key: string): Promise<void> { this.values.delete(key); }
   async keys(prefix?: string): Promise<string[]> { return [...this.values.keys()].filter((key) => !prefix || key.startsWith(prefix)); }
+  async increment(key: string, field: string, delta = 1): Promise<number> {
+    const stored = this.values.get(key);
+    if (stored !== undefined && (typeof stored !== 'object' || stored === null || Array.isArray(stored))) throw new Error('expected stored object');
+    const value: Record<string, unknown> = { ...stored };
+    const previous = value[field] ?? 0;
+    if (typeof previous !== 'number') throw new Error('counter must be numeric');
+    const next = previous + delta;
+    value[field] = next; this.values.set(key, value); return next;
+  }
+  async compareAndSet(key: string, field: string, expected: unknown, next: unknown): Promise<boolean> {
+    const stored = this.values.get(key);
+    if (stored !== undefined && (typeof stored !== 'object' || stored === null || Array.isArray(stored))) throw new Error('expected stored object');
+    const value: Record<string, unknown> = { ...stored };
+    if (!Object.is(value[field], expected)) return false;
+    value[field] = next; this.values.set(key, value); return true;
+  }
   async clear(): Promise<void> { this.values.clear(); }
 }
 
@@ -106,9 +122,9 @@ describe('model-mapping control', () => {
     const storage = new MemoryStorage();
     const invoke = (catalog: unknown, path: string) => {
       const control = createControl(host(storage, catalog));
-      return handler(control, 'getCatalog').invoke({
+      return Promise.resolve(handler(control, 'getCatalog').invoke({
         ...host(storage, catalog), request: request(path), requestSignal: new AbortController().signal,
-      }).finally(() => control.dispose());
+      })).finally(() => control.dispose());
     };
     const initialLastPage = await (await invoke(many(120), '/catalog?page=3')).json();
     expect(initialLastPage.page).toBe(3);
@@ -138,7 +154,7 @@ describe('model-mapping control', () => {
     const manifest = JSON.parse(readFileSync(new URL('../../manifest.json', import.meta.url), 'utf8')) as {
       control?: { entry?: string };
       capabilities?: string[];
-      contributes?: { api?: readonly { path: string; methods: readonly string[]; handler: string; execution: 'control' }[] };
+      contributes?: { api?: readonly { path: string; methods: readonly string[]; handler: string; execution: 'control'; capability: string }[] };
     };
     expect(manifest.control?.entry).toBe('server/control.ts');
     expect(manifest.capabilities).toContain('controlPlane');

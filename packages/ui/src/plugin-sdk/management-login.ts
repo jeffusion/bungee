@@ -1,6 +1,8 @@
 /** Host-owned management login capability provided to a plugin login page. */
 export interface ManagementLoginContext {
   readonly provider: Readonly<{ name: string; publicOrigin: string }>;
+  loginOptions<T = unknown>(): Promise<T>;
+  beginLogin(input: { methodId: string; returnTo?: string }): Promise<{ authorizationUrl: string; flowId: string }>;
   login(input: unknown): Promise<unknown>;
   complete(): Promise<void>;
 }

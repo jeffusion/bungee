@@ -24,12 +24,12 @@ const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 
 test.each([false, true])('duplicating a service passes real configuration validation (managed: %s)', async (managed) => {
-  const service = structuredClone(source);
-  if (managed) {
-    service.endpoints[0]!.managedBy = {
-      plugin: 'provider', contributionId: 'accounts', bindingId: service.endpoints[0]!.plugins[0]!.id,
-    };
-  }
+  const service: ConfigurationService = { ...structuredClone(source), endpoints: source.endpoints.map(endpoint => ({
+    ...structuredClone(endpoint),
+    ...(managed ? { managedBy: {
+      plugin: 'provider', contributionId: 'accounts', bindingId: endpoint.plugins[0]!.id,
+    } } : {}),
+  })) };
   const aggregate: ConfigurationAggregate = {
     logical_configuration: {
       services: [service], routes: [{
@@ -75,7 +75,8 @@ test.each([false, true])('duplicating a service passes real configuration valida
   expect(saved.endpoints[0]!.plugins[0]!.options).toEqual(service.endpoints[0]!.plugins[0]!.options);
   expect(saved.endpoints[0]!.plugins[0]!.enabled).toBe(false);
   expect(saved.plugins[0]!.options).toEqual(service.plugins[0]!.options);
-  if (managed) expect(saved.endpoints[0]!.managedBy).toEqual({ ...service.endpoints[0]!.managedBy, bindingId: saved.endpoints[0]!.plugins[0]!.id });
+  const managedBy = service.endpoints[0]!.managedBy;
+  if (managedBy) expect(saved.endpoints[0]!.managedBy).toEqual({ ...managedBy, bindingId: saved.endpoints[0]!.plugins[0]!.id });
   expect(editor).toEqual(before);
   const binding = draft.plugins![0]!;
   if (typeof binding === 'string') throw new Error('Expected plugin binding');

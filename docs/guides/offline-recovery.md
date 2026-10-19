@@ -1,32 +1,56 @@
 # 离线插件恢复
 
-恢复入口读取有界 stdin JSON 或 0600 文件，持有同样的停止锁，通过已选中管理 provider 的
-`offlineRecovery` 能力及异步 `PluginDurableState` 执行；选中别的 provider 时拒绝身份恢复。
-没有 provider 启用时，可以先恢复明确指定、支持该能力的插件身份，再按正常流程启用它。
-恢复输入不会进入 argv、环境或日志；插件数据库和配置 Worker 独立关闭，只有全部关闭确认后才释放实例锁。
-关闭超时或打开结果未知会保留锁并报告资源故障。进程退出后操作系统释放锁；不要在原进程仍运行时绕过锁。
+恢复必须在整个实例停止后执行，并持有同一实例的 master／ingress 锁。配置和插件状态由各自存储 Worker 执行；只有数据库关闭 ACK 齐备后才释放锁并返回结果，初始化码也只在此后显示。关闭超时或结果未知会保留锁并报告故障，不要删除锁文件绕过运行实例。
 
-```sh
-bungee recover --file recovery.json
-```
+## 前提与数据位置
+
+停止 master、ingress 和所有 Worker。初始化、启动和恢复使用相同的配置路径、环境变量、插件产物与秘密存储密钥。CLI 默认读取 `~/.bungee/data/bungee.db`，自定义路径用 `BUNGEE_CONFIG_DB_PATH`；插件状态库为配置库同目录的 `plugin-state.db`。`recover` 没有配置路径位置参数或 `--config` 选项。
 
 CLI 从配置数据库旁的 `plugin-secrets.key` 读取初始化时持久化的加密密钥，恢复命令不接受参数或环境变量覆盖。恢复数据库备份时，同时还原配套的密钥文件；CLI 初始化约定见 [CLI 参考](../reference/cli.md#bungee-init)。
 
-## 前提与输入
-
-停止 master、ingress 和所有 Worker。初始化、启动和恢复使用相同的配置路径、环境和实例锁路径；不要通过删除锁文件绕过运行实例。输入最多 8192 字节，文件必须为 0600，或从 stdin 输入：
+Docker 部署先停止原容器，再以同一镜像、原数据卷和环境变量运行临时交互容器。在该容器用原生入口明确指定配置库：
 
 ```sh
+bun packages/core/dist/main.js --recover /usr/app/data/bungee.db --plugin user-auth --action issue-setup-code
+```
+
+保持终端交互，不创建空数据卷；命令结束并删除临时容器后再启动原实例。其他部署可使用下述 CLI 命令。
+
+## 初始化管理认证
+
+```sh
+bungee recover --plugin user-auth --action issue-setup-code
+```
+
+stdin、stdout 都必须为 TTY，不能从文件或管道签发初始化码。宿主先原子持久化强制认证 guard 和 provider 激活选择，再调用插件准备初始化。中途失败不能让下次启动恢复匿名管理；处理原错误后可重新签发。
+
+一次性码由 32 字节随机数生成，30 分钟有效，只保存摘要。命令确认配置与插件状态库均关闭后才在 TTY 显示码。再次签发撤销原码；账号已 ready 时拒绝签发。启动后访问公开管理地址的 `/#/setup`，输入码、账号和两次 5–32 个 Unicode 字符的密码。成功后回登录页，初始化不建立会话。完整步骤见[认证指南](authentication.md#管理认证)。
+
+## 重置账号密码
+
+```sh
+bungee recover --plugin user-auth --action reset
+```
+
+命令要求 stdin、stdout 都是本地 TTY，交互输入新账号、两次隐藏密码及恢复原因，不要求或记录旧账号。输入历史关闭，公开提示不能通过方向键回显密码。命令定位初始化时建立的恢复锚点，完整身份保留原 ID；锚点身份缺失或损坏时允许重建，保留其他用户及 OIDC 连接。重置撤销全部旧会话与初始化码，保留不含凭据的恢复摘要，不改变强制认证状态、路由、服务或 API Key。Turnstile 关闭提示默认保留原配置，只有输入 `yes` 才关闭挑战。重置完成后启动实例并正常登录。
+
+## 解除强制认证
+
+```sh
+bungee recover --plugin user-auth --action release-auth
+```
+
+这是解除强制管理认证的唯一入口，要求整个实例停止并使用本地 TTY。身份数据保留，启动后恢复匿名管理。在线插件停用、配置替换和导入都不能解除保护；provider 故障或目录缺失也不能降级匿名。
+
+## 结构化插件状态恢复
+
+`kind: plugin-state` 恢复使用有界 stdin JSON 或 owner-only `0600` 普通文件。输入最多 8192 字节，凭据不进入 argv、环境或日志。宿主拒绝所有 `kind: identity` 结构化输入；身份恢复必须使用本地 TTY action，即使 JSON 来自终端或 owner-only 文件也不例外。
+
+```sh
+bungee recover --file recovery.json
+# 或
 bungee recover < recovery.json
 ```
-
-### 恢复管理员身份
-
-```json
-{"kind":"identity","plugin":"local-accounts","payload":{"username":"admin","password":"替换为新的6至64字符密码","reason":"恢复管理访问"}}
-```
-
-已有管理员时指定原账号；无管理员时可建立一个。插件撤销原会话并保留恢复审计，不自动启用管理认证或改变当前模式。其他 provider 必须声明自己的身份恢复协议。
 
 ### 恢复预算账务
 
@@ -40,7 +64,7 @@ bungee recover < recovery.json
 
 ## 完成判断
 
-命令成功关闭存储并释放锁后，重新启动实例。确认管理健康、以恢复身份登录，并检查相关插件的恢复状态。恢复停用插件的状态不自动启用它；配置导入不能替代业务状态恢复。若关闭或结果未知，保留错误和操作身份，排查后查询状态，不能盲目重执行。
+命令成功关闭存储并释放锁后，重新启动实例。确认管理健康，并按所选操作完成初始化、登录或匿名访问核验，检查相关插件状态。普通插件状态恢复不自动启用插件；配置导入不能替代业务状态恢复。若关闭或结果未知，保留错误和操作身份，排查后查询状态，不能盲目重执行。
 
 ## 准备运行时证明格式升级
 

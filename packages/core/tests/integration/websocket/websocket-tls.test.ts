@@ -10,7 +10,7 @@ test('WSS verifies upstream certificates and accepts an explicitly trusted local
   try{
     execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=127.0.0.1','-addext','subjectAltName=IP:127.0.0.1','-keyout',key,'-out',cert],{stdio:'ignore'});
     upstream=Bun.serve({hostname:'127.0.0.1',port:0,tls:{key:await readFile(key,'utf8'),cert:await readFile(cert,'utf8')},
-      fetch(request,server){if(server.upgrade(request))return;return new Response('not WS',{status:400});},
+      fetch(request,server){if(server.upgrade(request,{data:undefined}))return;return new Response('not WS',{status:400});},
       websocket:{message(socket,message){socket.send(message);}},
     });
     const source=`import {createWebSocketBridge} from ${JSON.stringify(new URL('../../../src/websocket/index.ts',import.meta.url).pathname)};

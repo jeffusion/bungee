@@ -1,6 +1,7 @@
 import type { ConfigRepository } from './config-repository';
-import type { ConfigRepositoryOptions, RepositorySnapshot, CommitConfigurationCommandV1, CommitConfigurationResult } from './repository-types';
+import type { ConfigRepositoryOptions, RepositorySnapshot, ManagementProtection, ControlProjection, CommitConfigurationCommandV1, CommitConfigurationResult } from './repository-types';
 import { ConfigRepositoryError } from './repository-types';
+import { validateManagementProtection } from './management-protection';
 import { prepareCommitCommand } from './prepared-command';
 import { freezeSnapshot, freezeProjection } from './immutable-snapshot';
 import type { SupervisionState } from '../supervision/state-repository';
@@ -13,7 +14,7 @@ export interface ConfigurationStorageWorker {
   terminate(): void;
   addEventListener(type: string, listener: (event: any) => void): void;
 }
-export type AsyncConfigRepositoryOptions = Pick<ConfigRepositoryOptions, 'compileOptions'> & {
+export type AsyncConfigRepositoryOptions = Pick<ConfigRepositoryOptions, 'compileOptions' | 'offline'> & {
   readonly workerUrl?: string | URL;
   readonly maxPendingRequests?: number;
   readonly maxPendingBytes?: number;
@@ -36,6 +37,7 @@ type Pending = {
 /** Production client: the only synchronous reads are validated immutable projections. */
 export class AsyncConfigRepository {
   private snapshot!: RepositorySnapshot;
+  private managementProtection!: ManagementProtection;
   private supervision!: SupervisionState;
   private sequence = 0;
   private state: 'opening' | 'open' | 'closing' | 'closed' = 'opening';
@@ -72,10 +74,10 @@ export class AsyncConfigRepository {
   static async open(dbPath: string, options: AsyncConfigRepositoryOptions = {}): Promise<AsyncConfigRepository> {
     const client = new AsyncConfigRepository(options);
     try {
-      const startup = await client.send('open', [dbPath]) as {
-        snapshot: RepositorySnapshot; supervision: SupervisionState;
+      const startup = await client.send('open', [dbPath, { offline: options.offline === true, managementProviders: [...(options.compileOptions?.managementProviders ?? [])] }]) as {
+        snapshot: RepositorySnapshot; supervision: SupervisionState; managementProtection: ManagementProtection;
       };
-      client.snapshot = freezeSnapshot(startup.snapshot);
+      client.installControlProjection(startup);
       client.supervision = freezeProjection(startup.supervision);
       client.state = 'open';
       return client;
@@ -87,19 +89,40 @@ export class AsyncConfigRepository {
   }
 
   getSnapshot(): RepositorySnapshot { return this.snapshot; }
+  getManagementProtection(): ManagementProtection { return this.managementProtection; }
+  getControlProjection(): ControlProjection { return { snapshot: this.snapshot, managementProtection: this.managementProtection }; }
+
+  private installControlProjection(projection: ControlProjection): ControlProjection {
+    validateManagementProtection(projection.managementProtection);
+    const snapshot = freezeSnapshot(projection.snapshot);
+    const managementProtection = freezeProjection(projection.managementProtection);
+    if (managementProtection.required && !snapshot.aggregate.plugin_activations.some(activation => activation.plugin_name === managementProtection.selectedProvider)) {
+      throw new ConfigRepositoryError('schema_corrupt', 'protected management provider is absent from the configuration projection');
+    }
+    if (!this.snapshot || snapshot.revision >= this.snapshot.revision) {
+      this.snapshot = snapshot;
+      this.managementProtection = managementProtection;
+    }
+    return this.getControlProjection();
+  }
+
+  async refreshControlProjection(): Promise<ControlProjection> {
+    return this.installControlProjection(await this.rpc('getControlProjection'));
+  }
+
+  async setManagementProviderOffline(provider: string | null, operationId: string, now: number): Promise<ControlProjection> {
+    return this.installControlProjection(await this.rpc('setManagementProviderOffline', provider, operationId, now));
+  }
   getSupervisionState(): SupervisionState { return this.supervision; }
 
   async commit(command: CommitConfigurationCommandV1): Promise<CommitConfigurationResult> {
     const prepared = prepareCommitCommand(command, this.options.compileOptions);
     const result = await this.rpc('commitPrepared', prepared);
-    if (result.kind === 'committed') {
-      // Failed, rejected and unknown outcomes never change the committed projection.
-      // Reply order follows the storage queue; guard revision for resumed callers.
-      const snapshot = freezeSnapshot(result.snapshot);
-      if (snapshot.revision > this.snapshot.revision) this.snapshot = snapshot;
-      return { ...result, snapshot };
+    if (result.kind === 'committed' || result.kind === 'duplicate') {
+      try { await this.refreshControlProjection(); }
+      catch { throw new ConfigurationStorageResultUnknownError('commitPrepared', prepared.mutationId); }
     }
-    return result;
+    return result.kind === 'committed' ? { ...result, snapshot: freezeSnapshot(result.snapshot) } : result;
   }
 
   async claimControllerWithCapability(
@@ -135,7 +158,8 @@ export class AsyncConfigRepository {
     }
     const id = ++this.sequence;
     if (!Number.isSafeInteger(id)) return Promise.reject(new ConfigRepositoryError('repository_failure', 'storage request IDs exhausted'));
-    const mutationId = method === 'commitPrepared' ? (args[0] as { mutationId: string }).mutationId : undefined;
+    const mutationId = method === 'commitPrepared' ? (args[0] as { mutationId: string }).mutationId
+      : method === 'setManagementProviderOffline' ? args[1] as string : undefined;
     return new Promise((resolve, reject) => {
       const timer=setTimeout(()=>{this.fail(new ConfigRepositoryError('repository_failure', `configuration storage ${method==='close'?'close':'request'} deadline exceeded`));this.worker.terminate();},method==='close'?this.closeTimeout:this.requestTimeout);
       const request:Pending={ method, mutationId, resolve, reject, timer, bytes, sent:false };

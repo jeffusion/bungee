@@ -1,3 +1,4 @@
+import { controlHost } from '../helpers/control-host';
 import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 import type { ControlHostContext, ControlRpcContext, SecretStore, SecretValue } from '../../../../packages/core/src/plugin-control/contracts';
@@ -38,7 +39,7 @@ function token(expiresAtOrOverrides?: number | Partial<CodexTokenSet>): CodexTok
 }
 
 function host(store: SecretStore, signal = new AbortController().signal): ControlHostContext {
-  return { signal, secretStore: store };
+  return controlHost(store, signal);
 }
 
 function rpcContext(store: SecretStore, accountRef: string, signal = new AbortController().signal): ControlRpcContext {
@@ -429,11 +430,11 @@ describe('ChatGPT control', () => {
     const store = new FakeSecretStore();
     await new AccountStore(store).create('A', token(Date.now() + 3600_000));
     const lifetime = new AbortController();
-    const control = createControl({ signal: lifetime.signal, secretStore: store });
+    const control = createControl(host(store, lifetime.signal));
     let cancelled = false;
     const body = new ReadableStream<Uint8Array>({ start() {}, cancel() { cancelled = true; } });
     const handler = control.api.find((item) => item.handler === 'createDraft')!;
-    const request = handler.invoke({ signal: lifetime.signal, secretStore: store, request: new Request('http://localhost', { method: 'POST', body, duplex: 'half' } as RequestInit), requestSignal: new AbortController().signal });
+    const request = handler.invoke({ ...host(store, lifetime.signal), request: new Request('http://localhost', { method: 'POST', body, duplex: 'half' } as RequestInit), requestSignal: new AbortController().signal });
     await new Promise((resolve) => setTimeout(resolve, 0));
     await control.dispose();
     await expect(request).resolves.toMatchObject({ status: 409 });

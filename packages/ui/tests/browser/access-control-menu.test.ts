@@ -63,7 +63,7 @@ try {
     const pluginCard = page.getByTestId('page-plugins').locator('.plugin-management-card').filter({ hasText: t('metadata.name') });
     await expect(pluginCard).toBeVisible();
     await expect(pluginCard.locator('a[href^="/#/plugins/key-access"]')).toHaveCount(0);
-    await expect(pluginCard.locator(`a[href="/#${canonical}"]`)).toBeVisible();
+    await expect(pluginCard.locator('a[href^="/#/extensions/"]')).toHaveCount(0);
     const menuLink = page.getByTestId('app-header').getByRole('link', { name: t('metadata.name'), exact: true });
     await menuLink.click();
     const settings = page.getByTestId('access-control-settings');

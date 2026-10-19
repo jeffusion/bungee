@@ -31,7 +31,7 @@ class FakeWorker implements ConfigurationStorageWorker {
   postMessage(request: any): void {
     this.requests.push(request);
     if (request.method === 'open') queueMicrotask(() => this.emit('message', { data: { id: request.id, ok: true,
-      result: { snapshot, supervision: { instance_id: '10000000-0000-4000-8000-000000000001',
+      result: { snapshot, managementProtection: {required:false,selectedProvider:null,generation:0}, supervision: { instance_id: '10000000-0000-4000-8000-000000000001',
         controller_epoch: 0, current_controller_id: null, updated_at: 0 } } } }));
     if (request.method === 'close') queueMicrotask(() => this.emit('message', { data: { id: request.id, ok: true, result: null } }));
   }
@@ -246,4 +246,20 @@ describe('real configuration storage deadline and close failure evidence',()=>{
       await expect(client.close()).rejects.toMatchObject({code:'repository_failure'});
     }finally{clearInterval(timer);blocker.exec('ROLLBACK');blocker.close();}
   });
+});
+
+
+test('acknowledged commit with an unreadable projection stays unknown under the original mutation ID', async () => {
+  class ProjectionFailureWorker extends FakeWorker {
+    override postMessage(request: any) {
+      super.postMessage(request);
+      if (request.method === 'commitPrepared') queueMicrotask(() => this.emit('message', {data:{id:request.id,ok:true,result:{kind:'committed',snapshot:{...snapshot,revision:2},operation:{mutation_id:'ack-refresh-failed',committed_revision:2}}}}));
+      if (request.method === 'getControlProjection') queueMicrotask(() => this.emit('message', {data:{id:request.id,ok:false,error:{code:'repository_failure',message:'projection unavailable'}}}));
+    }
+  }
+  const worker = new ProjectionFailureWorker();
+  const client = await AsyncConfigRepository.open('fixture', {workerFactory:()=>worker}); clients.push(client);
+  const before = client.getControlProjection();
+  await expect(client.commit(command('ack-refresh-failed'))).rejects.toMatchObject({code:'result_unknown',mutationId:'ack-refresh-failed'});
+  expect(client.getControlProjection()).toEqual(before);
 });

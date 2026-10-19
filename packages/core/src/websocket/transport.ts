@@ -24,6 +24,10 @@ export type WebSocketBridgeOptions = Partial<Limits>;
 /** Opaque token prevents callbacks from taking ownership of another bridge's session. */
 export interface WebSocketBridgeData { readonly connection: object }
 
+interface WebSocketUpgradeServer {
+  upgrade(request: Request, options: { data: WebSocketBridgeData; headers?: HeadersInit }): boolean;
+}
+
 export interface WebSocketUpgradeOptions {
   readonly url: URL | string;
   readonly headers: Headers;
@@ -190,7 +194,7 @@ export class WebSocketBridge {
   }
 
   /** Call only for upgrade candidates; ordinary HTTP returns undefined without taking ownership. */
-  upgrade(request: Request, server: Bun.Server<any>, options: WebSocketUpgradeOptions): Promise<Response | undefined> {
+  upgrade(request: Request, server: WebSocketUpgradeServer, options: WebSocketUpgradeOptions): Promise<Response | undefined> {
     if (!isWebSocketUpgradeRequest(request)) return Promise.resolve(undefined);
     const invalid = validateWebSocketRequest(request);
     if (invalid) return Promise.resolve(invalid);
@@ -216,7 +220,7 @@ export class WebSocketBridge {
   }
 
   /** Uses the same native handler and admission budgets without an upstream socket. */
-  upgradeSession(request: Request, server: Bun.Server<any>, options: ManagedWebSocketSessionOptions): Promise<Response | undefined> {
+  upgradeSession(request: Request, server: WebSocketUpgradeServer, options: ManagedWebSocketSessionOptions): Promise<Response | undefined> {
     if (!isWebSocketUpgradeRequest(request)) return Promise.resolve(undefined);
     const invalid = validateWebSocketRequest(request);
     if (invalid) return Promise.resolve(invalid);
@@ -603,7 +607,7 @@ class ManagedSession implements TransportSession {
   get bufferedBytes(): number { return this.#bufferedBytes; }
   get processLimit(): number { return this.#bridge.limits.maxTotalBufferedBytes; }
 
-  upgrade(request: Request, server: Bun.Server<any>, headers: Headers): Response | undefined {
+  upgrade(request: Request, server: WebSocketUpgradeServer, headers: Headers): Response | undefined {
     if (this.#options.signal?.aborted) this.cancelHandshake(499, 'WebSocket handshake cancelled');
     if (!this.#bridge.accepting) this.cancelHandshake(503, 'WebSocket bridge is stopping');
     if (this.#handshakeRejection) {
@@ -782,7 +786,7 @@ class BridgeSession {
   readonly response: Promise<Response | undefined>;
   readonly #bridge: WebSocketBridge;
   readonly #request: Request;
-  readonly #server: Bun.Server<any>;
+  readonly #server: WebSocketUpgradeServer;
   readonly #options: WebSocketUpgradeOptions;
   readonly #url: URL;
   readonly #protocols: string[];
@@ -812,7 +816,7 @@ class BridgeSession {
   #clientBytes = 0;
   #upstreamBytes = 0;
 
-  constructor(bridge: WebSocketBridge, request: Request, server: Bun.Server<any>, options: WebSocketUpgradeOptions, url: URL) {
+  constructor(bridge: WebSocketBridge, request: Request, server: WebSocketUpgradeServer, options: WebSocketUpgradeOptions, url: URL) {
     this.#bridge = bridge; this.#request = request; this.#server = server; this.#options = options; this.#url = url;
     this.#protocols = offeredProtocols(request);
     this.response = new Promise((resolve) => { this.#resolveResponse = resolve; });

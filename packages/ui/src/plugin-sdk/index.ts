@@ -40,6 +40,7 @@ export { formatCompactNumber } from '$utils/format-number';
 
 // 类型
 export type { TimeRange, StatsHistoryV2 } from '$types';
+export type { ManagementSetupContext } from './management-setup';
 export type { ManagementLoginContext } from './management-login';
 export { isManagementLoginStaleError } from './management-login';
 

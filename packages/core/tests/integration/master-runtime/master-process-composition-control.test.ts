@@ -12,7 +12,7 @@ import { PluginManifestCatalog } from '../../../src/plugin-manifest-catalog';
 import { startMasterComposition, type MasterProcessDependencies, type MasterProcessCoordinator } from '../../../src/master-runtime/composition';
 import { serializeErrorChain } from '../../../src/master-runtime/error-chain';
 import { createAsyncMasterStats, migrateAccessDatabaseAsync } from '../../../src/master-runtime/observability-client';
-import type { ConfigurationRecovery, RepositorySnapshot } from '../../../src/config-storage';
+import { ConfigRepository, type ConfigurationRecovery, type RepositorySnapshot } from '../../../src/config-storage';
 import type { ConfigPublicationWorkerProcess, ServingConfigWorker, WorkerAdmissionController } from '../../../src/config-publication';
 import type { ConfigMasterMessage, ConfigProcessIdentity } from '../../../src/config-publication/types';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed } from '../../../src/supervision';
@@ -27,6 +27,7 @@ import {
 
 const HASH = `sha256:${'a'.repeat(64)}` as const;
 const MASTER_GENERATION = '10000000-0000-4000-8000-000000000001';
+const ANONYMOUS_MANAGEMENT_PROTECTION = Object.freeze({required:false, selectedProvider:null, generation:0});
 
 function identity(slot: number): ConfigProcessIdentity {
   return {
@@ -136,6 +137,8 @@ test('composition retains ACKed serving/draining snapshots and installs the peer
     let adoptionAttempts = 0;
     const repository = {
       getSnapshot: () => current,
+      getManagementProtection: () => ANONYMOUS_MANAGEMENT_PROTECTION,
+      refreshControlProjection: async () => ({snapshot:current, managementProtection:ANONYMOUS_MANAGEMENT_PROTECTION}),
       appendServingSnapshot: async () => { publicationOrder.push('append'); },
       getServingSnapshot: async () => null,
       getActivePublication: async () => null,
@@ -442,7 +445,9 @@ test('malformed plugin secret keys fail the composition boundary instead of beco
   process.env.BUNGEE_PLUGIN_SECRETS_KEY = 'not-canonical-base64';
   const events: string[] = [];
   const repository = {
-    getSnapshot: () => { throw new Error('unreachable'); }, getActivePublication: async () => null,
+    getSnapshot: () => { throw new Error('unreachable'); },
+    getManagementProtection: () => { throw new Error('unreachable'); },
+    refreshControlProjection: async () => { throw new Error('unreachable'); }, getActivePublication: async () => null,
     getOperationState: () => null, getCurrentOperationState: async () => null, commit: () => null, beginPublication: () => null,
     beginWorkerAttempt: () => null, beginDrainingRecovery: () => null, recordWorkerResult: () => null,
     markDraining: () => null, finalizePublication: () => null,
@@ -484,6 +489,7 @@ test.each(['stopped', 'publication-failure'] as const)('selected generic authent
   const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
   process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32,1).toString('base64');
   let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
+  let configuration: ConfigRepository | undefined;
   const provider = 'fixture-identity', dependency = 'fixture-identity-state', broken = 'fixture-broken';
   const order: string[] = [];
   (globalThis as any).__isolatedManagementOrder = order;
@@ -496,19 +502,26 @@ test.each(['stopped', 'publication-failure'] as const)('selected generic authent
         control:{entry:'control.ts',rpc:[]},capabilities:['hooks','controlPlane','dynamicRuntimeLoad'],uiExtensionMode:'none',engines:{bungee:'^5.0.0'},configSchema:[],
         ...(name===provider ? {management:{},dependencies:{[dependency]:'^1.0.0'}} : {})}));
       await writeFile(join(directory,'main.ts'),'export default {};');
-      const management = name===provider ? `management:{authenticate:async()=>({id:'fixture',provider:${JSON.stringify(provider)},capabilities:['config.read']}),authorize:async()=>true,hasIdentity:async()=>true,login:async()=>Response.json({signedIn:true}),logout:async()=>Response.json({}),bootstrap:async()=>{},revokeSessions:async()=>{}},` : '';
+      const management = name===provider ? `management:{setupStatus:async()=>'ready',initialize:async()=>Response.json({error:'already_initialized'},{status:409}),authenticate:async()=>({id:'fixture',provider:${JSON.stringify(provider)},capabilities:['config.read']}),authorize:async()=>true,hasIdentity:async()=>true,login:async()=>Response.json({signedIn:true}),logout:async()=>Response.json({}),bootstrap:async()=>{},revokeSessions:async()=>{}},` : '';
       const observer = name===provider ? 'export function createObservationAdapter(observation){return { count:()=>observation.withDatabase(db=>db.query("SELECT 1 AS value").get().value) };}'
         : name===broken ? 'export function createObservationAdapter(){throw new Error("unrelated_observation_failure");}' : '';
       await writeFile(join(directory,'control.ts'),`${observer}export function createControl(context){globalThis.__isolatedManagementOrder.push(${JSON.stringify(name)});globalThis.__isolatedManagementStores.set(${JSON.stringify(name)},context.storage);${name===broken ? "throw new Error('unrelated_failure');" : `return {api:[],rpc:[],${management}start(){},dispose(){}};`}}`);
     }
     const catalog = await PluginManifestCatalog.build({scanDirectories:[root]});
-    let current = {revision:1,content_hash:HASH,aggregate:{logical_configuration:{services:[],routes:[],plugins:[]},plugin_activations:[provider,dependency,broken].map(plugin_name=>({plugin_name}))}} as unknown as RepositorySnapshot;
-    const recovery = {recovery_id:'60000000-0000-4000-8000-000000000001',state:'stopped',target_revision:1,attempt_count:1,max_attempts:6,next_retry_at:null,final_reason_code:'fatal_source_failure'};
+    configuration = ConfigRepository.open(join(root,'config.db'), {compileOptions:catalog.toCompileOptions()});
+    const committed = configuration.commit({mutation_id:'select-management-provider',expected_revision:1,kind:'config',created_at:1,target_worker_slots:[],
+      aggregate:{logical_configuration:{services:[],routes:[],plugins:[]},plugin_activations:[provider,dependency,broken].map(plugin_name=>({plugin_name}))}});
+    if (committed.kind !== 'committed') throw new Error('management fixture selection was not committed');
+    let current = committed.snapshot;
+    expect(configuration.getManagementProtection()).toEqual({required:true,selectedProvider:provider,generation:1});
+    const recovery = {recovery_id:'60000000-0000-4000-8000-000000000001',state:'stopped',target_revision:current.revision,attempt_count:1,max_attempts:6,next_retry_at:null,final_reason_code:'fatal_source_failure'};
     let activePublication: any = null;
     let controlFailures = 0;
-    const repository = {getSnapshot:()=>current,getServingSnapshot:async()=>null,appendServingSnapshot:async()=>{},getActivePublication:async()=>activePublication,
+    const repository = {getSnapshot:()=>current,
+      getManagementProtection:()=>configuration!.getManagementProtection(),
+      refreshControlProjection:async()=>({snapshot:current,managementProtection:configuration!.getManagementProtection()}),getServingSnapshot:async()=>null,appendServingSnapshot:async()=>{},getActivePublication:async()=>activePublication,
       finalizePublication:async()=>{controlFailures++;return {state:'degraded',error_code:'control_readiness_failed'};},
-      getCurrentOperationState:async()=>null,getCurrentRecovery:async()=>mode==='stopped' ? recovery : null,getRecovery:async()=>recovery,close:async()=>{}};
+      getCurrentOperationState:async()=>null,getCurrentRecovery:async()=>mode==='stopped' ? recovery : null,getRecovery:async()=>recovery,close:async()=>{configuration?.close();configuration=undefined;}};
     let admissionCache: Map<string, RepositorySnapshot> | undefined;
     const initial = current;
     const originalSet = Map.prototype.set;
@@ -536,9 +549,16 @@ test.each(['stopped', 'publication-failure'] as const)('selected generic authent
     expect(managementOptions.health()).toMatchObject({live:true,management:true,data:false,degraded:true});
     const config = await managementOptions.controlApi.handle(new Request('http://localhost/api/config'));
     expect(config.status).toBe(200);expect(spawnCalls).toBe(0);expect(publishCalls).toBe(0);
+    const authMode = await managementOptions.controlApi.handle(new Request('http://localhost/api/auth/mode'));
+    expect(authMode.status).toBe(200);
+    expect(await authMode.json()).toMatchObject({mode:'plugin',initialized:true,provider:{name:provider}});
+    const setup = await managementOptions.controlApi.handle(new Request('http://localhost/api/auth/setup'));
+    expect(setup.status).toBe(200);
+    expect(await setup.json()).toMatchObject({initialized:true,provider:{name:provider}});
     if (mode === 'publication-failure') {
       expect(admissionCache).toBeDefined();
-      for (let revision = 2; revision <= 33; revision++) {
+      const lastRevision = current.revision + 32;
+      for (let revision = current.revision + 1; revision <= lastRevision; revision++) {
         current = { ...current, revision };
         const outcome = await composedCoordinator!.startCurrent(current);
         expect(outcome).toMatchObject({ kind: 'startup_degraded', error_code: 'control_readiness_failed' });
@@ -559,7 +579,7 @@ test.each(['stopped', 'publication-failure'] as const)('selected generic authent
     await handle.shutdown();handle=undefined;
     expect(()=>observation.count()).toThrow('observation_capability_revoked');
   } finally {
-    await handle?.shutdown();delete (globalThis as any).__isolatedManagementOrder;
+    await handle?.shutdown();configuration?.close();delete (globalThis as any).__isolatedManagementOrder;
     delete (globalThis as any).__isolatedManagementStores;
     if(previousSecret===undefined)delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;else process.env.BUNGEE_PLUGIN_SECRETS_KEY=previousSecret;
     await rm(root,{recursive:true,force:true});
@@ -631,6 +651,8 @@ test('does not create an in-memory retry loop without a durable recovery row', a
   };
   const repository = {
     getSnapshot: () => current,
+    getManagementProtection: () => ANONYMOUS_MANAGEMENT_PROTECTION,
+    refreshControlProjection: async () => ({snapshot:current, managementProtection:ANONYMOUS_MANAGEMENT_PROTECTION}),
     getActivePublication: async () => null,
     appendServingSnapshot: async () => undefined,
     getServingSnapshot: async () => null,
@@ -806,6 +828,8 @@ test.each(['scheduled', 'running', 'stopped'] as const)(
       };
       const repository = {
         getSnapshot: () => targetSnapshot,
+        getManagementProtection: () => ANONYMOUS_MANAGEMENT_PROTECTION,
+        refreshControlProjection: async () => ({snapshot:targetSnapshot, managementProtection:ANONYMOUS_MANAGEMENT_PROTECTION}),
         getServingSnapshot: async (key: { revision: number; content_hash: string; plugin_catalog_hash: string }) =>
           key.revision === oldSnapshot.revision && key.content_hash === oldSnapshot.content_hash
             && key.plugin_catalog_hash === catalog.hash ? oldSnapshot : null,

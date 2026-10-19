@@ -43,12 +43,12 @@ describe('widget registry generator', () => {
     writeFileSync(join(pluginDir, 'manifest.json'), '{"name":"bad-plugin","name":"shadowed"}');
     const output = join(root, 'generated.ts');
 
-    const process = Bun.spawn({
+    const child = Bun.spawn({
       cmd: ['bun', resolve(import.meta.dir, '../../../../scripts/build/generate-widget-registry.ts')],
-      env: { ...Bun.env, BUNGEE_WIDGET_PLUGINS_DIR: root, BUNGEE_WIDGET_OUTPUT_FILE: output },
+      env: { ...process.env, BUNGEE_WIDGET_PLUGINS_DIR: root, BUNGEE_WIDGET_OUTPUT_FILE: output },
       stdout: 'pipe', stderr: 'pipe',
     });
-    expect(await process.exited).not.toBe(0);
+    expect(await child.exited).not.toBe(0);
   });
 
   test('rejects an existing code-injection entry before mutating output', async () => {
@@ -71,12 +71,12 @@ describe('widget registry generator', () => {
     const output = join(root, 'generated.ts');
     writeFileSync(output, 'unchanged');
 
-    const process = Bun.spawn({
+    const child = Bun.spawn({
       cmd: ['bun', resolve(import.meta.dir, '../../../../scripts/build/generate-widget-registry.ts')],
-      env: { ...Bun.env, BUNGEE_WIDGET_PLUGINS_DIR: root, BUNGEE_WIDGET_OUTPUT_FILE: output },
+      env: { ...process.env, BUNGEE_WIDGET_PLUGINS_DIR: root, BUNGEE_WIDGET_OUTPUT_FILE: output },
       stdout: 'pipe', stderr: 'pipe',
     });
-    expect(await process.exited).not.toBe(0);
+    expect(await child.exited).not.toBe(0);
     expect(await Bun.file(output).text()).toBe('unchanged');
   });
 
@@ -99,12 +99,12 @@ describe('widget registry generator', () => {
     const output = join(root, 'generated.ts');
     writeFileSync(output, 'unchanged');
 
-    const process = Bun.spawn({
+    const child = Bun.spawn({
       cmd: ['bun', resolve(import.meta.dir, '../../../../scripts/build/generate-widget-registry.ts')],
-      env: { ...Bun.env, BUNGEE_WIDGET_PLUGINS_DIR: root, BUNGEE_WIDGET_OUTPUT_FILE: output },
+      env: { ...process.env, BUNGEE_WIDGET_PLUGINS_DIR: root, BUNGEE_WIDGET_OUTPUT_FILE: output },
       stdout: 'pipe', stderr: 'pipe',
     });
-    expect(await process.exited).not.toBe(0);
+    expect(await child.exited).not.toBe(0);
     expect(await Bun.file(output).text()).toBe('unchanged');
   });
 });

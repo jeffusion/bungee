@@ -1,25 +1,84 @@
 import {createInterface} from 'node:readline/promises';
-import {Writable} from 'node:stream';
+import {PassThrough, Writable} from 'node:stream';
+import type {OfflineRecoveryCapability} from '../plugin-control/contracts';
 
-export async function collectAdministratorRecovery(ask:(label:string,secret:boolean)=>Promise<string>) {
-  const newUsername=(await ask('新的管理员账号：',false)).trim();
-  if (!/^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$/.test(newUsername)) throw new Error('invalid_recovery_username');
-  const password=await ask('新密码（6–64 个字符，输入不显示）：',true);
-  const confirmation=await ask('确认新密码：',true);
-  if ([...password].length<6 || [...password].length>64 || password!==confirmation) throw new Error('invalid_recovery_password');
-  return {kind:'identity',plugin:'local-accounts',payload:{newUsername,password,reason:'interactive administrator recovery'}};
-}
-/** Passwords stay off argv, terminal echo and shell history. */
-export async function readAdministratorRecovery() {
+type RecoveryPrompts = NonNullable<OfflineRecoveryCapability['prompts']>;
+export type RecoveryQuestion = (label: string, secret: boolean) => Promise<string>;
+
+export function requireRecoveryTerminal(): void {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('recovery_requires_terminal');
-  console.log('请先停止目标实例的全部进程，并确认数据库路径及部署环境。恢复后旧会话全部失效。');
-  let hidden=false;
-  const output=new Writable({write(chunk,_encoding,callback){if(!hidden)process.stdout.write(chunk);callback();}});
-  const rl=createInterface({input:process.stdin,output,terminal:true});
+}
+
+/** Plugins own field semantics; the host only validates the bounded prompt protocol. */
+export async function collectRecoveryAnswers(prompts: RecoveryPrompts, ask: RecoveryQuestion): Promise<Record<string, string>> {
+  if (!Array.isArray(prompts) || !prompts.length || prompts.length > 64) throw new Error('invalid_recovery_prompts');
+  const names = new Set<string>();
+  for (const prompt of prompts) {
+    if (!prompt || typeof prompt.name !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(prompt.name)
+      || ['operation', '__proto__', 'constructor', 'prototype'].includes(prompt.name) || names.has(prompt.name)
+      || typeof prompt.label !== 'string' || !prompt.label || typeof prompt.secret !== 'boolean') throw new Error('invalid_recovery_prompts');
+    names.add(prompt.name);
+  }
+  const answers: Record<string, string> = {};
+  for (const prompt of prompts) {
+    const answer = await ask(prompt.label, prompt.secret);
+    if (typeof answer !== 'string') throw new Error('invalid_recovery_input');
+    answers[prompt.name] = answer;
+    if (Buffer.byteLength(JSON.stringify({operation: 'reset', ...answers})) > 8192) throw new Error('recovery_input_too_large');
+  }
+  return answers;
+}
+
+/** Secret input is never echoed; all interaction stays on the owning terminal. */
+export async function readRecoveryAnswers(prompts: RecoveryPrompts): Promise<Record<string, string>> {
+  requireRecoveryTerminal();
+  const input = process.stdin;
+  const wasRaw = input.isRaw === true;
+  const wasFlowing = input.readableFlowing === true;
+  let bytes = 0, overflow = false;
+  const abort = new AbortController();
+  const cancel = () => abort.abort();
+  const boundInput = (chunk: Buffer | string) => {
+    bytes += Buffer.byteLength(chunk);
+    if (bytes > 8192) { overflow = true; abort.abort(); }
+  };
+  input.on('data', boundInput);
+  input.on('end', cancel);
+  input.on('close', cancel);
   try {
-    return await collectAdministratorRecovery(async(label,secret)=>{
-      const pending=rl.question(label);hidden=secret;
-      try{return await pending;}finally{hidden=false;if(secret)process.stdout.write('\n');}
+    return await collectRecoveryAnswers(prompts, async (label, secret) => {
+      if (abort.signal.aborted || input.readableEnded || input.destroyed) throw new Error(overflow ? 'recovery_input_too_large' : 'recovery_cancelled');
+      // History and the kill/yank buffer belong to one question, never to a later public prompt.
+      // The disposable input also owns readline's keypress decoder and its listeners.
+      const questionInput = new PassThrough();
+      const output = new Writable({write(chunk, _encoding, callback) { if (!secret) process.stdout.write(chunk); callback(); }});
+      const rl = createInterface({input: questionInput, output, terminal: true, historySize: 0});
+      const forward = (chunk: Buffer | string) => { questionInput.write(chunk); };
+      rl.on('SIGINT', cancel);
+      rl.on('close', cancel);
+      try {
+        if (typeof input.setRawMode === 'function') input.setRawMode(true);
+        input.on('data', forward);
+        process.stdout.write(label + '：');
+        return await rl.question('', {signal: abort.signal});
+      }
+      catch { throw new Error(overflow ? 'recovery_input_too_large' : 'recovery_cancelled'); }
+      finally {
+        // Closing an answered question is normal; EOF/SIGINT still cancel the whole interaction.
+        input.off('data', forward);
+        rl.off('SIGINT', cancel); rl.off('close', cancel);
+        rl.close(); questionInput.destroy(); output.end();
+        if (secret) process.stdout.write('\n');
+      }
     });
-  }finally{rl.close();output.end();}
+  } finally {
+    input.off('data', boundInput); input.off('end', cancel); input.off('close', cancel);
+    if (!input.destroyed && typeof input.setRawMode === 'function' && input.isRaw !== wasRaw) input.setRawMode(wasRaw);
+    if (!input.destroyed) { if (wasFlowing) input.resume(); else input.pause(); }
+  }
+}
+
+export function writeSetupCodeToTerminal(result: {code: string; expiresAt: number}): void {
+  requireRecoveryTerminal();
+  process.stdout.write(`一次性初始化码：${result.code}\n有效期至：${new Date(result.expiresAt).toISOString()}\n`);
 }

@@ -1,3 +1,4 @@
+import { prepareManagementInitialization, initializeManagementAccount } from '../helpers/management-initialization';
 import { createTokenStatsGatewayFixture } from '../helpers/token-stats-fixture';
 import {pluginStateFixturePath} from '../helpers/plugin-state-fixture';
 import { expect, test } from 'bun:test';
@@ -10,7 +11,7 @@ import { HostSnapshotStore } from '../../packages/core/src/plugin-services/snaps
 import { PluginCommunicationStore } from '../../packages/core/src/plugin-services/persistence';
 import { MODELS_DEV_SETTINGS_KEY } from '../../plugins/models-dev/server/store';
 import {
-  createGatewayFixture, reservePortBlock, startTrackedGatewayMaster, waitForHealth,
+  createGatewayFixture, reservePortBlock, startTrackedGatewayMaster,
   waitUntil, recordOwnedWorkers, stopOwnedMaster, releasePortBlock, quarantinePortBlock,
   cleanupGatewayFixture, requestJson, safeGatewayError, type OwnedMaster,
   type GatewayMasterStartupState,
@@ -117,11 +118,17 @@ test('original-lab estimates and context tiers settle protected USD budgets acro
     await recordOwnedWorkers(master!, workers);
   };
   try {
-    for (const name of ['key-access', 'token-budget', 'local-accounts']) {
+    for (const name of ['key-access', 'token-budget', 'user-auth']) {
       await cp(resolve(import.meta.dir, '../../packages/core/dist/plugins', name), join(fixture.pluginsPath, name), { recursive: true, errorOnExist: true });
     }
+    const prepared = await prepareManagementInitialization(fixture.configDbPath, fixture.pluginsPath);
+    revision = prepared.revision;
     master = await startTrackedGatewayMaster(startup, fixture, lease);
-    await waitForHealth(master, lease.base, fixture);
+    await waitUntil(async () => (await fetch(`${management}/health`)).ok, 'master did not become healthy');
+    await initializeManagementAccount(management, prepared.code, 'pricing-admin', password);
+    const login = await api('/api/auth/login', 'POST', { username: 'pricing-admin', password, transport: 'bearer' });
+    authorization = `Bearer ${login.token}`;
+    await inventory();
     const db = new Database(pluginStateFixturePath(fixture.configDbPath));
     try {
       db.exec('PRAGMA busy_timeout = 5000');
@@ -131,19 +138,15 @@ test('original-lab estimates and context tiers settle protected USD budgets acro
     await publish(1);
     const initial = await api('/api/config');
     const aggregate = { ...initial.config,
-      plugin_activations: ['models-dev', 'token-metering', 'token-stats', 'catalog-version-probe', 'key-access', 'token-budget', 'local-accounts'].map(plugin_name => ({ plugin_name })),
+      plugin_activations: ['models-dev', 'token-metering', 'token-stats', 'catalog-version-probe', 'key-access', 'token-budget', 'user-auth'].map(plugin_name => ({ plugin_name })),
       logical_configuration: { plugins: [], services: [{ id: SERVICE, position: 1, name: 'estimate-acceptance', plugins: [],
         endpoints: [{ id: UPSTREAM, position: 1, target: `http://127.0.0.1:${upstream.port}/v1/`, weight: 100, priority: 1, is_disabled: false, plugins: [] }] }],
       routes: [{ id: ROUTE, position: 1, path: '/pricing-estimate', service_id: SERVICE, plugins: [] },
         { id: '30000000-0000-4000-8000-0000000000af', position: 2, path: '/catalog-fixture-ready', service_id: SERVICE, plugins: [] }] } };
     const mutation = randomUUID();
-    await api('/api/config', 'PUT', { expected_revision: initial.revision, mutation_id: mutation, aggregate,
-      managementSetup: { username: 'pricing-admin', password, passwordConfirmation: password } });
+    await api('/api/config', 'PUT', { expected_revision: initial.revision, mutation_id: mutation, aggregate });
     revision = initial.revision + 1;
-    await waitUntil(async () => (await (await fetch(`${management}/api/auth/mode`)).json() as any).mode === 'plugin', 'management authentication did not activate');
     expect((await fetch(`${management}/api/config`)).status).toBe(401);
-    const login = await api('/api/auth/login', 'POST', { username: 'pricing-admin', password, transport: 'bearer' });
-    authorization = `Bearer ${login.token}`;
     await inventory();
     await ready(1, 2);
     const issued = await api('/api/plugins/key-access/control/credentials', 'POST', { name: 'Estimate Acceptance' });

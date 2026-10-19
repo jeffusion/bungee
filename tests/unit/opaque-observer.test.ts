@@ -15,13 +15,13 @@ test('slow side callback never stalls response bytes and side queue is bounded',
 test('optional compressed JSON decode observes content independently from wire',async()=>{
   for(const [coding,compress] of [['gzip',gzipSync],['zstd',zstdCompressSync]] as const){const events:any[]=[];const payload=compress(encoder.encode('{"usage":{"total_tokens":3}}'));
     const observer=createAttemptResponseObserver('json',context,async(event)=>{events.push(event);},undefined,coding);
-    const bytes=new Uint8Array(await new Response(new Response(payload).body!.pipeThrough(observer)).arrayBuffer());await observer.completion;
-    expect(bytes).toEqual(payload);expect(events.find(event=>event.phase==='response')?.body).toEqual({usage:{total_tokens:3}});
+    const bytes=new Uint8Array(await new Response(new Response(Uint8Array.from(payload)).body!.pipeThrough(observer)).arrayBuffer());await observer.completion;
+    expect(bytes).toEqual(Uint8Array.from(payload));expect(events.find(event=>event.phase==='response')?.body).toEqual({usage:{total_tokens:3}});
   }
 });
 test('SSE observer metadata stays separate and does not inject JSON fields',async()=>{
   const events:any[]=[];const payload=encoder.encode('event: custom\nid: 7\ndata: {"usage":{"total_tokens":1}}\n\n');
-  const observer=createAttemptResponseObserver('sse',context,async(event)=>{events.push(event);});await new Response(new Response(payload).body!.pipeThrough(observer)).text();await observer.completion;
+  const observer=createAttemptResponseObserver('sse',context,async(event)=>{events.push(event);});await new Response(new Response(Uint8Array.from(payload)).body!.pipeThrough(observer)).text();await observer.completion;
   const event=events.find(event=>event.phase==='response');expect(event.body).toEqual({usage:{total_tokens:1}});expect(event.envelope.event).toBe('custom');expect(event.envelope.id).toBe('7');
 });
 

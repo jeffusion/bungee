@@ -35,7 +35,7 @@ async function connectFixture(page: Page) {
     errors.push(`request failed: ${path}: ${reason}`);
   });
   const config = configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null, retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 }));
-  config.config.logical_configuration.routes = [{ id: routeId, position: 0, path: '/relay-route', plugins: [] }];
+  config.config.logical_configuration.routes = [{ id: routeId, position: 0, path: '/relay-route', plugins: [], endpoints: [] }];
   config.config.logical_configuration.services = [{ id: serviceId, position: 0, name: 'relay-service', plugins: [], endpoints: [] }];
   await page.route(`${runtime.origin}/api/**`, async route => {
     const url = new URL(route.request().url());
@@ -214,8 +214,8 @@ for (const language of ['zh-CN', 'en']) test(`Codex summaries resolve route path
     await expect(page.getByTestId('saved-bindings')).toContainText(serviceId);
     await summary.screenshot({ path: `/tmp/codex-router-summary-${language}.png` });
 
-    config.config.logical_configuration.routes[0].path = '/renamed-relay';
-    config.config.logical_configuration.services[0].name = 'renamed-service';
+    config.config.logical_configuration.routes = config.config.logical_configuration.routes.map(route => ({ ...route, path: '/renamed-relay' }));
+    config.config.logical_configuration.services = config.config.logical_configuration.services.map(service => ({ ...service, name: 'renamed-service' }));
     await page.reload();
     await expect(summary).toContainText(`${zh ? '路由' : 'Route'}: /renamed-relay`);
     await expect(summary).toContainText(`${zh ? '服务' : 'Service'}: renamed-service`);

@@ -58,7 +58,7 @@ async function fixture(options: ManagedWebSocketSessionOptions, limits: WebSocke
   const bridge = createWebSocketBridge({ closeTimeoutMs: 20, ...limits });
   const sent: string[] = []; const closes: number[] = [];
   let data!: WebSocketBridgeData;
-  const server = { upgrade(_request: Request, input: { data: WebSocketBridgeData }) { data = input.data; return true; } } as Bun.Server<any>;
+  const server = { upgrade(_request: Request, input: { data: WebSocketBridgeData }) { data = input.data; return true; } };
   await bridge.upgradeSession(request(), server, options);
   const socket = {
     data, readyState: 1, getBufferedAmount: () => 0,
@@ -160,7 +160,7 @@ describe('managed WebSocket sessions', () => {
 
   test('validates requests, admission and handshake-only cancellation', async () => {
     const bridge = createWebSocketBridge(); let upgrades = 0;
-    const server = { upgrade() { upgrades++; return false; } } as unknown as Bun.Server<any>;
+    const server = { upgrade() { upgrades++; return false; } };
     expect(await bridge.upgradeSession(new Request('http://localhost'), server, { onMessage() {} })).toBeUndefined();
     const bad = request(); bad.headers.set('Sec-WebSocket-Version', '12');
     expect((await bridge.upgradeSession(bad, server, { onMessage() {} }))?.status).toBe(426);
@@ -191,7 +191,7 @@ describe('managed WebSocket sessions', () => {
 
   test('pending native commit reserves handshake capacity and rechecks abort or stop', async () => {
     let upgrades = 0;
-    const server = { upgrade() { upgrades++; return true; } } as unknown as Bun.Server<any>;
+    const server = { upgrade() { upgrades++; return true; } };
     const bridge = createWebSocketBridge({ maxHandshakes: 1 });
     const controller = new AbortController();
     const pending = bridge.upgradeSession(request(), server, { signal: controller.signal, onMessage() {} });

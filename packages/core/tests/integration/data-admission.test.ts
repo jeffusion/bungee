@@ -116,7 +116,7 @@ test('worker prepare uses effective anonymous identity and publication changes c
     h.freeze(); expect(() => h.admit(target(), worker)).toThrow('admission_state_unavailable'); expect(h.beforeAttempt(t, worker).version).toBe(2);
   } finally {setWorkerAdmissionSession(null); await server.stop(true);}
 });
-async function pipeline(run: (ctx: {host: DataAdmissionHost; send: (path?: string, authorization?: string, body?: ReadableStream<Uint8Array>) => Promise<Response>; calls: () => number; headers: () => string | null}) => Promise<void>, upstreamFetch?: (request: Request, count: number, host: DataAdmissionHost) => Response | Promise<Response>, retry = false) {
+async function pipeline(run: (ctx: {host: InstanceType<typeof DataAdmissionHost>; send: (path?: string, authorization?: string, body?: ReadableStream<Uint8Array>) => Promise<Response>; calls: () => number; headers: () => string | null}) => Promise<void>, upstreamFetch?: (request: Request, count: number, host: InstanceType<typeof DataAdmissionHost>) => Response | Promise<Response>, retry = false) {
   const secret = generateWorkerTransportSecret(), identity = {role: 'ingress' as const, process_instance_id: randomUUID(), boot_nonce: randomUUID()};
   const h = host(); await h.publish({version: 1, plugins: [accessPlugin()], routeRequirements: [{plugin: 'key-access', routeIds: ['route', 'other']}]});
   let calls = 0, auth: string | null = null;

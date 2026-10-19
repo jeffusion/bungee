@@ -4,7 +4,7 @@ import {
   createConfigWorkerLifecycle,
   type ProductionResources,
 } from '../../../src/config-worker/lifecycle';
-import { startCurrentMessage } from '../../helpers/config-publication-worker-runtime.ts';
+import { startCurrentMessage } from '../../helpers/config-publication-worker-runtime';
 import {
   privateWorkerHeaders,
   TEST_WORKER_TRANSPORT_SECRET,

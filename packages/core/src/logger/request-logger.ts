@@ -1,7 +1,6 @@
 import { accessLogWriter, type ProcessingStep } from './access-log-writer';
 import { fileLogWriter, type FileLogEntry } from './file-log-writer';
 import type { AccessLogWriter } from './access-log-writer';
-import type { FileLogWriter } from './file-log-writer';
 import type { BodyStorageManager } from './body-storage';
 import type { HeaderStorageManager } from './header-storage';
 import type { RawResponseError } from '../plugin-control/contracts';

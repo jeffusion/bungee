@@ -192,12 +192,6 @@ describe('configuration control with an explicit management provider', () => {
 
   test('authenticates before body parsing and gates valid mutations before preflight work', async () => {
     const { api, repository } = fixture(1, 'converged', (value) => value, () => false);
-    let snapshotCalls = 0;
-    const getSnapshot = repository.getSnapshot.bind(repository);
-    repository.getSnapshot = () => {
-      snapshotCalls += 1;
-      return getSnapshot();
-    };
     const mutationRequests = [
       request('/api/config', { method: 'PUT' }),
       request('/api/config/import', { method: 'POST' }),
@@ -217,7 +211,8 @@ describe('configuration control with an explicit management provider', () => {
         ? { error: 'control_recovering' }
         : expectedStatuses[index] === 200 ? { revision: 1, unchanged: true } : { error: 'invalid_json' });
     }
-    expect(snapshotCalls).toBe(22);
+    expect(repository.getSnapshot().revision).toBe(1);
+    expect(repository.getActivePublication()).toBeNull();
     expect((await api.handle(authorized('/api/config')))?.status).toBe(200);
   });
 

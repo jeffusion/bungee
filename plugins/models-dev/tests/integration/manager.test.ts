@@ -29,6 +29,23 @@ class MemoryStorage implements PluginStorage {
   async readStrict<T>(key: string): Promise<{ found: false } | { found: true; value: T }> {
     return this.values.has(key) ? { found: true, value: this.values.get(key) as T } : { found: false };
   }
+  async increment(key: string, field: string, delta = 1): Promise<number> {
+    const stored = this.values.get(key);
+    if (stored !== undefined && (typeof stored !== 'object' || stored === null || Array.isArray(stored))) throw new Error('expected stored object');
+    const value: Record<string, unknown> = { ...stored };
+    const previous = value[field] ?? 0;
+    if (typeof previous !== 'number') throw new Error('counter must be numeric');
+    const next = previous + delta;
+    value[field] = next; this.values.set(key, value); return next;
+  }
+  async compareAndSet(key: string, field: string, expected: unknown, next: unknown): Promise<boolean> {
+    const stored = this.values.get(key);
+    if (stored !== undefined && (typeof stored !== 'object' || stored === null || Array.isArray(stored))) throw new Error('expected stored object');
+    const value: Record<string, unknown> = { ...stored };
+    if (!Object.is(value[field], expected)) return false;
+    value[field] = next; this.values.set(key, value); return true;
+  }
+  async clear(): Promise<void> { this.values.clear(); }
   uncached(): PluginStorage { return this; }
 }
 function snapshotStore() {
@@ -49,7 +66,7 @@ function manager(storage: MemoryStorage, fetchImpl: typeof fetch, store = snapsh
   }, { fetch: fetchImpl, now: () => 1000, schedule: () => 0 as unknown as ReturnType<typeof setTimeout>, cancel: () => {} });
   return { instance, store, published, injection };
 }
-const okFetch = (catalog: unknown): typeof fetch => (async () => Response.json(catalog)) as typeof fetch;
+const okFetch = (catalog: unknown): typeof fetch => Object.assign(async () => Response.json(catalog), { preconnect: () => {} });
 
 describe('models-dev authoritative snapshot', () => {
   test('the production async store restores and publishes only after the database commit', async () => {
@@ -108,9 +125,9 @@ describe('models-dev authoritative snapshot', () => {
   });
   test('network failure preserves the last version', async () => {
     let fail = false;
-    const { instance, store } = manager(new MemoryStorage(), (async () => {
+    const { instance, store } = manager(new MemoryStorage(), Object.assign(async () => {
       if (fail) throw new Error('offline'); return Response.json(smallCatalog);
-    }) as typeof fetch);
+    }, { preconnect: () => {} }));
     await instance.start(); await instance.refresh(); fail = true; await instance.refresh();
     expect(instance.statusSnapshot()).toMatchObject({ version: 1, state: 'stale', lastError: 'network' });
     expect(store.current()!.descriptor.version).toBe(1); instance.stop();
@@ -227,7 +244,7 @@ describe('models-dev authoritative snapshot', () => {
         snapshot: { store: () => ({ current: async () => store.current(), version: async (version: number) => store.version(version), publish: async (version: number, body: unknown) => store.publish(version, body) }), provide: () => {} },
       },
     } as unknown as ControlHostContext, {
-      fetch: (async () => { fetchCount++; throw new Error('fixture forbids network'); }) as typeof fetch,
+      fetch: Object.assign(async () => { fetchCount++; throw new Error('fixture forbids network'); }, { preconnect: () => {} }),
       schedule: () => 0 as unknown as ReturnType<typeof setTimeout>, cancel: () => {},
     });
     const worker = new ModelsDevPlugin();

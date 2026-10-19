@@ -129,7 +129,7 @@ const timeline: SmokeTimelineEntry[] = [];
 const failureDiagnosticPaths: FailureDiagnosticPaths[] = [];
 const smokeStartedAt = Date.now();
 let activeCase: SmokeCaseContext | undefined;
-const localAccountsManifest = JSON.parse(fs.readFileSync(path.join(WORKSPACE_ROOT, 'plugins/local-accounts/manifest.json'), 'utf8'));
+const userAuthManifest = JSON.parse(fs.readFileSync(path.join(WORKSPACE_ROOT, 'plugins/user-auth/manifest.json'), 'utf8'));
 let protectedAuth = false;
 let pluginSession = false;
 let loginRequests = 0;
@@ -251,16 +251,18 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async (route) => {
   const url = route.request().url();
   const pathname = new URL(url).pathname;
   if (pathname === '/api/auth/mode') {
-    await route.fulfill({ json: { mode: protectedAuth ? 'plugin' : 'anonymous', publicOrigin: new URL(url).origin,
-      ...(protectedAuth ? { provider: { name: 'local-accounts', loginComponent: localAccountsManifest.management.loginComponent } } : {}) } });
+    await route.fulfill({ json: { mode: protectedAuth ? 'plugin' : 'anonymous', initialized: true, publicOrigin: new URL(url).origin,
+      ...(protectedAuth ? { provider: { name: 'user-auth', loginComponent: userAuthManifest.management.loginComponent } } : {}) } });
   } else if (pathname === '/api/auth/verify') {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify(protectedAuth
-        ? { success: pluginSession, mode: 'plugin', ...(pluginSession ? { subject: { id: 'smoke-admin', provider: 'local-accounts' }, csrfToken: 'smoke-csrf' } : {}) }
+        ? { success: pluginSession, mode: 'plugin', ...(pluginSession ? { subject: { id: 'smoke-admin', provider: 'user-auth' }, csrfToken: 'smoke-csrf' } : {}) }
         : { success: true, mode: 'anonymous', subject: { id: 'anonymous', provider: 'anonymous' } }),
     });
+  } else if (pathname === '/api/auth/login/options') {
+    await route.fulfill({json:{local:{enabled:true,turnstile:{enabled:false}},methods:[]}});
   } else if (pathname === '/api/auth/login') {
     assert.equal(route.request().method(), 'POST');
     assert.deepEqual(route.request().postDataJSON(), { username: 'smoke-admin', password: 'smoke-password', transport: 'cookie' });
@@ -268,8 +270,8 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async (route) => {
     pluginSession = true;
     await route.fulfill({ json: { success: true, mode: 'plugin', csrfToken: 'smoke-csrf' } });
   } else if (pathname === '/api/plugin-translations') {
-    await route.fulfill({ json: Object.fromEntries(Object.entries(localAccountsManifest.translations)
-      .map(([language, messages]) => [language, { plugins: { 'local-accounts': messages } }])) });
+    await route.fulfill({ json: Object.fromEntries(Object.entries(userAuthManifest.translations)
+      .map(([language, messages]) => [language, { plugins: { 'user-auth': messages } }])) });
   } else if (new URL(url).pathname === '/api/config/runtime') {
     await route.fulfill({ json: configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null,
       retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 })) });
@@ -456,10 +458,10 @@ for (const [caseIndex, r] of routesToTest.entries()) {
       await form.locator('input[autocomplete="username"]').fill('smoke-admin');
       await form.locator('input[autocomplete="current-password"]').fill('smoke-password');
       const menuResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/ui/menus');
-      await form.getByRole('button').click();
+      await form.locator('button:not([type="button"])').click();
       await assertVisibleTestId(PAGE_TEST_IDS.dashboard, caseContext);
       await (await menuResponse).finished();
-      assert.equal(loginRequests, 1, 'The local-accounts login form must submit exactly once.');
+      assert.equal(loginRequests, 1, 'The user-auth login form must submit exactly once.');
       assert.equal(new URL(page.url()).hash, '#/', 'Successful provider login must return to the dashboard.');
     }
     recordTimeline('case_end', caseContext, caseFailed ? 'failure' : 'success');
@@ -498,6 +500,7 @@ fs.writeFileSync(
 
 if (pageErrors.length > 0 || consoleErrors.length > 0 || criticalFailures.length > 0 || hasFailure) {
   for (const error of pageErrors) console.error(`Browser page error: ${error.stack ?? error.message}`);
+  console.error('Smoke diagnostics:', JSON.stringify({ consoleErrors, criticalFailures, caseFailures: timeline.filter(entry => entry.event === 'case_failure') }));
   for (const error of consoleErrors) console.error(`Browser console error: ${JSON.stringify(error)}`);
   for (const failure of criticalFailures) console.error(`Critical request failed: ${JSON.stringify(failure)}`);
   console.error('Smoke test failed with errors.');

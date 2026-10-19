@@ -12,7 +12,7 @@ import { resolveStorageWorkerUrls } from './process-options';
 import { PluginDependencyGraph } from '../plugin-dependencies';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { type PluginDurableState } from '../plugin-durable-state';
-import { ManagementAuthentication, parseManagementOrigin, validateManagementTransition, managementSetupFailure } from './management-auth';
+import { ManagementAuthentication, parseManagementOrigin, validateManagementTransition } from './management-auth';
 import { managementRequestSource, parseTrustedManagementProxies } from '../management-listener/request-source';
 import { parseAdmissionTarget, type WorkerStateRpcCall } from '../data-admission/rpc';
 import type { DataAdmissionPublication } from '../data-admission/host';
@@ -117,7 +117,7 @@ export interface MasterPluginCatalog {
 }
 
 export type MasterProcessRepository = Pick<AsyncConfigRepository,
-  'getSnapshot' | 'getSupervisionState' | 'close' | 'commit' | 'getActivePublication'
+  'getSnapshot' | 'getManagementProtection' | 'refreshControlProjection' | 'getSupervisionState' | 'close' | 'commit' | 'getActivePublication'
   | 'getOperationState' | 'getCurrentOperationState' | 'getRecovery' | 'getCurrentRecovery'
   | 'appendServingSnapshot' | 'getServingSnapshot' | 'claimControllerWithCapability'
   | 'beginPublication' | 'beginWorkerAttempt' | 'beginDrainingRecovery' | 'markDraining' | 'recordWorkerResult' | 'finalizePublication' | 'createManualRecovery' | 'claimRecoveryAttempt'
@@ -830,8 +830,7 @@ export async function startMasterComposition(
     const managementProviders = new Set((catalog.records?.() ?? []).filter(record => record.manifest.management).map(record => record.name));
     const managementAuth = new ManagementAuthentication(resources.pluginControl,
       () => resources.repository!.getSnapshot().aggregate, managementProviders, managementOrigin,
-      durableState?.forNamespace('core-management-auth'));
-    await managementAuth.initialize();
+      () => resources.repository!.getManagementProtection());
     const protections = new DurableRouteProtections(durableState?.forNamespace('core-route-protection'));
     await protections.initialize();
     const routeProtections = protections.routes;
@@ -991,10 +990,9 @@ export async function startMasterComposition(
           && admitted.every(worker => resources.workerFactory?.owns(worker.process) === true
             && registry.workers.some(peer => peer.worker_instance_id === worker.process.identity.worker_instance_id
               && peer.boot_nonce === worker.boot_nonce && peer.master_generation === worker.process.identity.master_generation));
-        const selected = managementAuth.selected();
         const management = !runtimeStopping && dependencies.runtimeRecovery?.state !== 'stopped' && configurationStorageHealthy && pluginStorageHealthy
           && resources.stats?.healthy?.() !== false
-          && (selected === null || resources.pluginControl?.status(selected) === 'ready');
+          && managementAuth.available();
         const snapshot = resources.repository!.getSnapshot();
         return {live:true,management,data,degraded:!management || !data || admissionRecovering
           || registry?.revision !== snapshot.revision || registry?.content_hash !== snapshot.content_hash};
@@ -1915,9 +1913,8 @@ export async function startMasterComposition(
     const healthTimer = setInterval(() => {
       if (communicationStopped || !configurationStorageHealthy) return;
       const ingressFresh = resources.ingressController?.trustedActiveAdmissionIfFresh();
-      const selected = managementAuth.selected();
       const healthy = runtimeReady && !runtimeStopping && pluginStorageHealthy && resources.stats?.healthy?.() !== false
-        && (selected === null || resources.pluginControl?.status(selected) === 'ready') && !!ingressFresh
+        && managementAuth.available() && !!ingressFresh
         && trackedAdmission.snapshot().length === options.workerCount;
       void dependencies.runtimeRecovery?.observe(resources.repository!,healthy)
         .catch(() => { configurationStorageFailed(); });
@@ -2055,7 +2052,6 @@ export async function startMasterComposition(
             }
           })));
     };
-    let committedManagementProvider = managementAuth?.selected() ?? null;
     const menuRepository = resources.repository;
     controlApi = createConfigControlApi({
       repository: resources.repository,
@@ -2077,8 +2073,7 @@ export async function startMasterComposition(
       ]}),
       managementAuth,
       pluginDependencies: new PluginDependencyGraph(catalogRecords.map(value=>value.manifest)),
-      managementSetupStatus: name => resources.pluginControl!.readManagementSetup(name),
-      managementProviderMetadata: name => ({name,loginComponent:(catalog.records?.() ?? []).find(value=>value.name===name)?.manifest.management?.loginComponent}),
+      managementProviderMetadata: name => ({name,...(catalog.records?.() ?? []).find(value=>value.name===name)?.manifest.management}),
       resourceCollection: readKeyCollection,
       resourceExtensions: readKeyExtensions,
       guardDataTransition,
@@ -2096,18 +2091,23 @@ export async function startMasterComposition(
         request, active, next, managementAuth, resources.pluginControl!,
       ),
       guardManagementTransition: async (request, active, next, setup) => {
-        if (!managementAuth) return Response.json({error:'management_uninitialized'},{status:503});
+        const protectedChange = await validateManagementTransition(request, active, next, managementAuth, resources.pluginControl!);
+        if (protectedChange) return protectedChange;
         const before = managementAuth.selected(active), after = managementAuth.selected(next);
-        if (before === after) return null;
-        if (!await managementAuth.authorized(request,'auth.mode')) return Response.json({error:'forbidden'},{status:403});
-        if (after) {
-          if (before) return Response.json({error:'management_provider_conflict'},{status:422});
-          if (!setup) return Response.json({error:'management_setup_required'},{status:422});
-          try { const handle = await resources.pluginControl!.activate(after); if (!handle.control.management) throw new Error('missing_provider');
-            await handle.control.management.bootstrap(setup); if (!await handle.control.management.hasIdentity()) throw new Error('identity_required');
-          } catch (error) { return managementSetupFailure(error); }
+        if (before === after || !after) return null;
+        if (!setup) return Response.json({error:'management_setup_required'},{status:422});
+        try {
+          const provider = resources.pluginControl!.get(after)?.control.management;
+          if (!provider) throw new Error('provider_unavailable');
+          await provider.bootstrap(setup);
+          if (!await provider.hasIdentity()) throw new Error('provider_unavailable');
+          return null;
+        } catch (error) {
+          const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+          if (code === 'invalid_credentials' || code === 'invalid_input') return Response.json({error:code},{status:422});
+          if (code === 'initialization_required') return Response.json({error:code},{status:409});
+          return Response.json({error:'management_setup_failed'},{status:503});
         }
-        return null;
       },
       admission: trackedAdmission,
       workerCount: options.workerCount,
@@ -2185,10 +2185,6 @@ export async function startMasterComposition(
       statsApi: resources.stats ?? undefined,
       onConfigurationCommitted: async (snapshot) => {
         activePublicationObserved = true;
-        await managementAuth.rememberSelection(snapshot.aggregate);
-        const selected = managementAuth?.selected(snapshot.aggregate) ?? null;
-        if (committedManagementProvider && committedManagementProvider !== selected) await resources.pluginControl!.get(committedManagementProvider)?.control.management?.revokeSessions();
-        committedManagementProvider = selected;
         resources.stats?.configureLogging?.(snapshot.aggregate.logical_configuration.logging);
       },
       runtimeUpstreams: () => runtimeUpstreams({

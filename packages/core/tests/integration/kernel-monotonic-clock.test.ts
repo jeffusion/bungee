@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createKernelMonotonicClock, kernelMonotonicNowNs, readKernelDeadlineClockId } from '../../src/master-runtime/kernel-monotonic-clock';
 import { createConfigWorkerRuntimeController } from '../../src/config-publication/worker-runtime';
-import { drainMessage, fakeLifecycle, PROCESS_IDENTITY, startMessage } from '../helpers/config-publication-worker-runtime.ts';
+import { drainMessage, fakeLifecycle, PROCESS_IDENTITY, startMessage } from '../helpers/config-publication-worker-runtime';
 
 const output = (address: number) => new BigInt64Array(toArrayBuffer(address as Pointer, 0, 16));
 

@@ -1,6 +1,6 @@
 # 插件扩展架构
 
-Bungee 的基础层负责个人反代的 Route、Service、上游及通用插件运行机制。管理默认匿名、路由默认公开；单管理员认证、Key 生命周期与路由访问控制、Key 限速、token 计量、预算和统计由可选插件提供。插件通过声明依赖与公开服务复用能力，核心不包含这些业务插件的策略、账务或 UI 字段。
+Bungee 的基础层负责个人反代的 Route、Service、上游及通用插件运行机制。管理默认匿名、路由默认公开；管理账号认证、Key 生命周期与路由访问控制、Key 限速、token 计量、预算和统计由可选插件提供。插件通过声明依赖与公开服务复用能力，核心不包含这些业务插件的策略、账务或 UI 字段。
 
 进程基础说明见 [运行时架构](./runtime.md)，具体行为见 [认证与访问控制设计](./access-control.md)，使用步骤见 [使用指南](../guides/authentication.md)。
 
@@ -8,7 +8,7 @@ Bungee 的基础层负责个人反代的 Route、Service、上游及通用插件
 
 | 基础层保留 | 通过插件实现 |
 | --- | --- |
-| 代理路由、服务、上游、协议传输与进程管理 | 单管理员账号密码与会话 |
+| 代理路由、服务、上游、协议传输与进程管理 | 账号密码、初始化码与会话 |
 | 匿名管理／代理主体、管理 provider 与准入接口 | 数据面 Key 生命周期、路由保护与最终模型范围 |
 | 通用只读 resource collection／extension DTO | Key ID、生成、验证、过期、撤销、速率与预算 |
 | catalog、依赖图、服务注册、生命周期和作用域 | token 协议解析、usage 规范化及统计展示 |
@@ -16,7 +16,7 @@ Bungee 的基础层负责个人反代的 Route、Service、上游及通用插件
 | 通用跨进程 RPC、状态发布、持久化、秘密存储 | 管理员与会话、策略记录、周期额度与账本的内容 |
 | 通用菜单、设置、资源编辑扩展和 API 门禁 | 登录表单、访问控制设置、Key 高级设置与统计组件 |
 
-无业务插件时，管理匿名、代理公开，不需要凭证。Route 与 Service 没有认证配置；Key 生命周期和路由保护统一归访问控制插件。管理认证只管理一个管理员，没有团队与角色。
+无业务插件时，管理匿名、代理公开，不需要凭证。Route 与 Service 没有认证配置；Key 生命周期和路由保护统一归访问控制插件。用户认证提供管理账号密码，所有登录拥有相同管理能力，没有团队、成员或角色授权。
 
 可选插件停用需要满足依赖及业务 guard。Key 限速与预算显式关闭后，新请求取消对应限制，已接纳请求使用原策略与服务租约完成；访问控制须先显式解除全部路由保护。已选择的认证 provider、受保护路由要求另有持久 guard，不能因插件故障或目录缺失自动放宽访问。
 
@@ -40,7 +40,7 @@ Bungee 的基础层负责个人反代的 Route、Service、上游及通用插件
 
 | 插件 | 类型与作用域 | 依赖 | 业务职责 |
 | --- | --- | --- | --- |
-| local-accounts | 全局管理扩展，control 进程 | 无业务依赖 | 单管理员账号、会话与管理认证 |
+| user-auth | 全局管理扩展，control 进程 | 无业务依赖 | 账号密码、初始化、会话与管理认证 |
 | key-access | 全局策略插件，control/worker/ingress | 无业务依赖 | 数据面 Key 生命周期、保护路由集合及路由／最终模型授权 |
 | key-rate-limit | 全局策略插件，control/ingress | key-access | 每个 Key 的全实例速率策略 |
 | token-metering | 全局服务插件，worker | 无业务依赖 | 一次解析、规范化 usage、计量来源和不完整结果 |
@@ -52,7 +52,7 @@ Bungee 的基础层负责个人反代的 Route、Service、上游及通用插件
 ```mermaid
 flowchart TD
     B[Bungee 基础代理与匿名入口] --> H[通用插件 Host]
-    H --> A[local-accounts]
+    H --> A[user-auth]
     H --> K[key-access]
     H --> R[key-rate-limit]
     H --> Q[token-budget]
@@ -134,12 +134,13 @@ worker 中的 token-metering 接收框架提供的最终请求与原始上游响
 
 | 扩展点 | 平台保证 | 插件负责 |
 | --- | --- | --- |
+| management.setupStatus / initialize | 只路由当前 provider 的初始化请求、Origin 校验与页面框架 | 一次性码和账号校验、原子初始化，不创建登录会话 |
 | management.authenticate | 唯一选中的提供者、互斥模式、错误不回退 | 验证账号会话并输出管理主体 |
 | management.authorize | API 声明能力及当前主体传入，拒绝结果强制执行 | 验证当前管理员会话并授权 |
 | data.finalAdmission | 最终目标冻结、身份插件最新状态、持久保护 guard、单次外部请求许可 | 范围、速率、预算业务判断 |
 | data.beforeAttempt | 每次发送前执行，绑定请求及 attempt 租约 | 故障转移目标检查、必要准备和账务登记 |
 | transport.observeRaw | 请求和原始响应的通用观察及显式完整性 | LLM 解析及 token 规范化 |
-| plugin.lifecycleGuard | 生命周期与状态编辑串行化、在途引用可追踪 | 认证切换证明、路由保护停用检查、迁移及清理保护；限速／预算策略不阻止明确停用，租约推迟销毁 |
+| plugin.lifecycleGuard | 生命周期与状态编辑串行化、在途引用可追踪 | 强制认证 guard、路由保护停用检查、迁移及清理保护；限速／预算策略不阻止明确停用，租约推迟销毁 |
 | plugin.statePublish | 持久化版本、发布 ACK、代际隔离及恢复操作 | 策略内容和账务状态的生成 |
 
 准入链只有纯 validate、可取消 prepare，以及 Host 的共同最终决定，不提供通用的跨插件分布式 commit。所有初步校验成功后才能 prepare；跨进程 prepare 仅允许建立绑定 request/attempt ID 的 pending 记录或订阅租约，不能永久扣减额度或速率。某个准备失败或结果未知时不发许可，按同一 ID 查询并取消已确认准备项；未确认项进入可恢复状态，不能换 ID 重试。预算 pending 不预留 token，未发送时可幂等取消。
@@ -158,7 +159,7 @@ master、ingress 和 worker 分别承载各自的通用 Host 与业务插件。
 
 | 进程 | 平台 Host | 插件职责 |
 | --- | --- | --- |
-| master/control | 管理 API、存储 Worker 协调、插件迁移和状态发布 | local-accounts，Key 策略编辑，预算账本事务，统计 API |
+| master/control | 管理 API、存储 Worker 协调、插件迁移和状态发布 | user-auth，Key 策略编辑，预算账本事务，统计 API |
 | ingress | 全实例准入序列、通用身份验证与持久保护 guard、策略 Host | key-access 验证 Key 与最终范围，Key 限流桶，预算准入计数 |
 | worker | scoped Hook、目标冻结、原始传输观察、服务句柄 | 最终模型提取，token-metering，预算 attempt 准备与结算提交 |
 
@@ -172,7 +173,7 @@ Key 访问范围等策略从 master 发布到 ingress，worker 只提供实际�
 
 Key 真值与生命周期由 key-access 插件的耐久状态及发布协议负责。该插件保存凭证摘要、撤销状态、保护集合和每 Key 授权；key-rate-limit 与 token-budget 按稳定 Key ID 保存各自策略。管理员、会话与预算账本归相应插件。
 
-core 提供 collection 和 resource extension 的通用只读 Host：按 manifest 声明加载 DTO reader，只传入 `get/list`，不启动已停用插件，不授予写权限。创建和撤销 Key 属于插件 API。平台独立持久化管理 provider 选择与受保护路由要求，catalog 目录缺失或读取异常不能抹掉这些保护。
+core 提供 collection 和 resource extension 的通用只读 Host：按 manifest 声明加载 DTO reader，只传入 `get/list`，不启动已停用插件，不授予写权限。创建和撤销 Key 属于插件 API。配置 Worker 原子持久化管理强制认证 guard 和 provider 激活选择；guard 不进入普通配置导入导出。平台另行持久化受保护路由要求，catalog 目录缺失或读取异常不能抹掉这些保护。
 
 平台提供异步 durable-state capability。插件状态、密钥、KV、命令日志、可靠事件和快照在 plugin-state.db，配置在 bungee.db，观察数据在 access.db。独立存储 Worker 执行查询与事务；master 通过消息协调，不在监督线程扫描 SQLite。普通 CAS 不记录历史命令，需要幂等结果的业务复用命令日志。状态、命令结果及 outbox 必须同库原子提交，未知结果不能自动重执行，见[存储契约](storage.md)。
 
@@ -181,7 +182,7 @@ Host 维护命名空间和版本，插件声明业务记录 schema。命名空�
 | 持久化内容 | 所有者 | 是否受日志清理影响 |
 | --- | --- | --- |
 | 数据面 Key 摘要、授权、保护集合与撤销 | key-access | 否 |
-| 单管理员及会话 | local-accounts | 否 |
+| 管理身份、初始化码及会话 | user-auth | 否 |
 | 管理 provider 选择、路由保护 guard | core 通用 Host | 否 |
 | 访问范围、Key 速率策略 | 对应策略插件 | 否 |
 | 预算策略、attempt、周期账本 | token-budget | 否 |
@@ -192,7 +193,7 @@ Host 维护命名空间和版本，插件声明业务记录 schema。命名空�
 
 停用期间保留的策略不作用于新请求，重新启用恢复原策略与账务，不追溯计入停用期间接纳的流量。未知账务不阻止明确停用，但必须保留恢复证据；重新启用预算时，受影响 Key 在恢复完成前不能接纳新的预算请求。
 
-普通代理配置导入导出不替换管理员、Key 或插件耐久运行状态。对于身份插件选择、激活集合和引用安全状态的配置，导入必须经过相同授权与 lifecycle 校验，不因它是“代理配置导入”而绕过管理认证切换保护。
+普通代理配置导入导出不替换管理身份、Key 或插件耐久运行状态，也不包含管理强制认证 guard。对于身份插件选择、激活集合和引用安全状态的配置，导入必须经过相同授权与 lifecycle 校验；已保护的 provider 不能通过在线替换、停用或导入解除。
 
 ## 两类发布与生命周期
 
@@ -214,7 +215,7 @@ Host 维护命名空间和版本，插件声明业务记录 schema。命名空�
 
 | 场景 | 行为 |
 | --- | --- |
-| 明确选择无管理认证，且路由未配置保护 | 匿名管理、公开代理；选中认证 provider 但未就绪时拒绝管理访问 |
+| 尚未选择管理保护，或停机显式 release-auth 后，且路由未配置保护 | 匿名管理、公开代理；选中认证 provider 但未就绪时拒绝管理访问 |
 | 关闭 token-stats，预算仍启用 | 拒绝：预算依赖它的定价服务，须先停用预算及其他依赖者 |
 | 关闭 token-metering，但有消费者激活或排空租约 | 拒绝并列出依赖者或在途引用者 |
 | 关闭 token-budget，但仍有有效预算策略或待结算/在途请求 | 允许切换，新请求不受预算限制；原请求继续计量结算，状态保留，旧实例延后释放 |
@@ -222,13 +223,13 @@ Host 维护命名空间和版本，插件声明业务记录 schema。命名空�
 | 关闭 key-access，但仍有受保护路由或启用依赖者 | 拒绝，须先解除全部保护并停用依赖者 |
 | key-access 故障、保护状态读取失败或目录缺失 | 持久 guard 保留已有保护，不能变为公开 |
 | 账务不完整时明确关闭预算，再重新启用 | 停用后新请求无预算限制；恢复证据保留，重新启用时受影响 Key 仍须恢复账务 |
-| local-accounts 故障或候选初始化失败 | 保持管理认证模式，不自动恢复匿名管理 |
+| user-auth 故障或候选初始化失败 | 保持管理认证模式，不自动恢复匿名管理 |
 | 计量失败，只有统计消费 | 统计标为不完整，不因报表故障终止代理流 |
 | 计量失败，有预算消费 | 已发送流继续；预算插件阻止新的预算请求并进入恢复 |
 | master 不可用 | 无需 durable prepare 的既有策略按可信 ingress 状态继续；需要耐久登记的新预算 attempt 拒绝 |
 | provider 原进程崩溃 | 不承诺流连接存活；重新服务前恢复版本及必要状态 |
 
-管理认证未启用时允许匿名管理；启用时所有管理操作要求唯一管理员的有效会话。停用认证须验证当前身份，完成切换后恢复匿名。没有成员或角色分级。
+没有强制认证时允许匿名管理；启用后所有管理操作要求有效会话，所有登录拥有同等管理能力。强制认证只能通过停机、本地 TTY 的 `release-auth` 解除；在线停用、替换和导入都不能解除保护。没有成员或角色分级。
 
 ## 插件中心与 SDK 界面
 
@@ -238,7 +239,7 @@ Host 维护命名空间和版本，插件声明业务记录 schema。命名空�
 
 访问控制插件设置页统一维护 Key 与路由保护；创建或编辑 Key 只保存授权；路由保护由独立的公开开关修改。保护集合与授权范围分开，最后一个 Key 撤销不解除保护。core 通过通用 resource extension 读取高级策略摘要及停用后的只读状态。
 
-管理认证未启用时 Dashboard 直接进入；选中 local-accounts 后显示单管理员账号密码表单。core 呈现当前 provider UI，不维护账号表。插件 API 能力声明交给管理 provider 执行，单管理员具备完整管理权限。
+没有强制认证时 Dashboard 直接进入。用户认证由停机、本地 TTY 的 `issue-setup-code` 准备：Host 先保存强制认证和 provider 选择，再调用插件签发初始化码，双库关闭确认后才显示。启动后 `/#/setup` 呈现 provider 初始化组件，成功后回登录页；正常登录由 Host Cookie-only verify 核验后才加载 Dashboard、导航与插件 API。core 不维护账号表，所有有效登录具有完整管理权限。
 
 插件开关保留原有 BSwitch；依赖或 guard 不能满足时 disabled，并说明具体原因，不修改基础组件样式。
 

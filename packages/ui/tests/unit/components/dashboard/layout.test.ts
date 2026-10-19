@@ -87,7 +87,7 @@ describe('dashboard layout persistence', () => {
     expect(legacy.cards[2].w).toBe(12);
   });
   test('doubles fifteen-column geometry while preserving plugin slots and mobile preferences', () => {
-    const previous = { version: 3, cards: [
+    const previous: Omit<DashboardLayout, 'version'> & { version: 3 } = { version: 3, cards: [
       { id: 'kpi.requests', x: 0, y: 0, w: 3, h: 2 },
       { id: 'chart.requests', x: 3, y: 0, w: 4, h: 4 },
       { id: 'plugin:native:quota:overview', x: 7, y: 0, w: 8, h: 2, title: 'Quota', pluginName: 'quota' },
@@ -106,7 +106,7 @@ describe('dashboard layout persistence', () => {
     expect(parseLayout({ version: 4, cards: [], mobile: [] }).cards).toHaveLength(0);
   });
   test('migrates coarse rows once without changing physical geometry or mobile preferences', () => {
-    const old = { version: 4, cards: [
+    const old: Omit<DashboardLayout, 'version'> & { version: 4 } = { version: 4, cards: [
       { id: 'kpi.rpm', x: 6, y: 1, w: 6, h: 2 },
       { id: 'plugin:native:quota:overview', x: 0, y: 7, w: 15, h: 5, title: 'Quota', pluginName: 'quota' },
     ], mobile: [{ id: 'plugin:native:quota:overview', height: 'tall' }, { id: 'kpi.rpm', height: 'compact' }] };

@@ -1,3 +1,5 @@
+import type { ModelsDevCapabilitiesService } from '../../plugins/models-dev/contract';
+import { emptyStatus } from '../../plugins/models-dev/server/catalog';
 import {PluginServiceHost} from '../../packages/core/src/plugin-services';
 import type {RpcEndpointHandle} from '../../packages/core/src/plugin-services/rpc-runtime';
 import {CONVERSION_SERVICE_ID,CONVERSION_VERSION,historyClient,historyRpc,type ConversionService} from '../../plugins/llm-protocol-adapter/contract';
@@ -5,7 +7,7 @@ import {conversionService} from '../../plugins/llm-protocol-adapter/server/servi
 import {HistoryTransport} from '../../plugins/llm-protocol-adapter/server/history';
 
 /** Real worker service facade and self-history RPC over a host-owned in-memory transport. */
-export function relayServiceHost(catalog:any={model:()=>null}){
+export function relayServiceHost(catalog: ModelsDevCapabilitiesService={status:emptyStatus,model:()=>null}){
  const plugin='llm-protocol-adapter',transport=new HistoryTransport(),purposes:string[]=[];
  const declarations=new Map([
   ['models-dev',{provides:[{id:'models-dev.capabilities.v1',version:1,process:'worker',kind:'local'}]}],
@@ -26,7 +28,7 @@ export function relayServiceHost(catalog:any={model:()=>null}){
   purposes.push(request.context.purpose);
   return remote.invokeTracked({target:{provider:plugin,service:historyRpc.id,major:1,method:request.method},input:request.input,purpose:request.context.purpose,signal:request.context.signal,...(request.context.operationId?{operationId:request.context.operationId}:{}),...(request.commandAction?{commandAction:request.commandAction}:{})});
  }});worker.rpc!.runtime.markReady(endpoint);
- const service=conversionService(provider.consume<any>('models-dev','models-dev.capabilities.v1',1),true,historyClient(provider.rpc!.consume(plugin,historyRpc)),provider.runBackground!.bind(provider));
+ const service=conversionService(provider.consume<ModelsDevCapabilitiesService>('models-dev','models-dev.capabilities.v1',1),true,historyClient(provider.rpc!.consume(plugin,historyRpc)),provider.runBackground!.bind(provider));
  provider.publish(CONVERSION_SERVICE_ID,CONVERSION_VERSION,service);provider.onDispose(()=>service.dispose());worker.markReady(plugin);
  const router=worker.createContext('router','route:entry',{[plugin]:'*'});worker.markReady('router','route:entry');
  const facade=router.consume<ConversionService>(plugin,CONVERSION_SERVICE_ID,CONVERSION_VERSION);

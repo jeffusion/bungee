@@ -45,7 +45,7 @@ export interface WebSocketHandshakeContext {
 export interface GatewayWebSocketInput {
   readonly request: Request;
   readonly nativeRequest: Request;
-  readonly server: Bun.Server<any>;
+  readonly server: Bun.Server<import('../websocket').WebSocketBridgeData>;
   readonly bridge: import('../websocket').WebSocketBridge;
   readonly config: import('@jeffusion/bungee-types').AppConfig;
   readonly servingRevision: number;

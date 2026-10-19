@@ -27,6 +27,8 @@ export function hashConfigurationContent(value: unknown): Sha256Digest {
 }
 
 export type ConfigurationRequestIdentity = {
+  readonly management_provider?: string | null;
+  readonly offline_management?: boolean;
   readonly kind: 'config' | 'admin_state';
   readonly expected_revision: number;
   readonly aggregate: ConfigurationAggregate;
@@ -35,6 +37,8 @@ export type ConfigurationRequestIdentity = {
 
 export function hashConfigurationRequest(identity: ConfigurationRequestIdentity): Sha256Digest {
   return hashConfigurationContent({
+    ...(identity.management_provider == null ? {} : { management_provider: identity.management_provider }),
+    ...(identity.offline_management ? { offline_management: true } : {}),
     kind: identity.kind,
     expected_revision: identity.expected_revision,
     aggregate: identity.aggregate,

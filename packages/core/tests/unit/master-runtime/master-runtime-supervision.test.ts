@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { StartupPublicationOutcome } from '../../../src/config-publication';
-import { serving, settle, supervisionFixture, type RepairContext } from '../../helpers/master-runtime-supervision.ts';
+import { serving, settle, supervisionFixture, type RepairContext } from '../../helpers/master-runtime-supervision';
 
 function deferred() {
   let resolve = (): void => undefined;

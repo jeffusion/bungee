@@ -11,7 +11,6 @@ describe('plugins toggle surface', () => {
     expect(source).toContain('checked={plugin.enabled}');
     expect(source).not.toContain('<button role="switch"');
     expect(source).toContain('activationBlockedReason(plugin, pluginDisplayName, $_)');
-    expect(source).toContain('action.kind === \'config\'');
 
     // onMount only refreshes plugins.
     expect(source).toMatch(/onMount\(async \(\) => \{\s*await refreshPlugins\(\);\s*\}\)/);

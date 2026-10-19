@@ -67,3 +67,8 @@ export function hasManagementLoginComponent(provider: string, component: string 
 
 // 导出组件来源映射
 export { componentSourceMap };
+
+/** Setup uses the same static ownership boundary as provider login. */
+export function hasManagementSetupComponent(provider: string, component: string | undefined): boolean {
+  return !!component && getWidgetSource(component) === provider && getNativeWidget(component) !== null;
+}

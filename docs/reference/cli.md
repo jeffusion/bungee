@@ -11,7 +11,7 @@ The npm package is `@jeffusion/bungee`; its executable is named `bungee`. Use `n
 | Command | Description |
 |---|---|
 | `bungee init` | Initialize SQLite storage and persist the plugin secrets encryption key |
-| `bungee recover` | Recover stopped-instance identity or plugin state from bounded JSON input |
+| `bungee recover` | Initialize, reset or release management authentication locally; recover plugin state offline |
 | `bungee start` | Start proxy server as daemon |
 | `bungee stop` | Stop daemon |
 | `bungee restart` | Restart daemon |
@@ -37,7 +37,21 @@ Creates the SQLite configuration database and its sibling `plugin-state.db` idem
 
 ### `bungee recover`
 
-Read JSON through stdin or `--file <path>` (owner-only `0600` regular file). Requires the same configuration database and startup environment, with the whole instance stopped. See [recovery examples](../guides/offline-recovery.md). Secrets are not command arguments.
+Requires the whole instance stopped and the original database, environment and encryption key. The configuration database defaults to `~/.bungee/data/bungee.db`; override with `BUNGEE_CONFIG_DB_PATH`. There is no configuration-path positional argument or `--config` option on the CLI command.
+
+For management authentication, `--plugin user-auth --action <action>` requires both stdin and stdout to be a TTY and cannot be combined with `--file`:
+
+| Action | Behavior |
+|---|---|
+| `issue-setup-code` | Persist mandatory protection and provider selection before issuing a 30-minute one-time code; reject an initialized identity; display only after both databases close |
+| `reset` | Prompt for a new account, hidden password twice and a reason; revoke sessions and setup codes while preserving mandatory protection |
+| `release-auth` | Explicitly release mandatory protection offline while retaining identity data |
+
+```sh
+bungee recover --plugin user-auth --action issue-setup-code
+```
+
+Structured `kind: plugin-state` recovery reads bounded JSON through stdin or `--file <path>` (owner-only `0600` regular file). The host rejects all structured `kind: identity` requests; identity recovery requires a terminal action. Interactive recovery disables input history and hides passwords. Secrets are not command arguments. See [recovery examples](../guides/offline-recovery.md), including the native core entry point used in Docker.
 
 ### `bungee start`
 
@@ -138,7 +152,7 @@ npx @jeffusion/bungee@latest ui --host localhost --port 8089
 
 ## 5) Runtime Notes
 
-Management is anonymous by default. When the optional 管理认证 (`local-accounts`) plugin is enabled, obtain a short-lived Bearer session using `POST /api/auth/login` with `{username,password,transport:"bearer"}`, then pass it through `--token` for export/import. The CLI does not save sessions. Disabling management authentication returns to anonymous management.
+Management is anonymous by default. After initializing 用户认证 (`user-auth`) through the offline setup-code flow, obtain a Bearer session using `POST /api/auth/login` with `{username,password,transport:"bearer"}`, then pass it through `--token` for export/import. The CLI does not save sessions. Only offline `release-auth` restores anonymous management; online disabling and imports cannot release protection.
 
 - `start` and `restart` use stable absolute SQLite paths under `~/.bungee/data`.
 - Release downloads are `.tar.gz` archives containing the executable and strict built-in plugin artifacts.
