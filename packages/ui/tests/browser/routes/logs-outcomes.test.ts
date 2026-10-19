@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { startUiRuntime } from '../../../../../tests/helpers/ui-runtime';
 import { configurationRuntimeFixture, publicationFixture } from '../../helpers/publication';
+import {collectApiEvidence} from '../../helpers/editors/api-evidence';
 import { menuSnapshot, fulfillMenuIcons } from '../../helpers/menus';
 
 let runtime: Awaited<ReturnType<typeof startUiRuntime>>, browser: Browser;
@@ -18,12 +19,13 @@ afterAll(async () => { try { await browser?.close(); } finally { await runtime?.
 async function withLogs(answer: (request: Request) => Promise<Response>, run: (page: Page, queries: URL[]) => Promise<void>) {
   const context = await browser.newContext({viewport:{width:1440,height:900}});
   try {
-    const page = await context.newPage(), errors: string[] = [], queries: URL[] = [];
-    page.on('pageerror', error => errors.push(error.message));
+    const page = await context.newPage(), queries: URL[] = [];
+    const evidence=collectApiEvidence(page),errors=evidence.errors;
     await page.addInitScript(() => { localStorage.setItem('locale','en');localStorage.setItem('logsAutoRefresh','false'); });
     const config = configurationRuntimeFixture(publicationFixture({operation:null,recovery:null,retryable:false,serving_complete:true,serving_revision:1,target_revision:1}));
     await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
       const url = new URL(route.request().url());
+      if(route.request().method() !== 'GET') {errors.push(`Unexpected ${route.request().method()} ${url.pathname}`);return route.fulfill({status:500,json:{error:'unexpected_method'}});}
       if(url.pathname === '/api/logs' || url.pathname === '/api/logs/export') {
         queries.push(url);
         const response = await answer(new Request(url));
@@ -43,7 +45,7 @@ async function withLogs(answer: (request: Request) => Promise<Response>, run: (p
     });
     await page.goto(`${runtime.origin}/#/logs`);
     await rendered(page.getByTestId('logs-table-scroll')).toBeVisible();
-    await run(page,queries);expect(errors).toEqual([]);
+    await run(page,queries);expect(errors).toEqual([]);evidence.verify();
   } finally {await context.close();}
 }
 async function transport(page:Page,name:string) {
@@ -117,5 +119,5 @@ test('browser filters and CSV exports match the real SQLite chain API', async ()
       expect(csv).toContain('actual-http500');expect(csv).toContain(',completed,');
       expect(csv).not.toContain('actual-retry');expect(csv).not.toContain('actual-cancel');
     });
-  } finally {db?.close();rmSync(root,{recursive:true,force:true});}
+  } finally {try {db?.close();} finally {rmSync(root,{recursive:true,force:true});}}
 },60_000);

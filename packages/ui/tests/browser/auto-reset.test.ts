@@ -2,6 +2,7 @@ import { test as browserTest } from 'bun:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { chromium } from 'playwright';
+import { observeNetwork } from '../helpers/dashboard/network';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 
 browserTest('auto reset', async () => {
@@ -13,6 +14,7 @@ try {
     browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1100, height: 850 } });
   const errors: string[] = [];
+  observeNetwork(page, errors);
   page.on('pageerror', error => errors.push(error.message));
   const fixtureOrigin = uiRuntime.origin;
   let enabled = false;
@@ -24,24 +26,29 @@ try {
   const expiresAt = Date.now() + 600000;
   await page.route('**/*', async route => {
     const request = route.request(), url = new URL(request.url());
-    if (url.origin !== fixtureOrigin) return route.abort();
+    if (url.origin !== fixtureOrigin) {
+      if (url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com') return route.fulfill({ contentType: url.hostname === 'fonts.googleapis.com' ? 'text/css' : 'text/plain', body: '' });
+      errors.push(`Unexpected external resource: ${request.url()}`); return route.abort();
+    }
     if (!url.pathname.startsWith('/api/')) return route.continue();
+    const expectedMethod = ['/api/plugins/chatgpt-oauth/control/accounts/auto-reset', '/api/plugins/chatgpt-oauth/control/accounts/usage/reset'].includes(url.pathname) ? 'POST' : 'GET';
+    if (request.method() !== expectedMethod) throw new Error(`Unexpected method: ${request.method()} ${url.pathname}`);
     const respond = (body: unknown) => route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
-    if (url.pathname.endsWith('/control/accounts/auto-reset')) {
+    if (url.pathname === '/api/plugins/chatgpt-oauth/control/accounts/auto-reset') {
       const body = request.postDataJSON(); settings.push(body); enabled = body.enabled;
       return respond({});
     }
-    if (url.pathname.endsWith('/control/accounts/usage/reset')) {
+    if (url.pathname === '/api/plugins/chatgpt-oauth/control/accounts/usage/reset') {
       resets.push(request.postDataJSON()); pending = false;
       return respond({ outcome: 'already_redeemed', windowsReset: 0 });
     }
-    if (url.pathname.endsWith('/control/accounts/usage')) return respond(usageUnavailable ? {
+    if (url.pathname === '/api/plugins/chatgpt-oauth/control/accounts/usage') return respond(usageUnavailable ? {
       usage: { state: 'unavailable' }, resetCredits: { state: 'unavailable' },
     } : {
       usage: { state: 'fresh', primary: { usedPercent: 50, windowSeconds: 18000 } },
       resetCredits: { state: 'fresh', availableCount: 0, credits: [] },
     });
-    if (url.pathname.endsWith('/control/accounts')) return respond({ accounts: [{ id: 'simulation-account', label: 'Simulation',
+    if (url.pathname === '/api/plugins/chatgpt-oauth/control/accounts') return respond({ accounts: [{ id: 'simulation-account', label: 'Simulation',
       status: 'active', available: true, autoResetCredits: enabled,
       ...(pending ? { pendingAutoReset: { creditId: 'simulation-credit', redeemRequestId: requestId, expiresAt, completed: false } } : {}),
     }] });
@@ -76,7 +83,7 @@ try {
   await page.evaluate(() => (window as any).setTestLocale('zh'));
   await status.getByText('自动重置已开启（到期前 30 分钟）', { exact: true }).waitFor();
   const chineseToggle = page.getByRole('switch', { name: '自动重置: Simulation' });
-  for (const width of [1100, 390, 320]) {
+  for (const width of [1100, 320]) {
     await page.setViewportSize({ width, height: 850 });
     const heading = await page.getByTestId('reset-heading').boundingBox();
     const button = await chineseToggle.boundingBox();

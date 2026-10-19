@@ -9,34 +9,44 @@ browserTest('unified header navigation, group keyboard lifecycle, locales and se
   const uiRuntime = await startUiRuntime({ mode: 'built-page' });
   const evidence = process.env.HEADER_EVIDENCE_DIR ?? '/tmp/bungee-header-actions';
   mkdirSync(evidence, { recursive: true });
-  const browser = await chromium.launch({ headless: true });
+  let browser: Awaited<ReturnType<typeof chromium.launch>>;
+  try { browser = await chromium.launch({headless:true}); } catch (error) { await uiRuntime.close(); throw error; }
   const errors: string[] = [];
   const runtime = configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null,
     retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 }));
   try {
-    for (const mode of ['anonymous', 'plugin'] as const) for (const language of ['zh-CN', 'en']) {
+    for (const {mode, language} of [{mode:'anonymous',language:'zh-CN'}, {mode:'plugin',language:'en'}] as const) {
       const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: language });
-      await context.addInitScript(value => localStorage.setItem('locale', value), language);
+      await context.addInitScript(value => {
+        if (localStorage.getItem('locale') === null) localStorage.setItem('locale', value);
+      }, language);
       const page = await context.newPage();
       page.on('pageerror', error => errors.push(error.message));
+      page.on('console', message => { if (message.type() === 'error') errors.push(`${message.location().url}: ${message.text()}`); });
+      page.on('requestfailed', request => errors.push(`${request.method()} ${request.url()}: ${request.failure()?.errorText}`));
+      await page.route('https://fonts.googleapis.com/**', route => route.fulfill({contentType:'text/css',body:''}));
       let authenticated = true, logoutCalls = 0;
       const snapshot = menuSnapshot();
       const mockApi = (route: Route) => {
         const url = new URL(route.request().url());
         const json = (value: unknown) => route.fulfill({ json: value });
-        if (url.pathname === '/api/auth/mode') return json({ mode, initialized: true, publicOrigin: url.origin,
+        if (route.request().method() === 'GET' && url.pathname === '/api/auth/mode') return json({ mode, initialized: true, publicOrigin: url.origin,
           ...(mode === 'plugin' ? { provider: { name: 'user-auth', loginComponent: 'UserAuthLogin' } } : {}) });
-        if (url.pathname === '/api/auth/verify') return json({ mode, success: authenticated,
+        if (route.request().method() === 'GET' && url.pathname === '/api/auth/verify') return json({ mode, success: authenticated,
           ...(authenticated ? { subject: { id: mode === 'plugin' ? 'test-user' : 'anonymous',
             provider: mode === 'plugin' ? 'user-auth' : 'anonymous' }, csrfToken: 'test-csrf' } : {}) });
-        if (url.pathname === '/api/auth/logout') { authenticated = false; logoutCalls++; return json({ success: true }); }
-        if (url.pathname === '/api/ui/menus') return json(snapshot);
-        if (url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
-        if (url.pathname === '/api/config/runtime') return json(runtime);
-        if (url.pathname === '/api/config') return json({ revision: 1, content_hash: runtime.content_hash, config: runtime.config });
-        if (url.pathname === '/api/plugins') return json([]);
-        if (url.pathname === '/api/runtime/upstreams') return json({ schema: 'bungee-runtime-upstreams-v1', generated_at: Date.now(), availability: 'complete', reason: null, admission: { revision: 1 }, workers: { observed: [], missing: [] }, upstreams: [] });
-        return json({});
+        if (['POST'].includes(route.request().method()) && url.pathname === '/api/auth/logout') { authenticated = false; logoutCalls++; return json({ success: true }); }
+        if (route.request().method() === 'GET' && url.pathname === '/api/auth/login/options') return json({local:{enabled:true,turnstile:{enabled:false}},methods:[]});
+        if (route.request().method() === 'GET' && url.pathname === '/api/ui/menus') return json(snapshot);
+        if (route.request().method() === 'GET' && url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
+        if (route.request().method() === 'GET' && url.pathname === '/api/config/runtime') return json(runtime);
+        if (route.request().method() === 'GET' && url.pathname === '/api/config') return json({ revision: 1, content_hash: runtime.content_hash, config: runtime.config });
+        if (route.request().method() === 'GET' && url.pathname === '/api/plugins') return json([]);
+        if (route.request().method() === 'GET' && url.pathname === '/api/runtime/upstreams') return json({ schema: 'bungee-runtime-upstreams-v1', generated_at: Date.now(), availability: 'complete', reason: null, admission: { revision: 1 }, workers: { observed: [], missing: [] }, upstreams: [] });
+        if (route.request().method() === 'GET' && url.pathname === '/api/plugin-translations') return json({});
+        if (route.request().method() === 'GET' && url.pathname === '/api/ui/icons/collections') return json({collections:[]});
+        errors.push(`Unexpected API ${route.request().method()} ${url.pathname}`);
+        return route.fulfill({status:501,json:{error:'unexpected_fixture_request'}});
       };
       await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, mockApi);
       await page.goto(`${uiRuntime.origin}/#/routes`);
@@ -82,6 +92,8 @@ browserTest('unified header navigation, group keyboard lifecycle, locales and se
       await languageMenu.getByRole('menuitemradio', { name: language === 'en' ? '中文' : 'English', exact: true }).click();
       await expect(languages).toHaveAttribute('aria-label', alternateCode === 'en' ? 'Language' : '语言');
       expect(await page.evaluate(() => localStorage.getItem('locale'))).toBe(alternateCode);
+      await page.reload(); await expect(header).toBeVisible();
+      await expect(languages).toHaveAttribute('aria-label', alternateCode === 'en' ? 'Language' : '语言');
       if (mode === 'plugin') {
         for (const width of [1440, 320]) {
           await page.setViewportSize({ width, height: 900 });
@@ -108,5 +120,5 @@ browserTest('unified header navigation, group keyboard lifecycle, locales and se
       await context.close();
     }
     expect(errors).toEqual([]);
-  } finally { await browser.close(); await uiRuntime.close(); }
+  } finally { try { await browser.close(); } finally { await uiRuntime.close(); } }
 }, 240_000);

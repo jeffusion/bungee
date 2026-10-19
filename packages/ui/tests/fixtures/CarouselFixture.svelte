@@ -5,7 +5,7 @@
   let index = $state(0);
   let autoplay = $state(true);
   let loop = $state(true);
-  let interval = $state(1000);
+  let interval = $state<number | undefined>(undefined);
   let mounted = $state(true);
   let compact = $state(false);
   let effect = $state<'fade' | 'slide'>('fade');
@@ -40,7 +40,7 @@
   <PanelCard title="轮播 / Carousel" tag="TEST">
     {#if mounted}
       <div class={compact ? 'h-64' : undefined}>
-      <BCarousel {items} bind:index {autoplay} {interval} {loop} {compact} {effect} onchange={value => changes.push(value)} ariaLabel="Test carousel">
+      <BCarousel {items} bind:index {autoplay} {...(interval === undefined ? {} : { interval })} {loop} {compact} {effect} onchange={value => changes.push(value)} ariaLabel="Test carousel">
         {#snippet children(item)}
           <h2 class="nx-display text-xl text-zinc-50">{item}</h2>
           <p class="my-3 text-sm text-zinc-300">工业轮播内容 / Industrial carousel content</p>

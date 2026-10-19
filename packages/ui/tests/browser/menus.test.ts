@@ -1,10 +1,17 @@
 import { test } from 'bun:test';
-import { chromium, expect, type Page, type Route } from 'playwright/test';
+import { expect, type Page, type Route } from 'playwright/test';
 import { mkdirSync } from 'node:fs';
 import { BUILTIN_MENU_PAGES, type MenuLayout, type MenuNode, type MenuPage, type MenuSnapshot } from '@jeffusion/bungee-types';
 import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
-import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
+import { observeNetwork } from '../helpers/dashboard/network';
+import { dashboardRuntime } from '../helpers/dashboard/runtime';
+const runtime = dashboardRuntime();
+const iconCollections = { revision: 'icons:test', collections: [
+  { id: 'lucide', title: 'Lucide', total: 60, version: 'test', license: { title: 'ISC' } },
+  { id: 'tabler', title: 'Tabler', total: 60, version: 'test', license: { title: 'MIT' } },
+  { id: 'carbon', title: 'Carbon', total: 60, version: 'test', license: { title: 'Apache 2.0' } },
+] };
 
 async function closeDialogWithEscape(page: Page) {
   const dialog = page.getByRole('dialog');
@@ -14,24 +21,24 @@ async function closeDialogWithEscape(page: Page) {
   await expect(dialog).toHaveCount(0);
 }
 
-test('menu editor saves, reloads, preserves conflicted drafts, guards navigation and renders offline icon search', async () => {
-  const runtime = await startUiRuntime({ mode: 'built-page' });
-  const browser = await chromium.launch({ headless: true });
+test('menu editor saves, reloads, preserves conflicted drafts, guards navigation and renders offline icon search', () => runtime.run(async page => {
+  await page.route('https://fonts.googleapis.com/**', route => route.fulfill({ contentType: 'text/css', body: '' }));
+  await page.route('https://fonts.gstatic.com/**', route => route.fulfill({ body: '' }));
   const evidence = process.env.MENUS_EVIDENCE_DIR ?? '/tmp/bungee-menus'; mkdirSync(evidence, { recursive: true });
   const errors: string[] = [];
+  const network = observeNetwork(page, errors);
   const configuration = configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null, retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 }));
-  try {
-    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: 'en' });
-    await context.addInitScript(() => localStorage.setItem('locale', 'en'));
-    const page = await context.newPage();
+    await page.addInitScript(() => localStorage.setItem('locale', 'en'));
     page.on('pageerror', error => errors.push(error.message));
-    let snapshot = menuSnapshot(), conflict = false, writes = 0, loseResponse = false;
+    let snapshot = menuSnapshot(), conflictFailures = 0, writes = 0, loseResponse = false;
+    let responseLoss: Promise<void> | undefined;
     let slowSearch: Route | null = null, failSearchOnce = true;
     let lastWrite: { expected_revision: number; layout: MenuLayout } | null = null;
     const searches: { collection: string | null; q: string | null; offset: number; limit: number }[] = [];
     const iconBatches: string[][] = [];
     await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
       const url = new URL(route.request().url()), json = (value: unknown) => route.fulfill({ json: value });
+      if (route.request().method() !== (url.pathname === '/api/ui/menus' && route.request().method() === 'PUT' ? 'PUT' : 'GET')) throw new Error(`Unexpected method: ${route.request().method()} ${url.pathname}`);
       if (url.pathname === '/api/auth/mode') return json({ mode: 'plugin', initialized: true, publicOrigin: url.origin, provider: { name: 'user-auth', loginComponent: 'UserAuthLogin' } });
       if (url.pathname === '/api/auth/verify') return json({ mode: 'plugin', success: true, subject: { id: 'editor', provider: 'user-auth' }, csrfToken: 'test-csrf' });
       if (url.pathname === '/api/plugins') return json([]);
@@ -41,26 +48,35 @@ test('menu editor saves, reloads, preserves conflicted drafts, guards navigation
         if (route.request().method() === 'PUT') {
           writes++; lastWrite = route.request().postDataJSON();
           expect(route.request().headers()['x-csrf-token']).toBe('test-csrf');
-          if (conflict) return route.fulfill({ status: 409, json: { error: 'menu_revision_conflict' } });
+          if (conflictFailures > 0) { conflictFailures--; network.expectHttpError(route.request(), 409); return route.fulfill({ status: 409, json: { error: 'menu_revision_conflict' } }); }
           snapshot = { ...snapshot, revision: snapshot.revision + 1, layout: lastWrite!.layout };
-          if (loseResponse) { loseResponse = false; return route.abort('failed'); }
+          if (loseResponse) { loseResponse = false; responseLoss = network.expectFailure(route.request(), 'net::ERR_FAILED', () => route.abort('failed')); return responseLoss; }
         }
         return json(snapshot);
       }
-      if (url.pathname === '/api/ui/icons/collections') return json({ revision: 'icons:test', collections: [
-        { id: 'lucide', title: 'Lucide', total: 60, version: 'test', license: { title: 'ISC' } },
-        { id: 'tabler', title: 'Tabler', total: 60, version: 'test', license: { title: 'MIT' } },
-        { id: 'carbon', title: 'Carbon', total: 60, version: 'test', license: { title: 'Apache 2.0' } },
-      ] });
+      if (url.pathname === '/api/ui/icons/collections') return json(iconCollections);
       if (url.pathname === '/api/ui/icons/search') {
         const offset = Number(url.searchParams.get('offset')); searches.push({ collection: url.searchParams.get('collection'), q: url.searchParams.get('q'), offset, limit: Number(url.searchParams.get('limit')) });
         if (url.searchParams.get('q') === 'slow') { slowSearch = route; return; }
-        if (url.searchParams.get('q') === 'broken' && failSearchOnce) { failSearchOnce = false; return route.fulfill({ status: 500, json: { error: 'icon_search_unavailable' } }); }
+        if (url.searchParams.get('q') === 'broken' && failSearchOnce) { failSearchOnce = false; network.expectHttpError(route.request(), 500); return route.fulfill({ status: 500, json: { error: 'icon_search_unavailable' } }); }
         const prefix = url.searchParams.get('collection') ?? 'lucide';
         return json({ revision: 'icons:test', offset, limit: 48, total: 60, items: Array.from({ length: Math.min(48, 60 - offset) }, (_, i) => ({ id: `${prefix}:search-${i + offset}`, name: `search-${i + offset}`, collection: prefix })) });
       }
       if (url.pathname === '/api/ui/icons/data') { iconBatches.push((url.searchParams.get('ids') ?? '').split(',')); return fulfillMenuIcons(route); }
-      return json({});
+      if (url.pathname === '/api/plugins/schemas' || url.pathname === '/api/plugin-translations') return json({});
+      throw new Error(`Unexpected API: ${route.request().method()} ${url.pathname}`);
+    });
+    await page.addInitScript(() => {
+      const fetch = window.fetch.bind(window);
+      window.fetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const slow = String(input).includes('/api/ui/icons/search') && new URL(String(input), location.origin).searchParams.get('q') === 'slow';
+        const response = await fetch(input, init);
+        if (slow) {
+          const json = response.json.bind(response);
+          response.json = async () => { const body = await json(); requestAnimationFrame(() => { (window as any).oldIconSearchConsumed = true; }); return body; };
+        }
+        return response;
+      }, window.fetch);
     });
     await page.goto(`${runtime.origin}/#/menus`);
     const editor = page.getByTestId('page-menus'), save = page.getByTestId('menus-save');
@@ -105,6 +121,7 @@ test('menu editor saves, reloads, preserves conflicted drafts, guards navigation
     await expect(dialog.getByTestId('icon-search-results').getByRole('button')).toHaveCount(48);
     expect(searches.at(-1)?.limit).toBe(48);
     await slowSearch!.fulfill({ json: { revision: 'icons:test', offset: 0, limit: 48, total: 0, items: [] } });
+    await page.waitForFunction(() => (window as any).oldIconSearchConsumed === true);
     await expect(dialog.getByTestId('icon-search-results').getByRole('button')).toHaveCount(48);
     await dialog.getByRole('searchbox', { name: 'Search icons' }).fill('broken');
     await expect(dialog.getByText('Icons could not be loaded. Text navigation remains available.', { exact: true })).toBeVisible();
@@ -131,7 +148,7 @@ test('menu editor saves, reloads, preserves conflicted drafts, guards navigation
     await save.click(); await expect(save).toBeDisabled();
     expect(iconBatches.every(ids => ids.length <= 64)).toBe(true);
     // A CAS conflict retains the draft and blocks another write until reload.
-    await renameGroup('Conflicting draft'); conflict = true;
+    await renameGroup('Conflicting draft'); conflictFailures = 1;
     await save.click(); await expect(page.getByTestId('menus-status')).toContainText('Another editor changed');
     await expect(groupTitle).toContainText('Conflicting draft'); await expect(save).toBeDisabled();
     const writeCount = writes;
@@ -139,10 +156,11 @@ test('menu editor saves, reloads, preserves conflicted drafts, guards navigation
     await expect(page.getByTestId('confirmation-accept')).toBeVisible(); await closeDialogWithEscape(page); await expect(page.getByTestId('confirmation-accept')).toHaveCount(0);
     await expect(groupTitle).toContainText('Conflicting draft'); expect(writes).toBe(writeCount);
     await pageAction('Reload'); await page.getByTestId('confirmation-accept').click();
-    await expect(groupTitle).toContainText('Operations'); conflict = false;
+    await expect(groupTitle).toContainText('Operations'); conflictFailures = 0;
     // A committed write with a lost response is verified by GET without retrying PUT.
     await renameGroup('Verified after response loss'); loseResponse = true;
     await save.click(); await expect(page.getByTestId('menus-status')).toHaveText('Menu layout saved.');
+    expect(responseLoss).toBeDefined(); await responseLoss; network.assertSettled();
     expect(writes).toBe(writeCount + 1);
     // The guarded router keeps the dirty editor and restores a still-attached menu trigger.
     await renameGroup('Unsaved draft');
@@ -172,26 +190,30 @@ test('menu editor saves, reloads, preserves conflicted drafts, guards navigation
       await expect.poll(() => editor.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
       await page.screenshot({ path: `${evidence}/editor-${width}.png`, fullPage: true });
     }
-    await context.close(); expect(errors).toEqual([]);
-  } finally { await browser.close(); await runtime.close(); }
-}, 150_000);
+    network.assertSettled(); expect(errors).toEqual([]);
+}), 150_000);
 
-test('flat and grouped menus render every configured entry in order at every width', async () => {
-  const runtime = await startUiRuntime({ mode: 'built-page' }); const browser = await chromium.launch({ headless: true });
-  try {
-    const page = await browser.newPage({ viewport: { width: 768, height: 900 } });
+test('flat and grouped menus render every configured entry in order at every width', () => runtime.run(async page => {
+  await page.route('https://fonts.googleapis.com/**', route => route.fulfill({ contentType: 'text/css', body: '' }));
+  await page.route('https://fonts.gstatic.com/**', route => route.fulfill({ body: '' }));
+    const errors: string[] = []; const network = observeNetwork(page, errors); page.on('pageerror', error => errors.push(error.message));
     await page.addInitScript(() => localStorage.setItem('locale', 'en'));
     const catalog = [...BUILTIN_MENU_PAGES, ...Array.from({ length: 12 }, (_, index) => ({ id: `plugin:long:${index}`, label: `Plugin contribution with complete long label ${index}`, href: `/#/extensions/long/${index}`, source: 'plugin' as const, pluginName: 'long', available: true, defaultIcon: 'lucide:puzzle' }))];
     const flat: MenuLayout = catalog.map(page => ({ kind: 'page', pageId: page.id, visible: true }));
     let snapshot: MenuSnapshot = { ...menuSnapshot(), catalog, layout: flat };
     await page.route('**/api/**', route => {
       const path = new URL(route.request().url()).pathname, json = (value: unknown) => route.fulfill({ json: value });
+      if (route.request().method() !== (path === '/api/ui/menus' && route.request().method() === 'PUT' ? 'PUT' : 'GET')) throw new Error(`Unexpected method: ${route.request().method()} ${path}`);
       if (path === '/api/auth/mode') return json({ mode: 'anonymous' });
       if (path === '/api/auth/verify') return json({ mode: 'anonymous', success: true, subject: { id: 'anonymous', provider: 'anonymous' } });
       if (path === '/api/plugins') return json([]);
       if (path === '/api/ui/menus') return json(snapshot);
+      if (path === '/api/ui/icons/collections') return json(iconCollections);
       if (path === '/api/ui/icons/data') return fulfillMenuIcons(route);
-      return json({});
+      if (path === '/api/config/runtime') return json(configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null, retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 })));
+      if (path === '/api/config') return json({ revision: 1, content_hash: 'menus-fixture', config: configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null, retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 })).config });
+      if (path === '/api/plugins/schemas' || path === '/api/plugin-translations') return json({});
+      throw new Error(`Unexpected API: ${route.request().method()} ${path}`);
     });
     await page.goto(`${runtime.origin}/#/menus`);
     const top = page.getByTestId('header-top-menu');
@@ -210,17 +232,16 @@ test('flat and grouped menus render every configured entry in order at every wid
     await top.getByRole('button', { name: 'Operations', exact: true }).click();
     await expect(page.getByRole('menuitem', { name: 'Routes', exact: true })).toBeVisible(); await page.keyboard.press('Escape');
     await expect(top.locator(':scope > ul > li')).toHaveCount(catalog.length - 2);
-  } finally { await browser.close(); await runtime.close(); }
-}, 90_000);
+    network.assertSettled(); expect(errors).toEqual([]);
+}), 90_000);
 
-test('disabled plugins disappear when menu refresh fails and recover their saved preferences', async () => {
-  const runtime = await startUiRuntime({ mode: 'built-page' }); const browser = await chromium.launch({ headless: true });
+test('disabled plugins disappear when menu refresh fails and recover their saved preferences', () => runtime.run(async page => {
+  await page.route('https://fonts.googleapis.com/**', route => route.fulfill({ contentType: 'text/css', body: '' }));
+  await page.route('https://fonts.gstatic.com/**', route => route.fulfill({ body: '' }));
   const evidence = process.env.MENUS_EVIDENCE_DIR ?? '/tmp/bungee-menus'; mkdirSync(evidence, { recursive: true });
-  try {
-    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
     await page.addInitScript(() => localStorage.setItem('locale', 'en'));
-    const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
-    let enabled = true, menuUnavailable = false, failedReads = 0, writes = 0;
+    const errors: string[] = []; const network = observeNetwork(page, errors); page.on('pageerror', error => errors.push(error.message));
+    let enabled = true, remainingMenuFailures = 0, failedReads = 0, writes = 0;
     const plugin: MenuPage = { id: 'plugin:test:%2Fpage', label: 'Test page', href: '/#/extensions/test/page',
       source: 'plugin', pluginName: 'test', defaultIcon: 'lucide:puzzle', available: true };
     const snapshot = {...menuSnapshot()};
@@ -230,23 +251,28 @@ test('disabled plugins disappear when menu refresh fails and recover their saved
       const request = route.request(), path = new URL(request.url()).pathname;
       const json = (value: unknown) => route.fulfill({ json: value });
       if (request.method() !== 'GET') writes++;
+      if (route.request().method() !== (path === '/api/ui/menus' && route.request().method() === 'PUT' ? 'PUT' : 'GET')) throw new Error(`Unexpected method: ${route.request().method()} ${path}`);
       if (path === '/api/auth/mode') return json({ mode: 'anonymous' });
       if (path === '/api/auth/verify') return json({ mode: 'anonymous', success: true, subject: { id: 'anonymous', provider: 'anonymous' } });
       if (path === '/api/plugins') return json([{ name: 'test', enabled, version: '1.0.0', metadata: { name: 'Test plugin',
         contributes: { navigation: [{ label: plugin.label, path: '/page' }] } } }]);
+      if (path === '/api/ui/icons/collections') return json(iconCollections);
       if (path === '/api/ui/icons/data') return fulfillMenuIcons(route);
       if (path === '/api/ui/menus') {
-        if (menuUnavailable) { failedReads++; return route.fulfill({ status: 503, json: { error: 'menu_storage_unavailable' } }); }
+        if (remainingMenuFailures > 0) { remainingMenuFailures--; failedReads++; network.expectHttpError(route.request(), 503); return route.fulfill({ status: 503, json: { error: 'menu_storage_unavailable' } }); }
         return json(snapshot);
       }
-      return json({});
+      if (path === '/api/config/runtime') return json(configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null, retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 })));
+      if (path === '/api/config') return json({ revision: 1, content_hash: 'menus-fixture', config: configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null, retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 })).config });
+      if (path === '/api/plugins/schemas' || path === '/api/plugin-translations') return json({});
+      throw new Error(`Unexpected API: ${route.request().method()} ${path}`);
     });
     await page.goto(`${runtime.origin}/#/menus`);
     const top = page.getByTestId('header-top-menu'), editor = page.getByTestId('page-menus');
     const pluginRow = editor.locator(`[data-menu-id="${plugin.id}"]`);
     await expect(pluginRow.locator('[data-menu-icon="tabler:home"] svg')).toBeVisible();
     await expect(top.getByRole('link', { name: plugin.label, exact: true })).toBeVisible();
-    enabled = false; menuUnavailable = true;
+    enabled = false; remainingMenuFailures = 1;
     await top.getByRole('button', { name: 'System', exact: true }).click();
     await page.getByRole('menuitem', { name: 'Plugins', exact: true }).click();
     await expect(page.getByTestId('page-plugins')).toBeVisible(); await expect.poll(() => failedReads).toBeGreaterThan(0);
@@ -255,13 +281,14 @@ test('disabled plugins disappear when menu refresh fails and recover their saved
     await page.getByRole('menuitem', { name: 'Menu Management', exact: true }).click();
     await expect(editor).toBeVisible(); await expect(pluginRow).toHaveCount(0);
     await expect(editor.getByRole('alert')).toHaveText('Menu settings could not be loaded. Saving is disabled until a successful reload.');
+    expect(failedReads).toBe(1); expect(remainingMenuFailures).toBe(0);
     await editor.getByRole('button', { name: 'Page actions', exact: true }).click();
     await page.getByRole('menuitem', { name: 'Page catalog', exact: true }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
     await expect(page.getByRole('dialog').getByText(plugin.label, { exact: true })).toHaveCount(0);
     await closeDialogWithEscape(page);
     await page.screenshot({ path: `${evidence}/disabled-plugin-refresh-failed.png` });
-    enabled = true; menuUnavailable = false;
+    enabled = true;
     await top.getByRole('button', { name: 'System', exact: true }).click();
     await page.getByRole('menuitem', { name: 'Plugins', exact: true }).click();
     await expect(top.getByRole('link', { name: plugin.label, exact: true })).toBeVisible();
@@ -269,33 +296,35 @@ test('disabled plugins disappear when menu refresh fails and recover their saved
     await page.getByRole('menuitem', { name: 'Menu Management', exact: true }).click();
     await expect(pluginRow.locator('[data-menu-icon="tabler:home"] svg')).toBeVisible();
     await expect(editor.getByRole('alert')).toHaveCount(0);
-    expect(writes).toBe(0); expect(errors).toEqual([]);
-  } finally { await browser.close(); await runtime.close(); }
-}, 90_000);
+    expect(writes).toBe(0); network.assertSettled(); expect(errors).toEqual([]);
+}), 90_000);
 
-test('compact menu actions support keyboard reordering, reparenting, validation, collapse and read-only dialogs', async () => {
-  const runtime = await startUiRuntime({ mode: 'built-page' });
-  const browser = await chromium.launch({ headless: true });
-  try {
-    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+test('compact menu actions support keyboard reordering, reparenting, validation, collapse and read-only dialogs', () => runtime.run(async page => {
+  await page.route('https://fonts.googleapis.com/**', route => route.fulfill({ contentType: 'text/css', body: '' }));
+  await page.route('https://fonts.gstatic.com/**', route => route.fulfill({ body: '' }));
     await page.addInitScript(() => localStorage.setItem('locale', 'en'));
-    const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+    const errors: string[] = []; const network = observeNetwork(page, errors); page.on('pageerror', error => errors.push(error.message));
     const initial = {...menuSnapshot()};
     initial.layout = initial.layout.map(node => node.kind === 'page' && node.pageId === 'builtin:services' ? { ...node, icon: 'tabler:home' } : node);
     const configuration = configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null, retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 }));
     const captured: {layout: MenuLayout | null} = {layout: null};
     await page.route('**/api/**', route => {
       const request = route.request(), path = new URL(request.url()).pathname, json = (value: unknown) => route.fulfill({ json: value });
+      if (route.request().method() !== (path === '/api/ui/menus' && route.request().method() === 'PUT' ? 'PUT' : 'GET')) throw new Error(`Unexpected method: ${route.request().method()} ${path}`);
       if (path === '/api/auth/mode') return json({ mode: 'anonymous', publicOrigin: runtime.origin });
       if (path === '/api/auth/verify') return json({ mode: 'anonymous', success: true, subject: { id: 'anonymous', provider: 'anonymous' } });
       if (path === '/api/plugins') return json([]);
       if (path === '/api/config/runtime') return json(configuration);
+      if (path === '/api/ui/icons/collections') return json(iconCollections);
       if (path === '/api/ui/icons/data') return fulfillMenuIcons(route);
       if (path === '/api/ui/menus') {
         if (request.method() === 'PUT') { captured.layout = request.postDataJSON().layout; return json({ ...initial, layout: captured.layout, revision: 2 }); }
         return json(initial);
       }
-      return json({});
+      if (path === '/api/config/runtime') return json(configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null, retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 })));
+      if (path === '/api/config') return json({ revision: 1, content_hash: 'menus-fixture', config: configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null, retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 })).config });
+      if (path === '/api/plugins/schemas' || path === '/api/plugin-translations') return json({});
+      throw new Error(`Unexpected API: ${route.request().method()} ${path}`);
     });
     await page.goto(`${runtime.origin}/#/menus`);
     const editor = page.getByTestId('page-menus'), tree = page.getByTestId('menu-layout-tree'), save = page.getByTestId('menus-save');
@@ -390,17 +419,14 @@ test('compact menu actions support keyboard reordering, reparenting, validation,
       await expect.poll(() => editor.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
       await expect(row('builtin:services').getByRole('button', { name: 'Menu actions Services', exact: true })).toBeVisible();
     }
-    expect(errors).toEqual([]);
-  } finally { await browser.close(); await runtime.close(); }
-}, 120_000);
+    network.assertSettled(); expect(errors).toEqual([]);
+}), 120_000);
 
-test('menu drag feedback supports boundaries and groups, while disabled plugin preferences stay out of the editor', async () => {
-  const runtime = await startUiRuntime({ mode: 'built-page' });
-  const browser = await chromium.launch({ headless: true });
-  try {
-    const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
+test('menu drag feedback supports boundaries and groups, while disabled plugin preferences stay out of the editor', () => runtime.run(async page => {
+  await page.route('https://fonts.googleapis.com/**', route => route.fulfill({ contentType: 'text/css', body: '' }));
+  await page.route('https://fonts.gstatic.com/**', route => route.fulfill({ body: '' }));
     await page.addInitScript(() => localStorage.setItem('locale', 'en'));
-    const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+    const errors: string[] = []; const network = observeNetwork(page, errors); page.on('pageerror', error => errors.push(error.message));
     const inactiveRoot = { kind: 'page', pageId: 'plugin:inactive:%2Froot', visible: false, icon: 'tabler:home' } as const;
     const inactiveChild = { ...inactiveRoot, pageId: 'plugin:inactive:%2Fchild' };
     const pluginPage = (id: string, available: boolean): MenuPage => ({ id, label: id, href: '/#/extensions/inactive/' + id.split('%2F')[1], source: 'plugin', pluginName: 'inactive', defaultIcon: 'lucide:puzzle', available });
@@ -412,15 +438,20 @@ test('menu drag feedback supports boundaries and groups, while disabled plugin p
     snapshot.layout = [...snapshot.layout, { kind: 'group', id: 'group:other', title: 'Other', visible: true, children: [] }];
     await page.route('**/api/**', route => {
       const path = new URL(route.request().url()).pathname, json = (value: unknown) => route.fulfill({ json: value });
+      if (route.request().method() !== (path === '/api/ui/menus' && route.request().method() === 'PUT' ? 'PUT' : 'GET')) throw new Error(`Unexpected method: ${route.request().method()} ${path}`);
       if (path === '/api/auth/mode') return json({ mode: 'anonymous' });
       if (path === '/api/auth/verify') return json({ mode: 'anonymous', success: true, subject: { id: 'anonymous', provider: 'anonymous' } });
       if (path === '/api/plugins') return json([]);
+      if (path === '/api/ui/icons/collections') return json(iconCollections);
       if (path === '/api/ui/icons/data') return fulfillMenuIcons(route);
       if (path === '/api/ui/menus') {
         if (route.request().method() === 'PUT') { captured.layout = route.request().postDataJSON().layout; snapshot = { ...snapshot, layout: captured.layout!, revision: snapshot.revision + 1 }; }
         return json(snapshot);
       }
-      return json({});
+      if (path === '/api/config/runtime') return json(configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null, retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 })));
+      if (path === '/api/config') return json({ revision: 1, content_hash: 'menus-fixture', config: configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null, retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 })).config });
+      if (path === '/api/plugins/schemas' || path === '/api/plugin-translations') return json({});
+      throw new Error(`Unexpected API: ${route.request().method()} ${path}`);
     });
     await page.goto(`${runtime.origin}/#/menus`);
     const editor = page.getByTestId('page-menus'), tree = page.getByTestId('menu-layout-tree'), save = page.getByTestId('menus-save');
@@ -518,6 +549,5 @@ test('menu drag feedback supports boundaries and groups, while disabled plugin p
       await page.setViewportSize({ width, height: 1100 });
       await expect.poll(() => editor.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
     }
-    expect(errors).toEqual([]);
-  } finally { await browser.close(); await runtime.close(); }
-}, 120_000);
+    network.assertSettled(); expect(errors).toEqual([]);
+}), 120_000);

@@ -1,3 +1,5 @@
+import {createDefaultMenuLayout} from '@jeffusion/bungee-types';
+import {menuSnapshot, fulfillMenuIcons} from '../helpers/menus';
 import { test as browserTest } from 'bun:test';
 import { chromium, expect } from 'playwright/test';
 import { mkdirSync } from 'node:fs';
@@ -24,32 +26,59 @@ try {
     await context.addInitScript(value => localStorage.setItem('locale', value), language);
     const page = await context.newPage();
     page.on('pageerror', error => errors.push(error.message));
+    page.on('console', message => { if (message.type() === 'error') errors.push(`${message.location().url}: ${message.text()}`); });
+    let activeBookmark: string | undefined;
+    const cancelledBookmarkFrames: string[] = [];
+    page.on('requestfailed', request => {
+      // The root bookmark redirects through /extensions/key-access before selecting its page.
+      // Its transient sandbox document is cancelled by that observed navigation only.
+      if (activeBookmark === '/plugins/key-access?from=bookmark'
+        && request.method() === 'GET' && request.isNavigationRequest()
+        && request.frame().parentFrame() === page.mainFrame()
+        && request.url() === `${base}/plugins/key-access/index.html`
+        && request.failure()?.errorText === 'net::ERR_ABORTED'
+        && cancelledBookmarkFrames.length === 0) { cancelledBookmarkFrames.push(activeBookmark); return; }
+      errors.push(`${request.method()} ${request.url()}: ${request.failure()?.errorText}`);
+    });
+    await page.route('https://fonts.googleapis.com/**', route => route.fulfill({contentType:'text/css',body:''}));
     const t = (key: string) => manifest.translations[language][key];
     let enabled = true;
     let protectedRouteIds: string[] = [];
     let key = { id: 'key-test', name: 'demo-app', prefix: 'bk_example', createdAt: Date.now(), expiresAt: null, revokedAt: null };
     const writes: Array<{ path: string; body: unknown }> = [];
+    await page.route('**/plugins/key-access/index.html', route => route.fulfill({contentType:'text/html',body:'<!doctype html><title>Plugin navigation</title>'}));
     await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
       const request = route.request(), url = new URL(request.url());
       const json = (value: unknown) => route.fulfill({ json: value });
-      if (url.pathname === '/api/auth/mode') return json({ mode: 'anonymous', publicOrigin: url.origin });
-      if (url.pathname === '/api/auth/verify') return json({ success: true, mode: 'anonymous' });
-      if (url.pathname === '/api/plugins') return json([{ name: manifest.name, enabled, version: manifest.version,
+      if (request.method() === 'GET' && url.pathname === '/api/auth/mode') return json({ mode: 'anonymous', publicOrigin: url.origin });
+      if (request.method() === 'GET' && url.pathname === '/api/auth/verify') return json({ success: true, mode: 'anonymous' });
+      if (request.method() === 'GET' && url.pathname === '/api/plugins') return json([{ name: manifest.name, enabled, version: manifest.version,
         metadata: { ...manifest.metadata, contributes: manifest.contributes } }]);
-      if (url.pathname === '/api/plugin-translations') return json(Object.fromEntries(Object.entries(manifest.translations)
+      if (request.method() === 'GET' && url.pathname === '/api/plugin-translations') return json(Object.fromEntries(Object.entries(manifest.translations)
         .map(([code, messages]) => [code, { plugins: { 'key-access': messages } }])));
-      if (url.pathname === '/api/config/runtime') return json(runtime);
-      if (url.pathname === '/api/config') return json({ revision: 1, content_hash: runtime.content_hash, config: runtime.config });
-      if (url.pathname === '/api/resources/api-key') return json({ keys: [key] });
-      if (url.pathname === '/api/plugins/key-access/control/routes') {
+      if (request.method() === 'GET' && url.pathname === '/api/ui/menus') {
+        const snapshot = menuSnapshot();
+        const catalog = [...snapshot.catalog, ...[manifest].filter(item => enabled).flatMap(item => (item.contributes.navigation ?? []).map((nav: any) => ({
+          id:`plugin:${item.name}:${encodeURIComponent(nav.path)}`,label:nav.label,href:`/#/extensions/${item.name}${nav.path}`,
+          source:'plugin' as const,pluginName:item.name,defaultIcon:'lucide:user',available:true,
+        })))];
+        return json({...snapshot,catalog,layout:createDefaultMenuLayout(catalog)});
+      }
+      if (request.method() === 'GET' && url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
+      if (request.method() === 'GET' && url.pathname === '/api/runtime/upstreams') return json({schema:'bungee-runtime-upstreams-v1',generated_at:Date.now(),availability:'complete',reason:null,admission:{revision:1},workers:{observed:[],missing:[]},upstreams:[]});
+      if (request.method() === 'GET' && url.pathname === '/api/plugins/key-access/sandbox') return json({sandbox:'allow-scripts',allowedHostActions:[],controlAllowlist:[]});
+      if (request.method() === 'GET' && url.pathname === '/api/config/runtime') return json(runtime);
+      if (request.method() === 'GET' && url.pathname === '/api/config') return json({ revision: 1, content_hash: runtime.content_hash, config: runtime.config });
+      if (request.method() === 'GET' && url.pathname === '/api/resources/api-key') return json({ keys: [key] });
+      if (['GET','PUT'].includes(request.method()) && url.pathname === '/api/plugins/key-access/control/routes') {
         if (request.method() === 'PUT') {
           const body = request.postDataJSON(); writes.push({ path: url.pathname, body });
           protectedRouteIds = body.protectedRouteIds;
         }
         return json({ protectedRouteIds, routeKeyBindings: {}, ready: true, published: true });
       }
-      if (url.pathname === '/api/plugins/key-access/control/keys/key-test') return json({ value: { routes: null, models: null } });
-      if (url.pathname === '/api/plugins/key-access/control/credentials/key-test') {
+      if (request.method() === 'GET' && url.pathname === '/api/plugins/key-access/control/keys/key-test') return json({ value: { routes: null, models: null } });
+      if (['GET','PUT'].includes(request.method()) && url.pathname === '/api/plugins/key-access/control/credentials/key-test') {
         if (request.method() === 'PUT') {
           const body = request.postDataJSON(); writes.push({ path: url.pathname, body });
           key = { ...key, name: body.name };
@@ -57,7 +86,8 @@ try {
         }
         return json({ token: 'fixture-only-token' });
       }
-      return json({});
+      errors.push(`Unexpected API ${request.method()} ${url.pathname}`);
+      return route.fulfill({status:501,json:{error:'unexpected_fixture_request'}});
     });
     await page.goto(`${base}/#/plugins`);
     const pluginCard = page.getByTestId('page-plugins').locator('.plugin-management-card').filter({ hasText: t('metadata.name') });
@@ -100,15 +130,18 @@ try {
     await settings.getByRole('button', { name: t('ui.refresh'), exact: true }).click();
     await expect(settings).toContainText('updated-app');
     for (const oldPath of ['/plugins/key-access/settings?from=bookmark', '/plugins/key-access?from=bookmark']) {
+      activeBookmark = oldPath;
       await page.goto(`${base}/#${oldPath}`);
       await expect.poll(() => new URL(page.url()).hash).toBe(`#${canonical}?from=bookmark`);
       await expect(settings).toContainText('updated-app');
+      activeBookmark = undefined;
     }
+    expect(cancelledBookmarkFrames).toEqual(['/plugins/key-access?from=bookmark']);
     await page.getByRole('link', { name: language === 'zh-CN' ? '路由管理' : 'Routes', exact: true }).click();
     await expect(settings).toHaveCount(0);
     await page.goBack(); await expect(settings).toContainText('updated-app');
     enabled = false;
-    await page.goto(`${base}/#/plugins`); await page.reload();
+    await page.reload(); await page.goto(`${base}/#/plugins`);
     await expect(page.getByTestId('app-header').getByRole('link', { name: t('metadata.name'), exact: true })).toHaveCount(0);
     await expect(pluginCard.locator('a')).toHaveCount(0);
     await context.close();

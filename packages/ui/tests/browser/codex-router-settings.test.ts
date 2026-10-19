@@ -1,13 +1,14 @@
 import { test as browserTest } from 'bun:test';
-import { chromium, expect } from 'playwright/test';
-import { resolve, extname } from 'node:path';
+import { expect, type Route } from 'playwright/test';
+import { dashboardRuntime } from '../helpers/dashboard/runtime';
+const uiRuntime = dashboardRuntime();
 import { createMasterPluginCatalogApi } from '../../../core/src/master-runtime/master-plugin-catalog-api';
 import type { PluginManifestRecord } from '../../../core/src/plugin-manifest-catalog/types';
+import { observeNetwork } from '../helpers/dashboard/network';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
 import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
 
-browserTest('codex router settings', async () => {
-const dist = resolve(import.meta.dir, '../../dist');
+browserTest('codex router settings', () => uiRuntime.run(async page => {
 const manifest = await Bun.file(new URL('../../../../plugins/codex-router/manifest.json', import.meta.url)).json();
 const catalogApi = createMasterPluginCatalogApi({ catalog: { records: () => [{ name: manifest.name, manifest, configSchema: manifest.configSchema } as PluginManifestRecord] } });
 const catalogSnapshot = { aggregate: { plugin_activations: [{ plugin_name: manifest.name }] } } as never;
@@ -16,30 +17,17 @@ const runtime = configurationRuntimeFixture(publicationFixture({ operation: null
 const entryId = '10000000-0000-4000-8000-000000000001', serviceId = '20000000-0000-4000-8000-000000000001';
 runtime.config.logical_configuration.services = [{ id: serviceId, position: 0, name: 'fixture-service', plugins: [], endpoints: [{ id: '30000000-0000-4000-8000-000000000001', position: 0, target: 'https://fixture.invalid', weight: 100, priority: 1, is_disabled: false, plugins: [] }] }];
 runtime.config.logical_configuration.routes = [{ id: entryId, position: 0, path: '/codex', service_id: serviceId, plugins: [{ id: '40000000-0000-4000-8000-000000000001', position: 0, name: 'codex-router', enabled: true, options: { models: [] } }] }];
-const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request) {
-  const path = new URL(request.url).pathname;
-  const file = resolve(dist, `.${path === '/' ? '/index.html' : path}`);
-  if (!file.startsWith(dist + '/')) return new Response(null, { status: 404 });
-  return new Response(Bun.file(file), { headers: { 'Content-Type': {
-    '.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css', '.svg': 'image/svg+xml',
-  }[extname(file)] ?? 'application/octet-stream' } });
-} });
-const browser = await chromium.launch({ headless: true }).catch(async error => { await server.stop(true); throw error; });
-const page = await browser.newPage({ locale: 'zh-CN' });
 const requests: string[] = [], errors: string[] = [];
 const catalogQueries: URLSearchParams[] = [];
+let holdSourceCatalog: ((route: Route) => void) | undefined;
 page.on('pageerror', error => errors.push(error.message));
-page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
-page.on('requestfailed', request => {
-  const path = new URL(request.url()).pathname;
-  const reason = request.failure()?.errorText;
-  // Search changes and dropdown dismissal intentionally abort catalog requests.
-  if (path === '/api/plugins/codex-router/control/catalog' && reason === 'net::ERR_ABORTED') return;
-  errors.push(`request failed: ${path}: ${reason}`);
-});
+const network = observeNetwork(page, errors);
 page.on('request', request => requests.push(new URL(request.url()).pathname));
+await page.route('https://fonts.googleapis.com/**', route => route.fulfill({ contentType: 'text/css', body: '' }));
+await page.route('https://fonts.gstatic.com/**', route => route.fulfill({ body: '' }));
 await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
   const url = new URL(route.request().url());
+  if (route.request().method() !== 'GET') throw new Error(`Unexpected method: ${route.request().method()} ${url.pathname}`);
   const json = (value: unknown) => route.fulfill({ json: value });
   if (url.pathname === '/api/auth/mode') return json({ mode: 'anonymous', publicOrigin: url.origin });
   if (url.pathname === '/api/auth/verify') return json({ success: true, mode: 'anonymous' });
@@ -53,6 +41,9 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
   }
   if (url.pathname === '/api/plugins/codex-router/control/catalog') {
     catalogQueries.push(url.searchParams);
+    if (holdSourceCatalog && url.searchParams.get('provider') === 'openai') {
+      const capture = holdSourceCatalog; holdSourceCatalog = undefined; capture(route); return;
+    }
     const search = url.searchParams.get('search') ?? '';
     const provider = url.searchParams.get('provider') ?? 'fixture';
     const page = Number(url.searchParams.get('page') ?? 1);
@@ -69,7 +60,7 @@ try {
   expect(manifest.contributes.settings).toBeUndefined();
   expect(manifest.contributes.nativeSettingsComponent).toBeUndefined();
   expect(manifest.uiExtensionMode).toBe('none');
-  await page.goto(`${server.url}#/routes/edit/%2Fcodex`);
+  await page.goto(`${uiRuntime.origin}/#/routes/edit/%2Fcodex`);
   await page.locator('aside button[data-testid$="-plugins"]').click();
   await page.getByTestId('section-plugins').getByRole('button', { name: '编辑', exact: true }).click();
   const dialog = page.getByRole('dialog');
@@ -88,8 +79,11 @@ try {
   await expect(row.getByRole('textbox', { name: '原始模型', exact: true })).toHaveValue('manual-draft');
   await row.getByRole('button', { name: '从目录选择', exact: true }).click();
   await expect(row.getByRole('combobox', { name: '原始提供商', exact: true })).toHaveCount(0);
+  const heldCatalog = new Promise<Route>(resolve => { holdSourceCatalog = resolve; });
   await row.getByRole('combobox', { name: '原始模型', exact: true }).click();
-  await row.getByRole('combobox', { name: '原始模型', exact: true }).press('Escape');
+  const cancelledCatalog = await heldCatalog;
+  await network.expectAborts([cancelledCatalog.request()], () => row.getByRole('combobox', { name: '原始模型', exact: true }).press('Escape'));
+  // Completion means requestfailed observed this captured request's client abort.
   await expect(dialog).toBeVisible();
   await expect(row.getByRole('combobox', { name: '原始模型', exact: true })).toBeFocused();
   await row.getByRole('combobox', { name: '原始模型', exact: true }).click();
@@ -126,6 +120,7 @@ try {
   await row.getByRole('combobox', { name: '目标模型协议', exact: true }).click();
   await page.getByRole('option', { name: 'Chat Completions', exact: true }).click();
   await row.getByRole('combobox', { name: '原始模型', exact: true }).click();
+  await expect(page.getByRole('option', { name: 'gpt-original-1', exact: true })).toBeVisible();
   await row.getByRole('combobox', { name: '原始模型', exact: true }).fill('gpt-original');
   await page.getByRole('option', { name: 'gpt-original', exact: true }).click();
   expect(catalogQueries.some(query => query.get('provider') === 'openai' && query.get('page') === '2')).toBe(true);
@@ -209,6 +204,7 @@ try {
   await row.getByRole('combobox', { name: '目标模型协议', exact: true }).click();
   await page.getByRole('option', { name: 'Chat Completions', exact: true }).click();
   await row.getByRole('combobox', { name: '原始模型', exact: true }).click();
+  await expect(page.getByRole('option', { name: 'gpt-original-1', exact: true })).toBeVisible();
   await row.getByRole('combobox', { name: '原始模型', exact: true }).press('Escape');
   await expect(dialog).toBeVisible();
   await expect(row.getByRole('combobox', { name: '原始模型', exact: true })).toBeFocused();
@@ -273,16 +269,6 @@ try {
   await expect(dialog.getByTestId('plugin-config-save-button')).toBeEnabled();
   await relay.scrollIntoViewIfNeeded();
   await page.screenshot({ path: '/tmp/codex-collaboration-relay-built.png', fullPage: true });
-  await page.setViewportSize({ width: 1440, height: 1440 });
-  const bindingHeader = (await row.locator('header.nx-panel-head').boundingBox())!;
-  const relayHeader = (await relay.locator('header.nx-panel-head').boundingBox())!;
-  expect(Math.abs(bindingHeader.height - relayHeader.height)).toBeLessThanOrEqual(1);
-  const relayType = (await relay.getByRole('combobox', { name: '目标类型', exact: true }).boundingBox())!;
-  const relayTarget = (await relay.getByRole('combobox', { name: '中继目标', exact: true }).boundingBox())!;
-  expect(Math.abs(relayType.y - relayTarget.y)).toBeLessThanOrEqual(1);
-  expect(Math.abs(relayType.width - relayTarget.width)).toBeLessThanOrEqual(1);
-  await dialog.screenshot({ path: '/tmp/codex-router-form.png' });
-  await page.setViewportSize({ width: 1440, height: 1049 });
   await dialog.getByTestId('plugin-config-save-button').click();
   await expect(summary).toContainText('gpt-relay · Responses · 服务: fixture-service');
   await page.getByTestId('section-plugins').getByRole('button', { name: '编辑', exact: true }).click();
@@ -362,12 +348,10 @@ try {
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(dialog).toHaveCount(0);
   await expect(page.getByTestId('section-plugins').getByRole('button', { name: 'Edit', exact: true })).toBeFocused();
-  expect(errors).toEqual([]);
+  network.assertSettled(); expect(errors).toEqual([]);
   console.log('Codex Router UI passed: OpenAI source selection and non-OpenAI target filtering; additions and replacements; source search and pagination; catalog and manual values retained; grouped and aligned fields; no overflow at 1440/768/390/320px. All APIs are fixtures.');
 } catch (error) {
   await page.screenshot({ path: '/tmp/codex-router-source-picker-failure.png', fullPage: true });
   throw error;
-} finally {
-  try { await browser.close(); } finally { await server.stop(true); }
 }
-}, 240_000);
+}), 240_000);

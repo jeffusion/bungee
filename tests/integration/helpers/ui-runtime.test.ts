@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { access, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { startUiRuntime } from '../../helpers/ui-runtime';
@@ -64,6 +64,22 @@ describe('owned UI test runtimes', () => {
       await writeFile(join(directory, 'owned-by-caller'), 'keep');
       await access(join(directory, 'owned-by-caller'));
     } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test('closing preserves diagnostic evidence while releasing its port and disposable cache', async () => {
+    const runtime = await startUiRuntime({ mode: 'built-page' });
+    const diagnostic = join(runtime.evidence, 'failure.json');
+    try {
+      await mkdir(join(runtime.evidence, 'cache'));
+      await writeFile(join(runtime.evidence, 'cache', 'disposable'), 'cached');
+      await writeFile(diagnostic, JSON.stringify({ stage: 'navigation', error: 'fixture failure' }));
+      await runtime.close();
+      await access(diagnostic);
+      await removed(join(runtime.evidence, 'cache'));
+      await expect(request(runtime.origin)).rejects.toThrow();
+    } finally {
+      try { await runtime.close(); } finally { await rm(runtime.evidence, { recursive: true, force: true }); }
+    }
   });
 
   test('relative and absolute HTML or module fixtures retain Vite transforms and aliases, then release their port, cache and cwd', async () => {

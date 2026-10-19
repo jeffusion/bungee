@@ -26,8 +26,7 @@ test('lazy pages ignore stale loads, retain updated props and reload after a fai
       (window as any).rename('latest');
     });
     await page.waitForFunction(() => typeof (window as any).finishNext === 'function');
-    await page.evaluate(() => (window as any).finishFirst());
-    await page.waitForTimeout(30);
+    await page.evaluate(() => (window as any).finishFirstAndFlush());
     expect(await page.locator('[data-page]').count()).toBe(0);
     await page.evaluate(() => (window as any).finishNext());
     await page.locator('[data-page]').waitFor();

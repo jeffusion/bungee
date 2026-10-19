@@ -6,4 +6,4 @@ import Component from '../../ui/TokenStatsSettings.svelte';
 import manifest from '../../manifest.json';
 addMessages('en', {plugins:{'token-stats':manifest.translations.en}});
 locale.set('en'); await waitLocale('en');
-mount(Component, {target:document.getElementById('app')!});
+(window as unknown as {mountPricing:()=>void}).mountPricing = () => { mount(Component, {target:document.getElementById('app')!}); };

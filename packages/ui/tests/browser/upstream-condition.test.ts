@@ -1,21 +1,18 @@
 import { test as browserTest } from 'bun:test';
 import assert from 'node:assert/strict';
-import { fileURLToPath } from 'node:url';
+import {startUiRuntime} from '../../../../tests/helpers/ui-runtime';
 import { chromium } from 'playwright';
 import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { parseNormalizeCompileAggregate } from '../../../core/src/config-storage/aggregate';
 import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
 
 browserTest('upstream condition', async () => {
-const uiRoot = fileURLToPath(new URL('../../dist/', import.meta.url));
 const manifest = await Bun.file(new URL('../../../../plugins/chatgpt-oauth/manifest.json', import.meta.url)).json();
 const compileOptions = { pluginSchemas: new Map([[manifest.name, manifest.configSchema]]) };
-const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request) {
-  const path = new URL(request.url).pathname;
-  return new Response(Bun.file(`${uiRoot}${path === '/' ? 'index.html' : path.slice(1)}`));
-} });
-const browser = await chromium.launch({ headless: true }).catch(async error => { await server.stop(true); throw error; });
+const runtime=await startUiRuntime({mode:'built-page'});
+let browser:Awaited<ReturnType<typeof chromium.launch>>|undefined;
 try {
+ browser=await chromium.launch({headless:true});
   for (const { managed, initialCondition, blank } of [
     { managed: false, initialCondition: undefined, blank: '' },
     { managed: false, initialCondition: "{{ body.model?.endsWith('-luna') }}", blank: '' },
@@ -38,7 +35,9 @@ try {
     const original = structuredClone(config);
     const errors: string[] = [];
     const writes: ConfigurationAggregate[] = [];
-    const page = await browser.newPage();
+    const context=await browser.newContext();
+    try {
+    const page = await context.newPage();
     page.setDefaultTimeout(10_000);
     page.on('pageerror', error => errors.push(error.message));
     page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
@@ -47,8 +46,9 @@ try {
       const request = route.request(), url = new URL(request.url());
       if (url.hostname !== '127.0.0.1') return route.fulfill({ body: '' });
       if (!url.pathname.startsWith('/api/')) return route.continue();
+      if(request.method() !== 'GET' && !(request.method() === 'PUT' && url.pathname === '/api/config')) {errors.push(`Unexpected ${request.method()} ${url.pathname}`);return route.fulfill({status:500,json:{error:'unexpected_method'}});}
       const respond = (json: unknown, status = 200) => route.fulfill({ json, status });
-      if (url.pathname === '/api/auth/mode') return respond({ mode: 'anonymous', publicOrigin: `http://127.0.0.1:${server.port}` });
+      if (url.pathname === '/api/auth/mode') return respond({ mode: 'anonymous', publicOrigin: runtime.origin });
       if (url.pathname === '/api/auth/verify') return respond({ success: true, mode: 'anonymous', subject: { id: 'anonymous', provider: 'anonymous' } });
       if (url.pathname === '/api/ui/menus') return respond(menuSnapshot());
       if (url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
@@ -76,7 +76,7 @@ try {
       errors.push(`Unmocked ${request.method()} ${url.pathname}`);
       return respond({ error: 'unexpected_request' }, 500);
     });
-    await page.goto(`http://127.0.0.1:${server.port}/#/services`);
+    await page.goto(`${runtime.origin}/#/services`);
     await page.getByRole('button', { name: 'Show', exact: true }).click();
     await page.getByRole('button', { name: 'Copy', exact: true }).click();
     await page.locator('[title="original-copy"]').waitFor();
@@ -100,9 +100,9 @@ try {
     if (managed) assert.equal(saved.endpoints[0]!.managedBy!.bindingId, saved.endpoints[0]!.plugins[0]!.id);
     assert.deepEqual(errors, []);
     console.log(`PASS copy → clear condition → rename → save (managed=${managed}, initialCondition=${initialCondition ?? 'unset'})`);
-    await page.close();
+    } finally {await context.close();}
   }
 } finally {
-  try { await browser.close(); } finally { await server.stop(true); }
+  try { await browser?.close(); } finally { await runtime.close(); }
 }
 }, 240_000);

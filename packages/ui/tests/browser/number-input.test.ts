@@ -1,3 +1,4 @@
+import {collectApiEvidence} from '../helpers/editors/api-evidence';
 import { test as browserTest } from 'bun:test';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 import { chromium, expect } from 'playwright/test';
@@ -7,7 +8,7 @@ import { resolve } from 'node:path';
 browserTest('number input', async () => {
 const evidence = process.env.NUMBER_INPUT_EVIDENCE_DIR ?? '/tmp/bungee-number-input-evidence';
 await mkdir(evidence, { recursive: true });
-const errors: string[] = [];
+let errors: string[] = [];
 const checks: string[] = [];
 const uiRuntime = await startUiRuntime({ mode: 'component-fixture', entries: ['tests/fixtures/number-input.html'] });
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
@@ -15,8 +16,8 @@ let success = false;
 try {
   browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
-  page.on('pageerror', error => errors.push(error.message));
-  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+  const evidenceApi=collectApiEvidence(page);
+  errors=evidenceApi.errors;
   await page.goto(`${uiRuntime.origin}/tests/fixtures/number-input.html`);
   const input = page.getByTestId('number');
   const bound = page.getByTestId('bound-value');
@@ -62,6 +63,7 @@ try {
   await expect(input).toHaveValue('20'); await expect(bound).toHaveText('20');
   checks.push('disabled actual prop blocks editing but accepts external state');
   await page.screenshot({ path: resolve(evidence, 'component.png') });
+  evidenceApi.verify();
   expect(errors).toEqual([]);
   success = true;
 } finally {

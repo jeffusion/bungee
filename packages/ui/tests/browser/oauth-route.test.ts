@@ -1,28 +1,28 @@
-import { test as browserTest } from 'bun:test';
+import { afterAll,beforeAll,test } from 'bun:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
-import { chromium } from 'playwright';
+import { chromium,type Browser } from 'playwright';
+import { collectApiEvidence } from '../helpers/editors/api-evidence';
+import manifest from '../../../../plugins/chatgpt-oauth/manifest.json';
+let uiRuntime:Awaited<ReturnType<typeof startUiRuntime>>,browser:Browser;
+beforeAll(async()=>{uiRuntime=await startUiRuntime({mode:'component-fixture',entries:['tests/fixtures/oauth.html']});try{browser=await chromium.launch();}catch(error){await uiRuntime.close();throw error;}},120_000);
+afterAll(async()=>{try{await browser?.close();}finally{await uiRuntime?.close();}});
+test('route handoff-save',()=>runRouteScenario('handoff-save'),240_000);
+test('route duplicate-binding',()=>runRouteScenario('duplicate-binding'),240_000);
+test('route service-rejection',()=>runRouteScenario('service-rejection'),240_000);
+test('route stale-reload',()=>runRouteScenario('stale-reload'),240_000);
+test('route draft-cancel-template',()=>runRouteScenario('draft-cancel-template'),240_000);
+test('route handoff-cancel',()=>runRouteScenario('handoff-cancel'),240_000);
+test('route invalid-link',()=>runRouteScenario('invalid-link'),240_000);
+test('route create-cas-retry',()=>runRouteScenario('create-cas-retry'),240_000);
 
-browserTest('oauth route', async () => {
-const manifest = JSON.parse(await readFile(new URL('../../../../plugins/chatgpt-oauth/manifest.json', import.meta.url), 'utf8'));
-const uiRuntime = await startUiRuntime({ mode: 'component-fixture', entries: ['tests/fixtures/oauth.html'] });
-let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
-try {
-  browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: { width: 1280, height: 850 } });
+async function runRouteScenario(scenario:string){
+ const context=await browser.newContext({viewport:{width:1280,height:850}});
+ try{
+ const page=await context.newPage();
   page.setDefaultTimeout(15000);
-  const errors: string[] = [], requests: string[] = [], writes: any[] = [];
-  let expectedConflictConsole = 0;
-  page.on('pageerror', error => errors.push(error.message));
-  page.on('console', message => {
-    if (message.type() !== 'error') return;
-    if (message.text() === 'Failed to load resource: the server responded with a status of 409 (Conflict)') {
-      expectedConflictConsole++;
-      return;
-    }
-    errors.push(message.text());
-  });
+  const evidence = collectApiEvidence(page);
+  const errors = evidence.errors, requests: string[] = [], writes: any[] = [];
   const routeIds = {
     custom: 'd68a6c29-6bb4-460b-ad67-4abdf1129999',
     duplicate: '10f4319c-37c6-453d-9704-9e9bcc3f63fe',
@@ -45,10 +45,19 @@ try {
     if (url.hostname !== '127.0.0.1') return route.abort();
     if (!url.pathname.startsWith('/api/')) return route.continue();
     requests.push(`${req.method()} ${url.pathname}`);
-    const respond = (value: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(value) });
+    const respond = (value: unknown, status = 200) => {
+      if(status >= 400) evidence.expectStatus(route,status);
+      return route.fulfill({status,json:value});
+    };
+    const path=url.pathname, method=req.method();
+    const reads=['/api/config','/api/plugins','/api/plugins/schemas','/api/plugins/chatgpt-oauth/control/accounts/usage','/api/plugins/chatgpt-oauth/control/accounts/siwc','/api/plugins/chatgpt-oauth/control/accounts','/api/plugins/chatgpt-oauth/control/accounts/codex'];
+    if (!(method === 'GET' && reads.includes(path)) && !(method === 'PUT' && path === '/api/config') && !(method === 'POST' && path === '/api/plugins/chatgpt-oauth/control/accounts/draft')) {
+      errors.push(`Unexpected ${method} ${path}`);return route.fulfill({status:500,json:{error:'unexpected_request'}});
+    }
     if (url.pathname === '/api/config' && req.method() === 'GET') return respond({ config, revision, content_hash: 'sha256:fixture' });
     if (url.pathname === '/api/config' && req.method() === 'PUT') {
       const body = req.postDataJSON(); writes.push(body);
+      assert.equal(body.expected_revision,revision,'configuration writes carry the current CAS revision');
       if (rejectNextCreatePut) {
         rejectNextCreatePut = false;
         config.logical_configuration.routes.find((item: any) => item.path === '/custom').description = 'another editor updated the config';
@@ -83,7 +92,15 @@ try {
     assert.equal(await dialog.count(), 1, `exactly one ${label} dialog is open`);
     assert.equal(await page.getByRole('dialog').count(), 1, `${label} must not overlap any other dialog`);
   };
-  const goAccounts = async () => { await page.goto(base); await account('Primary').getByRole('button', { name: 'Use with route' }).waitFor(); };
+  const goAccounts = async () => {
+    await page.goto(base);
+    try { await account('Primary').getByRole('button', { name: 'Use with route' }).waitFor(); }
+    catch(error) {
+      const failures:unknown[]=[error];
+      try { evidence.verify(); } catch(apiError) { failures.push(apiError); }
+      throw new AggregateError(failures,`Account page did not initialize: ${JSON.stringify({url:page.url(),requests,body:await page.locator('body').innerText()})}`);
+    }
+  };
   const openRoute = async (name: string) => {
     await account(name).getByRole('button', { name: 'Use with route' }).click();
     await assertOnlyDialog(routeDialog, 'Use with route');
@@ -100,6 +117,10 @@ try {
   };
   const targetSection = () => page.getByTestId('route-target-section');
   const rows = () => targetSection().locator('[role="listitem"][draggable="true"]');
+
+  const newEditor = base.replace('#/accounts', '#/routes/new');
+
+if(scenario === 'handoff-save'){
   await goAccounts();
   assert.equal(await page.locator('.account-card').count(), 2);
   assert(!/account-[12]|d68a6c29-6bb4-460b-ad67-4abdf1129999/.test(await page.locator('[data-testid="chatgpt-accounts-page"]').innerText()), 'card must not expose account or route IDs');
@@ -153,21 +174,33 @@ try {
   await Promise.all([page.waitForResponse(response => response.request().method() === 'PUT' && new URL(response.url()).pathname === '/api/config'), page.getByTestId('route-save-button').click()]);
   assert.equal(writes.length, 2, 'explicit update commits');
   assert.equal(writes[1].aggregate.logical_configuration.routes.find((item: any) => item.path === '/custom').endpoints.length, 2);
+
+}
+
+if(scenario === 'duplicate-binding'){
   await goAccounts();
   await selectRoute('Primary', '/duplicate');
   await continueRoute();
   await targetSection().waitFor();
   assert.equal(await rows().count(), 1, 'duplicate handoff focuses the existing binding');
   assert.match(await page.getByTestId('route-handoff-notice').innerText(), /no duplicate/i);
-  assert.equal(writes.length, 2);
+  assert.equal(writes.length, 0);
+
+}
+
+if(scenario === 'service-rejection'){
   await goAccounts();
   await selectRoute('Primary', '/service-route');
   assert.match(await routeDialog.getByRole('alert').innerText(), /Edit that service/i);
   assert(await routeDialog.getByRole('button', { name: 'Continue to route editor' }).isDisabled());
-  assert.equal(writes.length, 2);
+  assert.equal(writes.length, 0);
   await routeDialog.getByRole('button', { name: 'Edit referenced service' }).click();
   await page.waitForFunction(() => location.hash.startsWith('#/services/edit/service-a'));
   await routeDialog.waitFor({ state: 'hidden' });
+
+}
+
+if(scenario === 'stale-reload'){
   await goAccounts();
   await selectRoute('Primary', '/custom');
   await continueRoute();
@@ -177,7 +210,7 @@ try {
   await page.getByTestId('route-save-button').click();
   await page.getByTestId('route-stale-warning').waitFor();
   assert.equal(await rows().count(), draftRows, 'stale result preserves the editor draft');
-  assert.equal(writes.length, 2, 'stale update must not PUT');
+  assert.equal(writes.length, 0, 'stale update must not PUT');
   await page.screenshot({ path: '/tmp/opencode/bungee-oauth-route-stale-desktop.png' });
   // ConfirmDialog really renders these testids. Assert the modal opens before clicking either control.
   await page.getByTestId('route-stale-warning').getByRole('button', { name: 'Reload route' }).click();
@@ -195,13 +228,15 @@ try {
   await reloadDialog.getByTestId('confirm-dialog-confirm').click();
   await reloadDialog.waitFor({ state: 'hidden' });
   await page.getByTestId('route-stale-warning').waitFor({ state: 'hidden' });
-  assert.equal(await rows().count(), 2, 'confirmed reload reads the latest persisted route');
+  assert.equal(await rows().count(), 1, 'confirmed reload reads the latest persisted route');
   await page.waitForFunction(() => document.querySelector('[data-testid="route-save-button"]')?.hasAttribute('disabled') === false);
   assert(await page.getByTestId('route-save-button').isEnabled(), 'confirmed reload restores a fresh editable baseline');
-  assert.equal(writes.length, 2, 'reload is read-only');
+  assert.equal(writes.length, 0, 'reload is read-only');
 
-  const newEditor = base.replace('#/accounts', '#/routes/new');
-  await page.evaluate(() => localStorage.removeItem('bungee-route-draft'));
+
+}
+
+if(scenario === 'draft-cancel-template'){
   await page.goto(newEditor);
   await page.getByTestId('route-nav-match').waitFor();
   await page.getByRole('textbox').first().fill('/cancel-test');
@@ -209,7 +244,7 @@ try {
   await page.getByTestId('confirm-dialog-cancel').click();
   assert.match(await page.getByRole('textbox').first().inputValue(), /cancel-test/, 'cancel preserves unsaved input');
   assert.equal(await page.evaluate(() => location.hash), '#/routes/new');
-  assert.equal(writes.length, 2);
+  assert.equal(writes.length, 0);
 
   await page.evaluate(() => {
     localStorage.setItem('locale', 'en');
@@ -229,7 +264,7 @@ try {
   await restoreDialog.getByTestId('confirm-dialog-confirm').click();
   await restoreDialog.waitFor({ state: 'hidden' });
   assert.equal(await page.getByRole('textbox').first().inputValue(), '/restored-route', 'restore confirm applies the saved draft');
-  assert.equal(writes.length, 2);
+  assert.equal(writes.length, 0);
 
   // RouteTemplates also dispatches a component event, not an onselect callback prop.
   await page.getByRole('button', { name: 'Use Template' }).click();
@@ -239,9 +274,12 @@ try {
   await targetSection().waitFor();
   assert.equal(await rows().count(), 1, 'the target section shows the template upstream');
   assert.match(await targetSection().innerText(), /api\.example\.com/, 'chapter navigation displays the selected template target');
-  assert.equal(writes.length, 2, 'template and chapter navigation never publish');
+  assert.equal(writes.length, 0, 'template and chapter navigation never publish');
 
-  await page.evaluate(() => localStorage.removeItem('bungee-route-draft'));
+
+}
+
+if(scenario === 'handoff-cancel'){
   await goAccounts();
   await openRoute('Primary');
   await continueRoute();
@@ -249,20 +287,28 @@ try {
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   await page.getByTestId('confirm-dialog-confirm').click();
   await page.waitForFunction(() => location.hash === '#/accounts');
-  assert.equal(writes.length, 2, 'confirmed cancel discards the unsaved handoff');
+  assert.equal(writes.length, 0, 'confirmed cancel discards the unsaved handoff');
 
+
+}
+
+if(scenario === 'invalid-link'){
   await page.goto(`${newEditor}?sourcePlugin=chatgpt-oauth&mode=existing`);
   await page.getByTestId('route-handoff-error').waitFor();
   assert.match(await page.getByTestId('route-handoff-error').innerText(), /handoff link is invalid/i);
-  assert.equal(writes.length, 2);
+  assert.equal(writes.length, 0);
 
   const existingEditor = base.replace('#/accounts', '#/routes/edit/%2Fcustom');
   await page.goto(`${existingEditor}?sourcePlugin=chatgpt-oauth&mode=existing`);
   await page.getByTestId('route-nav-match').waitFor();
   assert.match(await page.getByTestId('route-handoff-error').innerText(), /handoff link is invalid/i,
     'loading an authoritative existing route must not erase the invalid-handoff notice');
-  assert.equal(writes.length, 2);
+  assert.equal(writes.length, 0);
 
+
+}
+
+if(scenario === 'create-cas-retry'){
   await goAccounts();
   await openRoute('Primary');
   await continueRoute();
@@ -274,7 +320,7 @@ try {
     page.waitForResponse(response => response.request().method() === 'PUT' && new URL(response.url()).pathname === '/api/config' && response.status() === 409),
     page.getByTestId('route-save-button').click(),
   ]);
-  assert.equal(writes.length, 3, 'first explicit create attempts a single PUT and receives CAS conflict');
+  assert.equal(writes.length, 1, 'first explicit create attempts a single PUT and receives CAS conflict');
   assert.equal(config.logical_configuration.routes.some((item: any) => item.path === '/cas-create'), false);
   assert.equal(await page.getByRole('textbox').first().inputValue(), '/cas-create', 'conflicting create retains unsaved input');
   assert.equal(await page.getByTestId('route-stale-warning').count(), 0, 'new route has no existing baseline to reload');
@@ -284,14 +330,12 @@ try {
     page.waitForResponse(response => response.request().method() === 'PUT' && new URL(response.url()).pathname === '/api/config' && response.status() === 202),
     page.getByTestId('route-save-button').click(),
   ]);
-  assert.equal(writes.length, 4, 'explicit second save performs exactly one new PUT');
-  assert.equal(writes[3].expected_revision, writes[2].expected_revision + 1, 'second save re-reads the latest revision');
+  assert.equal(writes.length, 2, 'explicit second save performs exactly one new PUT');
+  assert.equal(writes[1].expected_revision, writes[0].expected_revision + 1, 'second save re-reads the latest revision');
   assert(config.logical_configuration.routes.some((item: any) => item.path === '/cas-create'));
   assert.equal(config.logical_configuration.routes.find((item: any) => item.path === '/custom').description, 'another editor updated the config');
-  assert.equal(resetConsume, 0);
-  assert(expectedConflictConsole <= 1, 'at most the expected single CAS 409 may appear in the browser console');
-  assert.deepEqual(errors, [], 'no uncaught errors or console errors');
-  console.log('ROUTE HANDOFF browser: new, custom, duplicate, service rejection, stale reload cancel/confirm, draft restore, template, section navigation, localized new/existing malformed handoff, create CAS explicit retry; desktop/mobile screenshots; console clean; reset consume=0');
-  console.log('REQUESTS', JSON.stringify(requests));
-} finally { try { await browser?.close(); } finally { await uiRuntime.close(); } }
-}, 240_000);
+
+}
+assert.equal(resetConsume,0);assert.deepEqual(errors,[]);evidence.verify();
+}finally{await context.close();}
+}

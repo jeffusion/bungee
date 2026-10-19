@@ -102,6 +102,13 @@ try {
   try {
     const current = touchCarousel.locator('[data-carousel-slide][aria-hidden="false"]');
     const selected = () => mobile.evaluate(() => (window as any).carouselTest.state().index);
+    // Check trusted controls before synthetic swipes can trigger native gesture suppression.
+    await mobile.evaluate(() => (window as any).carouselTest.configure({ autoplay: false, index: 0, compact: false, longContent: false }));
+    await touchCarousel.locator('label[for="Alpha-toggle"]').tap();
+    assert(await touchCarousel.getByLabel('Alpha toggle').isChecked());
+    await touchCarousel.locator('summary').filter({ hasText: 'Alpha details' }).tap();
+    assert(await touchCarousel.locator('details').first().evaluate(element => (element as HTMLDetailsElement).open));
+    assert.equal(await touchCarousel.locator('[id$="-viewport"]').evaluate(element => getComputedStyle(element).touchAction), 'pan-y pinch-zoom');
     const swipe = async (dx: number, dy: number, yOffset = 10) => {
       const box = (await current.boundingBox())!;
       const x = box.x + box.width * .6, y = box.y + yOffset;
@@ -135,6 +142,14 @@ try {
     // gestures intentionally remain native. Start on the long content instead.
     await swipe(-100, 0, 150); assert.equal(await selected(), 1, 'horizontal touch still works inside a scrollable slide');
     await mobile.screenshot({ path: join(evidence, 'touch.png') });
+    await mobile.evaluate(() => (window as any).carouselTest.configure({ index: 0, compact: false, longContent: false }));
+    await touchCarousel.getByLabel('Alpha input').scrollIntoViewIfNeeded();
+    const input = (await touchCarousel.getByLabel('Alpha input').boundingBox())!;
+    const x = input.x + input.width / 2, y = input.y + input.height / 2;
+    await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+    for (let step = 1; step <= 6; step++) await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x - step * 14, y }] });
+    await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    assert.equal(await selected(), 0, 'a swipe beginning on a nested input keeps its native behavior');
   } finally { await session.detach(); await mobile.close(); }
   assert.deepEqual(errors, [], 'no browser/runtime/network errors');
   console.log(`PASS: native wheel chaining, short/long/empty/single, fade/slide, desktop/narrow, BCarouselList design, bidirectional touch and vertical touch. Evidence: ${evidence}`);
