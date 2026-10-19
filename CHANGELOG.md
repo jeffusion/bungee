@@ -1,3 +1,15 @@
+# [6.0.0](https://github.com/jeffusion/bungee/compare/v5.26.0...v6.0.0) (2026-10-19)
+
+
+* feat(auth)!: replace local accounts with multi-user authentication ([de767b4](https://github.com/jeffusion/bungee/commit/de767b472b15e833a7554126f6cb0cdcd2dc2acb))
+
+
+### BREAKING CHANGES
+
+* user-auth replaces local-accounts. Previous accounts,
+cookies, and authentication state are not migrated; deployments must back up
+and initialize user-auth explicitly. Stale plugin activations fail closed.
+
 # [5.26.0](https://github.com/jeffusion/bungee/compare/v5.25.0...v5.26.0) (2026-10-19)
 
 
