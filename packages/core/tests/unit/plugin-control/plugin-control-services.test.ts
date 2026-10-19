@@ -49,7 +49,7 @@ function serviceRecord(name: string, character: string, options: ServiceRecordOp
       capabilities: ['api', 'dynamicRuntimeLoad', 'controlPlane'],
       runtimeScope: 'global',
       uiExtensionMode: 'none',
-      engines: { bungee: '^4.3.0 || ^5.0.0' },
+      engines: { bungee: '^6.0.0' },
       control: { entry: 'control.ts', rpc: options.rpc === false ? [] : [{ name: 'refresh', access: 'bound-attempt' }] },
       contributes: { api: [{ path: '/read', methods: ['GET'], handler: 'read', execution: 'control' }] },
       ...(provides.length > 0 || consumes.length > 0

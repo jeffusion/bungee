@@ -55,7 +55,7 @@ function serviceRecord(name: string, character: string, options: RecordOptions =
       capabilities: ['api', 'dynamicRuntimeLoad', 'controlPlane'],
       runtimeScope: 'global',
       uiExtensionMode: 'none',
-      engines: { bungee: '^4.3.0 || ^5.0.0' },
+      engines: { bungee: '^6.0.0' },
       control: { entry: 'control.ts', rpc: (options.rpcMethods ?? ['refresh']).map(method => ({ name: method, access: 'bound-attempt' as const })) },
       contributes: { api: [{ path: '/read', methods: ['GET'], handler: 'read', execution: 'control' }] },
       ...(provides.length > 0 || consumes.length > 0

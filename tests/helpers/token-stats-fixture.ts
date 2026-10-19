@@ -13,7 +13,7 @@ export function createTokenStatsGatewayFixture(): Promise<GatewayFixture> {
       await writeFile(join(probePath, 'manifest.json'), JSON.stringify({
         name: 'catalog-version-probe', version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin',
         capabilities: ['hooks', 'dynamicRuntimeLoad'], runtimeScope: 'global', main: 'main.ts',
-        uiExtensionMode: 'none', engines: { bungee: '^5.0.0' }, configSchema: [], dependencies: { 'models-dev': '^1.0.0' },
+        uiExtensionMode: 'none', engines: { bungee: '^6.0.0' }, configSchema: [], dependencies: { 'models-dev': '^1.0.0' },
         services: { consumes: [{ plugin: 'models-dev', id: 'models-dev.catalog.v1', version: 1, process: 'worker' }] },
       }));
     },

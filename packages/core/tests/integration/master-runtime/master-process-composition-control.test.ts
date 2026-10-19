@@ -93,7 +93,7 @@ test('composition retains ACKed serving/draining snapshots and installs the peer
     await writeFile(join(pluginRoot, 'manifest.json'), JSON.stringify({
       name: 'fake-control', version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin', main: 'main.ts',
       control: { entry: 'control.ts', rpc: [{ name: 'refresh', access: 'bound-attempt' }] },
-      capabilities: ['hooks', 'controlPlane', 'dynamicRuntimeLoad'], uiExtensionMode: 'none', engines: { bungee: '^4.3.0 || ^5.0.0' }, configSchema: [],
+      capabilities: ['hooks', 'controlPlane', 'dynamicRuntimeLoad'], uiExtensionMode: 'none', engines: { bungee: '^6.0.0' }, configSchema: [],
     }));
     await writeFile(join(pluginRoot, 'main.ts'), 'export default {};\n');
     (globalThis as any).__bungeeCompositionControlInvokes = 0;
@@ -499,7 +499,7 @@ test.each(['stopped', 'publication-failure'] as const)('selected generic authent
     for (const name of [provider,dependency,broken]) {
       const directory = join(root,name); await mkdir(directory);
       await writeFile(join(directory,'manifest.json'),JSON.stringify({name,version:'1.0.0',schemaVersion:3,artifactKind:'runtime-plugin',main:'main.ts',
-        control:{entry:'control.ts',rpc:[]},capabilities:['hooks','controlPlane','dynamicRuntimeLoad'],uiExtensionMode:'none',engines:{bungee:'^5.0.0'},configSchema:[],
+        control:{entry:'control.ts',rpc:[]},capabilities:['hooks','controlPlane','dynamicRuntimeLoad'],uiExtensionMode:'none',engines:{bungee:'^6.0.0'},configSchema:[],
         ...(name===provider ? {management:{},dependencies:{[dependency]:'^1.0.0'}} : {})}));
       await writeFile(join(directory,'main.ts'),'export default {};');
       const management = name===provider ? `management:{setupStatus:async()=>'ready',initialize:async()=>Response.json({error:'already_initialized'},{status:409}),authenticate:async()=>({id:'fixture',provider:${JSON.stringify(provider)},capabilities:['config.read']}),authorize:async()=>true,hasIdentity:async()=>true,login:async()=>Response.json({signedIn:true}),logout:async()=>Response.json({}),bootstrap:async()=>{},revokeSessions:async()=>{}},` : '';

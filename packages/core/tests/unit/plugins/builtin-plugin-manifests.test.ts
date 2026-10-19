@@ -4,18 +4,12 @@ import { loadPluginArtifactManifest } from '../../../src/plugin-artifact-contrac
 
 const BUILTIN_PLUGINS_DIR = path.resolve(import.meta.dir, '../../../../../plugins');
 
-const BUILTIN_PLUGIN_ENGINES = {
-  'anthropic-request-sanitizer': '^4.2.0 || ^5.0.0',
-  'anthropic-tool-name-transformer': '^4.2.0 || ^5.0.0',
-  'chatgpt-oauth': '^4.3.0 || ^5.0.0',
-  'codex-router': '^4.2.0 || ^5.0.0',
-  'deepseek-reasoning-fix': '^4.2.0 || ^5.0.0',
-  'model-mapping': '^4.2.0 || ^5.0.0',
-  'llm-protocol-adapter': '^5.0.0',
-  'signature-repair': '^4.2.0 || ^5.0.0',
-  'token-stats': '^5.0.0',
-} as const;
-const BUILTIN_PLUGIN_NAMES = Object.keys(BUILTIN_PLUGIN_ENGINES) as (keyof typeof BUILTIN_PLUGIN_ENGINES)[];
+const BUILTIN_PLUGIN_NAMES = [
+  'anthropic-request-sanitizer', 'anthropic-tool-name-transformer',
+  'chatgpt-oauth', 'codex-router', 'deepseek-reasoning-fix',
+  'key-access', 'key-rate-limit', 'llm-protocol-adapter', 'model-mapping', 'models-dev',
+  'signature-repair', 'token-budget', 'token-metering', 'token-stats', 'user-auth',
+] as const;
 
 describe('builtin plugin manifests', () => {
   test.each(BUILTIN_PLUGIN_NAMES)('loads %s as a vnext manifest', async (pluginName) => {
@@ -25,7 +19,7 @@ describe('builtin plugin manifests', () => {
     expect(manifest.schemaVersion).toBe(3);
     expect(manifest.artifactKind).toBe('runtime-plugin');
     expect(manifest.main).toBe('server/index.ts');
-    expect(manifest.engines.bungee).toBe(BUILTIN_PLUGIN_ENGINES[pluginName]);
+    expect(manifest.engines.bungee).toBe('^6.0.0');
     expect(manifest.metadata?.name).toBeDefined();
     expect(manifest.translations?.en).toBeDefined();
     expect(manifest.translations?.['zh-CN']).toBeDefined();

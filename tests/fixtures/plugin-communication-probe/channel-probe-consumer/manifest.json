@@ -6,7 +6,7 @@
   "capabilities": ["hooks", "dynamicRuntimeLoad"],
   "runtimeScope": "global",
   "uiExtensionMode": "none",
-  "engines": { "bungee": "^5.0.0" },
+  "engines": { "bungee": "^6.0.0" },
   "main": "main.ts",
   "dependencies": { "channel-probe-provider": "^1.0.0" },
   "services": {

@@ -6,7 +6,7 @@
   "capabilities": ["hooks", "api", "dynamicRuntimeLoad", "controlPlane"],
   "runtimeScope": "global",
   "uiExtensionMode": "none",
-  "engines": { "bungee": "^5.0.0" },
+  "engines": { "bungee": "^6.0.0" },
   "main": "main.ts",
   "control": { "entry": "control.ts", "rpc": [] },
   "services": {
