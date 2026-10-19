@@ -1,3 +1,16 @@
+# [5.26.0](https://github.com/jeffusion/bungee/compare/v5.25.0...v5.26.0) (2026-10-19)
+
+
+### Bug Fixes
+
+* **ci:** restore offline icon resources for regression tests ([6549966](https://github.com/jeffusion/bungee/commit/6549966947fa369101004e5dc2730c2bbbb6f57f))
+* **menus:** keep move submenus inside the viewport ([732f458](https://github.com/jeffusion/bungee/commit/732f458de7dc10ca1503b23ce23fb76536c525b6))
+
+
+### Features
+
+* **menus:** unify navigation and offline icon management ([575faa6](https://github.com/jeffusion/bungee/commit/575faa68719b4e4ff37796cffbe97252e38b6f67))
+
 # [5.25.0](https://github.com/jeffusion/bungee/compare/v5.24.3...v5.25.0) (2026-10-16)
 
 

@@ -1,6 +1,6 @@
 {
   "name": "@jeffusion/bungee",
-  "version": "5.25.0",
+  "version": "5.26.0",
   "description": "High-performance reverse proxy server CLI",
   "type": "module",
   "bin": {
