@@ -4,6 +4,8 @@
   import { isLoading } from 'svelte-i18n';
   import { pluginList, refreshPlugins } from '$stores/plugins';
   import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
+  import { publicationRecovery } from '$stores/runtime';
   import { nativeWidgetRegistry } from '$components/native-widgets';
   import QuotaPropsProbe from './QuotaPropsProbe.svelte';
   import QuotaPeerProbe from './QuotaPeerProbe.svelte';
@@ -14,6 +16,8 @@
   const race = new URLSearchParams(location.search).has('race');
   onMount(() => {
     Object.assign(window, { unmountDashboard: () => mounted = false, refreshTestPlugins: refreshPlugins,
+      testRuntimeStatus: () => get(publicationRecovery).readStatus,
+      pauseTestRuntimePolling: () => publicationRecovery.pause(),
       withdrawTestPlugin: () => pluginList.update(plugins => plugins.filter(plugin => plugin.name !== 'chatgpt-oauth')),
       disableTestPlugin: () => pluginList.update(plugins => plugins.map(plugin => ({ ...plugin, enabled: false }))) });
   });

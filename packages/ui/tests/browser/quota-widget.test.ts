@@ -61,6 +61,10 @@ test('quota current windows, partial snapshots and malformed payloads preserve u
 }), 60_000);
 
 test('quota polling starts at 60 seconds and a completed stale response cannot replace newer accounts', () => run(async (page, f) => {
+  // Advance only the quota lifecycle: finish the initial dashboard runtime read
+  // before pausing its unrelated poll, whose network timeout uses the same clock.
+  await page.waitForFunction(() => (window as any).testRuntimeStatus() === 'fresh');
+  await page.evaluate(() => (window as any).pauseTestRuntimePolling());
   // Preserve normal fetch and AbortSignal. Only JSON delivery is held, after the
   // original response body has really arrived, so cancellation cannot erase it.
   await page.evaluate(() => {
