@@ -455,8 +455,10 @@ for (const [caseIndex, r] of routesToTest.entries()) {
       const form = page.getByTestId(PAGE_TEST_IDS.login).locator('form');
       await form.locator('input[autocomplete="username"]').fill('smoke-admin');
       await form.locator('input[autocomplete="current-password"]').fill('smoke-password');
+      const menuResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/ui/menus');
       await form.getByRole('button').click();
       await assertVisibleTestId(PAGE_TEST_IDS.dashboard, caseContext);
+      await (await menuResponse).finished();
       assert.equal(loginRequests, 1, 'The local-accounts login form must submit exactly once.');
       assert.equal(new URL(page.url()).hash, '#/', 'Successful provider login must return to the dashboard.');
     }
@@ -496,6 +498,8 @@ fs.writeFileSync(
 
 if (pageErrors.length > 0 || consoleErrors.length > 0 || criticalFailures.length > 0 || hasFailure) {
   for (const error of pageErrors) console.error(`Browser page error: ${error.stack ?? error.message}`);
+  for (const error of consoleErrors) console.error(`Browser console error: ${JSON.stringify(error)}`);
+  for (const failure of criticalFailures) console.error(`Critical request failed: ${JSON.stringify(failure)}`);
   console.error('Smoke test failed with errors.');
   throw new Error('UI smoke failed; see browser diagnostics');
 } else {

@@ -364,6 +364,7 @@ test('compact menu actions support keyboard reordering, reparenting, validation,
     await expect(services.locator('[data-menu-icon="lucide:server"] svg')).toBeVisible();
     await editor.getByRole('button', { name: 'Draft preview', exact: true }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
+    await expect.poll(() => page.getByRole('dialog').evaluate(node => node.contains(document.activeElement))).toBe(true);
     await expect(page.getByRole('dialog').locator('a')).toHaveCount(0);
     await page.keyboard.press('Escape'); await expect(page.getByRole('dialog')).toHaveCount(0);
     await editor.getByRole('button', { name: 'Page actions', exact: true }).click();
