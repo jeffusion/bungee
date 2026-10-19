@@ -1,10 +1,18 @@
 import { test } from 'bun:test';
-import { chromium, expect, type Route } from 'playwright/test';
+import { chromium, expect, type Page, type Route } from 'playwright/test';
 import { mkdirSync } from 'node:fs';
 import { BUILTIN_MENU_PAGES, type MenuLayout, type MenuPage, type MenuSnapshot } from '@jeffusion/bungee-types';
 import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
+
+async function closeDialogWithEscape(page: Page) {
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  await expect.poll(() => dialog.evaluate(node => node.contains(document.activeElement))).toBe(true);
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+}
 
 test('menu editor saves, reloads, preserves conflicted drafts, guards navigation and renders offline icon search', async () => {
   const runtime = await startUiRuntime({ mode: 'built-page' });
@@ -76,7 +84,7 @@ test('menu editor saves, reloads, preserves conflicted drafts, guards navigation
     await editor.getByRole('button', { name: 'Draft preview', exact: true }).click();
     await expect(page.getByRole('dialog').getByTestId('menu-preview-tree')).toContainText('Operations');
     await expect(page.getByRole('dialog').getByTestId('menu-preview-tree')).toHaveCount(1);
-    await page.keyboard.press('Escape'); await expect(page.getByRole('dialog')).toHaveCount(0);
+    await closeDialogWithEscape(page);
     await expect(editor.getByRole('button', { name: 'Draft preview', exact: true })).toBeFocused();
     await expect(editor.getByTestId('menu-preview-tree')).toHaveCount(0);
     // Background synchronization updates the live state and never replaces a dirty draft.
@@ -128,7 +136,7 @@ test('menu editor saves, reloads, preserves conflicted drafts, guards navigation
     await expect(groupTitle).toContainText('Conflicting draft'); await expect(save).toBeDisabled();
     const writeCount = writes;
     await pageAction('Reload');
-    await expect(page.getByTestId('confirmation-accept')).toBeVisible(); await page.keyboard.press('Escape'); await expect(page.getByTestId('confirmation-accept')).toHaveCount(0);
+    await expect(page.getByTestId('confirmation-accept')).toBeVisible(); await closeDialogWithEscape(page); await expect(page.getByTestId('confirmation-accept')).toHaveCount(0);
     await expect(groupTitle).toContainText('Conflicting draft'); expect(writes).toBe(writeCount);
     await pageAction('Reload'); await page.getByTestId('confirmation-accept').click();
     await expect(groupTitle).toContainText('Operations'); conflict = false;
@@ -251,7 +259,7 @@ test('disabled plugins disappear when menu refresh fails and recover their saved
     await page.getByRole('menuitem', { name: 'Page catalog', exact: true }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
     await expect(page.getByRole('dialog').getByText(plugin.label, { exact: true })).toHaveCount(0);
-    await page.keyboard.press('Escape');
+    await closeDialogWithEscape(page);
     await page.screenshot({ path: `${evidence}/disabled-plugin-refresh-failed.png` });
     enabled = true; menuUnavailable = false;
     await top.getByRole('button', { name: 'System', exact: true }).click();
@@ -339,7 +347,7 @@ test('compact menu actions support keyboard reordering, reparenting, validation,
       (document.querySelector('[data-testid="menus-save"]') as HTMLButtonElement).click();
     });
     await expect(page.getByTestId('confirmation-cancel')).toBeVisible(); expect(saved).toBeNull();
-    await page.keyboard.press('Escape'); await expect(page.getByRole('dialog')).toHaveCount(0);
+    await closeDialogWithEscape(page);
     await expect(editor.getByRole('button', { name: 'Page actions', exact: true })).toBeFocused();
     await moveTo('System');
     await expect(tree.getByRole('list', { name: 'System', exact: true }).locator('[data-menu-id="builtin:services"]')).toHaveCount(1);
@@ -364,13 +372,12 @@ test('compact menu actions support keyboard reordering, reparenting, validation,
     await expect(services.locator('[data-menu-icon="lucide:server"] svg')).toBeVisible();
     await editor.getByRole('button', { name: 'Draft preview', exact: true }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
-    await expect.poll(() => page.getByRole('dialog').evaluate(node => node.contains(document.activeElement))).toBe(true);
     await expect(page.getByRole('dialog').locator('a')).toHaveCount(0);
-    await page.keyboard.press('Escape'); await expect(page.getByRole('dialog')).toHaveCount(0);
+    await closeDialogWithEscape(page);
     await editor.getByRole('button', { name: 'Page actions', exact: true }).click();
     await page.getByRole('menuitem', { name: 'Page catalog', exact: true }).click();
     await expect(page.getByRole('dialog').getByText('Dashboard', { exact: true })).toBeVisible();
-    await page.keyboard.press('Escape'); await expect(page.getByRole('dialog')).toHaveCount(0);
+    await closeDialogWithEscape(page);
     await expect(editor.getByRole('button', { name: 'Page actions', exact: true })).toBeFocused();
     await system.getByRole('switch').uncheck(); await actions('group:system', 'Dissolve group (keep pages)');
     await expect(system).toHaveCount(0); await expect(editor.getByRole('button', { name: 'Add group', exact: true })).toBeFocused();
@@ -442,7 +449,7 @@ test('menu drag feedback supports boundaries and groups, while disabled plugin p
     await editor.getByRole('button', { name: 'Page actions', exact: true }).click();
     await page.getByRole('menuitem', { name: 'Page catalog', exact: true }).click();
     await expect(page.getByRole('dialog')).toBeVisible(); await expect(page.getByRole('dialog').getByText(/inactive/)).toHaveCount(0);
-    await page.keyboard.press('Escape'); await expect(page.getByRole('dialog')).toHaveCount(0);
+    await closeDialogWithEscape(page);
     const dashboardHandle = row('builtin:dashboard').getByRole('button', { name: 'Drag Dashboard', exact: true });
     // Tab retains a visible focus cue; a subsequent pointer press removes it.
     await editor.getByRole('button', { name: 'Page actions', exact: true }).focus(); await page.keyboard.press('Tab');
