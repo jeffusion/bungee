@@ -2,7 +2,7 @@ import { test } from 'bun:test';
 import { expect } from 'playwright/test';
 import { LAYOUT_KEY, type DashboardLayout } from '../../src/components/dashboard/layout';
 import { dashboardRuntime } from '../helpers/dashboard/runtime';
-import { connectDashboard } from '../helpers/dashboard/fixture';
+import { connectDashboard, navigateDashboard } from '../helpers/dashboard/fixture';
 
 const runtime = dashboardRuntime();
 const layout: DashboardLayout = { version: 5, cards: [
@@ -14,7 +14,7 @@ const layout: DashboardLayout = { version: 5, cards: [
 async function open(page: import('playwright').Page) {
   const fixture = await connectDashboard(page);
   await page.addInitScript(({ key, layout }) => { if (!localStorage.getItem(key)) localStorage.setItem(key, JSON.stringify(layout)); }, { key: LAYOUT_KEY, layout });
-  await page.goto(runtime.origin);
+  await navigateDashboard(page, () => page.goto(runtime.origin));
   await expect(fixture.card('kpi.requests')).toBeVisible();
   await expect(page.getByTestId('dashboard-chart-traffic').locator('canvas')).toBeVisible();
   return fixture;
@@ -42,7 +42,7 @@ test('Dashboard pointer drag and resize persist actual GridStack geometry', () =
   const saved = await stored();
   expect(saved.version).toBe(5);
   expect(saved.cards.find((entry: any) => entry.id === 'chart.requests').h).toBeGreaterThan(8);
-  await page.reload();
+  await navigateDashboard(page, () => page.reload());
   for (const entry of saved.cards) {
     await expect(card(entry.id)).toHaveAttribute('gs-w', String(entry.w));
     await expect(card(entry.id)).toHaveAttribute('gs-h', String(entry.h));
@@ -122,7 +122,8 @@ test('Dashboard failed save preserves draft and storage; Cancel restores the sav
 }), 60_000);
 
 test('Dashboard dirty draft guards leaving and pauses refresh for a complete interval', () => runtime.run(async page => {
-  const fixture = await open(page); await page.clock.install();
+  await page.clock.install();
+  const fixture = await open(page);
   await fixture.edit();
   await fixture.card('kpi.requests').getByRole('button', { name: '移除「总请求数」', exact: true }).click();
   const before = fixture.historyCalls;
@@ -149,7 +150,7 @@ test('Dashboard mobile order and height persist independently from desktop geome
   await expect(page.getByTestId('dashboard-customize')).toBeVisible();
   const saved = await stored(); expect(saved.cards).toEqual(original.cards);
   expect(saved.mobile[0]).toEqual({ id: 'kpi.success', height: 'tall' });
-  await page.reload(); await expect(page.locator('.dashboard-mobile-card').first()).toHaveAttribute('data-card-id', 'kpi.success');
+  await navigateDashboard(page, () => page.reload()); await expect(page.locator('.dashboard-mobile-card').first()).toHaveAttribute('data-card-id', 'kpi.success');
   await page.setViewportSize({ width: 1440, height: 1100 });
   await expect(page.locator('.grid-stack-item')).toHaveCount(4); expect((await stored()).cards).toEqual(original.cards);
   expect(pageErrors).toEqual([]);
@@ -158,13 +159,13 @@ test('Dashboard mobile order and height persist independently from desktop geome
 test('Dashboard current storage supports empty boards, templates and malformed-input recovery', () => runtime.run(async page => {
   const { card, pageErrors } = await open(page);
   await page.evaluate(key => localStorage.setItem(key, JSON.stringify({ version: 5, cards: [], mobile: [] })), LAYOUT_KEY);
-  await page.reload(); await expect(page.getByTestId('dashboard-empty')).toBeVisible();
+  await navigateDashboard(page, () => page.reload()); await expect(page.getByTestId('dashboard-empty')).toBeVisible();
   await page.getByRole('button', { name: '布局模板', exact: true }).click();
   await page.getByTestId('dashboard-template-api').click();
   await page.getByTestId('dashboard-save-layout').click();
   await expect(card('kpi.requests')).toBeVisible();
   await page.evaluate(key => localStorage.setItem(key, '{invalid'), LAYOUT_KEY);
-  await page.reload(); await expect(card('kpi.rpm')).toBeVisible();
+  await navigateDashboard(page, () => page.reload()); await expect(card('kpi.rpm')).toBeVisible();
   expect(pageErrors).toEqual([]);
 }), 60_000);
 
@@ -178,7 +179,7 @@ test('Dashboard GridStack fills vertical space while preserving intentional hori
     ];
     localStorage.setItem(key, JSON.stringify({ version: 5, cards, mobile: cards.map(({ id }) => ({ id, height: 'standard' })) }));
   }, LAYOUT_KEY);
-  await page.reload(); await edit();
+  await navigateDashboard(page, () => page.reload()); await edit();
   const rpmBefore = (await card('kpi.rpm').boundingBox())!;
   await card('kpi.requests').getByRole('button', { name: '移除「总请求数」', exact: true }).click();
   await expect(card('kpi.success')).toHaveAttribute('gs-x', '12');
@@ -192,7 +193,7 @@ test('Dashboard GridStack fills vertical space while preserving intentional hori
   await page.getByTestId('dashboard-save-layout').click();
   await expect(page.getByTestId('dashboard-customize')).toBeVisible();
   const saved = await stored();
-  await page.reload();
+  await navigateDashboard(page, () => page.reload());
   await expect(card('kpi.success')).toHaveAttribute('gs-x', '12');
   await expect(card('kpi.rpm')).toHaveAttribute('gs-y', '4');
   expect(await stored()).toEqual(saved); expect(pageErrors).toEqual([]);

@@ -9,6 +9,14 @@ import { observeNetwork } from './network';
 import { dashboardSample, historySample, upstreamSample } from './stats';
 import type { TimeRange } from '../../../src/types';
 
+export async function navigateDashboard(page: Page, navigate: () => Promise<unknown>) {
+  // Cards may render before the independent configuration read completes.
+  // Finish it before another navigation can abort the request.
+  const config = page.waitForResponse(response => new URL(response.url()).pathname === '/api/config');
+  await navigate();
+  await (await config).finished();
+}
+
 export function tokenMenuSnapshot() {
  const snapshot = menuSnapshot();
  const page = { id: 'plugin:token-stats:%2Fstatistics', label: 'page.title', href: '/#/extensions/token-stats/statistics', source: 'plugin' as const, pluginName: 'token-stats', defaultIcon: 'lucide:chart-no-axes-column', available: true };
