@@ -363,6 +363,7 @@ test('compact menu actions support keyboard reordering, reparenting, validation,
     await actions('builtin:services', 'Use default icon');
     await expect(services.locator('[data-menu-icon="lucide:server"] svg')).toBeVisible();
     await editor.getByRole('button', { name: 'Draft preview', exact: true }).click();
+    await expect(page.getByRole('dialog')).toBeVisible();
     await expect(page.getByRole('dialog').locator('a')).toHaveCount(0);
     await page.keyboard.press('Escape'); await expect(page.getByRole('dialog')).toHaveCount(0);
     await editor.getByRole('button', { name: 'Page actions', exact: true }).click();
@@ -485,7 +486,8 @@ test('menu drag feedback supports boundaries and groups, while disabled plugin p
     await page.getByRole('menuitem', { name: 'Rename group', exact: true }).click();
     const name = row('group:system').getByRole('textbox', { name: 'Group name', exact: true });
     await expect(name).toBeFocused(); await name.fill('Operations'); await name.press('Enter');
-    await row('group:system').getByRole('switch').uncheck(); await save.click(); await expect(save).toBeDisabled();
+    await row('group:system').getByRole('switch').uncheck(); await save.click();
+    await expect(page.getByTestId('menus-status')).toHaveText('Menu layout saved.'); await expect(save).toBeDisabled();
     expect(saved?.find(node => node.kind === 'page' && node.pageId === inactiveRoot.pageId)).toEqual(inactiveRoot);
     const storedGroup = saved?.find(node => node.kind === 'group' && node.id === 'group:system');
     expect(storedGroup?.kind === 'group' && storedGroup.children.find(node => node.pageId === inactiveChild.pageId)).toEqual(inactiveChild);
