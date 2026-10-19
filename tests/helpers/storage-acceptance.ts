@@ -128,7 +128,7 @@ if (await boundedExit(init, 20_000) !== 0) throw new Error('formal initializatio
   const changedPassword=randomBytes(24).toString('base64url');
   await page.goto(base+'/#/extensions/user-auth/profile');
   const settings=page.getByTestId('auth-user-profile');await settings.waitFor();
-  await settings.getByRole('button',{name:messages['settings.passwordTitle'],exact:true}).click();
+  await settings.getByRole('button',{name:messages['profile.changePassword'],exact:true}).click();
   const passwordDialog=page.getByRole('dialog');
   await passwordDialog.getByLabel(messages['settings.currentPassword'],{exact:true}).fill(password);
   await passwordDialog.getByLabel(messages['settings.newPassword'],{exact:true}).fill(changedPassword);

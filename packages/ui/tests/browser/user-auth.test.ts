@@ -704,6 +704,7 @@ test('connection toolbar separates adding from filters and distinguishes empty l
         await add.click();
         await expect(page.getByRole('dialog')).toBeVisible();
         await expect(page.getByRole('heading', {name: messages['connections.new'], exact: true})).toBeVisible();
+        await expect.poll(() => page.getByRole('dialog').evaluate(node => node.contains(document.activeElement))).toBe(true);
         await page.keyboard.press('Escape');
         await expect(page.getByRole('dialog')).toHaveCount(0);
         await expect(add).toBeFocused();
