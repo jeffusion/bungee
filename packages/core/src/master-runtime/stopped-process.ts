@@ -7,6 +7,12 @@ export function keepStoppedProcessAlive(): void {
   process.exitCode = undefined;
   const keeper = setInterval(() => {},60_000);
   let listener: ReturnType<typeof createManagementListener> | null = null;
+  let stopping = false;
+  const stop = () => {
+    if (stopping) return; stopping = true;
+    void Promise.resolve(listener?.stop()).finally(() => {clearInterval(keeper);process.exit(0);});
+  };
+  process.once('SIGTERM',stop); process.once('SIGINT',stop);
   try {
     const options = readMasterProcessOptions();
     listener = createManagementListener({profile:'management',hostname:options.managementHost,port:options.managementPort,
@@ -15,10 +21,4 @@ export function keepStoppedProcessAlive(): void {
       controlApi:{handle:async () => Response.json({error:'runtime_stopped'},{status:503})}});
     listener.start(); listener.ready?.();
   } catch { logger.error({code:'stopped_listener_unavailable'},'Stopped master requires local offline recovery'); }
-  let stopping = false;
-  const stop = () => {
-    if (stopping) return; stopping = true;
-    void Promise.resolve(listener?.stop()).finally(() => {clearInterval(keeper);process.exit(0);});
-  };
-  process.once('SIGTERM',stop); process.once('SIGINT',stop);
 }
