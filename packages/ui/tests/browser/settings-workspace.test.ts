@@ -118,9 +118,7 @@ test('import review can be cancelled and invalid snapshots are rejected',async()
     candidate.logical_configuration={...candidate.logical_configuration,routes:Array.from({length:65},(_,index)=>({id:crypto.randomUUID(),position:index,path:`/route-${index}`,endpoints:[],plugins:[]}))};
     await upload(page,envelope(candidate));await expect(page.getByTestId('import-preview')).toBeVisible();
     await expect(page.getByRole('combobox',{name:/^(Log Level|日志级别)$/})).toBeDisabled();await review(page);
-    await page.keyboard.press('Tab');
-
-    await page.keyboard.press('Escape');await expect(page.getByTestId('config-review')).toHaveCount(0);
+    await closeReview(page);
     await page.getByRole('button',{name:language==='en'?'Cancel import':'取消导入',exact:true}).click();
     expect(model.writes).toHaveLength(0);
     await upload(page,'invalid snapshot');await expect(page.getByTestId('settings-notice')).toBeVisible();

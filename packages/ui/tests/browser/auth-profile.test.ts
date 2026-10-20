@@ -236,14 +236,14 @@ test('unlink confirmation preserves identities on cancel and failure and revokes
       const dialog = page.getByRole('dialog',{name:'解除第三方账号绑定',exact:true});
       await unbind.click();await expect(dialog).toContainText('18018352');
 
-      await page.keyboard.press('Escape');await expect(dialog).toHaveCount(0);
+      await dialog.getByRole('button',{name:'取消',exact:true}).click();await expect(dialog).toHaveCount(0);
       expect(writes).toEqual([]);
       await unbind.click();await dialog.getByRole('button',{name:'解除绑定',exact:true}).click();
       await expect(dialog.getByRole('alert')).toBeVisible();
       await expect(page).toHaveURL(/#\/extensions\/user-auth\/profile$/);
       await expect(page.getByTestId('identity-bindings')).toContainText('18018352');
       await expect(page.getByTestId('identity-bindings').getByRole('button',{name:/^绑定 /})).toHaveCount(0);
-      await dialog.getByRole('button',{name:'取消',exact:true}).press('Escape');await expect(dialog).toHaveCount(0);
+      await dialog.getByRole('button',{name:'取消',exact:true}).click();await expect(dialog).toHaveCount(0);
       subject = 'subject-'.repeat(64);
       await page.reload();
       await page.getByTestId('identity-bindings').getByRole('button',{name:/^解除绑定 GitHub /}).click();
@@ -377,7 +377,7 @@ test('password changes verify the current password and revoke the session only a
       const dialog=page.getByRole('dialog',{name:'修改登录密码',exact:true});
       await open.click();
       await dialog.getByLabel('当前密码',{exact:true}).fill('discarded password');
-      await page.keyboard.press('Escape');await expect(dialog).toHaveCount(0);
+      await dialog.getByRole('button',{name:'关闭',exact:true}).click();await expect(dialog).toHaveCount(0);
       expect(writes).toEqual([]);
       await open.click();await expect(dialog.getByLabel('当前密码',{exact:true})).toHaveValue('');
       const fill=async(current:string,password=' 空 格😀 ')=>{

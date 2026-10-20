@@ -44,7 +44,7 @@ test('user management preserves exact DTOs, isolates identities and prevents dup
     const create = page.getByRole('dialog', {name:'创建用户', exact:true});
 
     await create.getByLabel('用户密码（5–32 个字符）',{exact:true}).fill('discarded-password');
-    await page.keyboard.press('Escape'); await expect(create).toHaveCount(0);
+    await create.getByRole('button', {name:'关闭',exact:true}).click(); await expect(create).toHaveCount(0);
 
     await userPanel.getByRole('button',{name:'创建用户',exact:true}).click();
     await expect(create.getByLabel('用户密码（5–32 个字符）',{exact:true})).toHaveValue('');
@@ -110,7 +110,7 @@ test('editing users never loads identities and resetting the active user revokes
           const dialog = page.getByRole('dialog');
           await expect(dialog.getByRole('combobox')).toHaveCount(0);
 
-          await dialog.getByLabel('账号',{exact:true}).press('Escape');
+          await dialog.getByRole('button',{name:'关闭',exact:true}).click();
           await expect(dialog).toHaveCount(0);
           expect(reads).toEqual([control + '/users']); expect(writes).toEqual([]);
         }

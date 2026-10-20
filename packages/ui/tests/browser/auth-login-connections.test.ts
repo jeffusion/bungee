@@ -231,7 +231,7 @@ test('connection toolbar separates adding from filters and distinguishes empty l
         await expect(page.getByRole('dialog')).toBeVisible();
         await expect(page.getByRole('heading', {name: messages['connections.new'], exact: true})).toBeVisible();
 
-        await page.keyboard.press('Escape');
+        await page.getByRole('dialog').getByRole('button', {name: messages['admin.close'], exact: true}).click();
         await expect(page.getByRole('dialog')).toHaveCount(0);
 
         expect(errors).toEqual([]);
@@ -273,7 +273,7 @@ test('provider presets expose only required fields, preserve callback IDs and ke
       await add.click();
       await expect(page.getByRole('dialog')).toBeVisible();
 
-      await page.keyboard.press('Escape');
+      await page.getByRole('dialog').getByRole('button', {name: '关闭', exact: true}).click();
       await expect(page.getByRole('dialog')).toHaveCount(0);
       await expect(search).toHaveCount(0);
       await expect(status).toHaveCount(0);
@@ -323,7 +323,7 @@ test('provider presets expose only required fields, preserve callback IDs and ke
       await expect(edit.getByRole('switch',{name:'启用连接',exact:true})).toBeEnabled();
       await expect(edit.getByRole('button',{name:'Google',exact:true})).toHaveCount(0);
       await expect(edit.getByLabel('Client secret',{exact:true})).toHaveValue('');
-      await page.keyboard.press('Escape');expect(errors).toEqual([]);
+      await edit.getByRole('button',{name:'关闭',exact:true}).click();expect(errors).toEqual([]);
     } finally {await context.close();}
   } finally { await closeAuthContexts(); }
 },90_000);
@@ -410,10 +410,10 @@ test('custom OIDC discovers on blur, rejects failures and stale responses, and s
       await dialog.getByRole('combobox',{name:'配置方式',exact:true}).selectOption('issuer');
       await dialog.getByLabel('Issuer URL',{exact:true}).fill('https://closing.example');await blur();
       await page.waitForFunction(() => (window as any).jsonDeliveries['https://closing.example']?.received === true);
-      await page.keyboard.press('Escape');await expect(dialog).toHaveCount(0);await open();await releaseJsonDelivery(page, 'https://closing.example');
+      await dialog.getByRole('button',{name:'关闭',exact:true}).click();await expect(dialog).toHaveCount(0);await open();await releaseJsonDelivery(page, 'https://closing.example');
       await expect(dialog.getByTestId('discovered-metadata')).toHaveCount(0);
       await expect(dialog.getByLabel('Issuer URL',{exact:true})).toHaveValue('');
-      await page.keyboard.press('Escape');expect(errors).toEqual([]);
+      await dialog.getByRole('button',{name:'关闭',exact:true}).click();expect(errors).toEqual([]);
     } finally {await context.close();}
   } finally { await closeAuthContexts(); }
 },90_000);
@@ -512,7 +512,7 @@ test('login settings isolate drafts, handle failed saves and preserve saved conf
       await expect(turnDialog.getByRole('alert')).toBeVisible();
       await expect(turnDialog.getByLabel('Site key', {exact: true})).toHaveValue('updated-elsewhere');
 
-      await page.keyboard.press('Escape');
+      await turnDialog.getByRole('button', {name: '关闭', exact: true}).click();
       await edit.click();
       await sessionDialog.locator('#session-idleTimeoutMinutes').fill('99');
       await sessionDialog.getByRole('button', {name: '取消', exact: true}).click();

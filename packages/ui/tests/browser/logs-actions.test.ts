@@ -79,7 +79,7 @@ try {
         const [download] = await Promise.all([page.waitForEvent('download'), footer.getByRole('button', { name: 'CSV', exact: true }).click()]);
         expect(download.suggestedFilename()).toMatch(/\.csv$/);
       }
-      await page.keyboard.press('Escape');
+      await panel.getByRole('button', { name: text.common.close, exact: true }).click();
       await expect(panel).toHaveCount(0);
 
       expect(errors).toEqual([]); evidence.verify();
