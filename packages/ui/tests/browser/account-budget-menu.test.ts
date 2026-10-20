@@ -148,11 +148,18 @@ try {
     const authCard = page.getByTestId('page-plugins').locator('.plugin-management-card').filter({hasText:t('user-auth','metadata.name')});
     await authCard.locator('a[href="/#/plugins/user-auth/settings"]').click();
     const loginSettings = page.getByTestId('auth-login-management');
-    await expect(loginSettings).toBeVisible();
+    const waitForLoginSettings = async () => {
+      await expect(loginSettings.getByTestId('session-policy-summary')).toBeVisible();
+      await expect(loginSettings.getByTestId('turnstile-saved-status')).toBeVisible();
+      await expect(loginSettings.getByRole('switch', { name: t('user-auth', 'connections.autoCreate'), exact: true })).toBeEnabled();
+    };
+    await waitForLoginSettings();
     await expect(page.getByTestId('auth-users')).toHaveCount(0);
     await expect(page.getByTestId('auth-user-profile')).toHaveCount(0);
-    await page.reload(); await expect(loginSettings).toBeVisible();
-    budgetEnabled = false; await page.reload(); await page.goto(`${base}/#/plugins`);
+    await page.reload(); await waitForLoginSettings();
+    budgetEnabled = false; await page.reload(); await waitForLoginSettings(); await page.goto(`${base}/#/plugins`);
+    await expect(authCard).toBeVisible();
+    await expect(page.getByTestId('app-header').getByRole('link', { name: t('user-auth', 'profile.title'), exact: true })).toBeVisible();
     await expect(page.getByTestId('app-header').getByRole('link', { name: t('token-budget', 'metadata.name'), exact: true })).toHaveCount(0);
     await context.close();
   }
