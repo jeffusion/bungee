@@ -1,6 +1,7 @@
 import type { PluginConfigConstraint, PluginRuntimeScope } from '@jeffusion/bungee-types';
 import { api, requestPluginControl, type ApiRequestOptions } from './client';
-import { inspectTerminal, waitForConfigurationOperation, type ConfigurationOperationState } from './config';
+import type { ConfigurationOperationState } from './config';
+import { retainAccepted } from '../components/domain/config/publication-state';
 
 export interface UpstreamSourceContribution {
   readonly id: string;
@@ -169,21 +170,20 @@ type PluginToggleAccepted = ConfigurationOperationState & {
 };
 
 /**
- * Toggles plugin activation through the master control plane and follows the
- * accepted publication operation to its terminal state before resolving.
- * Server truth — callers must re-read the plugin list after this resolves.
+ * A durable configuration ACK ends the toggle. Publication continues in the
+ * shared runtime view; an authentication handoff must still complete first.
+ * Callers re-read the plugin list after this resolves.
  */
 export async function setPluginEnabled(
   name: string,
   enabled: boolean,
-  options: { readonly timeoutMs?: number; readonly pollIntervalMs?: number; managementSetup?:unknown; onAccepted?:(operation:PluginToggleAccepted)=>void|Promise<void> } = {},
-): Promise<'unchanged' | 'converged'> {
+  options: { managementSetup?:unknown; onAccepted?:(operation:PluginToggleAccepted)=>void|Promise<void> } = {},
+): Promise<'unchanged' | 'committed'> {
   const accepted = await (enabled ? PluginsAPI.enable(name,options.managementSetup) : PluginsAPI.disable(name));
-  await options.onAccepted?.(accepted);
-  if (accepted.unchanged === true) return 'unchanged';
-  if (typeof accepted.operation_id !== 'string') {
+  if (accepted.unchanged !== true && (typeof accepted.operation_id !== 'string' || !accepted.operation_id)) {
     throw new Error(`Plugin activation for ${name} was not accepted as a configuration operation`);
   }
-  await (inspectTerminal(accepted) ?? waitForConfigurationOperation(accepted.operation_id, options));
-  return 'converged';
+  if (accepted.operation_id) retainAccepted(accepted.operation_id);
+  await options.onAccepted?.(accepted);
+  return accepted.unchanged === true ? 'unchanged' : 'committed';
 }

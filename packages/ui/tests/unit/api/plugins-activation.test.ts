@@ -1,8 +1,12 @@
-import { afterEach, describe, expect, test } from 'bun:test';
-import { ConfigurationOperationDegradedError } from '../../../src/api/config';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import type { ConfigurationOperation } from '../../../src/api/config';
 import { PluginsAPI, setPluginEnabled } from '../../../src/api/plugins';
+import { pendingPublicationKey, readPendingPublication } from '../../../src/components/domain/config/workspace';
 
 const originalFetch = globalThis.fetch;
+const originalStorage = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage');
+const operationId = '10000000-0000-4000-8000-000000000009';
+let stored: Map<string, string>;
 type RequestRecord = { readonly url: string; readonly init?: RequestInit };
 type MockResponse = Response | ((init?: RequestInit) => Response);
 
@@ -16,7 +20,7 @@ function install(requests: RequestRecord[], responses: MockResponse[]): void {
     } });
 }
 
-function accepted(operationId: string, state: 'committed' | 'converged' | 'degraded'): MockResponse {
+function accepted(operationId: string, state: ConfigurationOperation['state']): MockResponse {
   return () => Response.json({
     operation_id: operationId,
     revision: 8,
@@ -31,13 +35,17 @@ function accepted(operationId: string, state: 'committed' | 'converged' | 'degra
   }, { status: 202 });
 }
 
-async function rejection(promise: Promise<unknown>): Promise<unknown> {
-  try { await promise; } catch (error) { return error; }
-  throw new Error('Expected promise to reject');
-}
-
+beforeEach(() => {
+  stored = new Map();
+  Object.defineProperty(globalThis, 'sessionStorage', {configurable:true, value:{
+    setItem:(key:string,value:string) => stored.set(key,value),
+    getItem:(key:string) => stored.get(key) ?? null,
+  }});
+});
 afterEach(() => {
   Object.defineProperty(globalThis, 'fetch', { configurable: true, value: originalFetch });
+  if (originalStorage) Object.defineProperty(globalThis, 'sessionStorage', originalStorage);
+  else delete (globalThis as any).sessionStorage;
 });
 
 describe('plugin activation', () => {
@@ -63,58 +71,61 @@ describe('plugin activation', () => {
     expect(requests[0]?.url).toBe('/api/plugins/demo/enable');
   });
 
-  test('polls the accepted operation to its converged terminal before resolving', async () => {
-    // Given
+  test.each(['committed','publishing','draining','converged','degraded'] as const)('retains the durable ACK in state %s without waiting for publication', async state => {
     const requests: RequestRecord[] = [];
-    install(requests, [
-      accepted('op-9', 'committed'),
-      Response.json({ operation: { mutation_id: 'op-9', state: 'converged', result_status: 200 }, workers: [] }),
-    ]);
-
-    // When
-    const result = await setPluginEnabled('demo', false);
-
-    // Then
-    expect(result).toBe('converged');
-    expect(requests[0]?.url).toBe('/api/plugins/demo/disable');
-    expect(requests[1]?.url).toBe('/api/config/operations/op-9');
+    install(requests, [accepted(operationId, state)]);
+    expect(await setPluginEnabled('demo', false)).toBe('committed');
+    expect(requests.map(request => request.url)).toEqual(['/api/plugins/demo/disable']);
+    expect(readPendingPublication()).toEqual({mutationId:operationId, accepted:true});
   });
 
-  test('surfaces a degraded terminal as a failure', async () => {
-    // Given
+  test('retains the ACK before login and awaits the authentication handoff only', async () => {
     const requests: RequestRecord[] = [];
-    install(requests, [accepted('op-9', 'degraded')]);
-
-    // When
-    const error = await rejection(setPluginEnabled('demo', true));
-
-    // Then
-    expect(error).toBeInstanceOf(ConfigurationOperationDegradedError);
+    install(requests, [accepted(operationId, 'draining')]);
+    let release!: () => void, entered!: () => void;
+    const handoff = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    let completed = false;
+    const pending = setPluginEnabled('user-auth', true, {onAccepted:async state => {
+      expect(state.operation_id).toBe(operationId);
+      expect(readPendingPublication()).toEqual({mutationId:operationId, accepted:true});
+      entered(); await handoff;
+    }}).then(value => { completed = true; return value; });
+    await started;
+    expect(completed).toBe(false);
+    release();
+    expect(await pending).toBe('committed');
+    expect(requests).toHaveLength(1);
   });
 
-  test('session switch completes before polling an accepted management transition', async () => {
+  test('a failed login preserves the accepted identity without persisting credentials or resubmitting', async () => {
     const requests: RequestRecord[] = [];
-    install(requests, [accepted('op-auth', 'committed'), Response.json({operation:{mutation_id:'op-auth',state:'converged',result_status:200},workers:[]})]);
-    let switched = false;
-    await setPluginEnabled('user-auth',true,{onAccepted:async accepted=>{
-      expect(accepted.operation_id).toBe('op-auth');
-      expect(requests).toHaveLength(1);
-      switched = true;
-    }});
-    expect(switched).toBe(true);
-    expect(requests[1]?.url).toBe('/api/config/operations/op-auth');
+    install(requests, [accepted(operationId, 'committed')]);
+    await expect(setPluginEnabled('user-auth', true, {
+      managementSetup:{operation:'initialize',username:'owner',password:'fixture-password',passwordConfirmation:'fixture-password'},
+      onAccepted:async () => { throw new Error('invalid_credentials'); },
+    })).rejects.toThrow('invalid_credentials');
+    expect(readPendingPublication()).toEqual({mutationId:operationId, accepted:true});
+    expect(stored.size).toBe(1);
+    expect(stored.get(pendingPublicationKey)).not.toContain('fixture-password');
+    expect(requests).toHaveLength(1);
   });
 
-  test('failed login after commit retains the accepted operation for recovery and never repeats submission', async () => {
+  test('pre-commit rejection retains no accepted identity and does not retry the write', async () => {
     const requests: RequestRecord[] = [];
-    install(requests,[accepted('op-auth','committed')]);
-    let retained = '';
-    const error = await rejection(setPluginEnabled('user-auth',true,{onAccepted:async state=>{
-      retained = state.operation_id!;
-      throw new Error('invalid_credentials');
-    }}));
-    expect((error as Error).message).toBe('invalid_credentials');
-    expect(retained).toBe('op-auth');
+    install(requests, [Response.json({error:'invalid_input'}, {status:422})]);
+    await expect(setPluginEnabled('user-auth', true)).rejects.toThrow('invalid_input');
+    expect(stored.size).toBe(0);
+    expect(requests).toHaveLength(1);
+  });
+
+  test('a malformed ACK is rejected before handoff or tracking', async () => {
+    const requests: RequestRecord[] = [];
+    install(requests, [Response.json({revision:8}, {status:202})]);
+    let called = false;
+    await expect(setPluginEnabled('demo', true, {onAccepted:() => { called = true; }})).rejects.toThrow('not accepted');
+    expect(called).toBe(false);
+    expect(stored.size).toBe(0);
     expect(requests).toHaveLength(1);
   });
 });
