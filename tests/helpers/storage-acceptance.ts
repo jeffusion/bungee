@@ -11,7 +11,6 @@ import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 export async function runStorageAcceptance(binary?: string) {
 const root = await mkdtemp(join(tmpdir(), 'bungee-storage-browser-'));
-const evidence = await mkdtemp(join(tmpdir(), 'bungee-storage-evidence-'));
 const native = binary !== undefined;
 const password = randomBytes(3).toString('base64url')+'!';
 const secrets = [password];
@@ -73,7 +72,7 @@ if (await boundedExit(init, 20_000) !== 0) throw new Error('formal initializatio
     return response.ok && (await response.json()).initialized === false;
   }, 'management setup did not become ready', 45000);
   browser = await chromium.launch({headless:true});
-  const context = await browser.newContext({viewport:{width:390,height:844},locale:'zh-CN'});
+  const context = await browser.newContext({locale:'zh-CN'});
   await context.addInitScript(() => { if (location.protocol === 'http:' || location.protocol === 'https:') localStorage.setItem('locale','zh-CN'); });
   const page = await context.newPage();
   let expectedLogoutFailures = 0;
@@ -113,14 +112,13 @@ if (await boundedExit(init, 20_000) !== 0) throw new Error('formal initializatio
   phase = 'setup';
   await page.goto(base+'/#/setup');
   await page.locator('input[autocomplete="off"]').waitFor();
-  await page.screenshot({path:join(evidence,'mobile-setup.png'),fullPage:true});
   await page.locator('input[autocomplete="off"]').fill(prepared.code);
   await page.locator('input[autocomplete="username"]').fill(setup.username);
   await page.locator('input[autocomplete="new-password"]').nth(0).fill(password);
   await page.locator('input[autocomplete="new-password"]').nth(1).fill(password);
   await page.locator('form button').click();
   await page.waitForURL(base+'/#/login');
-  await page.locator('input[autocomplete="current-password"]').waitFor();
+  await page.locator('form[aria-busy="false"] button:not([type="button"]):enabled').waitFor();
   check(page.url().endsWith('/#/login'),'setup did not return to login');
   check((await context.request.get(base+'/api/config')).status()===401,'setup created an authenticated session');
   const signed = await fetch(base+'/api/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:setup.username,password,transport:'bearer'})});
@@ -129,12 +127,10 @@ if (await boundedExit(init, 20_000) !== 0) throw new Error('formal initializatio
   await wait(bearer,prepared.revision);
   check((await fetch(base+'/api/config')).status===401,'anonymous management access was accepted');
   phase = 'cookie-login';
-  await page.setViewportSize({width:1440,height:1000});
   await page.goto(base+'/#/login');
   await page.locator('input[autocomplete="username"]').fill(setup.username);
   await page.locator('input[autocomplete="current-password"]').fill(password);
   await dashboardAction(() => page.locator('form button').click());
-  await page.screenshot({path:join(evidence,'login-dashboard.png'),fullPage:true});
   const browserConfig = await context.request.get(base+'/api/config');
   check(browserConfig.status()===200,'browser cookie session not authenticated '+browserConfig.status()+' '+(browserConfig.ok() ? '' : await browserConfig.text()));
   phase = 'proxy-publication';
@@ -151,7 +147,6 @@ if (await boundedExit(init, 20_000) !== 0) throw new Error('formal initializatio
   const proxied=await fetch(`http://127.0.0.1:${ports[0]}/acceptance`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(requestBody)});
   const received=await proxied.json(); check(proxied.status===200 && received.message==='storage-acceptance' && JSON.stringify(received.payload)===JSON.stringify(requestBody),'real proxy payload mismatch');
   const health=await (await fetch(base+'/health')).json(); check(health.live && health.management && health.data,'formal health availability mismatch');
-  await page.screenshot({path:join(evidence,'dashboard.png'),fullPage:true});
   check(diagnostics.length===0,'browser errors: '+JSON.stringify(diagnostics));
   await page.goto('about:blank');
   phase = 'restart';
@@ -160,7 +155,6 @@ if (await boundedExit(init, 20_000) !== 0) throw new Error('formal initializatio
   await wait(bearer,prepared.revision+1); await dashboardAction(() => page.goto(base+'/#/'));
   check((await context.request.get(base+'/api/config')).status()===200,'browser session lost after restart');
   check((await fetch(`http://127.0.0.1:${ports[0]}/acceptance`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(requestBody)})).status===200,'proxy failed after restart');
-  await page.screenshot({path:join(evidence,'dashboard.png'),fullPage:true});
   const messages = (await Bun.file(resolve(import.meta.dir,'../../plugins/user-auth/manifest.json')).json()).translations['zh-CN'];
   phase = 'password-revocation';
   const changedPassword=randomBytes(24).toString('base64url'); secrets.push(changedPassword);
@@ -173,7 +167,7 @@ if (await boundedExit(init, 20_000) !== 0) throw new Error('formal initializatio
   await passwordDialog.getByLabel(messages['settings.confirmation'],{exact:true}).fill(changedPassword);
   await passwordDialog.getByRole('button',{name:messages['settings.submit'],exact:true}).click();
   await page.waitForURL(base+'/#/login');
-  await page.locator('input[autocomplete="current-password"]').waitFor();
+  await page.locator('form[aria-busy="false"] button:not([type="button"]):enabled').waitFor();
   check((await fetch(base+'/api/auth/verify',{headers:bearer})).status===401,'password change retained the old Bearer');
   await page.locator('input[autocomplete="username"]').fill(setup.username);
   await page.locator('input[autocomplete="current-password"]').fill(changedPassword);
@@ -186,15 +180,15 @@ if (await boundedExit(init, 20_000) !== 0) throw new Error('formal initializatio
   await settings.getByRole('button',{name:messages['settings.logout'],exact:true}).click();
   await settings.getByRole('alert').waitFor();
   check((await context.request.get(base+'/api/config')).status()===200,'failed logout cleared the valid session');
-  await page.screenshot({path:join(evidence,'logout-failure-preserved.png'),fullPage:true});
   await page.unroute('**/api/auth/logout');
   check(expectedLogoutFailures === 0,'expected logout failure was not observed');
   phase = 'logout-success';
   await waitUntil(async () => pendingApi.size === 0, 'profile API requests did not finish: ' + phase, 20000);
   await settings.getByRole('button',{name:messages['settings.logout'],exact:true}).click();
   await page.waitForURL(base+'/#/login');
-  await page.locator('input[autocomplete="current-password"]').waitFor();
+  await page.locator('form[aria-busy="false"] button:not([type="button"]):enabled').waitFor();
   check((await context.request.get(base+'/api/config')).status()===401,'successful logout retained session');
+  await waitUntil(async () => pendingApi.size === 0, 'login API requests did not finish: ' + phase, 20000);
   await page.goto('about:blank');
   await manager.stop();started=false;
   phase = 'offline-recovery';
@@ -206,18 +200,17 @@ if (await boundedExit(init, 20_000) !== 0) throw new Error('formal initializatio
   check(!recovery.output.includes(recoveredPassword),'recovery leaked password');
   await manager.start({workers:'1'});started=true;
   await waitUntil(async()=>{try{return (await fetch(base+'/api/auth/mode')).ok;}catch{return false;}},'restored instance unavailable',45000);
-  await page.setViewportSize({width:390,height:844});await page.goto(base+'/#/login');
+  await page.goto(base+'/#/login');
   await page.locator('input[autocomplete="username"]').fill('recovered-owner');
   await page.locator('input[autocomplete="current-password"]').fill(recoveredPassword);
   await dashboardAction(() => page.locator('form button').click());
   await dashboardAction(() => page.reload());
-  await page.screenshot({path:join(evidence,'mobile-recovered-dashboard.png'),fullPage:true});
   check((await context.request.get(base+'/api/config')).status()===200,'recovered browser session failed');
   check(diagnostics.length===0,'browser errors: '+JSON.stringify(diagnostics));
-  console.log(JSON.stringify({artifact:native?'native':'formal-dist',browserSetup:true,browserLogin:true,cookieAuth:true,proxyPayload:true,restartSession:true,passwordChange:true,logoutFailurePreserved:true,recoveredLogin:true,desktop:true,mobile:true,health,jsErrors:diagnostics.length,screenshot:join(evidence,'dashboard.png')}));
+  console.log(JSON.stringify({artifact:native?'native':'formal-dist',browserSetup:true,browserLogin:true,cookieAuth:true,proxyPayload:true,restartSession:true,passwordChange:true,logoutFailurePreserved:true,recoveredLogin:true,health,jsErrors:diagnostics.length}));
   passed=true;
 } catch (error) {
-  console.log(JSON.stringify({acceptance:'failed',phase,root,evidence,diagnostics,pendingApi:[...pendingApi.values()]}));
+  console.log(JSON.stringify({acceptance:'failed',phase,root,diagnostics,pendingApi:[...pendingApi.values()]}));
   // Private logs and databases remain in the fixture directory on failure.
   throw error;
 } finally {

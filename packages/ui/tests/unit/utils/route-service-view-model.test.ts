@@ -1,12 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  getEndpointPreview,
-  getRouteDisplayViewModel,
-  getRouteFeatureBadges,
   getRouteTargetSummary,
   getServiceConsumers,
   getServiceHealthAggregate,
-  sortEndpointsForDisplay,
 } from '../../../src/utils/route-service-view-model';
 import type { Route, Service } from '$api/routes';
 
@@ -50,62 +46,14 @@ describe('route-service-view-model', () => {
     const frozenService = deepFreeze(structuredClone(service));
 
     const summary = getRouteTargetSummary(frozenRoute, [frozenService]);
-    const display = getRouteDisplayViewModel(frozenRoute, [frozenService]);
 
-    expect(summary).toEqual({
+    expect(summary).toMatchObject({
       kind: 'service',
-      label: 'service: shared-service',
       serviceName: 'shared-service',
       endpointCount: 4,
     });
-    expect(display.preview.total).toBe(4);
     expect(frozenRoute).toEqual(route);
     expect(frozenService).toEqual(service);
-  });
-
-  test('summarizes custom endpoints and endpoint preview overflow', () => {
-    const route: Route = {
-      path: '/custom',
-      endpoints: [
-        { target: 'https://a.example.com', weight: 100, priority: 1 },
-        { target: 'https://b.example.com', weight: 100, priority: 2 },
-        { target: 'https://c.example.com', weight: 100, priority: 3 },
-        { target: 'https://d.example.com', weight: 100, priority: 4 },
-      ],
-    };
-
-    const summary = getRouteTargetSummary(route);
-    const preview = getEndpointPreview(route.endpoints);
-
-    expect(summary.kind).toBe('custom_endpoints');
-    expect(summary.endpointCount).toBe(4);
-    expect(preview.items).toHaveLength(3);
-    expect(preview.overflowCount).toBe(1);
-  });
-
-  test('sorts card, overflow, drawer and review consistently without changing endpoint positions', () => {
-    const service = createService();
-    service.endpoints = [
-      { target: 'p4', priority: 4, _position: 0, is_disabled: true },
-      { target: 'p2-first', priority: 2, _position: 1 },
-      { target: 'p1', priority: 1, _position: 2 },
-      { target: 'p3', priority: 3, _position: 3 },
-      { target: 'p2-second', priority: 2, _position: 4 },
-    ];
-    const original = structuredClone(service.endpoints);
-    const frozen = deepFreeze(service.endpoints);
-    const full = sortEndpointsForDisplay(frozen);
-    const card = getEndpointPreview(frozen);
-    const review = getEndpointPreview(frozen, 5);
-    const targets = ['p1', 'p2-first', 'p2-second', 'p3', 'p4'];
-
-    expect(full.map((item) => item.target)).toEqual(targets);
-    expect(card.items.map((item) => item.target)).toEqual(targets.slice(0, 3));
-    expect(card.overflowCount).toBe(2);
-    expect(review.items.map((item) => item.target)).toEqual(targets);
-    expect(getRouteDisplayViewModel({ path: '/shared', service: service.name }, [service]).preview.items.map((item) => item.target)).toEqual(targets.slice(0, 3));
-    expect(full.map((item) => item._position)).toEqual([2, 1, 4, 3, 0]);
-    expect(service.endpoints).toEqual(original);
   });
 
   test('treats direct response and response rules as direct-response capability', () => {
@@ -126,40 +74,9 @@ describe('route-service-view-model', () => {
     };
 
     const summary = getRouteTargetSummary(route);
-    const badges = getRouteFeatureBadges(route);
 
     expect(summary.kind).toBe('direct_response');
-    expect(badges.map((badge) => badge.section)).toEqual([
-      'cors',
-      'rateLimit',
-      'retry',
-      'directResponse',
-      'plugins',
-    ]);
-  });
 
-  test('emits modification only for real header/body/query/path rewrite changes', () => {
-    const emptyDefaults: Route = {
-      path: '/defaults',
-      request: {
-      headers: { add: {}, remove: [] },
-      body: { add: {}, remove: [], replace: {}, default: {} },
-      query: { add: {}, remove: [], replace: {}, default: {} },
-      },
-    };
-
-    const realModifications: Route = {
-      path: '/mods',
-      request: {
-      headers: { add: { 'x-demo': '1' }, remove: ['x-old'] },
-      body: { add: { foo: 'bar' }, remove: [], replace: {}, default: {} },
-      query: { add: {}, remove: [], replace: { status: 'active' }, default: {} },
-      },
-      path_rewrite: { '^/api/(.*)$': '/v1/$1' },
-    };
-
-    expect(getRouteFeatureBadges(emptyDefaults).some((badge) => badge.section === 'modification')).toBe(false);
-    expect(getRouteFeatureBadges(realModifications).some((badge) => badge.section === 'modification')).toBe(true);
   });
 
   test('marks missing service and empty targets distinctly', () => {

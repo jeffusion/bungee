@@ -48,40 +48,19 @@ for (const count of [0, 1, 3]) {
         const controlled = await last.getAttribute('aria-controls');
         expect(controlled).toBeTruthy();
         expect(await page.locator(`[id="${controlled}"] [data-detail]`).count()).toBe(1);
-        if (process.env.CHAIN_DETAIL_SCREENSHOTS && count === 3) {
-          await page.screenshot({ path: '/tmp/opencode/chain-detail-default-last.png' });
-        }
+
         await last.focus();
         await page.keyboard.press('Enter');
-        await page.evaluate(() => (window as any).refreshTranslation());
+
         expect(await page.locator('[data-detail]').count()).toBe(0);
         expect(await last.getAttribute('aria-expanded')).toBe('false');
         await page.keyboard.press('Space');
         expect(await last.getAttribute('aria-expanded')).toBe('true');
         if (count > 1) {
           await buttons.first().click();
-          await page.evaluate(() => (window as any).refreshTranslation());
+
           expect(await page.locator('[data-detail]').getAttribute('data-detail')).toBe('attempt-0');
           expect(await last.getAttribute('aria-expanded')).toBe('false');
-        }
-        if (count === 3) for (const width of [1280, 640, 390, 320]) {
-          await page.setViewportSize({ width, height: 900 });
-          expect(await buttons.evaluateAll(nodes => nodes.every(node => node.scrollWidth <= node.clientWidth))).toBe(true);
-          expect(await buttons.evaluateAll(nodes => nodes.every(node => {
-            const chips = node.children[1].children;
-            const rects = [...chips].map(chip => chip.getBoundingClientRect());
-            return rects.length === 3 && rects.every(rect => Math.abs(rect.top - rects[0].top) < 1 && rect.width > 0);
-          }))).toBe(true);
-          expect(await page.locator('[data-testid="chain-detail-modal"] > .overflow-y-auto').evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
-          await page.keyboard.press('Tab');
-          await buttons.first().focus();
-          expect(await buttons.first().evaluate(node => getComputedStyle(node).boxShadow)).not.toBe('none');
-          await buttons.first().hover();
-          expect(await buttons.first().evaluate(node => getComputedStyle(node).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
-          if (process.env.CHAIN_DETAIL_SCREENSHOTS && count === 3) {
-            await buttons.first().focus();
-            await page.screenshot({ path: `/tmp/opencode/chain-detail-${width}.png` });
-          }
         }
       }
       expect(errors).toEqual([]);

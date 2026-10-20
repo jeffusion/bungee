@@ -1,20 +1,15 @@
 import { test } from 'bun:test';
-import { chromium, expect } from 'playwright/test';
-import { mkdir } from 'node:fs/promises';
+import { expect } from 'playwright/test';
 import manifest from '../../../../plugins/user-auth/manifest.json';
-import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
 import { createAuthRuntime } from '../helpers/auth/runtime';
-import {menuSnapshot, fulfillMenuIcons} from '../helpers/menus';
-
 
 const {authRuntime} = createAuthRuntime('component-fixture', ['index.html']);
 
 test('current setup page resolves uncertain initialization and keeps late reads bound to its provider and lifetime', async () => {
   const {runtime, browser} = await authRuntime();
-  const evidence = '/tmp/bungee-management-setup';
-  await mkdir(evidence, { recursive: true });
-  for (const scenario of ['ack-lost', 'verification-lost', 'already-initialized', 'initial-read-lost', 'provider-change', 'unmounted', 'english'] as const) {
-      const language = scenario === 'english' ? 'en' : 'zh-CN';
+
+  for (const scenario of ['ack-lost', 'verification-lost', 'already-initialized', 'initial-read-lost', 'provider-change', 'unmounted'] as const) {
+      const language = 'zh-CN';
       const context = await browser.newContext({ viewport: { width: 390, height: 1000 }, locale: language });
       try {
         await context.addInitScript(language => localStorage.setItem('locale', language), language);
@@ -81,13 +76,13 @@ test('current setup page resolves uncertain initialization and keeps late reads 
         }
         await expect(form).toBeVisible();
         const fill = async () => {
-          await form.getByLabel(language === 'en' ? 'One-time setup code' : '一次性初始化码', { exact: true }).fill('fixture-code');
-          await form.getByLabel(language === 'en' ? 'Username' : '账号', { exact: true }).fill('admin');
-          await form.getByLabel(language === 'en' ? 'Password (5–32 characters)' : '密码（5–32 个字符）', { exact: true }).fill('fixture setup password');
-          await form.getByLabel(language === 'en' ? 'Confirm password' : '确认密码', { exact: true }).fill('fixture setup password');
+          await form.getByLabel('一次性初始化码', { exact: true }).fill('fixture-code');
+          await form.getByLabel('账号', { exact: true }).fill('admin');
+          await form.getByLabel('密码（5–32 个字符）', { exact: true }).fill('fixture setup password');
+          await form.getByLabel('确认密码', { exact: true }).fill('fixture setup password');
         };
         await fill();
-        await form.getByRole('button', { name: language === 'en' ? 'Initialize account' : '初始化账号', exact: true }).click();
+        await form.getByRole('button', { name: '初始化账号', exact: true }).click();
         if (scenario === 'provider-change' || scenario === 'unmounted') {
           await page.waitForFunction(() => (window as any).setupVerificationReceived === true);
           await page.evaluate(async scenario => {
@@ -109,9 +104,9 @@ test('current setup page resolves uncertain initialization and keeps late reads 
           await expect(form).toHaveCount(0);
         } else {
           if (scenario === 'verification-lost') {
-            await expect(form.getByRole('alert')).toContainText('未能确认初始化结果');
+            await expect(form.getByRole('alert')).toBeVisible();
             await fill();
-            await form.getByRole('button', { name: language === 'en' ? 'Initialize account' : '初始化账号', exact: true }).click();
+            await form.getByRole('button', { name: '初始化账号', exact: true }).click();
           }
           const login = page.getByTestId('page-login');
           await expect(login).toBeVisible();
@@ -119,15 +114,8 @@ test('current setup page resolves uncertain initialization and keeps late reads 
           expect(requests.filter(request => request === 'POST /api/auth/setup')).toHaveLength(1);
           expect(requests).not.toContain('POST /api/auth/login');
           expect(requests).not.toContain('GET /api/auth/verify');
-          await login.getByText(language === 'en' ? 'Forgot your username or password?' : '忘记账号或密码？', { exact: true }).click();
-          await expect(login.locator('code')).toHaveText([
-            'bungee recover --plugin user-auth --action reset',
-            'bun packages/core/dist/main.js --recover /usr/app/data/bungee.db --plugin user-auth --action reset',
-          ]);
-          await expect(login).toContainText(language === 'en' ? 'original instance’s database path' : '数据库路径须指向原实例');
-          await expect(login).toContainText('entrypoint');
         }
-        await page.screenshot({ path: `${evidence}/${scenario}-390.png`, fullPage: true });
+
         expect(expectedConflict).toBe(0);
         expect(errors).toEqual([]);
       } finally { await context.close(); }

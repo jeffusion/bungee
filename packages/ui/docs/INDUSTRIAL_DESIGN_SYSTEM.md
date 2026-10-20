@@ -516,22 +516,8 @@ These rules apply to the management UI and **every plugin's UI**:
   never use an unqualified element/class selector that can affect another page.
   The exception requires explicit code review and browser evidence for direct
   entry, page switching, unmounting, and an unrelated page's unchanged styling.
-- `global-style-baseline.json` freezes existing global rules (including source
-  order, rule bodies and media conditions), `app.css`, and stylesheet imports. It is a
-  legacy inventory, **not approval for new global styles**. Component global-rule
-  removals are allowed while preserving the remaining order; changes to the
-  global foundation in `app.css` require a documented
-  exception and corresponding reviewed baseline update. Never refresh the
-  baseline merely to make a failing check pass.
-
-`tests/unit/style-scope.test.ts` scans `src/` and all `plugins/*/ui/` directories and
-runs in the unit category of the complete CI regression. New or changed global rules, new standalone
-stylesheets, template/head style elements or stylesheet links, and unregistered
-stylesheet imports fail this check. Reordering frozen rules also fails. Run it locally:
-
-```bash
-bun test packages/ui/tests/unit/style-scope.test.ts
-```
+Global style ownership and exceptions are checked in code review and browser inspection.
+Automated business tests do not freeze stylesheet contents or visual presentation.
 
 The route and service editor rails use
 `components/shell/EditorNavigation.svelte`. This component owns the navigation
@@ -955,13 +941,24 @@ Before declaring any UI change "done":
 
 ### 8.1 CI Integration & Smoke Tests
 
-The project uses automated checks to enforce the industrial design system and prevent regressions.
+Automated frontend checks protect core business logic and workflows: validation,
+authentication and session changes, configuration publication and recovery, account
+bindings, request contracts and data isolation. Run `bun run test:browser` after
+building current artifacts. CI selects browser files by module on Linux/macOS;
+full regression remains required before release. See the
+[development testing guide](../../../docs/guides/development.md#6-testing-strategy).
 
-1. **Import and translation boundaries**: `bun test --isolate packages/ui/tests/unit/ui-boundaries.test.ts` checks actual imports and reactive translation syntax. Comment text and historical migration quotas do not define architectural boundaries.
-2. **Playwright regressions**: `bun run test:browser` includes smoke, route editor, scrolling and dashboard native widget checks. Tests start their own local services; CI selects browser files by module on Linux/macOS; UI and plugin UI changes select the entire UI/plugin browser scope and root workflows. Full regression remains required before release. Build current artifacts before running a category directly. See the [development testing guide](../../../docs/guides/development.md#6-testing-strategy).
-3. **Style isolation**: `bun test --isolate packages/ui/tests/unit/style-scope.test.ts` enforces the frozen global-style baseline. Global styles require the documented narrow reviewed exception in §3.4.7; reorganizing tests must not broaden it.
+Do not assert CSS, dimensions, responsive layouts, animations, focus, translated
+wording or display formatting in automated tests. Use the browser review workflow
+above for presentation changes. Labels may locate controls; they are not immutable
+copy contracts.
 
-Built-page tests serve the current `dist` through the owned static runtime; component hosts use the existing Vite configuration with private caches. A file owns its service and browser, with a fresh context per test; do not share mutable runtimes across files. Wait for request completion, rendered state or stable layout rather than fixed preparation delays. Keep representative success screenshots and necessary state/layout evidence; collect additional screenshots for diagnosis. Cleanup failures must fail the check.
+Built-page tests serve current `dist` through the owned static runtime; component
+hosts use the existing Vite configuration with private caches. A file owns its
+service and browser, with a fresh context per test. Wait for business requests and
+state transitions to complete instead of fixed preparation delays. Browser errors,
+failed requests and cleanup failures must fail the check. Screenshots may support
+manual diagnosis without becoming automated acceptance criteria.
 
 Keep component tests under `tests/browser/`, pure logic under `tests/unit/`, and loaded hosts under `tests/fixtures/`. Test behavior through normal module imports or real rendering; never extract component source and execute it. Evidence belongs outside versioned source.
 
@@ -1003,4 +1000,4 @@ The maintained visual reference is `/#/design`, implemented by `src/routes/Desig
 
 Use `ui/number-input` for bounded integer fields. It accepts ASCII digits only, rejects invalid paste as a whole, and publishes undefined when cleared. Required validation prevents empty submission. Editing may temporarily exceed min/max; blur or Enter clamps and removes leading zeros. Buttons and arrow keys step by one, respect bounds/disabled/readonly, and never submit a form. Preserve text selection, external-value synchronization and spinbutton accessibility. The server still validates integers and ranges.
 
-The component check is `bun test --isolate packages/ui/tests/browser/number-input.test.ts`; domain ranges belong to the [models-dev contract](../../../plugins/models-dev/README.md).
+Domain ranges belong to the [models-dev contract](../../../plugins/models-dev/README.md); automated tests verify domain validation and conversion.

@@ -57,13 +57,12 @@ try {
     throw new Error(`Unmocked simulation API: ${request.method()} ${url.pathname}`);
   });
   await page.goto(`${fixtureOrigin}/tests/fixtures/oauth.html`);
-  const status = page.getByTestId('auto-reset-status');
   const toggle = page.getByRole('switch', { name: 'Auto reset: Simulation' });
-  await status.getByText('Automatic reset disabled', { exact: true }).waitFor();
+  await toggle.waitFor();
   assert.equal(await toggle.getAttribute('aria-checked'), 'false');
   await toggle.click();
   const dialog = page.getByRole('dialog');
-  await dialog.getByText(/The server refreshes the credit list every 5 minutes/).waitFor();
+  await dialog.waitFor();
   assert.equal(settings.length, 0, 'opening the confirmation must not enable automation');
   assert.equal(await toggle.getAttribute('aria-checked'), 'false', 'the switch must reflect persisted state before confirmation');
   await dialog.getByRole('button', { name: 'Close', exact: true }).click();
@@ -73,52 +72,31 @@ try {
   await page.keyboard.press('Space');
   await dialog.getByRole('button', { name: 'Confirm', exact: true }).click();
   await dialog.waitFor({ state: 'hidden' });
-  await status.getByText('Automatic reset enabled (30 minutes before expiry)', { exact: true }).waitFor();
+
   assert.equal(await toggle.getAttribute('aria-checked'), 'true');
   assert.deepEqual(settings, [{ accountRef: 'simulation-account', enabled: true }]);
   assert.equal(resets.length, 0, 'the UI must not implement a browser-driven reset timer');
-  await page.setViewportSize({ width: 320, height: 850 });
-  assert(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), 'English narrow layout must not overflow');
 
-  await page.evaluate(() => (window as any).setTestLocale('zh'));
-  await status.getByText('自动重置已开启（到期前 30 分钟）', { exact: true }).waitFor();
-  const chineseToggle = page.getByRole('switch', { name: '自动重置: Simulation' });
-  for (const width of [1100, 320]) {
-    await page.setViewportSize({ width, height: 850 });
-    const heading = await page.getByTestId('reset-heading').boundingBox();
-    const button = await chineseToggle.boundingBox();
-    const track = await page.getByTestId('auto-reset-track').boundingBox();
-    assert(heading && button && track);
-    assert.equal(track.width, 30); assert.equal(track.height, 16);
-    assert.equal(button.height, 24);
-    assert(Math.abs(heading.x + heading.width - button.x - button.width) <= 1, 'toggle stays at the right of the heading');
-    assert(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), 'narrow layout must not overflow');
-  }
-  await page.screenshot({ path: '/tmp/bungee-auto-reset-toggle-mobile.png', fullPage: true });
-  await page.setViewportSize({ width: 1100, height: 850 });
-  await page.screenshot({ path: '/tmp/bungee-auto-reset-toggle-desktop.png', fullPage: true });
-  await chineseToggle.click();
-  await dialog.getByText(/停止为此账号安排自动重置/).waitFor();
-  await dialog.getByRole('button', { name: '确认', exact: true }).click();
+  await toggle.click();
+  await dialog.waitFor();
+  await dialog.getByRole('button', { name: 'Confirm', exact: true }).click();
   await dialog.waitFor({ state: 'hidden' });
-  await status.getByText('自动重置已关闭', { exact: true }).waitFor();
-  assert.equal(await chineseToggle.getAttribute('aria-checked'), 'false');
+
+  assert.equal(await toggle.getAttribute('aria-checked'), 'false');
   assert.deepEqual(settings[1], { accountRef: 'simulation-account', enabled: false });
 
   pending = true;
-  await page.getByRole('button', { name: '刷新', exact: true }).click();
-  await page.getByRole('button', { name: '处理未知重置结果' }).click();
-  await dialog.getByRole('button', { name: '重试相同额度', exact: true }).click();
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await page.getByRole('button', { name: 'Resolve unknown reset' }).click();
+  await dialog.getByRole('button', { name: 'Retry same credit', exact: true }).click();
   await dialog.waitFor({ state: 'hidden' });
   assert.deepEqual(resets, [{ accountRef: 'simulation-account', creditId: 'simulation-credit', redeemRequestId: requestId }]);
   usageUnavailable = true;
-  await page.getByRole('button', { name: '刷新', exact: true }).click();
-  await page.getByText('额度详情不可用', { exact: true }).waitFor();
-  await chineseToggle.waitFor();
-  await page.getByRole('button', { name: '更多操作: Simulation' }).click();
-  assert.equal(await page.getByRole('menuitem', { name: /自动重置/ }).count(), 0, 'automatic reset is no longer hidden in the dropdown');
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await page.getByRole('button', { name: 'Refresh', exact: true }).and(page.locator('[aria-busy="false"]')).waitFor();
+  await toggle.waitFor();
   assert.deepEqual(errors, []);
-  console.log('PASS: simulated compact heading switch, keyboard/cancel, English/Chinese, narrow layouts, unavailable usage and pending reset resolution');
+
 } finally {
   try { await browser?.close(); } finally { await uiRuntime.close(); }
 }

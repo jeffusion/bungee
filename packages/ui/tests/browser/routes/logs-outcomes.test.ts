@@ -80,7 +80,7 @@ test('real Logs rows split HTTP, final transport and retries; filters and reset 
     await page.getByRole('button',{name:'Reset filters',exact:true}).click();
     await rendered.poll(()=>queries.at(-1)?.searchParams.has('transportOutcome')).toBe(false);
     expect(queries.at(-1)!.searchParams.has('status')).toBe(false);
-    await rendered(page.getByRole('button',{name:'Transport outcome',exact:true})).toHaveText('Transport outcome');
+    await rendered(page.getByRole('button',{name:'Transport outcome',exact:true})).toBeVisible();
   });
 },60_000);
 

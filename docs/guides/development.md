@@ -115,9 +115,11 @@ Tests belong to the module whose responsibility they primarily verify: `packages
 
 - `unit/`: pure behavior with injected fakes; no real database, listener, subprocess or browser.
 - `integration/`: real local databases, services and process contracts.
-- `browser/`: real rendered components and user interactions; services are shared within a file and contexts are isolated between cases.
+- `browser/`: core business workflows through real components, including authentication, configuration publication, account bindings and failure recovery; services are shared within a file and contexts are isolated between cases.
 - `helpers/`: explicit setup, waiting and cleanup; importing a helper must not allocate resources.
 - `fixtures/`: data and components loaded by the tested system.
+
+Frontend automation verifies business state, request contracts and workflow results. Do not add tests for CSS, layout dimensions, animation, focus, translated wording or display formatting. Review presentation through the design system and browser inspection. Text may locate a control without making its wording a test contract.
 
 Use a descriptive kebab-case `<behavior>.test.ts`; the directory identifies its layer. Tests never import other test entries, and production code never imports tests. Keep snapshots beside their tests; keep databases, screenshots, logs and measurement results outside the checkout.
 
@@ -202,7 +204,7 @@ bun run test
 - Keep PRs focused and incremental
 - Add/adjust tests for behavior changes
 - Update docs when configuration or operational behavior changes
-- UI and plugin UI changes must follow [component ownership and style isolation](../../packages/ui/docs/INDUSTRIAL_DESIGN_SYSTEM.md#347-mandatory-component-ownership-and-style-isolation): extract repeated DOM into shared components and keep component CSS scoped. Ad hoc global styles are forbidden; any genuine exception needs a documented reason, narrow scope, explicit review and browser verification. `bun test packages/ui/tests/unit/style-scope.test.ts` enforces the frozen global-style baseline in normal CI.
+- UI and plugin UI changes must follow [component ownership and style isolation](../../packages/ui/docs/INDUSTRIAL_DESIGN_SYSTEM.md#347-mandatory-component-ownership-and-style-isolation): extract repeated DOM into shared components and keep component CSS scoped. Ad hoc global styles are forbidden; any genuine exception needs a documented reason, narrow scope, explicit review and browser verification.
 
 ### Investigating intermittent shutdown failures
 

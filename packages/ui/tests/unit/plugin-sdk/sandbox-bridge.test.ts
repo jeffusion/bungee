@@ -18,13 +18,13 @@ test('bridge rejects forged credentials, actions, methods, paths, oversized bodi
   const seen = new Set<string>();
   const valid = { type: 'bungee:host-request', generation: 4, nonce: 'n'.repeat(64), id: 'request-1', action: 'control', path: '/allowed', method: 'POST', body: { ok: true } };
   expect(validateHostRequest(valid, 4, valid.nonce, seen)).toHaveProperty('request');
-  expect(validateHostRequest(valid, 4, valid.nonce, seen)).toMatchObject({ error: '请求已处理' });
+  expect(validateHostRequest(valid, 4, valid.nonce, seen)).toHaveProperty('error');
   expect(validateHostRequest({ ...valid, id: 'request-2', nonce: 'wrong' }, 4, valid.nonce, seen)).toHaveProperty('error');
   expect(validateHostRequest({ ...valid, id: 'request-3', generation: 3 }, 4, valid.nonce, seen)).toHaveProperty('error');
   expect(validateHostRequest({ ...valid, id: 'request-4', action: 'execute-admin' }, 4, valid.nonce, seen)).toHaveProperty('error');
-  expect(validateHostRequest({ ...valid, id: 'request-5', body: 'x'.repeat(65537) }, 4, valid.nonce, seen)).toMatchObject({ error: '请求内容过长' });
+  expect(validateHostRequest({ ...valid, id: 'request-5', body: 'x'.repeat(65537) }, 4, valid.nonce, seen)).toHaveProperty('error');
   expect(validateHostRequest({ ...valid, id: 'request-cap' }, 4, valid.nonce,
-    new Set(Array.from({ length: MAX_SEEN_HOST_REQUEST_IDS }, (_, index) => String(index))))).toMatchObject({ error: '请求数量超限' });
+    new Set(Array.from({ length: MAX_SEEN_HOST_REQUEST_IDS }, (_, index) => String(index))))).toHaveProperty('error');
   const policy: PluginHostPolicy = { sandbox: 'allow-scripts', allowedHostActions: ['control'], controlAllowlist: [{ path: '/allowed', methods: ['POST'] }] };
   expect(allowedControlRequest(policy, '/allowed', 'POST')).toBe(true);
   expect(allowedControlRequest(policy, '/not-allowed', 'POST')).toBe(false);

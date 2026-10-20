@@ -11,7 +11,7 @@ import { dashboardRuntime } from '../helpers/dashboard/runtime';
 const uiRuntime = dashboardRuntime();
 import { fulfillMenuIcons } from '../helpers/menus';
 
-browserTest('Token header navigation and incomplete usage remain compact', () => uiRuntime.run(async page => {
+browserTest('Token navigation opens current usage statistics', () => uiRuntime.run(async page => {
 const baseUrl = uiRuntime.origin;
 const manifest = await Bun.file(new URL('../../../../plugins/token-stats/manifest.json', import.meta.url)).json();
 const runtime = configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null,
@@ -66,31 +66,10 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
   const trendCard = page.locator('[data-card-id="plugin:native:token-stats:token-stats-time"]');
   const overview = page.getByTestId('token-stats-overview');
   await expect(overview).toBeVisible();
-  await expect(page.getByTestId('token-stats-metric-input')).toContainText('1.3K');
-  await expect(overview).not.toContainText(/含估算|用量记录丢失/);
+
   await expect(page.getByTestId('app-header').getByRole('link', { name: 'Token统计', exact: true })).toBeVisible();
-  for (const width of [320, 768, 1440]) {
-    await page.setViewportSize({ width, height: 1080 });
-    await page.locator(`${width < 768 ? '.dashboard-mobile-card' : '.grid-stack-item'}[data-card-id="plugin:native:token-stats:token-stats-time"]`)
-      .waitFor({ state: 'visible' });
-    const header = trendCard.locator('header');
-    const link = header.getByRole('link', { name: '查看模型统计' });
-    await expect(link).toBeVisible();
-    await expect(trendCard.locator('.dashboard-card-body a')).toHaveCount(0);
-    await expect.poll(() => header.evaluate(node => {
-      const bounds = node.getBoundingClientRect();
-      return [...node.querySelectorAll('a, button, [data-testid="native-widget-summary"], .nx-panel-head-title')].every(item => {
-        const rect = item.getBoundingClientRect();
-        return rect.left >= bounds.left && rect.right <= bounds.right && rect.top >= bounds.top && rect.bottom <= bounds.bottom;
-      });
-    })).toBe(true);
-    await expect.poll(() => link.evaluate(node => node.getBoundingClientRect().height
-      - Number.parseFloat(getComputedStyle(node).lineHeight)),
-      { message: `The statistics link stays on one line at ${width}px` }).toBeLessThanOrEqual(1);
-  }
   await trendCard.locator('header').getByRole('link', { name: '查看模型统计' }).click();
   await expect(page.getByTestId('token-stats-page-summary')).toBeVisible();
-  await expect(page.getByTestId('token-stats-page')).not.toContainText(/含估算|用量记录丢失/);
 
   expect(errors).toEqual([]);
 }), 120_000);

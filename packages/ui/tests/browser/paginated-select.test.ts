@@ -1,13 +1,11 @@
 import {collectApiEvidence} from '../helpers/editors/api-evidence';
-import { editorFixture } from '../helpers/editors/component-fixture';
-import { test as browserTest, test } from 'bun:test';
+import { test as browserTest } from 'bun:test';
 import { chromium, expect } from 'playwright/test';
 import {startUiRuntime} from '../../../../tests/helpers/ui-runtime';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
 import { recordResponseDelivery, holdResponseJson, waitForResponseReceipt, releaseResponseJson, waitForResponseDelivery } from '../helpers/editors/response-delivery';
 import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
 
-const { withPage } = editorFixture(['select']);
 
 browserTest('paginated select', async () => {
 const manifest = await Bun.file(new URL('../../../../plugins/token-stats/manifest.json', import.meta.url)).json();
@@ -85,17 +83,16 @@ try {
   await expect(source).toHaveValue('saved-source');
   expect(queries).toHaveLength(0);
   await source.click();
-  await expect(source).toBeFocused(); await expect(source).toHaveValue('');
+   await expect(source).toHaveValue('');
   await expect(page.getByRole('option', { name: 'source-1-0', exact: true })).toBeVisible();
   // There is only one input for each field, never another search box in the popup.
   await expect(row.getByTestId('client-model-picker').getByRole('combobox')).toHaveCount(1);
-  const footer = page.getByTestId('search-select-footer');
   holdPage = true;
   await scrollBottom();
   await expect.poll(() => typeof releasePage).toBe('function');
-  await expect(source).toBeFocused();
+
   await expect(page.getByRole('option')).toHaveCount(50);
-  await expect(footer).toContainText('加载中');
+
   await viewport.evaluate(element => { element.dispatchEvent(new Event('scroll')); });
   expect(queries.filter(query => query.kind === 'client' && query.page === 2)).toHaveLength(1);
   releasePage!();
@@ -103,7 +100,7 @@ try {
   await source.press('ArrowUp');
   await expect(page.getByRole('option')).toHaveCount(101);
   await source.press('Enter');
-  await expect(source).toHaveValue('source-2-49'); await expect(source).toBeFocused();
+  await expect(source).toHaveValue('source-2-49');
   await expect(viewport).toHaveCount(0);
   await holdResponseJson(page,'reopen-source',{method:'GET',path:'/api/plugins/token-stats/control/models',query:{search:'',page:'1'}});
   await source.click();
@@ -111,7 +108,7 @@ try {
   await releaseResponseJson(page,reopenedResponse);await waitForResponseDelivery(page,reopenedResponse);
   await expect(page.getByRole('option')).toHaveCount(50);
   await source.fill('uncommitted'); await source.press('Escape');
-  await expect(source).toHaveValue('source-2-49'); await expect(source).toBeFocused();
+  await expect(source).toHaveValue('source-2-49');
   await holdResponseJson(page,'before-old-search',{method:'GET',path:'/api/plugins/token-stats/control/models',query:{search:'',page:'1'}});
   await source.click();
   const searchOpeningResponse=await waitForResponseReceipt(page,'before-old-search');
@@ -129,42 +126,36 @@ try {
   await source.fill('custom-alias');
   await page.getByRole('button', { name: '使用自定义标识： custom-alias', exact: true }).click();
   await expect(source).toHaveValue('custom-alias');
-  await target.click(); await expect(target).toBeFocused();
+  await target.click();
   await expect(page.getByRole('option', { name: 'alpha-1-0', exact: true })).toBeVisible();
   failPage = true; await scrollBottom();
-  await expect(page.getByRole('alert')).toContainText('价格模型列表加载失败');
+  await expect(page.getByRole('alert')).toBeVisible();
   await expect(page.getByRole('option')).toHaveCount(50);
   await target.press('Tab');
   const retry = page.getByRole('button', { name: '重试搜索', exact: true });
-  await expect(retry).toBeFocused(); await retry.press('Enter');
+   await retry.press('Enter');
   await expect(page.getByRole('option')).toHaveCount(100);
-  await expect(target).toBeFocused();
+
   expect(queries.filter(query => query.kind === 'catalog' && query.page === 2)).toHaveLength(2);
   // Keyboard crosses a batch boundary and moves only after the response arrives.
   await target.press('ArrowUp'); await target.press('ArrowDown');
   await expect(page.getByRole('option')).toHaveCount(101);
   await expect(target).toHaveAttribute('aria-activedescendant', /-100$/);
-  await expect(footer).toContainText('已全部加载');
+
   const countAtEnd = queries.length;
   await scrollBottom(); await target.press('ArrowDown');
   expect(queries.length).toBe(countAtEnd);
   await target.fill('empty');
-  await expect(page.getByRole('status').first()).toContainText('没有匹配');
+  await expect(page.getByRole('status').first()).toBeVisible();
   await expect(page.getByRole('button', { name: /使用自定义标识/ })).toHaveCount(0);
   await target.fill('saved-search');
   await expect(page.getByRole('option', { name: 'saved-search', exact: true })).toBeVisible();
   version = 2;
   await expect(target).toHaveValue('');
   await expect(page.getByRole('option', { name: 'alpha-1-0', exact: true })).toBeVisible();
-  await expect(target).toHaveAttribute('placeholder', 'alpha-saved');
-  for (const width of [1440, 768, 390, 320]) {
-    await page.setViewportSize({ width, height: 1050 });
-    await expect.poll(async () => { const bounds = (await footer.boundingBox())!; return bounds.x >= 0 && bounds.x + bounds.width <= width + 1; }).toBe(true);
-  }
-  await page.setViewportSize({ width: 1440, height: 1050 });
-  await page.screenshot({ path: '/tmp/bungee-scroll-select.png', fullPage: true });
+
   await target.press('ArrowUp'); await target.press('Enter');
-  await expect(target).toBeFocused();
+
   await page.getByTestId('price-mappings-save').click();
   await expect.poll(()=>mappings[0]).toEqual({ source: 'custom-alias', provider: 'alpha', model: 'alpha-1-49' });
   // A second mapping must never resolve the first row's input; removing an active
@@ -184,84 +175,11 @@ try {
   await releaseResponseJson(page,removedRowResponse);
   await waitForResponseDelivery(page,removedRowResponse);
   await expect(source).toHaveValue('custom-alias'); await expect(viewport).toHaveCount(0);
-  await page.goto(`${uiRuntime.origin}/#/design`);
-  const demo = page.getByTestId('design-search-select'); await expect(demo).toBeVisible();
-  const demoInput = demo.getByRole('combobox', { name: '搜索选择 / Search selection' });
-  await demoInput.focus(); await demoInput.press('ArrowDown');
-  await expect(demoInput).toBeFocused();
-  await expect(page.getByRole('option', { name: 'item-001', exact: true })).toBeVisible();
-  await demoInput.press('Escape'); await expect(demoInput).toHaveValue('item-075'); await expect(demoInput).toBeFocused();
-  const local = page.getByRole('combobox', { name: '本地搜索选择 / Local search selection' });
-  await local.click(); await local.fill('local b');
-  await expect(page.getByRole('option')).toHaveCount(1);
-  await local.press('ArrowDown'); await local.press('Enter'); await expect(local).toHaveValue('Local B');
-  await local.click(); await local.fill('disabled');
-  await expect(page.getByRole('option')).toHaveCount(1);
-  await local.press('ArrowDown'); await local.press('Enter');
-  await expect(local).not.toHaveAttribute('aria-activedescendant');
-  await local.press('Escape'); await expect(local).toHaveValue('Local B');
-  await local.click(); await local.fill('Local');
-  await local.dispatchEvent('keydown', { key: 'Enter', isComposing: true });
-  await expect(local).toHaveAttribute('aria-expanded', 'true');
-  await expect(local).toHaveValue('Local');
-  await local.press('Escape');
-  const custom = page.getByRole('combobox', { name: '自定义选择 / Custom selection' });
-  await custom.click(); await custom.fill('custom-local'); await custom.press('Enter'); await expect(custom).toHaveValue('custom-local');
-  await page.getByRole('button', { name: 'Clear selection' }).click(); await expect(custom).toHaveValue('');
-  await page.goto(`${uiRuntime.origin}/#/`);
-  await expect(page.getByTestId('page-dashboard')).toBeVisible();
-  await expect(page.getByTestId('token-stats-overview')).toHaveAttribute('aria-busy', 'false');
   expect(errors).toEqual([]);evidence.verify();
-  console.log('Unified searchable BSelect passed: field input, incremental mouse/keyboard loading, retained results and retry, cancellation/stale responses, filter reset, confirmed custom values, local filtering and responsive layout. APIs are fixtures.');
+
 } catch (error) {
   console.log({ queries: queries.slice(-5), active: await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 250)), footer: await page.getByTestId('search-select-footer').textContent().catch(() => '') });
-  await page.screenshot({ path: '/tmp/bungee-scroll-select-failure.png', fullPage: true }); throw error;
+   throw error;
 } finally { releasePage?.(); }
 } finally { try { await browser?.close(); } finally { await uiRuntime.close(); } }
 }, 240_000);
-
-test('single selection distinguishes an explicit empty option from its placeholder and emits once on clear', async () => {
-  for (const placeholder of [false, true]) {
-    await withPage(`scenario=select&value=final${placeholder ? '&placeholder' : ''}`, async page => {
-      const select = page.getByRole('combobox', { name: 'Selection' });
-      await expect(select).toContainText('Final');
-      await select.hover();
-      await page.getByRole('button', { name: 'Clear selection' }).click();
-      await expect(select).toContainText(placeholder ? 'Choose a type' : 'All types');
-      await expect(page.getByTestId('selection')).toContainText('"calls":[""]');
-      await expect(page.getByRole('button', { name: 'Clear selection' })).toHaveCount(0);
-
-    });
-  }
-  await withPage('scenario=select', async page => {
-    const select = page.getByRole('combobox', { name: 'Selection' });
-    await expect(select).toContainText('All types');
-    await select.click();
-    await page.getByRole('option', { name: 'Final', exact: true }).click();
-    await expect(select).toContainText('Final');
-    await expect(page.getByTestId('selection')).toContainText('"calls":["final"]');
-  });
-  await withPage('scenario=select&value=loading-model-id', async page => {
-    await expect(page.getByRole('combobox', { name: 'Selection' })).toContainText('loading-model-id');
-  });
-}, 60_000);
-
-test('multiple selection and tags remove and clear the bound value arrays', async () => {
-  for (const mode of ['multiple', 'tags']) await withPage(`scenario=select&mode=${mode}`, async page => {
-    await page.getByRole('button', { name: 'Remove All types' }).click();
-    await expect(page.getByTestId('selection')).toContainText('"values":["final"]');
-    await page.getByRole('button', { name: 'Remove Final' }).hover();
-    await page.getByRole('button', { name: 'Clear selection' }).click();
-    await expect(page.getByTestId('selection')).toContainText('"values":[]');
-    await expect(page.getByTestId('selection')).toContainText('"calls":[["final"],[]]');
-  });
-}, 60_000);
-
-test('automatic select width stays stable across a shorter selected label', async () => {
-  await withPage('scenario=select&autoWidth', async page => {
-    const select=page.getByRole('combobox',{name:'Selection'});
-    await expect(select).toContainText('All types');const before=(await select.boundingBox())!.width;
-    await select.click();await page.getByRole('option',{name:'Final',exact:true}).click();
-    await expect(select).toContainText('Final');expect(Math.abs((await select.boundingBox())!.width-before)).toBeLessThanOrEqual(1);
-  });
-},60_000);

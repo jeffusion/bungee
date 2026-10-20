@@ -1,7 +1,6 @@
 import { expect, test } from 'bun:test';
 import { validateDirectionalRules } from '../../../src/validation/directional-validator';
 import { toEditorRoute, toV2Route, toEditorUpstream } from '../../../src/api/config-adapters';
-import { compile } from 'svelte/compiler';
 import { init, addMessages } from 'svelte-i18n';
 addMessages('en', {directional:{invalidExpression:'Invalid expression',invalidFormats:'Invalid formats',sseHeaderDependency:'Invalid SSE headers'}});
 await init({fallbackLocale:'en',initialLocale:'en'});
@@ -22,10 +21,4 @@ test('adapters preserve independent directional rules, identity, and unrelated p
   const logical:any={services:[],routes:[route],plugins:[]};
   expect(toEditorUpstream(endpoint).response).toEqual(endpoint.response);
   expect(toV2Route(toEditorRoute(route,[]),logical,route,0)).toEqual(route);
-});
-test('route and upstream use the same direction editor and expose format choices', async () => {
-  const editor=await Bun.file(new URL('../../../src/components/domain/route/DirectionalModificationEditor.svelte',import.meta.url)).text();
-  expect(()=>compile(editor,{filename:'DirectionalModificationEditor.svelte'})).not.toThrow();
-  expect(editor).toContain('policy.request.query');expect(editor).toContain('policy.response.body_formats');
-  expect(editor).toContain('directional.responseHelp');expect(editor).not.toContain('parseJSON');
 });

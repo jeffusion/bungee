@@ -40,15 +40,8 @@ test('service navigation follows seven visible sections and respects field and d
     });
     await page.getByTestId('service-nav-identity').first().click();await name.focus();await name.press('ControlOrMeta+s');
     await expect.poll(()=>submissions).toBe(1);
-    for(const width of [390,1440]) {
-      await page.setViewportSize({width,height:900});await page.getByTestId('service-nav-review').first().click();
-      await page.getByTestId('service-review-summary').scrollIntoViewIfNeeded();
-      expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);
-      const save=await page.getByTestId('service-save-button').boundingBox();expect(save!.y+save!.height).toBeLessThanOrEqual(901);
-    }
   });
 }, 60_000);
-
 
 test('service account handoff consumes its URL, prepares a draft and focuses an existing binding without duplicate creation', async () => {
   for (const duplicate of [false, true]) await withPage('scenario=service', async page => {

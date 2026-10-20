@@ -2,7 +2,6 @@ import {createDefaultMenuLayout} from '@jeffusion/bungee-types';
 import {menuSnapshot, fulfillMenuIcons} from '../helpers/menus';
 import { test as browserTest } from 'bun:test';
 import { chromium, expect } from 'playwright/test';
-import { mkdirSync } from 'node:fs';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 
@@ -10,18 +9,18 @@ browserTest('access control menu', async () => {
 const uiRuntime = await startUiRuntime({ mode: 'built-page' });
 try {
 const base = uiRuntime.origin;
-const evidence = process.env.ACCESS_EVIDENCE_DIR ?? '/tmp/bungee-access-control-menu';
 const manifest = await Bun.file(new URL('../../../../plugins/key-access/manifest.json', import.meta.url)).json();
 const runtime = configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null,
   retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 }));
 runtime.config.logical_configuration.routes = [{ id: 'route-test', position: 0, path: '/v1/chat/completions', endpoints: [],
   plugins: [] }];
-mkdirSync(evidence, { recursive: true });
+
 const browser = await chromium.launch({ headless: true });
 const errors: string[] = [];
 const canonical = '/extensions/key-access/settings';
 try {
-  for (const language of ['zh-CN', 'en']) {
+  {
+    const language = 'zh-CN';
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: language });
     await context.addInitScript(value => localStorage.setItem('locale', value), language);
     const page = await context.newPage();
@@ -58,7 +57,7 @@ try {
         .map(([code, messages]) => [code, { plugins: { 'key-access': messages } }])));
       if (request.method() === 'GET' && url.pathname === '/api/ui/menus') {
         const snapshot = menuSnapshot();
-        const catalog = [...snapshot.catalog, ...[manifest].filter(item => enabled).flatMap(item => (item.contributes.navigation ?? []).map((nav: any) => ({
+        const catalog = [...snapshot.catalog, ...[manifest].filter(() => enabled).flatMap(item => (item.contributes.navigation ?? []).map((nav: any) => ({
           id:`plugin:${item.name}:${encodeURIComponent(nav.path)}`,label:nav.label,href:`/#/extensions/${item.name}${nav.path}`,
           source:'plugin' as const,pluginName:item.name,defaultIcon:'lucide:user',available:true,
         })))];
@@ -101,17 +100,6 @@ try {
     await expect(menuLink).toHaveAttribute('aria-current', 'page');
     expect(new URL(page.url()).hash).toBe(`#${canonical}`);
     await page.reload(); await expect(settings).toContainText(key.name);
-    for (const width of [320, 390, 768, 1440]) {
-      await page.setViewportSize({ width, height: 1000 });
-      const link = page.getByTestId('header-top-menu').getByRole('link', { name: t('metadata.name'), exact: true });
-      await expect(link).toHaveAttribute('aria-current', 'page');
-      await link.click();
-      await expect(settings).toContainText(key.name);
-      expect(await page.locator('main').evaluate(node => node.scrollWidth > node.clientWidth)).toBe(false);
-      if (language === 'zh-CN' && [390, 1440].includes(width)) {
-        await page.screenshot({ path: `${evidence}/access-control-${width}.png`, animations: 'disabled', fullPage: true });
-      }
-    }
     // The relocated component saves through the same plugin controls.
     await settings.getByRole('radio', { name: t('ui.routeAccess'), exact: true }).click();
     const publicSwitch = settings.getByRole('switch');
@@ -147,8 +135,7 @@ try {
     await context.close();
   }
   expect(errors).toEqual([]);
-  console.log(JSON.stringify({ languages: 2, widths: 4, menu: true, settingsRemoved: true, reload: true,
-    legacyRedirects: true, routeProtection: true, keySave: true, disabledMenuHidden: true, errors, evidence }));
+
 } finally { await browser.close(); }
 } finally { await uiRuntime.close(); }
 }, 240_000);

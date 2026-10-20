@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import { findRuntimeUpstream, getRuntimeUpstreams, runtimeAvailabilityKey, runtimeStatus } from '../../../src/api/runtime';
+import { findRuntimeUpstream, getRuntimeUpstreams, runtimeAvailabilityKey } from '../../../src/api/runtime';
 import { runtimeRecord, runtimeResponse, unavailableRuntime } from '../../helpers/runtime';
 import { getRouteHealthAggregate, getServiceHealthAggregate } from '../../../src/utils/route-service-view-model';
 import { getDashboardStats, getStatsHistoryV2, getUnifiedUpstreamStats, getUpstreamDistribution, getUpstreamFailures, getUpstreamStatusCodes } from '../../../src/api/stats';
@@ -36,7 +36,6 @@ test('health requires runtime evidence, including per-upstream unknown in a comp
     expect(getServiceHealthAggregate(service, runtime).state).toBe(expected);
     expect(getRouteHealthAggregate({ path: '/route', service: 'service' }, [service], runtime).state).toBe(expected);
     expect(getRouteHealthAggregate({ path: 'service', endpoints: service.endpoints }, [], runtime).state).toBe(expected);
-    expect(runtimeStatus[state].dot).toBe(state === 'HEALTHY' ? 'ok' : state === 'UNHEALTHY' ? 'danger' : state === 'UNKNOWN' ? 'idle' : 'warn');
   }
   for (const runtime of [null, unavailableRuntime(), runtimeResponse([])]) {
     expect(getServiceHealthAggregate(service, runtime).state).toBe('unknown');

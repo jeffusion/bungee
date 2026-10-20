@@ -6,7 +6,6 @@ import budget from '../../../../plugins/token-budget/manifest.json';
 
 test('user management and profile have owned menu pages, while sign-in configuration belongs to plugin settings', () => {
   expect(accounts.contributes.navigation.map(page => page.path)).toEqual(['/users', '/profile']);
-  expect(accounts.contributes.navigation.map(page => accounts.translations['zh-CN'][page.label as keyof typeof accounts.translations['zh-CN']])).toEqual(['用户管理', '用户信息']);
   for (const manifest of [accounts, budget]) {
     for (const page of manifest.contributes.navigation) {
       expect(page.target).toBe('header');

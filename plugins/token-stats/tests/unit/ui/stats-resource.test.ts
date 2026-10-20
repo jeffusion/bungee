@@ -76,7 +76,6 @@ test('URL and selector retain unavailable key IDs and selecting all removes the 
   expect(keyIdFromUrl(input)).toBe('deleted');
   const options = keyFilterOptions([{id:'live',name:'Live'}], 'deleted', {all:'All',unattributed:'Anonymous',missing:'Unavailable'});
   expect(options.map(option => option.value)).toEqual(['','__unattributed__','live','deleted']);
-  expect(options.map(option => option.label)).toEqual(['All','Anonymous','Live','Unavailable']);
   expect(keyIdFromUrl(urlWithKeyId(input,'new /?'))).toBe('new /?');
   const all = urlWithKeyId(input,'');
   expect(keyIdFromUrl(all)).toBe('');

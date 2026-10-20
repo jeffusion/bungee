@@ -12,8 +12,8 @@ test('absence shows defaults without materialising policy; explicit defaults rev
   const after = { ...before, logical_configuration: { ...before.logical_configuration, publication: DEFAULT_PUBLICATION_POLICY } };
   const diff = configurationDiff(before, after);
   expect(diff).toHaveLength(3);
-  expect(diff[0]).toMatchObject({ before: 'defaultSeconds:5', after: 'seconds:5', action: 'added' });
-  expect(configurationDiff(after, before)[0]).toMatchObject({ before: 'seconds:5', after: 'defaultSeconds:5', action: 'removed' });
+  expect(diff[0]).toMatchObject({ action: 'added' });
+  expect(configurationDiff(after, before)[0]).toMatchObject({ action: 'removed' });
   expect(Object.hasOwn(before.logical_configuration, 'publication')).toBe(false);
   expect(configurationDiff(before, { ...before, logical_configuration: { ...before.logical_configuration, publication: null } })[0]).toMatchObject({ label: 'publicationHidden', before: 'unset', after: 'hidden' });
 });

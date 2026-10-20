@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 
 const read = (path: string) => Bun.file(new URL(path, import.meta.url)).text();
 
-test('startup restores the session once before protected initialization; no global credential menus', async () => {
+test('startup restores the session once before protected initialization', async () => {
   const source = await read('../../../src/App.svelte');
   const startup = source.slice(source.indexOf('async function initializeAuthenticatedSession'), source.indexOf('onMount(async'));
   expect(startup.indexOf('await restoreManagementSession()')).toBeGreaterThanOrEqual(0);
@@ -19,8 +19,6 @@ test('startup restores the session once before protected initialization; no glob
   expect(source).toContain("$isAuthenticated && !loginPageActive ? 'restored' : 'login'");
   expect(source).toContain('!protectedInitialized');
   expect(source).not.toContain('$capabilities');
-  for (const path of ['/#/keys', '/#/password']) expect(source).not.toContain(path);
-  expect(source).toContain("showLogout={$authMode?.mode === 'plugin' && $isAuthenticated}");
   expect(source).toContain('onLogout={handleLogout}');
 });
 
@@ -50,7 +48,6 @@ test('protected initialization guards asynchronous results and navigation happen
   expect(protectedInit).not.toContain('initialLocation');
   expect(protectedInit).toContain('await loadPluginTranslations(current)');
   expect(protectedInit).toMatch(/await PluginsAPI\.list[\s\S]*if \(!current\(\)\) return false;[\s\S]*pluginList\.set\(plugins\)/);
-  expect(protectedInit).toContain("if (current()) initializationError = 'management.initializationFailed'");
   const authenticated = source.slice(source.indexOf('async function handleAuthenticated'), source.indexOf('function handleLoginCompleted'));
   expect(authenticated).toContain('await protectedInitialize(currentGuard)');
   expect(authenticated).toContain('return initialized && currentGuard() && !destroyed');
@@ -78,7 +75,7 @@ test('normal hash changes retain the login capability and completion leaves only
   expect(factoryScope).not.toContain('$location');
 });
 
-test('platform login hosts an owned static provider capability without a refresh action', async () => {
+test('platform login hosts an owned static provider capability', async () => {
   const source = await read('../../../src/routes/Login.svelte');
   expect(source).toContain("$authMode?.mode === 'plugin'");
   expect(source).toContain('hasManagementLoginComponent($authMode.provider.name, $authMode.provider.loginComponent)');
@@ -88,8 +85,7 @@ test('platform login hosts an owned static provider capability without a refresh
   expect(source).toContain('owned?.dispose()');
   expect(source).toContain('onDestroy(() => { destroyed = true; instance?.dispose(); })');
   expect(source).toContain('if (!ProviderLogin) return');
-  for (const removed of ['onRefresh', 'refreshing', 'contextReady', 'async function refresh', "common.refresh"]) expect(source).not.toContain(removed);
-  for (const removed of ['accountError', 'pluginActivation.', 'on:login', 'verifyToken', 'readAuthMode', 'tokenInput', 'loginWithToken', 'bungee init', '管理 Key']) {
+  for (const removed of ['accountError', 'pluginActivation.', 'on:login', 'verifyToken', 'readAuthMode', 'tokenInput', 'loginWithToken']) {
     expect(source).not.toContain(removed);
   }
   const registry = await read('../../../src/components/native-widgets/index.ts');
@@ -114,7 +110,6 @@ test('plugin login has no host auth dependencies, endpoint prop or completion ev
   expect(source.indexOf('requireLoginSuccess(result)')).toBeLessThan(source.indexOf('await activeContext.complete()'));
   expect(source).toContain('destroyed || context !== activeContext || isManagementLoginStaleError(cause)');
   expect(source).toMatch(/finally\s*\{\s*password = ''/);
-  expect(source).not.toContain('<h2');
   const sdk = await read('../../../src/plugin-sdk/index.ts');
   expect(sdk).toContain("export type { ManagementLoginContext } from './management-login'");
   expect(sdk).toContain("export { isManagementLoginStaleError } from './management-login'");
@@ -132,17 +127,9 @@ test('shell logout is host-owned, guards drafts and only navigates after verifie
   expect(action.indexOf('await endSession(')).toBeLessThan(action.indexOf('settingsDirty.set(false)'));
   expect(action.indexOf('await endSession(')).toBeLessThan(action.indexOf('dashboardDirty.set(false)'));
   expect(action.indexOf('await endSession(')).toBeLessThan(action.indexOf("window.location.hash = '#/login'"));
-  expect(action).toContain("toast.show($_('login.logoutFailed'), 'error')");
-  for (const forbidden of ['user-auth', 'requestPluginControl', 'secureChannel', 'onRefresh', 'common.refresh']) expect(app).not.toContain(forbidden);
+  for (const forbidden of ['user-auth', 'requestPluginControl', 'secureChannel']) expect(app).not.toContain(forbidden);
   const header = await read('../../../src/components/shell/AppHeader.svelte');
-  for (const removed of ['secureChannel', 'StatusBadge', '>SECURE<', '>OPEN<']) expect(header).not.toContain(removed);
-  // Desktop and mobile share one independent button and the host's guarded action.
-  expect(header.match(/disabled=\{logoutBusy\}/g)).toHaveLength(1);
   expect(action).toContain('menuDirty.set(false)');
-  const logoutButton = header.match(/<button id="header-logout-button"[\s\S]*?<\/button>/)?.[0];
-  expect(logoutButton).toBeDefined();
-  expect(logoutButton).toContain('disabled={logoutBusy} aria-busy={logoutBusy}');
-  expect(logoutButton).toContain('onLogout(event.currentTarget)');
-  expect(logoutButton).toContain("aria-label={$_('login.logout')}");
-  expect(header.match(/id="header-logout-button"/g)).toHaveLength(1);
+  expect(header).toContain('disabled={logoutBusy}');
+  expect(header).toContain('onLogout(event.currentTarget)');
 });

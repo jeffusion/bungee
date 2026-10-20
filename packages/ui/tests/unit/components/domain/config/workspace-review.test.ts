@@ -20,16 +20,9 @@ test('secret-as-key, dotted keys, numeric secrets and unknown subtrees never rea
   for (const value of ['secret-as-key-marker', 'tokens.enabled', '8675309', '987654321', 'nested.secret-key', 'hidden-value-marker']) expect(output).not.toContain(value);
 });
 
-test('known storage limit has a readable KiB summary', () => {
-  const before = base(), after = structuredClone(before); after.logical_configuration.logging.body.max_size = 53248;
-  expect(JSON.stringify(configurationDiff(before, after))).toContain('50 KiB');
-  expect(JSON.stringify(configurationDiff(before, after))).toContain('52 KiB');
-});
-
-test('review shows sizes above 100 KiB through 5 MiB, but hides out-of-range values', () => {
+test('review hides out-of-range body size values', () => {
   const before = base(), after = structuredClone(before);
   after.logical_configuration.logging.body.max_size = 5 * 1024 * 1024;
-  expect(configurationDiff(before, after).find(row => row.label === 'bodyMax')).toMatchObject({ before: '50 KiB', after: '5120 KiB' });
   after.logical_configuration.logging.body.max_size++;
   expect(configurationDiff(before, after).find(row => row.label === 'bodyMax')?.after).toBe('hidden');
 });
