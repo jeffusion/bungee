@@ -1,3 +1,10 @@
+## [6.0.4](https://github.com/jeffusion/bungee/compare/v6.0.3...v6.0.4) (2026-10-20)
+
+
+### Bug Fixes
+
+* **auth:** distinguish provider initialization before activation ([06a85ad](https://github.com/jeffusion/bungee/commit/06a85adeed17b927e247ca0e1069da20ad40cafb))
+
 ## [6.0.3](https://github.com/jeffusion/bungee/compare/v6.0.2...v6.0.3) (2026-10-20)
 
 
