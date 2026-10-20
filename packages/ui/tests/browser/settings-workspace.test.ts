@@ -31,6 +31,7 @@ async function withSettings(run: (page: Page, model: ReturnType<typeof createMod
   const page=await context.newPage();
   const evidence=collectApiEvidence(page),errors=evidence.errors;
   await recordResponseDelivery(page,'/api/config/validate');
+  await recordResponseDelivery(page,'/api/config/runtime');
   await page.route('https://fonts.googleapis.com/**',route=>route.fulfill({contentType:'text/css',body:''}));
   await page.addInitScript(language=>localStorage.setItem('locale',language),language);
   await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/,async route=>{
@@ -247,8 +248,12 @@ test('a missing unacknowledged operation reloads only after both snapshot and se
     await page.getByTestId('logging-max-size').fill('52');await review(page);await page.getByTestId('config-confirm-publish').click();
     await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','unknown');await closeReview(page);
     const firstId=model.id;model.runtimeUnavailable=true;
+    await holdResponseJson(page,'missing-operation-runtime',{method:'GET',path:'/api/config/runtime'});
     await page.getByRole('button',{name:'Check this publication',exact:true}).click();
-    await expect(page.getByTestId('settings-notice')).toBeVisible();
+    const failedRuntime=await waitForResponseReceipt(page,'missing-operation-runtime');
+    await releaseResponseJson(page,failedRuntime);
+    await waitForResponseDelivery(page,failedRuntime);
+    await expect(page.getByTestId('runtime-uncertain')).toBeVisible();
     await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','unknown');
     await expect(page.getByTestId('logging-max-size')).toHaveValue('52');await expect(page.getByTestId('logging-max-size')).toBeDisabled();
     expect(model.writes).toHaveLength(1);expect(model.id).toBe(firstId);
