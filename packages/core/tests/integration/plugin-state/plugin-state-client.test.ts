@@ -469,13 +469,33 @@ describe('IPC physical progress and orphan resources',()=>{
       workerUrl:new URL('../../fixtures/plugin-state-fault-worker.ts',import.meta.url),...options});clients.push(client);return client;
   }
   test('a sent read deadline leaves healthy clients usable and retains the physical slot',async()=>{
-    const client=await fault('silent',{requestTimeoutMs:150});const state=client.durableState('read');
+    const requestTimeoutMs=30_000,cleanupTimeoutMs=300;
+    const client=await fault('silent',{requestTimeoutMs,cleanupTimeoutMs});const state=client.durableState('read');
     // The creator must physically settle before isolating the silent get.
     await waitForState(()=>client.health().pendingCount===0);
-    expect(await failure(state.get('silent'))).toMatchObject({code:'request_timeout'});
+    const schedule=globalThis.setTimeout;
+    let expire:(()=>void)|undefined;
+    let expireCleanup:(()=>void)|undefined;
+    let pending:Promise<unknown>;
+    try {
+      // Isolate the target read's deadlines from real worker startup time.
+      globalThis.setTimeout=((callback:(...args:any[])=>void,delay?:number,...args:any[])=>{
+        const timer=schedule(callback,delay,...args);
+        if(delay===requestTimeoutMs)expire=()=>{clearTimeout(timer);callback(...args);};
+        if(delay===requestTimeoutMs+cleanupTimeoutMs)expireCleanup=()=>{clearTimeout(timer);callback(...args);};
+        return timer;
+      }) as typeof setTimeout;
+      pending=failure(state.get('silent'));
+    } finally { globalThis.setTimeout=schedule; }
+    await waitForState(()=>client.health().requests.some(request=>request.phase==='sent'));
+    expect(expire).toBeFunction();expire!();
+    expect(await pending).toMatchObject({code:'request_timeout'});
     expect(client.health()).toMatchObject({failure:null,pendingCount:1});
     expect(await client.executorHasPending({process:'control',instance:'i',catalog:'c',generation:1})).toBe(false);
-    expect(await failure(client.close())).toMatchObject({code:'worker_failed'});
+    const closing=failure(client.close());
+    await waitForState(()=>client.health().state==='closing');
+    expect(expireCleanup).toBeFunction();expireCleanup!();
+    expect(await closing).toMatchObject({code:'worker_failed'});
     expect(client.health().closeConfirmed).toBe(false);
   });
   test('late capability ACK is reclaimed once during close, and waiting business remains unsent',async()=>{
