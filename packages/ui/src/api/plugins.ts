@@ -110,6 +110,11 @@ export interface ModelMappingCatalogStatus {
 
 export const PluginsAPI = {
   list: (options?: ApiRequestOptions) => api.get<Plugin[]>('/plugins', options),
+  getManagementSetup: async (name: string): Promise<{initialized: boolean}> => {
+    const status = await api.get<{initialized: boolean}>(`/plugins/${encodeURIComponent(name)}/management-setup`);
+    if (typeof status?.initialized !== 'boolean') throw new Error('management_setup_unavailable');
+    return status;
+  },
 
   /**
    * 获取所有插件的配置 schema

@@ -3,23 +3,24 @@ import {afterEach,describe,expect,spyOn,test} from 'bun:test';
 import {Database} from 'bun:sqlite';
 import {PLUGIN_DURABLE_STATE_SCHEMA_SQL,PluginDurableStateStore} from '../../src/plugin-durable-state';
 import {createPluginControlHost} from '../../src/plugin-control/host';
-import {createControl,prepareInitialization} from '../../../../plugins/user-auth/server/control';
+import {createControl,prepareInitialization,readManagementSetup} from '../../../../plugins/user-auth/server/control';
 import {loadPluginManifestRecord} from '../../src/plugin-manifest-catalog/manifest-filesystem';
 import {ManagementAuthentication,validateManagementTransition} from '../../src/master-runtime/management-auth';
 import {createConfigControlApi} from '../../src/master-runtime/control-api';
+import {createMasterPluginCatalogApi} from '../../src/master-runtime/master-plugin-catalog-api';
 import {hashConfigurationContent,type ManagementProtection} from '../../src/config-storage';
 import type {ConfigurationAggregate} from '@jeffusion/bungee-types';
 const PASSWORD='Administrator password 123!';
 const disposals:(()=>Promise<void>)[]=[];
 afterEach(async()=>{for(const dispose of disposals.splice(0).reverse())await dispose();});
 const request=(path:string,body?:unknown,extra:Record<string,string>={},method=body===undefined?'GET':'POST')=>new Request('http://localhost'+path,{method,headers:extra,...(body===undefined?{}:{body:JSON.stringify(body)})});
-async function fixture() {
+async function fixture(prepare = true) {
  const db=new Database(':memory:');db.exec(PLUGIN_DURABLE_STATE_SCHEMA_SQL);
  const state=new PluginDurableStateStore(db),namespace=state.forNamespace('user-auth');
- const prepared=await prepareInitialization({durableState:namespace});
+ const prepared=prepare ? await prepareInitialization({durableState:namespace}) : undefined;
  const raw=await loadPluginManifestRecord(fileURLToPath(new URL('../../../../plugins/user-auth', import.meta.url)));
  const record={...raw,runtimeHash:'sha256:'+'0'.repeat(64)} as any;
- const host=createPluginControlHost({records:[record],loadControl:async()=>({createControl}),
+ const host=createPluginControlHost({records:[record],loadControl:async()=>({createControl,readManagementSetup}),
   secretStores:{create:()=>({namespace:'user-auth',get:async()=>null,compareAndSet:async()=>1,delete:async()=>{}}),revoke(){},clear(){}},
   storage:{create:()=>({}) as any},durableState:name=>state.forNamespace(name)});
  let aggregate:ConfigurationAggregate={logical_configuration:{services:[],routes:[],plugins:[]},plugin_activations:[]};
@@ -31,10 +32,11 @@ async function fixture() {
   parseAggregate:value=>({ok:true,value:value as ConfigurationAggregate}),publicationTasks:{enqueue(){}},isMutationReady:()=>true,
   managementAuth:auth,managementProviderMetadata:name=>({name,loginComponent:'Login',setupComponent:'Setup'}),
   validateManagementTransition:(req,active,next)=>validateManagementTransition(req,active,next,auth,host),
-  pluginControlApi:host.api,pluginCapability:()=> 'self.password'});
+  pluginControlApi:host.api,pluginCapability:()=> 'self.password',
+  pluginCatalogApi:createMasterPluginCatalogApi({catalog:{records:()=>[record]},readManagementSetup:name=>host.readManagementSetup(name)})});
  disposals.push(async()=>{await host.dispose();db.close();});
  const select=async()=>{await host.activate('user-auth');aggregate={...aggregate,plugin_activations:[{plugin_name:'user-auth'}]};guard={required:true,selectedProvider:'user-auth',generation:guard.generation+1};};
- const setupBody={setupCode:prepared.code,username:'admin',password:PASSWORD,passwordConfirmation:PASSWORD};
+ const setupBody={setupCode:prepared?.code,username:'admin',password:PASSWORD,passwordConfirmation:PASSWORD};
  const initialize=()=>api.handle(request('/api/auth/setup',setupBody,{origin:'http://localhost','x-bungee-auth-provider':'user-auth'}));
  const enable=async()=>{await select();expect((await initialize())!.status).toBe(200);};
  const sign=async(transport='cookie')=>{
@@ -45,6 +47,23 @@ async function fixture() {
   setGuard:(next:ManagementProtection)=>{guard=next;},guard:()=>guard,setAggregate:(next:ConfigurationAggregate)=>{aggregate=next;}};
 }
 describe('management authentication and selected-provider initialization',()=>{
+ test('inactive provider status is read-only and independent of removed plugins; protected reads require a session',async()=>{
+  const f=await fixture(false),path='/api/plugins/user-auth/management-setup';
+  const own=f.state.forNamespace('user-auth'),other=f.state.forNamespace('local-accounts');
+  await other.transact([{key:'setup',expectedVersion:0,value:{schema:3,setup:{phase:'ready'}}}]);
+  const before=await other.list();
+  expect(await (await f.api.handle(request(path)))!.json()).toEqual({initialized:false});
+  expect(await own.list()).toEqual([]);
+  expect(await other.list()).toEqual(before);
+  expect(f.host.status('user-auth')).not.toBe('ready');
+  const issued=await prepareInitialization({durableState:own});
+  await f.select();
+  expect((await f.api.handle(request(path)))!.status).toBe(401);
+  expect((await f.api.handle(request('/api/auth/setup',{...f.setupBody,setupCode:issued.code},{origin:'http://localhost','x-bungee-auth-provider':'user-auth'})))!.status).toBe(200);
+  const session=await f.sign();
+  expect(await (await f.api.handle(request(path,undefined,{cookie:session.cookie})))!.json()).toEqual({initialized:true});
+  expect(await other.list()).toEqual(before);
+ });
  test('anonymous mode is explicit and setup has no arbitrary plugin selector',async()=>{
   const f=await fixture();
   expect((await f.api.handle(request('/api/config')))!.status).toBe(200);

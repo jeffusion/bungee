@@ -51,15 +51,19 @@ test('runtime rejects missing/damaged state; only explicit local reset rebuilds 
   const f=fixture();
   try {
     await expect(createControl(f.host).start()).rejects.toThrow('corrupt_state');
-    await expect(readManagementSetup(f.durableState)).rejects.toThrow('corrupt_state');
+    expect(await readManagementSetup(f.durableState)).toEqual({initialized:false});
+    expect(await f.durableState.list()).toEqual([]);
     const old=new PluginDurableStateStore(f.db).forNamespace('local-accounts');
     await old.transact([{key:'administrator',expectedVersion:0,value:{schema:3,administrator:{id:'old-secret-identity'}}}]);
+    expect(await readManagementSetup(f.durableState)).toEqual({initialized:false});
+    expect(await f.durableState.list()).toEqual([]);
     await recoverIdentity(reset(),f);
     const identity=((await f.durableState.list()).find(r=>r.key.startsWith('user:')))!;
     expect(JSON.stringify(identity)).not.toContain('old-secret-identity');
     await f.durableState.transact([{key:identity.key,expectedVersion:identity.version,value:{schema: 3,user:{id:'damaged'}}}]);
     await expect(createControl(f.host).start()).rejects.toThrow('corrupt_state');
     await expect(prepareInitialization(f)).rejects.toThrow('corrupt_state');
+    await expect(readManagementSetup(f.durableState)).rejects.toThrow('corrupt_state');
     await expect(recoverIdentity({...reset(),passwordConfirmation:'mismatch'},f)).rejects.toThrow('password_confirmation');
     await recoverIdentity(reset('rebuilt'),f);
     const control=createControl(f.host,{now:f.now}); await control.start(); expect(await control.hasIdentity()).toBe(true);

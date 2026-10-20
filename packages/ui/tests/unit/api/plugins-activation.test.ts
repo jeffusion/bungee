@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { ConfigurationOperationDegradedError } from '../../../src/api/config';
-import { setPluginEnabled } from '../../../src/api/plugins';
+import { PluginsAPI, setPluginEnabled } from '../../../src/api/plugins';
 
 const originalFetch = globalThis.fetch;
 type RequestRecord = { readonly url: string; readonly init?: RequestInit };
@@ -41,6 +41,14 @@ afterEach(() => {
 });
 
 describe('plugin activation', () => {
+  test('reads the target provider setup status without enabling it and rejects indeterminate responses', async () => {
+    const requests: RequestRecord[] = [];
+    install(requests, [Response.json({initialized:false}), Response.json({initialized:true}), Response.json({}), Response.json({initialized:'ready'})]);
+    expect(await PluginsAPI.getManagementSetup('test-auth')).toEqual({initialized:false});
+    expect(await PluginsAPI.getManagementSetup('test-auth')).toEqual({initialized:true});
+    for (let i = 0; i < 2; i++) await expect(PluginsAPI.getManagementSetup('test-auth')).rejects.toThrow('management_setup_unavailable');
+    expect(requests.every(request => request.url === '/api/plugins/test-auth/management-setup' && !request.init?.method)).toBe(true);
+  });
   test('returns unchanged for an already-active plugin without polling', async () => {
     // Given
     const requests: RequestRecord[] = [];

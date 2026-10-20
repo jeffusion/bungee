@@ -2014,6 +2014,7 @@ export async function startMasterComposition(
     const catalogRecords = catalog.records?.() ?? [];
     const pluginCatalogApi = createMasterPluginCatalogApi({
       catalog: { records: () => catalogRecords },
+      readManagementSetup: name => resources.pluginControl!.readManagementSetup(name),
       runtimeStatus: (name, enabled) => {
         const registry = resources.ingressController?.trustedAdmissionRegistryIfFresh();
         const current = registry?.active ? cachedSnapshot(registry.active) : null;

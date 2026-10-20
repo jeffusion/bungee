@@ -60,6 +60,38 @@ function api() {
   return createMasterPluginCatalogApi({ catalog: { records: () => [record] } });
 }
 
+test('management setup reads the named provider while inactive and distinguishes missing, ready and unavailable state', async () => {
+  const provider = { ...record, name: 'test-auth', manifest: { ...record.manifest, management: {loginComponent: 'Login', setupComponent: 'Setup'} } } as PluginManifestRecord;
+  const calls: string[] = [];
+  let status: unknown = {initialized: false};
+  const catalog = createMasterPluginCatalogApi({ catalog: {records: () => [record, provider]}, readManagementSetup: async name => {
+    calls.push(name);
+    if (status instanceof Error) throw status;
+    return status as {initialized: boolean};
+  } });
+  const path = '/api/plugins/test-auth/management-setup';
+  expect(catalog.matches(path)).toBe(true);
+  for (const initialized of [false, true]) {
+    status = {initialized, privateData: 'must not leak'};
+    const response = await catalog.handle(new Request('http://test' + path), snapshot([]));
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual({initialized});
+  }
+  for (const unavailable of [new Error('storage unavailable'), {}, {initialized: 'ready'}]) {
+    status = unavailable;
+    const response = await catalog.handle(new Request('http://test' + path), snapshot([]));
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({error: 'management_setup_unavailable'});
+  }
+  expect(calls).toEqual(Array(5).fill('test-auth'));
+  for (const name of ['sandbox-plugin', 'missing', '%zz']) {
+    expect((await catalog.handle(new Request(`http://test/api/plugins/${name}/management-setup`), snapshot([]))).status).toBe(404);
+  }
+  expect((await catalog.handle(new Request('http://test' + path, {method: 'POST'}), snapshot([]))).status).toBe(405);
+  expect(calls).toHaveLength(5);
+});
+
 test('scope filtering excludes global plugins from route, service and upstream editors', async () => {
   const global = { ...record, name: 'global-plugin', manifest: { ...record.manifest, name: 'global-plugin', runtimeScope: 'global' } } as PluginManifestRecord;
   const catalog = createMasterPluginCatalogApi({ catalog: { records: () => [record, global] } });
