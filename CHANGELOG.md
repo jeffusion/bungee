@@ -1,3 +1,11 @@
+## [6.1.1](https://github.com/jeffusion/bungee/compare/v6.1.0...v6.1.1) (2026-10-20)
+
+
+### Bug Fixes
+
+* **auth:** finish activation before background publication converges ([d26c41e](https://github.com/jeffusion/bungee/commit/d26c41e58b45fb82a7fb7713939d885283dbf387))
+* **ui:** refresh background publication after plugin activation ([94292ac](https://github.com/jeffusion/bungee/commit/94292ace995566f7f5e50c33bd829b5d2db1b603))
+
 # [6.1.0](https://github.com/jeffusion/bungee/compare/v6.0.4...v6.1.0) (2026-10-20)
 
 
