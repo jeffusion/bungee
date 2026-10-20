@@ -36,6 +36,8 @@
   }
   const dependencyNames = $derived.by(() => { $_; return selected?.dependencies.map(pluginDisplayName) ?? []; });
   async function refreshServerState(): Promise<boolean> {
+    // Start background tracking immediately after a toggle without delaying its completion.
+    void publicationRecovery.refresh();
     try { pluginList.set(await PluginsAPI.list({preserveSessionOnUnauthorized:true})); return true; }
     catch (error) {
       operationNotice = {key:'pluginActivation.refreshFailed'};
