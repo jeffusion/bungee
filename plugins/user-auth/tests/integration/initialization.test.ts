@@ -28,7 +28,9 @@ test.each([' 😀 甲 ', '😀'.repeat(32)])('initialization accepts 5–32 Unic
  expect((await control.login(new Request('https://example.com/login',{method:'POST',body:JSON.stringify({username:'owner',password:value,transport:'bearer'})}))).status).toBe(200);
 });
 test('only offline preparation creates explicit uninitialized state; one-time code is hashed and initialization issues no session',async()=>{
- const f=fixture();await expect(createControl(f.host,{now:f.now}).start()).rejects.toThrow('corrupt_state');
+ const f=fixture();expect(await readManagementSetup(f.durableState)).toEqual({initialized:false});
+ expect(await f.durableState.list()).toEqual([]);
+ await expect(createControl(f.host,{now:f.now}).start()).rejects.toThrow('corrupt_state');
  const issued=await prepareInitialization(f);expect(issued.code).toMatch(/^[A-Za-z0-9_-]{43}$/);expect(issued.expiresAt).toBe(f.now()+30*60_000);
  expect(JSON.stringify(await f.durableState.list())).not.toContain(issued.code);
  expect(await readManagementSetup(f.durableState)).toEqual({initialized:false});

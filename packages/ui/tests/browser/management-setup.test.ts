@@ -10,8 +10,7 @@ const {authRuntime} = createAuthRuntime();
 
 test('management setup gates protected requests, confirms initialization, and joins the ordinary login shell', async () => {
   const {runtime, browser} = await authRuntime();
-
-  for (const scenario of ['setup', 'unavailable', 'foreign-component'] as const) {
+  for (const scenario of ['setup', 'unavailable', 'foreign-component', 'activation-uninitialized', 'activation-ready', 'activation-unavailable', 'activation-changed', 'activation-recover'] as const) {
       const context = await browser.newContext({ viewport: { width: 390, height: 1000 }, locale: 'zh-CN' });
       try {
         await context.addInitScript(() => localStorage.setItem('locale', 'zh-CN'));
@@ -22,7 +21,8 @@ test('management setup gates protected requests, confirms initialization, and jo
         page.on('requestfailed', request => { errors.push(`${request.method()} ${request.url()}: ${request.failure()?.errorText}`); });
         // The UI font stylesheets are not part of this authentication flow.
         await page.route('https://fonts.googleapis.com/**', route => route.fulfill({ contentType: 'text/css', body: '' }));
-        let initialized = false, authenticated = false;
+        let initialized = false, authenticated = false, setupReads = 0, selected = false, loginAttempts = 0;
+        const activation = scenario.startsWith('activation-');
         const initialPassword = ' 😀 甲 ';
         const provider = { name: manifest.name, ...manifest.management,
           ...(scenario === 'foreign-component' ? { setupComponent: 'TokenStatsChart' } : {}) };
@@ -32,7 +32,25 @@ test('management setup gates protected requests, confirms initialization, and jo
           const request = route.request(), url = new URL(request.url());
           requests.push(`${request.method()} ${url.pathname}`);
           const json = (value: unknown) => route.fulfill({ json: value });
-          if (request.method() === 'GET' && url.pathname === '/api/auth/mode') return json({ mode: 'plugin', initialized, publicOrigin: url.origin, provider });
+          if (request.method() === 'GET' && url.pathname === '/api/auth/mode') return json(activation && !selected
+            ? {mode: 'anonymous', initialized: true, publicOrigin: url.origin}
+            : { mode: 'plugin', initialized: initialized || selected, publicOrigin: url.origin, provider });
+          if (request.method() === 'GET' && url.pathname === '/api/plugins/user-auth/management-setup') {
+            setupReads++;
+            if (selected && !authenticated) return route.fulfill({status:401,json:{error:'unauthorized'}});
+            if (scenario === 'activation-unavailable' && setupReads === 1) return json({});
+            return json({initialized: scenario === 'activation-ready' || scenario === 'activation-unavailable' || scenario === 'activation-recover' || (scenario === 'activation-changed' && setupReads === 1)});
+          }
+          if (request.method() === 'POST' && url.pathname === '/api/plugins/user-auth/enable') {
+            expect(scenario).toBe('activation-recover');
+            expect(request.postDataJSON()).toEqual({managementSetup:{username:'owner',password:'fixture-password'}});
+            selected = true;
+            return json({operation_id:'enable-auth',operation:{state:'converged',result_status:200},workers:[]});
+          }
+          if (request.method() === 'GET' && url.pathname === '/api/config/operations/enable-auth') {
+            expect(authenticated).toBe(true);
+            return json({operation:{state:'converged',result_status:200},workers:[]});
+          }
           if (['GET','POST'].includes(request.method()) && url.pathname === '/api/auth/setup') {
             if (scenario === 'unavailable') return json({});
             if (request.method() === 'POST') {
@@ -44,12 +62,16 @@ test('management setup gates protected requests, confirms initialization, and jo
             return json({ initialized, provider });
           }
           if (request.method() === 'GET' && url.pathname === '/api/auth/login/options') return json({local: {enabled: true, turnstile: {enabled: false}}, methods: []});
-          if (request.method() === 'POST' && url.pathname === '/api/auth/login') { authenticated = true; return json({ success: true }); }
-          if (request.method() === 'GET' && url.pathname === '/api/auth/verify') return json({ mode: 'plugin', success: authenticated,
+          if (request.method() === 'POST' && url.pathname === '/api/auth/login') {
+            loginAttempts++;
+            authenticated = scenario !== 'activation-recover' || loginAttempts > 1;
+            return json({ success: true });
+          }
+          if (request.method() === 'GET' && url.pathname === '/api/auth/verify') return json({ mode: activation && !selected ? 'anonymous' : 'plugin', success: (activation && !selected) || authenticated,
             ...(authenticated ? { subject: { id: 'fixture-admin', provider: manifest.name }, csrfToken: 'fixture-csrf' } : {}) });
           if (request.method() === 'GET' && url.pathname === '/api/plugin-translations') return json(Object.fromEntries(Object.entries(manifest.translations)
             .map(([language, messages]) => [language, { plugins: { [manifest.name]: messages } }])));
-          if (request.method() === 'GET' && url.pathname === '/api/plugins') return json([{ name: manifest.name, enabled: true, version: manifest.version,
+          if (request.method() === 'GET' && url.pathname === '/api/plugins') return json([{ name: manifest.name, enabled: !activation || selected, version: manifest.version,
             management: manifest.management, metadata: { ...manifest.metadata, contributes: manifest.contributes } }]);
           if (request.method() === 'GET' && url.pathname === '/api/plugins/user-auth/control/identities') return json({identities: []});
           if (request.method() === 'GET' && url.pathname === '/api/plugins/user-auth/control/users') return json({users: []});
@@ -76,6 +98,57 @@ test('management setup gates protected requests, confirms initialization, and jo
           return route.fulfill({status:501,json:{error:'unexpected_fixture_request'}});
         });
         await page.goto(`${runtime.origin}/#/plugins`);
+        if (activation) {
+          await expect(page.getByTestId('page-plugins')).toBeVisible();
+          await page.getByTestId('page-plugins').getByRole('switch').click();
+          const dialog = page.getByRole('dialog');
+          const verify = dialog.getByRole('button', {name: '验证并启用', exact: true});
+          const username = dialog.getByLabel('管理员账号', {exact: true});
+          if (scenario === 'activation-uninitialized') {
+            await expect(dialog.getByRole('button', {name: '重新检查状态', exact: true})).toBeEnabled();
+            await expect(dialog.getByRole('alert')).toHaveCount(0);
+            await expect(username).toHaveCount(0);
+            await expect(verify).toHaveCount(0);
+          } else {
+            if (scenario === 'activation-unavailable') {
+              await expect(dialog.getByRole('alert')).toBeVisible();
+              await expect(dialog.getByRole('button', {name: '重新检查状态', exact: true})).toBeEnabled();
+              await expect(username).toHaveCount(0);
+              await expect(verify).toHaveCount(0);
+              await dialog.getByRole('button', {name: '重新检查状态', exact: true}).click();
+            }
+            await expect(username).toBeVisible();
+            await expect(verify).toBeEnabled();
+            if (scenario === 'activation-changed') {
+              await username.fill('owner');
+              await dialog.getByLabel('管理员密码', {exact: true}).fill('fixture-password');
+              await verify.click();
+              await expect(dialog.getByRole('button', {name: '重新检查状态', exact: true})).toBeEnabled();
+              await expect(dialog.getByRole('alert')).toHaveCount(0);
+              await expect(username).toHaveCount(0);
+              await expect(verify).toHaveCount(0);
+              expect(setupReads).toBe(2);
+            }
+            if (scenario === 'activation-recover') {
+              await username.fill('owner');
+              await dialog.getByLabel('管理员密码', {exact: true}).fill('fixture-password');
+              await verify.click();
+              await expect(dialog.getByRole('button', {name:'重试',exact:true})).toBeEnabled();
+              await expect(dialog.getByRole('alert')).toBeVisible();
+              expect(authenticated).toBe(false);
+              await dialog.getByRole('button', {name:'重试',exact:true}).click();
+              await expect(dialog.getByRole('button', {name:'完成',exact:true})).toBeVisible();
+              expect(authenticated).toBe(true);
+              expect(loginAttempts).toBe(2);
+              expect(setupReads).toBe(2);
+              expect(requests.filter(value=>value === 'POST /api/plugins/user-auth/enable')).toHaveLength(1);
+              expect(requests).toContain('GET /api/config/operations/enable-auth');
+            }
+          }
+          if (scenario !== 'activation-recover') expect(requests.filter(value => value.startsWith('POST '))).toEqual([]);
+          expect(errors).toEqual([]);
+          continue;
+        }
         const setup = page.getByTestId('page-setup');
         await expect(setup).toBeVisible();
         const protectedRequests = () => requests.filter(request => !/^\w+ \/api\/auth\//.test(request));

@@ -14,6 +14,7 @@ export interface MasterPluginCatalogApi {
 export interface MasterPluginCatalogApiOptions {
   readonly catalog: Pick<PluginManifestCatalog, 'records'>;
   readonly runtimeStatus?: (name: string, enabled: boolean) => {ready: boolean; lifecycle: string; blockedReason?: string};
+  readonly readManagementSetup?: (name: string) => Promise<{initialized: boolean}>;
 }
 
 function json(body: unknown, status = 200): Response {
@@ -131,7 +132,7 @@ export function createMasterPluginCatalogApi(
     return path === '/api/plugins'
       || path === '/api/plugins/schemas'
       || path === '/api/plugin-translations'
-      || /^\/api\/plugins\/[^/]+\/sandbox$/.test(path);
+      || /^\/api\/plugins\/[^/]+\/(sandbox|management-setup)$/.test(path);
   };
 
   return Object.freeze({
@@ -169,12 +170,20 @@ export function createMasterPluginCatalogApi(
         return json(translations);
       }
 
-      const match = /^\/api\/plugins\/([^/]+)\/sandbox$/.exec(path);
+      const match = /^\/api\/plugins\/([^/]+)\/(sandbox|management-setup)$/.exec(path);
       const name = match?.[1];
       let decodedName: string | undefined;
       try { decodedName = name === undefined ? undefined : decodeURIComponent(name); }
       catch { return notFound(); }
       const record = decodedName === undefined ? undefined : byName.get(decodedName);
+      if (match?.[2] === 'management-setup') {
+        if (!record?.manifest.management) return notFound();
+        try {
+          const status = await options.readManagementSetup?.(record.name);
+          if (typeof status?.initialized !== 'boolean') throw new Error('invalid management setup status');
+          return Response.json({initialized: status.initialized}, {headers: {'cache-control': 'no-store'}});
+        } catch { return json({error: 'management_setup_unavailable'}, 503); }
+      }
       return record === undefined || !enabled.has(record.name) ? notFound() : json(sandboxResponse(record, true));
     },
   });

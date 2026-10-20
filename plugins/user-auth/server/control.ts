@@ -1592,7 +1592,9 @@ export const rpc = [], controlApi = api, controlRpc = rpc;
 export async function readManagementSetup(state: StateReader): Promise<{
     initialized: boolean;
 }> {
-    const records = await state.list(), setup = setupRecord(records);
+    const records = await state.list();
+    if (!records.length) return { initialized: false };
+    const setup = setupRecord(records);
     slots(records, 'session', MAX_SESSIONS, validateSession);
     slots(records, 'failure', MAX_FAILURES, validateFailure);
     const policy = records.find(r => r.key === 'session-policy');

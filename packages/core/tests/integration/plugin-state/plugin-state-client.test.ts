@@ -228,7 +228,9 @@ describe('production PluginStateClient failure and bounded read-set regressions'
   });
   test('real SQLite lock timeout classifies sent write unknown and sent read as failed, with timers responsive',async()=>{
     const dir=directory(),path=join(dir,'locked.db');
-    const client=await PluginStateClient.open(path,{initialize:true,requestTimeoutMs:250});clients.push(client);
+    // Include Worker startup in the request budget while still expiring well
+    // before SQLite's 5-second busy timeout during the locked operations.
+    const client=await PluginStateClient.open(path,{initialize:true,requestTimeoutMs:1000});clients.push(client);
     const state=client.durableState('locked');await state.get('warm');
     const blocker=new Database(path);blocker.exec('BEGIN IMMEDIATE');let ticks=0;const timer=setInterval(()=>ticks++,5);
     try {

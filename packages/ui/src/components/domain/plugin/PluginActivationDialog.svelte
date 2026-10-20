@@ -4,7 +4,7 @@
   import { IndustrialDialog, LoadingIndicator } from '$components/industrial';
   import { api } from '$api/client';
   import { readAuthMode, verifyToken, type AuthMode } from '$api/auth';
-  import { setPluginEnabled, type Plugin } from '$api/plugins';
+  import { PluginsAPI, setPluginEnabled, type Plugin } from '$api/plugins';
   import { getConfigurationOperation, inspectTerminal, waitForConfigurationOperation } from '$api/config';
   import { token, csrfToken, beginAuthenticationHandoff } from '$stores/auth';
   import { hasManagementLoginComponent } from '$components/native-widgets';
@@ -20,6 +20,7 @@
   let mode = $state<AuthMode | null>(null), message = $state(''), detail = $state(''), stage = $state('');
   let accepted = $state(false), operationId = $state(''), complete = $state(false);
   let browserOrigin = $state('');
+  let initialized = $state<boolean | null>(null);
   let failedStage = $state('');
   const stageText = (key: string) => key ? t(`stages.${key}`, { stage: failedStage ? t(`stages.${failedStage}`) : '' }) : '';
   let endHandoff: (() => void) | undefined;
@@ -28,11 +29,18 @@
   const loginUnavailable = $derived(enabled && !plugin.enabled && !!plugin.management && !accepted && !complete
     && !hasManagementLoginComponent(plugin.name, plugin.management.loginComponent));
   const localDisable = $derived(!!plugin.management && !enabled);
+  const setupRequired = $derived(!!plugin.management && enabled && initialized === false);
+  const setupUnchecked = $derived(!!plugin.management && enabled && initialized !== true);
   const title = $derived(plugin.management ? enabled ? t('enableManagementTitle') : t('disableManagementTitle') : t('enablePluginTitle'));
 
-  async function checkOrigin() {
+  async function checkOrigin(readSetup = true) {
     checking = true; message = ''; detail = '';
-    try { mode = await readAuthMode(); return true; }
+    if (readSetup) initialized = null;
+    try {
+      mode = await readAuthMode();
+      if (readSetup && plugin.management && enabled) initialized = (await PluginsAPI.getManagementSetup(plugin.name)).initialized;
+      return true;
+    }
     catch (error) { failure(error); return false; }
     finally { checking = false; }
   }
@@ -62,12 +70,12 @@
     await oncomplete();
   }
   async function submit(event: SubmitEvent) {
-    event.preventDefault(); if (busy || checking || mismatch || loginUnavailable || localDisable || accepted || complete) return;
+    event.preventDefault(); if (busy || checking || mismatch || loginUnavailable || localDisable || setupUnchecked || accepted || complete) return;
     if (plugin.management && !endHandoff) endHandoff = beginAuthenticationHandoff();
     busy = true; message = ''; detail = ''; stage = 'submitting';
     try {
       if (plugin.management) {
-        mode = await readAuthMode();
+        if (!await checkOrigin() || initialized !== true) { stage = ''; return; }
         if (!originMatches(mode.publicOrigin, window.location.origin)) { stage = ''; return; }
       }
       await setPluginEnabled(plugin.name, enabled, {
@@ -93,7 +101,9 @@
   async function recover() {
     if (busy) return; busy = true; message = ''; detail = '';
     try {
-      if (plugin.management) { if (!await checkOrigin() || mismatch) return; await waitForMode(); await establishSession(); }
+      // Acceptance can enable authentication before a session exists. Recover
+      // through public mode/login endpoints before any protected status read.
+      if (plugin.management) { if (!await checkOrigin(false) || mismatch) return; await waitForMode(); await establishSession(); }
       stage = 'recheckingPublication';
       if (operationId) await (inspectTerminal(await getConfigurationOperation(operationId)) ?? waitForConfigurationOperation(operationId));
       else if (accepted) {
@@ -117,7 +127,12 @@
         {#if mismatch}<div role="alert" class="text-sm text-amber-400 space-y-2"><p>{t('originMismatch', { origin: browserOrigin })}</p>
           {#if mode?.publicOrigin}<a class="text-nexus-300 underline break-all" href={`${mode.publicOrigin}/#/plugins`}>{t('correctAddress', { origin: mode.publicOrigin })}</a>{:else}<p>{t('missingOrigin')}</p>{/if}
           <p>{t('updateOrigin')}</p></div>{/if}
-        {#if enabled}
+        {#if setupRequired && !checking}
+          <p class="text-sm text-zinc-300">{t('initialSetupRequired')}</p>
+          <p class="text-sm text-zinc-400">{t('setupLocalHelp')}</p>
+          <code class="block font-mono text-sm text-zinc-400 break-all">bungee recover --plugin {plugin.name} --action issue-setup-code</code>
+          <p class="text-sm text-zinc-400">{t('setupRestartHelp')}</p>
+        {:else if enabled && initialized === true && !checking}
           <p class="text-sm text-zinc-300">{t('existingAccount')}</p>
           <label class="block space-y-1"><span class="nx-field-label">{t('username')}</span><input class="nx-input" bind:value={username} autocomplete="username" required disabled={busy || complete} /></label>
           <label class="block space-y-1"><span class="nx-field-label">{t('password')}</span><input class="nx-input" type="password" bind:value={password} autocomplete="current-password" required disabled={busy || complete} /></label>
@@ -127,7 +142,7 @@
       {/if}
       {#if stage}<p role="status" class="text-sm text-zinc-300">{stageText(stage)}</p>{/if}
 
-      {#if plugin.management}{#if enabled}<p class="text-sm text-zinc-400">{t('setupLocalHelp')}</p>{/if}<code class="block font-mono text-sm text-zinc-400 break-all">bungee recover --plugin {plugin.name} --action {enabled ? 'issue-setup-code' : 'release-auth'}</code>{/if}
+      {#if localDisable}<code class="block font-mono text-sm text-zinc-400 break-all">bungee recover --plugin {plugin.name} --action release-auth</code>{/if}
       {#if message}<p role="alert" class="text-sm text-red-400">{errorText(message)}</p><details class="text-sm text-zinc-400"><summary>{t('technicalDetails')}</summary><pre class="whitespace-pre-wrap break-all">{detail}</pre></details>{/if}
       {#if accepted && !complete && !busy}<p class="text-sm text-amber-400">{t('acceptedHelp')}</p>{/if}
     </form>
@@ -136,7 +151,7 @@
     {#if !complete && !accepted}<button class="nx-btn-ghost" disabled={busy} onclick={() => { open = false; onclose(); }}>{t('cancel')}</button>{/if}
     {#if complete}<button class="nx-btn-primary" onclick={() => { open = false; onclose(); }}>{t('done')}</button>
     {:else if accepted}<button class="nx-btn-primary" disabled={busy || checking || mismatch} onclick={recover}>{busy ? t('recovering') : t('retry')}</button>
-    {:else}<button form="plugin-activation" class="nx-btn-primary" disabled={busy || checking || mismatch || loginUnavailable || localDisable}>{busy ? t('processing') : !enabled ? t('disable') : plugin.management ? t('verifyEnable') : t('enable')}</button>{/if}
-    {#if mismatch || (message && !accepted)}<button class="nx-btn-ghost" disabled={busy} onclick={() => checkOrigin()}>{t('checkAddress')}</button>{/if}
+    {:else if !setupUnchecked}<button form="plugin-activation" class="nx-btn-primary" disabled={busy || checking || mismatch || loginUnavailable || localDisable}>{busy ? t('processing') : !enabled ? t('disable') : plugin.management ? t('verifyEnable') : t('enable')}</button>{/if}
+    {#if !accepted && !complete && (setupUnchecked || mismatch || message)}<button class="nx-btn-ghost" disabled={busy || checking} onclick={() => checkOrigin()}>{t('checkStatus')}</button>{/if}
   {/snippet}
 </IndustrialDialog>

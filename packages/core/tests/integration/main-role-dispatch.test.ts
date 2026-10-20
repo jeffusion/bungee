@@ -82,6 +82,16 @@ describe('main role dispatch', () => {
       expect(child.exitCode).toBeNull();child.kill('SIGTERM');expect(await child.exited).toBe(0);
     } finally {reader.releaseLock();}
   }
+  test('a stopped-state diagnostic is emitted only after manual shutdown handlers are installed', async () => {
+    const child = Bun.spawn([bunExecutable, '-e', `
+      import { keepStoppedProcessAlive } from './src/master-runtime/stopped-process';
+      import { logger } from './src/logger';
+      logger.error = () => { if (!process.emit('SIGTERM')) process.exit(78); };
+      keepStoppedProcessAlive();
+    `], {cwd: coreRoot, env: {...process.env, WORKER_COUNT: '0'}, stdout: 'ignore', stderr: 'ignore'});
+    processes.registerChild(child);
+    expect(await child.exited).toBe(0);
+  });
   test('production bootstrap failure remains stopped and accepts manual shutdown', async () => {
     const child = Bun.spawn([bunExecutable, 'src/main.ts'], {
       cwd: coreRoot,
