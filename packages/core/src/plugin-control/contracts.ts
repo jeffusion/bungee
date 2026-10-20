@@ -152,13 +152,21 @@ export type ControlApiTable = readonly ControlApiDeclaration[];
 export type ControlRpcTable = readonly ControlRpcDeclaration[];
 
 export interface OfflineRecoveryContext { readonly durableState: PluginDurableState; readonly now?: () => number }
-export interface OfflineRecoveryCapability {
-  /** Identity recovery is terminal-only; structured stdin/files support plugin-state only. */
-  readonly kind: 'identity' | 'plugin-state';
-  readonly prompts?: readonly { readonly name: string; readonly label: string; readonly secret: boolean }[];
-  prepareInitialization?(context: OfflineRecoveryContext): Promise<{ code: string; expiresAt: number }>;
-  recover(input: unknown, context: OfflineRecoveryContext): unknown | Promise<unknown>;
+export interface OfflineRecoveryPrompt {
+  readonly name: string;
+  readonly label: string;
+  readonly secret: boolean;
 }
+
+export interface PluginRecoveryAction {
+  readonly prompts: readonly OfflineRecoveryPrompt[];
+  run(input: Record<string, string>, context: OfflineRecoveryContext): unknown | Promise<unknown>;
+}
+
+/** Identity recovery is terminal-only; structured stdin/files support plugin-state only. */
+export type OfflineRecoveryCapability =
+  | {readonly kind: 'identity'; readonly actions: Readonly<Record<string, PluginRecoveryAction>>}
+  | {readonly kind: 'plugin-state'; recover(input: unknown, context: OfflineRecoveryContext): unknown | Promise<unknown>};
 
 export interface ControlPlugin {
   readManagementSetup?(state: Pick<PluginDurableState, 'get' | 'list'>): Promise<{initialized:boolean}>;

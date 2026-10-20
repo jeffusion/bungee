@@ -16,7 +16,7 @@
   let { plugin, enabled, dependencies = [], onclose, oncomplete }:
     { plugin: Plugin; enabled: boolean; dependencies?: string[]; onclose: () => void; oncomplete: () => Promise<void> } = $props();
   let open = $state(true), busy = $state(false), checking = $state(!!plugin.management);
-  let username = $state(''), password = $state('');
+  let username = $state(''), password = $state(''), passwordConfirmation = $state('');
   let mode = $state<AuthMode | null>(null), message = $state(''), detail = $state(''), stage = $state('');
   let accepted = $state(false), operationId = $state(''), complete = $state(false);
   let browserOrigin = $state('');
@@ -30,7 +30,7 @@
     && !hasManagementLoginComponent(plugin.name, plugin.management.loginComponent));
   const localDisable = $derived(!!plugin.management && !enabled);
   const setupRequired = $derived(!!plugin.management && enabled && initialized === false);
-  const setupUnchecked = $derived(!!plugin.management && enabled && initialized !== true);
+  const setupUnchecked = $derived(!!plugin.management && enabled && initialized === null);
   const title = $derived(plugin.management ? enabled ? t('enableManagementTitle') : t('disableManagementTitle') : t('enablePluginTitle'));
 
   async function checkOrigin(readSetup = true) {
@@ -66,20 +66,29 @@
   async function finish() {
     endHandoff?.(); endHandoff = undefined;
     complete = true; stage = 'complete';
-    password = '';
+    password = ''; passwordConfirmation = '';
     await oncomplete();
   }
   async function submit(event: SubmitEvent) {
     event.preventDefault(); if (busy || checking || mismatch || loginUnavailable || localDisable || setupUnchecked || accepted || complete) return;
+    if (setupRequired) {
+      if (password !== passwordConfirmation) { failure(new Error('password_confirmation')); return; }
+      if ([...password].length < 5 || [...password].length > 32) { failure(new Error('invalid_password')); return; }
+    }
+    const submittedInitialized = initialized;
     if (plugin.management && !endHandoff) endHandoff = beginAuthenticationHandoff();
     busy = true; message = ''; detail = ''; stage = 'submitting';
     try {
       if (plugin.management) {
-        if (!await checkOrigin() || initialized !== true) { stage = ''; return; }
+        if (!await checkOrigin()) { stage = ''; return; }
+        if (initialized !== submittedInitialized) { failure(new Error('setup_state_changed')); stage = ''; return; }
         if (!originMatches(mode.publicOrigin, window.location.origin)) { stage = ''; return; }
       }
       await setPluginEnabled(plugin.name, enabled, {
-        managementSetup: plugin.management && enabled ? {username, password} : undefined,
+        managementSetup: plugin.management && enabled
+          ? initialized ? {operation: 'verify', username, password}
+            : {operation: 'initialize', username, password, passwordConfirmation}
+          : undefined,
         onAccepted: async state => {
           accepted = true; operationId = state.operation_id ?? ''; stage = 'awaitingPublication';
           if (plugin.management) { await waitForMode(); await establishSession(); stage = 'confirmingPublication'; }
@@ -93,6 +102,10 @@
         // The response may have been lost after commit. Public mode can prove
         // the transition happened, but cannot prove publication converged.
         try { mode = await readAuthMode(); if (mode.mode === 'plugin' && mode.provider?.name === plugin.name) accepted = true; } catch { /* preserve the original failure */ }
+        if (!accepted) {
+          initialized = null;
+          try { initialized = (await PluginsAPI.getManagementSetup(plugin.name)).initialized; } catch { /* require an explicit status recheck before another write */ }
+        }
       }
       stage = accepted ? 'acceptedIncomplete' : 'unconfirmed';
       await oncomplete();
@@ -127,15 +140,11 @@
         {#if mismatch}<div role="alert" class="text-sm text-amber-400 space-y-2"><p>{t('originMismatch', { origin: browserOrigin })}</p>
           {#if mode?.publicOrigin}<a class="text-nexus-300 underline break-all" href={`${mode.publicOrigin}/#/plugins`}>{t('correctAddress', { origin: mode.publicOrigin })}</a>{:else}<p>{t('missingOrigin')}</p>{/if}
           <p>{t('updateOrigin')}</p></div>{/if}
-        {#if setupRequired && !checking}
-          <p class="text-sm text-zinc-300">{t('initialSetupRequired')}</p>
-          <p class="text-sm text-zinc-400">{t('setupLocalHelp')}</p>
-          <code class="block font-mono text-sm text-zinc-400 break-all">bungee recover --plugin {plugin.name} --action issue-setup-code</code>
-          <p class="text-sm text-zinc-400">{t('setupRestartHelp')}</p>
-        {:else if enabled && initialized === true && !checking}
-          <p class="text-sm text-zinc-300">{t('existingAccount')}</p>
-          <label class="block space-y-1"><span class="nx-field-label">{t('username')}</span><input class="nx-input" bind:value={username} autocomplete="username" required disabled={busy || complete} /></label>
-          <label class="block space-y-1"><span class="nx-field-label">{t('password')}</span><input class="nx-input" type="password" bind:value={password} autocomplete="current-password" required disabled={busy || complete} /></label>
+        {#if enabled && initialized !== null && !checking}
+          <p class="text-sm text-zinc-300">{setupRequired ? t('initialSetupRequired') : t('existingAccount')}</p>
+          <label class="block space-y-1"><span class="nx-field-label">{t('username')}</span><input class="nx-input" bind:value={username} autocomplete="username" required maxlength="64" disabled={busy || complete} /></label>
+          <label class="block space-y-1"><span class="nx-field-label">{t('password')}</span><input class="nx-input" type="password" bind:value={password} autocomplete={setupRequired ? 'new-password' : 'current-password'} required disabled={busy || complete} /></label>
+          {#if setupRequired}<label class="block space-y-1"><span class="nx-field-label">{t('passwordConfirmation')}</span><input class="nx-input" type="password" bind:value={passwordConfirmation} autocomplete="new-password" required disabled={busy || complete} /></label>{/if}
         {:else if !enabled}
           <p class="text-sm text-zinc-300">{t('disableAccountHelp')}</p>
         {/if}
@@ -151,7 +160,7 @@
     {#if !complete && !accepted}<button class="nx-btn-ghost" disabled={busy} onclick={() => { open = false; onclose(); }}>{t('cancel')}</button>{/if}
     {#if complete}<button class="nx-btn-primary" onclick={() => { open = false; onclose(); }}>{t('done')}</button>
     {:else if accepted}<button class="nx-btn-primary" disabled={busy || checking || mismatch} onclick={recover}>{busy ? t('recovering') : t('retry')}</button>
-    {:else if !setupUnchecked}<button form="plugin-activation" class="nx-btn-primary" disabled={busy || checking || mismatch || loginUnavailable || localDisable}>{busy ? t('processing') : !enabled ? t('disable') : plugin.management ? t('verifyEnable') : t('enable')}</button>{/if}
+    {:else if !setupUnchecked}<button form="plugin-activation" class="nx-btn-primary" disabled={busy || checking || mismatch || loginUnavailable || localDisable}>{busy ? t('processing') : !enabled ? t('disable') : plugin.management ? setupRequired ? t('initializeEnable') : t('verifyEnable') : t('enable')}</button>{/if}
     {#if !accepted && !complete && (setupUnchecked || mismatch || message)}<button class="nx-btn-ghost" disabled={busy || checking} onclick={() => checkOrigin()}>{t('checkStatus')}</button>{/if}
   {/snippet}
 </IndustrialDialog>

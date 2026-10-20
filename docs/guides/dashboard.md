@@ -41,7 +41,7 @@ Management surface:
 ## Management And Access Plugins
 
 - The plugin center preserves the existing BSwitch appearance. Dependencies or guards disable the switch and show the exact reason.
-- 用户认证 (`user-auth`) is initialized with an offline, local-terminal setup code. `/#/setup` accepts the code, account and confirmed password, then returns to login. Cookie-only verification gates the existing Dashboard, navigation and plugin APIs. All logins have full management access; there are no registration, member or role screens. Online disabling cannot release protection; use the offline `release-auth` action.
+- 用户认证 (`user-auth`) is initialized in its activation dialog with a username, password and password confirmation, then establishes a Cookie session. Existing accounts use password verification. The independent `/#/setup` page accepts the account and confirmed password when the selected provider is uninitialized, then returns to login. Cookie-only verification gates the existing Dashboard, navigation and plugin APIs. All logins have full management access; there are no registration, member or role screens. Online disabling cannot release protection; use the offline `release-auth` action.
 - 访问控制 provides API Key and route-protection tabs in its settings page. Creating, editing, or applying a Key saves its allowed routes without changing public access. The route switch controls public access independently, including routes with Key grants; revoking the final Key keeps routes protected.
 - Route and Service editors contain proxy configuration only. Public requests remain anonymous even when carrying a Key, and do not consume Key rate or token budgets.
 - Key rate limits depend on access control; token budgets depend on access control, metering and statistics pricing; statistics depend on metering and models-dev. Metering is a global service and cannot bind to routes or services.
@@ -176,6 +176,6 @@ Major endpoint groups:
 
 ## 5) Security Notes
 
-- Management is anonymous by default. 用户认证 (`user-auth`) protects management after offline initialization. Use offline, local-terminal `release-auth` to explicitly restore anonymous access. An installed-provider failure preserves authentication; startup clears an absent provider's selection along with its obsolete plugin records. See [authentication](./authentication.md).
+- Management is anonymous by default. 用户认证 (`user-auth`) protects management after activation. Use offline, local-terminal `release-auth` to explicitly restore anonymous access. An installed-provider failure preserves authentication; startup clears an absent provider's selection along with its obsolete plugin records. See [authentication](./authentication.md).
 - Plugin asset serving performs path traversal checks and file-type allowlisting.
 - CSP and additional browser security headers are applied for plugin HTML assets.

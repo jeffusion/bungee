@@ -38,12 +38,13 @@ test('Key lifecycle creates, reveals and deletes credentials through the access 
     {url:'/api/plugins/key-access/control/credentials/key',method:'DELETE'},
   ]);
 });
-test('single administrator setup and disable use exact envelopes',async()=>{
+test('management initialize, verify and disable use exact envelopes',async()=>{
   const requests:{url:string;init?:RequestInit}[]=[];
   globalThis.fetch=mockFetch(async(url,init)=>{requests.push({url:String(url),init});return Response.json({unchanged:true});});
-  const setup={username:'owner',password:'long-new-password',passwordConfirmation:'long-new-password'};
-  await setPluginEnabled('user-auth',true,{managementSetup:setup});await setPluginEnabled('user-auth',false,{});
-  expect(JSON.parse(String(requests[0]!.init!.body))).toEqual({managementSetup:setup});expect(new Headers(requests[1]!.init!.headers).get('x-bungee-next-authorization')).toBeNull();
+  const setup={operation:'initialize',username:'owner',password:'long-new-password',passwordConfirmation:'long-new-password'};
+  await setPluginEnabled('user-auth',true,{managementSetup:setup});const verification={operation:'verify',username:'owner',password:'long-new-password'};
+  await setPluginEnabled('user-auth',true,{managementSetup:verification});await setPluginEnabled('user-auth',false,{});
+  expect(JSON.parse(String(requests[0]!.init!.body))).toEqual({managementSetup:setup});expect(JSON.parse(String(requests[1]!.init!.body))).toEqual({managementSetup:verification});expect(JSON.parse(String(requests[2]!.init!.body))).toEqual({});expect(new Headers(requests[2]!.init!.headers).get('x-bungee-next-authorization')).toBeNull();
 });
 test('unauthorized clears credentials and CSRF',async()=>{
   login('key');restoreSession({success:true,csrfToken:'csrf'});

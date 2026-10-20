@@ -4,8 +4,7 @@ import dotenv from 'dotenv';
 import { initializeConfigurationDatabase } from './master-runtime/initialize-configuration';
 export { initializeConfigurationDatabase };
 export type * from './gateway/plugin';
-import { writeSetupCodeToTerminal } from './master-runtime/recovery-prompt';
-import { recoverOffline, recoverOfflineAction, readRecoveryInput, type OfflineRecoveryAction } from './master-runtime/offline-recovery';
+import { recoverOffline, recoverOfflineAction, readRecoveryInput } from './master-runtime/offline-recovery';
 export { recoverOffline };
 import { serializeErrorChain } from './master-runtime/error-chain';
 import { clearDaemonBootstrapEnvironment } from './daemon-control/bootstrap';
@@ -91,10 +90,9 @@ if (import.meta.main) {
         console.log(JSON.stringify(await recoverOffline(args[1], await readRecoveryInput(process.stdin))));
       } else {
         if (args.length !== 6 || args[2] !== '--plugin' || !args[3] || args[4] !== '--action'
-          || !['issue-setup-code', 'reset', 'release-auth'].includes(args[5]!)) throw new Error('invalid_recovery_arguments');
-        const result = await recoverOfflineAction(args[1], {plugin: args[3], action: args[5] as OfflineRecoveryAction});
-        if (args[5] === 'issue-setup-code') writeSetupCodeToTerminal(result as {code: string; expiresAt: number});
-        else console.log(JSON.stringify(result));
+          || !args[5]) throw new Error('invalid_recovery_arguments');
+        const result = await recoverOfflineAction(args[1], {plugin: args[3], action: args[5]});
+        console.log(JSON.stringify(result));
       }
     } else if (process.argv.slice(2).some(arg => arg.startsWith('--recover'))) {
       throw new Error('invalid_recovery_arguments');

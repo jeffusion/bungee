@@ -10,19 +10,28 @@ const {authRuntime} = createAuthRuntime();
 
 test('management setup gates protected requests, confirms initialization, and joins the ordinary login shell', async () => {
   const {runtime, browser} = await authRuntime();
-  for (const scenario of ['setup', 'unavailable', 'foreign-component', 'activation-uninitialized', 'activation-ready', 'activation-unavailable', 'activation-changed', 'activation-recover'] as const) {
+  for (const scenario of ['setup', 'unavailable', 'foreign-component', 'activation-uninitialized', 'activation-initialize', 'activation-ready', 'activation-unavailable', 'activation-changed', 'activation-initialized-elsewhere', 'activation-conflict', 'activation-commit-failed', 'activation-recover', 'activation-initialize-recover'] as const) {
       const context = await browser.newContext({ viewport: { width: 390, height: 1000 }, locale: 'zh-CN' });
       try {
         await context.addInitScript(() => localStorage.setItem('locale', 'zh-CN'));
         const page = await context.newPage();
         const errors: string[] = [], requests: string[] = [];
         page.on('pageerror', error => errors.push(error.message));
-        page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+        let expectedEnableFailure = ['activation-conflict', 'activation-commit-failed'].includes(scenario) ? 1 : 0;
+        page.on('console', message => {
+          if (message.type() !== 'error') return;
+          if (expectedEnableFailure && message.location().url === runtime.origin + '/api/plugins/user-auth/enable'
+            && message.text().includes(scenario === 'activation-conflict' ? '409' : '500')) { expectedEnableFailure--; return; }
+          errors.push(message.text());
+        });
         page.on('requestfailed', request => { errors.push(`${request.method()} ${request.url()}: ${request.failure()?.errorText}`); });
         // The UI font stylesheets are not part of this authentication flow.
         await page.route('https://fonts.googleapis.com/**', route => route.fulfill({ contentType: 'text/css', body: '' }));
         let initialized = false, authenticated = false, setupReads = 0, selected = false, loginAttempts = 0;
+        let enableAttempts = 0;
+        let accountReady = ['activation-ready', 'activation-unavailable', 'activation-recover', 'activation-changed'].includes(scenario);
         const activation = scenario.startsWith('activation-');
+        const recoverSession = scenario === 'activation-recover' || scenario === 'activation-initialize-recover';
         const initialPassword = ' 😀 甲 ';
         const provider = { name: manifest.name, ...manifest.management,
           ...(scenario === 'foreign-component' ? { setupComponent: 'TokenStatsChart' } : {}) };
@@ -39,11 +48,20 @@ test('management setup gates protected requests, confirms initialization, and jo
             setupReads++;
             if (selected && !authenticated) return route.fulfill({status:401,json:{error:'unauthorized'}});
             if (scenario === 'activation-unavailable' && setupReads === 1) return json({});
-            return json({initialized: scenario === 'activation-ready' || scenario === 'activation-unavailable' || scenario === 'activation-recover' || (scenario === 'activation-changed' && setupReads === 1)});
+            if (scenario === 'activation-changed' && setupReads > 1) accountReady = false;
+            if (scenario === 'activation-initialized-elsewhere' && setupReads > 1) accountReady = true;
+            return json({initialized: accountReady});
           }
           if (request.method() === 'POST' && url.pathname === '/api/plugins/user-auth/enable') {
-            expect(scenario).toBe('activation-recover');
-            expect(request.postDataJSON()).toEqual({managementSetup:{username:'owner',password:'fixture-password'}});
+            enableAttempts++;
+            expect(request.postDataJSON()).toEqual({managementSetup: accountReady
+              ? {operation:'verify',username:'owner',password:'fixture-password'}
+              : {operation:'initialize',username:'owner',password:'fixture-password',passwordConfirmation:'fixture-password'}});
+            accountReady = true;
+            if (enableAttempts === 1 && ['activation-conflict', 'activation-commit-failed'].includes(scenario)) {
+              return route.fulfill({status: scenario === 'activation-conflict' ? 409 : 500,
+                json:{error: scenario === 'activation-conflict' ? 'bootstrap_conflict' : 'configuration_commit_failed'}});
+            }
             selected = true;
             return json({operation_id:'enable-auth',operation:{state:'converged',result_status:200},workers:[]});
           }
@@ -55,7 +73,7 @@ test('management setup gates protected requests, confirms initialization, and jo
             if (scenario === 'unavailable') return json({});
             if (request.method() === 'POST') {
               expect(request.headers()['x-bungee-auth-provider']).toBe(manifest.name);
-              expect(request.postDataJSON()).toEqual({ setupCode: 'fixture-code', username: 'admin',
+              expect(request.postDataJSON()).toEqual({ username: 'admin',
                 password: initialPassword, passwordConfirmation: initialPassword });
               initialized = true; return json({ success: true });
             }
@@ -64,7 +82,8 @@ test('management setup gates protected requests, confirms initialization, and jo
           if (request.method() === 'GET' && url.pathname === '/api/auth/login/options') return json({local: {enabled: true, turnstile: {enabled: false}}, methods: []});
           if (request.method() === 'POST' && url.pathname === '/api/auth/login') {
             loginAttempts++;
-            authenticated = scenario !== 'activation-recover' || loginAttempts > 1;
+            expect(request.postDataJSON()).toEqual({username: activation ? 'owner' : 'admin', password: activation ? 'fixture-password' : initialPassword, transport:'cookie'});
+            authenticated = !recoverSession || loginAttempts > 1;
             return json({ success: true });
           }
           if (request.method() === 'GET' && url.pathname === '/api/auth/verify') return json({ mode: activation && !selected ? 'anonymous' : 'plugin', success: (activation && !selected) || authenticated,
@@ -103,49 +122,74 @@ test('management setup gates protected requests, confirms initialization, and jo
           await page.getByTestId('page-plugins').getByRole('switch').click();
           const dialog = page.getByRole('dialog');
           const verify = dialog.getByRole('button', {name: '验证并启用', exact: true});
+          const create = dialog.getByRole('button', {name: '创建账号并启用', exact: true});
           const username = dialog.getByLabel('管理员账号', {exact: true});
-          if (scenario === 'activation-uninitialized') {
-            await expect(dialog.getByRole('button', {name: '重新检查状态', exact: true})).toBeEnabled();
-            await expect(dialog.getByRole('alert')).toHaveCount(0);
+          const password = dialog.getByLabel('管理员密码', {exact: true});
+          const confirmation = dialog.getByLabel('确认管理员密码', {exact: true});
+          if (scenario === 'activation-unavailable') {
+            await expect(dialog.getByRole('alert')).toBeVisible();
             await expect(username).toHaveCount(0);
             await expect(verify).toHaveCount(0);
-          } else {
-            if (scenario === 'activation-unavailable') {
+            await expect(create).toHaveCount(0);
+            await dialog.getByRole('button', {name: '重新检查状态', exact: true}).click();
+          }
+          await expect(username).toBeVisible();
+          await username.fill('owner');
+          await password.fill('fixture-password');
+          if (!accountReady) await confirmation.fill('fixture-password');
+          if (scenario === 'activation-uninitialized') {
+            // Unicode length and confirmation errors never submit or re-read server state.
+            for (const invalid of ['x'.repeat(4), '😀'.repeat(4), 'x'.repeat(33), '😀'.repeat(33)]) {
+              await password.fill(invalid); await confirmation.fill(invalid); await create.click();
               await expect(dialog.getByRole('alert')).toBeVisible();
-              await expect(dialog.getByRole('button', {name: '重新检查状态', exact: true})).toBeEnabled();
-              await expect(username).toHaveCount(0);
-              await expect(verify).toHaveCount(0);
-              await dialog.getByRole('button', {name: '重新检查状态', exact: true}).click();
+              expect(enableAttempts).toBe(0);
             }
-            await expect(username).toBeVisible();
+            await password.fill('fixture-password'); await confirmation.fill('different'); await create.click();
+            await expect(dialog.getByRole('alert')).toBeVisible();
+            expect(setupReads).toBe(1);
+            await dialog.getByRole('button', {name:'取消',exact:true}).click();
+            await expect(dialog).toHaveCount(0);
+            expect(enableAttempts).toBe(0);
+          } else if (scenario === 'activation-changed' || scenario === 'activation-initialized-elsewhere') {
+            await (scenario === 'activation-changed' ? verify : create).click();
+            await expect(dialog.getByRole('alert')).toBeVisible();
+            await expect(scenario === 'activation-changed' ? create : verify).toBeEnabled();
+            await expect(confirmation).toHaveCount(scenario === 'activation-changed' ? 1 : 0);
+            expect(setupReads).toBe(2);
+            expect(enableAttempts).toBe(0);
+          } else if (scenario === 'activation-ready' || scenario === 'activation-unavailable') {
             await expect(verify).toBeEnabled();
-            if (scenario === 'activation-changed') {
-              await username.fill('owner');
-              await dialog.getByLabel('管理员密码', {exact: true}).fill('fixture-password');
+            await expect(confirmation).toHaveCount(0);
+            await dialog.getByRole('button', {name:'取消',exact:true}).click();
+            expect(enableAttempts).toBe(0);
+          } else {
+            await (accountReady ? verify : create).click();
+            if (scenario === 'activation-conflict' || scenario === 'activation-commit-failed') {
+              await expect(dialog.getByRole('alert')).toBeVisible();
+              await expect(verify).toBeEnabled();
+              await expect(confirmation).toHaveCount(0);
+              expect(enableAttempts).toBe(1);
+              expect(setupReads).toBe(3);
+              // Retain the same credentials, but require an explicit verification submit.
               await verify.click();
-              await expect(dialog.getByRole('button', {name: '重新检查状态', exact: true})).toBeEnabled();
-              await expect(dialog.getByRole('alert')).toHaveCount(0);
-              await expect(username).toHaveCount(0);
-              await expect(verify).toHaveCount(0);
-              expect(setupReads).toBe(2);
             }
-            if (scenario === 'activation-recover') {
-              await username.fill('owner');
-              await dialog.getByLabel('管理员密码', {exact: true}).fill('fixture-password');
-              await verify.click();
+            if (recoverSession) {
               await expect(dialog.getByRole('button', {name:'重试',exact:true})).toBeEnabled();
               await expect(dialog.getByRole('alert')).toBeVisible();
               expect(authenticated).toBe(false);
               await dialog.getByRole('button', {name:'重试',exact:true}).click();
-              await expect(dialog.getByRole('button', {name:'完成',exact:true})).toBeVisible();
-              expect(authenticated).toBe(true);
-              expect(loginAttempts).toBe(2);
+            }
+            await expect(dialog.getByRole('button', {name:'完成',exact:true})).toBeVisible();
+            expect(authenticated).toBe(true);
+            expect(loginAttempts).toBe(recoverSession ? 2 : 1);
+            expect(enableAttempts).toBe(['activation-conflict', 'activation-commit-failed'].includes(scenario) ? 2 : 1);
+            if (recoverSession) {
               expect(setupReads).toBe(2);
-              expect(requests.filter(value=>value === 'POST /api/plugins/user-auth/enable')).toHaveLength(1);
               expect(requests).toContain('GET /api/config/operations/enable-auth');
             }
           }
-          if (scenario !== 'activation-recover') expect(requests.filter(value => value.startsWith('POST '))).toEqual([]);
+          if (enableAttempts === 0) expect(requests.filter(value => value.startsWith('POST '))).toEqual([]);
+          expect(expectedEnableFailure).toBe(0);
           expect(errors).toEqual([]);
           continue;
         }
@@ -165,7 +209,6 @@ test('management setup gates protected requests, confirms initialization, and jo
         expect(protectedRequests()).toEqual([]);
         expect(requests).not.toContain('GET /api/auth/verify');
         await expect(page).toHaveURL(/#\/setup$/);
-        await form.getByLabel('一次性初始化码', { exact: true }).fill('fixture-code');
         await form.getByLabel('账号', { exact: true }).fill('admin');
         for (const invalid of ['x'.repeat(4), '😀'.repeat(4), 'x'.repeat(33), '😀'.repeat(33)]) {
           await form.getByLabel('密码（5–32 个字符）', { exact: true }).fill(invalid);

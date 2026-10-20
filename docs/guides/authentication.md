@@ -6,24 +6,20 @@ Bungee 是个人反向代理。基础功能是 Route、Service 和上游转发�
 
 先执行 `bungee init`，再执行 `bungee start`。初始化创建 SQLite 配置库和插件状态库，不生成凭证、不建立管理员。原生入口使用 `--initialize-config <配置库绝对路径>`。`BUNGEE_CONFIG_DB_PATH` 可指定配置库，初始化、启动和恢复必须使用同一路径。
 
-数据库要求符合[当前基线](../architecture/storage.md#数据库基线与升级)，配置不接受全局／路由 `auth` 字段。未选择管理 provider 时可直接进入 Dashboard；需要保护管理入口时先完成下述本地授权。
+数据库要求符合[当前基线](../architecture/storage.md#数据库基线与升级)，配置不接受全局／路由 `auth` 字段。未选择管理 provider 时可直接进入 Dashboard；需要保护管理入口时按下述步骤启用用户认证。
 
 ## 管理认证
 
-“用户认证”（`user-auth`）提供多用户管理、本地密码、Google、Microsoft、GitHub 及自定义 OIDC 连接及会话。首次初始化必须由部署服务器上的本地终端授权，不能在在线插件开关中建立账号。
+“用户认证”（`user-auth`）提供多用户管理、本地密码、Google、Microsoft、GitHub 及自定义 OIDC 连接和会话。
 
-1. 停止整个实例，在本地交互终端执行：
+1. 使用公开管理地址打开插件中心，启用“用户认证”。浏览器地址必须与配置的 `BUNGEE_PUBLIC_ORIGIN` 一致。
+2. 首次启用时，弹窗填写账号、密码和确认密码。账号名为 1–64 个 ASCII 字符，只允许字母、数字和 `_ . @ -`，首字符必须为字母或数字，保存为小写。密码为 5–32 个 Unicode 码点，允许空格，不做裁剪。
+3. 提交后创建首个账号并启用管理保护，弹窗自动建立 Cookie 会话。平台使用 Cookie-only `GET /api/auth/verify` 核验后，才初始化 Dashboard、导航与插件 API。已有账号时，弹窗只要求账号和密码进行验证。
+4. 若首个账号已保存而后续配置提交失败，账号不会回滚；重新检查状态后使用已有账号验证继续启用。若配置已提交但会话或发布未确认，按弹窗提示恢复并核验，不能将账号创建成功视为启用全部完成。
 
-   ```sh
-   bungee recover --plugin user-auth --action issue-setup-code
-   ```
+已选中 provider 但尚未初始化时，`/#/setup` 提供独立账号创建页面，仅填写账号及两次密码。此页面成功后返回登录页，不自动登录。ready 账号丢失或状态损坏不会重新开放初始化，应使用离线恢复。
 
-   CLI 默认使用 `~/.bungee/data/bungee.db`；自定义位置用 `BUNGEE_CONFIG_DB_PATH`，与初始化、启动保持一致。命令要求 stdin、stdout 都是 TTY，运行中的实例或重定向输入会被拒绝。
-2. 宿主先持久化强制认证和 provider 选择，再生成 32 字节随机一次性码。码有效期为 30 分钟，只保存摘要；配置与插件状态数据库均确认关闭后，才在终端显示明文。未完成初始化时重新签发立即撤销旧码；账号已就绪后不能重新签发。
-3. 启动实例，使用公开管理地址访问 `/#/setup`，填写一次性码、账号、密码和确认密码。账号名为 1–64 个 ASCII 字符，只允许字母、数字和 `_ . @ -`，首字符必须为字母或数字，保存为小写。密码为 5–32 个 Unicode 字符，允许空格，不做裁剪。
-4. 初始化成功后回到登录页，以账号密码正常登录。初始化不创建会话；平台使用 Cookie-only `GET /api/auth/verify` 核验登录结果后，才初始化 Dashboard、导航与插件 API。
-
-所有有效登录均有相同的完整管理能力，没有角色授权。插件没有本地自助注册、注册开关、邮件或 MFA；初始化页面只接受本地签发的一次性码。
+所有有效登录均有相同的完整管理能力，没有角色授权。插件没有本地自助注册、注册开关、邮件或 MFA。
 
 「用户管理」和「用户信息」提供独立菜单页面：前者创建、编辑、禁用用户、重置密码；后者查看当前用户资料、自行改密和验证绑定或解绑身份。「登录管理」位于用户认证插件的内置设置页，维护登录方式、人机验证和会话策略。第三方登录支持多个连接，必须显式配置 `BUNGEE_PUBLIC_ORIGIN`，支持 HTTP／HTTPS，生产环境建议使用 HTTPS。未知身份是否首次自动开户由一个插件级开关统一控制，默认关闭；开启后全部已启用连接接纳的身份都可建立拥有完整管理能力的账号，不按邮箱合并。连接本身没有开户覆盖项。
 
@@ -31,7 +27,7 @@ Bungee 是个人反向代理。基础功能是 Route、Service 和上游转发�
 
 Turnstile 默认关闭，设置 Site Key、Secret 和允许的 hostname 后可启用；开启后 Cookie 与 Bearer 的每次密码登录均需有效挑战，服务端验证失败或网络故障时拒绝登录。本地登录始终保留，详细配置与限制见 [user-auth](../../plugins/user-auth/README.md)。
 
-密码使用 Argon2id（64 MiB、3 次迭代）。浏览器会话使用 HttpOnly、SameSite=Strict Cookie，HTTPS 使用 Secure；Cookie 写请求校验 Origin 和 CSRF。会话默认空闲 30 分钟、绝对寿命 8 小时；空闲时间可设为 0，绝对寿命必须大于 0 且不超过 30 天。策略只影响新会话，已有会话保留创建时的策略。修改密码、禁用用户和绑定变更推进该用户 generation；本地重置和全局撤销推进实例会话代际；持久化时钟防止时间回拨让已过期凭据复活。
+密码使用 Argon2id（64 MiB、3 次迭代）。浏览器会话使用 HttpOnly、SameSite=Strict Cookie，HTTPS 使用 Secure；Cookie 写请求校验 Origin 和 CSRF。会话默认空闲 30 分钟、绝对寿命 8 小时；空闲时间可设为 0，绝对寿命必须大于 0 且不超过 30 天。策略只影响新会话，已有会话保留创建时的策略。修改密码、禁用用户和绑定变更推进该用户 generation；离线 `reset` 和全局撤销推进实例会话代际；持久化时钟防止时间回拨让已过期凭据复活。
 
 登录和初始化内容由当前 provider 的原生组件提供，平台负责页面框架、路由、会话核验与登录后的初始化。组件必须与当前 Bungee 版本匹配；缺失或损坏时拒绝访问，不回退匿名。
 
@@ -39,7 +35,7 @@ Turnstile 默认关闭，设置 Site Key、Secret 和允许的 hostname 后可�
 
 CLI 可向 `POST /api/auth/login` 发送 `{username,password,transport:"bearer"}` 获取 Bearer 会话，再通过管理命令的 `--token` 使用；CLI 不自动保存会话，Bearer 与 Cookie 会话不可交换使用。Turnstile 启用时，密码登录还须提交 `turnstileToken`，不能借 Bearer 方式绕过。
 
-强制认证 guard 与 provider 选择持久化在配置库，在线停用、替换或导入都不能解除。主动解除使用停机、本地 TTY 执行 `bungee recover --plugin user-auth --action release-auth`；它保留身份数据，启动后恢复匿名管理。已安装 provider 故障或状态损坏时保持保护；启动目录中已不存在的 provider 会自动清除选择并恢复匿名管理。忘记账号密码时用离线 `reset`，它不改变强制认证状态；详见[离线恢复](offline-recovery.md)。
+强制认证 guard 与 provider 选择持久化在配置库，在线停用、替换或导入都不能解除。主动解除使用停机、本地 TTY 执行 `bungee recover --plugin user-auth --action release-auth`；它保留身份数据，启动后恢复匿名管理。已安装 provider 故障或状态损坏时保持保护；启动目录中已不存在的 provider 会自动清除选择并恢复匿名管理。离线 `add-user` 新增账号，`reset-password` 按用户名改密，`reset` 恢复锚点管理员；这些动作不自动启用插件，也不改变强制认证状态；详见[离线恢复](offline-recovery.md)。
 
 ## 访问控制与 Key
 
@@ -97,7 +93,7 @@ Key 限速或预算停用后，切换点之后的新请求取消对应限制，�
 
 ## 恢复与备份
 
-无法登录或预算账务待恢复时，先停止整个实例，按[离线恢复指南](offline-recovery.md)调用对应插件能力。身份重置不改变强制认证；签发初始化码会先持久化强制认证，解除则必须显式执行 `release-auth`。
+无法登录或预算账务待恢复时，先停止整个实例，按[离线恢复指南](offline-recovery.md)调用对应插件能力。身份恢复不改变强制认证或 provider 激活选择；解除必须显式执行 `release-auth`。
 
 配置导出不包含 Key、管理员、会话或预算运行账本。备份完整状态时遵循[停机备份](deployment.md#backup)，恢复后核验凭据撤销与账务状态。
 

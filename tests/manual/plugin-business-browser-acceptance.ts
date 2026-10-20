@@ -154,11 +154,11 @@ try {
     body: JSON.stringify({ autoRefresh: false, intervalHours: 24, timeoutSeconds: 30 }),
   });
   assert.equal(settings.response.status, 200, settings.text);
-  const password = `Browser-${randomBytes(12).toString('hex')}!`;
+  const password = `Browser-${randomBytes(11).toString('hex')}!`;
   await stopOwnedMaster(master); master = undefined;
   const prepared = await prepareManagementInitialization(fixture.configDbPath, fixture.pluginsPath);
   master = await spawnMaster(fixture, lease, owned => { master = owned; }, 'debug');
-  await initializeManagementAccount(management, prepared.code, 'browser-owner', password);
+  await initializeManagementAccount(management, 'browser-owner', password);
   const denied = await fetch(management + '/api/config', { signal: AbortSignal.timeout(5000) });
   assert.equal(denied.status, 401, 'account mode must reject anonymous management');
   await denied.body?.cancel();
@@ -192,7 +192,7 @@ try {
     csrf = (await result.json()).csrfToken;
     assert(csrf && (await context!.cookies()).some(cookie => cookie.httpOnly), 'real cookie session was not created');
     assert.equal((await get('/api/plugins/user-auth/control/self')).administrator.username, 'browser-owner');
-    await publication(initial.revision + 2, true);
+    await publication(prepared.revision, true);
     await navigate('models-dev', '/catalog/status', 'models-dev-settings');
     await page!.getByTestId('models-dev-interval').waitFor();
   });

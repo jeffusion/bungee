@@ -8,7 +8,7 @@ Bungee 的核心是 Route、Service 和代理运行平台。管理入口默认�
 | --- | --- |
 | Route、Service、上游转发与运行管理 | core |
 | 管理认证接口、最终准入与持久化失败保护 | 通用 core Host |
-| 多用户、本地密码、OAuth／OIDC、Turnstile、初始化码、会话与本地恢复 | user-auth，显示“用户认证” |
+| 多用户、本地密码、OAuth／OIDC、Turnstile、首次账号初始化、会话与本地恢复 | user-auth，显示“用户认证” |
 | Key 生成、元数据、过期、验证、撤销及路由保护 | key-access，显示“访问控制” |
 | 每 Key 路由与最终模型授权 | key-access |
 | 每 Key 全实例请求速率 | key-rate-limit，依赖 key-access |
@@ -21,15 +21,15 @@ Bungee 的核心是 Route、Service 和代理运行平台。管理入口默认�
 
 ## 管理认证
 
-未选 provider 且没有强制认证 guard 时允许匿名管理，`init` 只建库。启用管理保护由停机、本地 TTY 的 `issue-setup-code` 授权：配置 Worker 先原子保存强制认证和 provider 激活选择，插件再准备 32 字节随机、30 分钟有效的一次性码。只保存摘要，配置和插件状态库均关闭确认后才在 TTY 显示。重签撤销旧码，ready 身份不能重签。
+未选 provider 且没有强制认证 guard 时允许匿名管理，`init` 只建库。插件中心启用 user-auth 时，只读查询初始化状态：空命名空间或合法未初始化状态显示账号、密码和确认密码，已有账号显示身份验证。查询不启动插件，不写入状态；插件启动为真正的空命名空间 CAS 建立最小 `uninitialized` 元数据。ready 用户丢失或状态损坏时拒绝访问，不重新开放初始化。
 
-Host 负责 provider 选择、初始化页面框架、Cookie 交接和持久 guard；user-auth 负责用户、本地密码、OAuth／OIDC、Turnstile、初始化码、会话、限流和恢复。浏览器访问 `/#/setup`，输入码、账号和两次密码；初始化成功返回登录页，不创建会话。正常登录后由 Host Cookie-only verify 核验，再加载既有 Dashboard、导航与插件 API。所有登录具有相同的完整管理能力，没有角色授权或个人壳。
+Host 负责 provider 选择、初始化页面框架、Cookie 交接和持久 guard；user-auth 负责用户、本地密码、OAuth／OIDC、Turnstile、初始化、会话、限流和恢复。启用请求的 `managementSetup.operation` 为 `initialize` 或 `verify`，分别创建首个账号或验证现有本地身份。首建在插件库原子提交后，配置 Worker 再原子保存强制认证与 provider 激活选择；后续配置提交失败不回滚账号，再次启用须读状态并转为 verify。启用弹窗自动创建 Cookie 会话，Host Cookie-only verify 核验后加载 Dashboard、导航与插件 API。独立 `/#/setup` 页面只创建首个账号，成功后返回登录页。所有登录具有相同的完整管理能力，没有角色授权或个人壳。
 
-强制认证独立于普通配置快照。已安装 provider 故障、未就绪或状态损坏均拒绝管理访问；在线停用、替换及导入不能解除保护。主动解除使用停机、本地 TTY 的 `release-auth` 并保留身份；启动目录中已不存在的 provider 则随失效插件记录一起清除选择。`reset` 输入新账号、两次隐藏密码及原因，完整身份保留 ID，缺失或损坏时可重建；撤销全部会话与初始化码，不改变强制认证。
+强制认证独立于普通配置快照。已安装 provider 故障、未就绪或状态损坏均拒绝管理访问；在线停用、替换及导入不能解除保护。主动解除使用停机、本地 TTY 的 `release-auth` 并保留身份；启动目录中已不存在的 provider 则随失效插件记录一起清除选择。离线 `add-user` 新增账号，`reset-password` 按用户名改密且只撤销目标用户会话，`reset` 依稳定锚点保留原 ID 恢复管理员并撤销全部会话；这些账号动作不改变 provider 选择或强制认证。
 
-密码为 5–32 个 Unicode 字符，使用 Argon2id（64 MiB、3 次迭代）。会话仅保存令牌摘要，默认空闲 30 分钟、绝对寿命 8 小时；空闲可为 0，绝对寿命必须大于 0 且不超过 30 天，策略只影响新会话。改密、禁用和身份绑定变化推进用户 generation，重置与全局撤销推进实例会话代际；持久 clock 的 CAS 观察时间防止回拨复活凭据。浏览器使用 HttpOnly／SameSite=Strict Cookie，HTTPS 标记 Secure；Cookie 写请求校验公开 Origin 和 CSRF。CLI 可取得 Bearer 会话，不自动保存。
+密码为 5–32 个 Unicode 字符，使用 Argon2id（64 MiB、3 次迭代）。会话仅保存令牌摘要，默认空闲 30 分钟、绝对寿命 8 小时；空闲可为 0，绝对寿命必须大于 0 且不超过 30 天，策略只影响新会话。改密、禁用和身份绑定变化推进用户 generation，离线 `reset` 与全局撤销推进实例会话代际；持久 clock 的 CAS 观察时间防止回拨复活凭据。浏览器使用 HttpOnly／SameSite=Strict Cookie，HTTPS 标记 Secure；Cookie 写请求校验公开 Origin 和 CSRF。CLI 可取得 Bearer 会话，不自动保存。
 
-插件使用既有 durableState／CAS，在 `user-auth` 命名空间保存 schema 3 记录，不新增插件状态表，不读取、导入、迁移或清理旧账号、Cookie 或 `local-accounts` 命名空间。已删除插件的激活和绑定由启动目录整理自动移除，原业务状态保留，见[存储契约](storage.md#管理能力与健康)。不兼容先前单账号记录，不自动迁移或重开初始化。没有本地自助注册、空注册开关、邮件、MFA 或角色能力；未来如实现真实注册，必须提供默认关闭的开关。OIDC 首次登录开户使用默认关闭的插件级统一开关，连接无独立覆盖；Turnstile 默认关闭，启用后本地密码的 Cookie／Bearer 登录都须验证。完整认证数据和配置契约见 [user-auth](../../plugins/user-auth/README.md)。
+插件使用既有 durableState／CAS，在 `user-auth` 命名空间保存 schema 3 记录，不新增插件状态表，不读取、导入、迁移或清理旧账号、Cookie 或 `local-accounts` 命名空间。已删除插件的激活和绑定由启动目录整理自动移除，原业务状态保留，见[存储契约](storage.md#管理能力与健康)。非当前 schema 记录明确拒绝，不自动迁移或重开初始化。历史 schema 3 待初始化记录的 `setup.code` 只做插件级只读投影及启动／离线维护 CAS 清理，不新增核心迁移，也不改变 ready 用户格式或 ID。没有本地自助注册、空注册开关、邮件、MFA 或角色能力；未来如实现真实注册，必须提供默认关闭的开关。OIDC 首次登录开户使用默认关闭的插件级统一开关，连接无独立覆盖；Turnstile 默认关闭，启用后本地密码的 Cookie／Bearer 登录都须验证。完整认证数据和配置契约见 [user-auth](../../plugins/user-auth/README.md)。
 
 ## 路由保护与 Key 授权
 
@@ -101,7 +101,7 @@ master 故障时已经发送的流继续，但尚未登记的新预算 attempt �
 
 插件中心保留现有 BSwitch。依赖或 guard 不允许停用时开关 disabled，并给出依赖者、在途租约或未解除路由保护的原因；不改变基础组件样式。
 
-访问控制设置页包含 API Key 与路由访问，创建 Key 默认选择指定路由；保存授权保持路由公开状态不变。高级模型、请求限速和 Token 预算按各插件能力呈现。停用扩展可通过通用只读资源协议查看保留配置，启用并 ready 后才可修改。用户认证提供用户管理、第三方登录、Turnstile、一次性初始化、登录、改密、会话策略与退出；解除强制认证只提供本地停机入口。
+访问控制设置页包含 API Key 与路由访问，创建 Key 默认选择指定路由；保存授权保持路由公开状态不变。高级模型、请求限速和 Token 预算按各插件能力呈现。停用扩展可通过通用只读资源协议查看保留配置，启用并 ready 后才可修改。用户认证提供用户管理、第三方登录、Turnstile、首次账号初始化、登录、改密、会话策略与退出；解除强制认证只提供本地停机入口。
 
 core 不解释插件策略、账号表或额度字段；collection 和 extension DTO 读取只授予 `get/list`，不启动停用插件，也不授予写能力。Key 创建与撤销由访问控制插件 API 执行。
 
@@ -109,7 +109,7 @@ core 不解释插件策略、账号表或额度字段；collection 和 extension
 
 管理默认监听本地，可通过启动环境配置对外监听。对外使用 HTTPS 反向代理并配置公开 Origin、可信代理；内部 RPC 只监听 loopback。初始化原生参数为 `--initialize-config`；全局及 Route 配置不接受 `auth` 字段。
 
-普通配置导入／导出不替换 Key、管理员、会话或预算运行账本。涉及激活集合、认证选择或保护对象时，同样检查当前管理身份、完整依赖闭包及持久 guard。管理 guard 不进入普通导入导出。离线恢复要求整个实例停止并持 master／ingress 锁；用户认证使用 TTY 的签码、重置和解除动作，其他插件保留声明的结构化恢复协议。
+普通配置导入／导出不替换 Key、管理员、会话或预算运行账本。涉及激活集合、认证选择或保护对象时，同样检查当前管理身份、完整依赖闭包及持久 guard。管理 guard 不进入普通导入导出。离线恢复要求整个实例停止并持 master／ingress 锁；用户认证使用 TTY 的新增用户、按用户名改密、锚点管理员恢复和解除保护动作，其他插件保留声明的结构化恢复协议。
 
 物理整库备份包含运行状态。恢复必须核验备份时点的会话、Key 删除和预算账务，旧备份不能证明当前状态。
 

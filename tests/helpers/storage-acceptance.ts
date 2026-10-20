@@ -1,6 +1,5 @@
 import { waitUntil } from './gateway-runtime';
 import { runRecoveryInTerminal, identityRecoveryAnswers } from './recovery-terminal';
-import { prepareManagementInitialization } from './management-initialization';
 // Run after bun run build. Optional: --binary /absolute/executable
 import { chromium, type Request } from 'playwright';
 import { captureProcessIdentity, probeProcessIdentity } from '../../packages/core/src/master-runtime/process-identity';
@@ -64,13 +63,15 @@ upstream = Bun.serve({hostname:'127.0.0.1',port:0,fetch: async request => Respon
   {cwd:root,env,stdout:Bun.file(join(root,'init.log')),stderr:Bun.file(join(root,'init-error.log'))});
 if (await boundedExit(init, 20_000) !== 0) throw new Error('formal initialization failed: '+root);
   base = `http://127.0.0.1:${ports[1]}`;
-  const prepared = await prepareManagementInitialization(env.BUNGEE_CONFIG_DB_PATH, env.PLUGINS_DIR);
   await manager.start({workers:'1'}); started=true;
   await waitUntil(async () => {
     if (child?.exitCode !== null) throw new Error('master exited before setup readiness');
-    const response = await fetch(base + '/api/auth/setup');
+    const response = await fetch(base + '/api/plugins/user-auth/management-setup');
     return response.ok && (await response.json()).initialized === false;
   }, 'management setup did not become ready', 45000);
+  await wait();
+  const initialMode = await (await fetch(base + '/api/auth/mode')).json();
+  check(initialMode.mode === 'anonymous', 'initial management mode was not anonymous');
   browser = await chromium.launch({headless:true});
   const context = await browser.newContext({locale:'zh-CN'});
   await context.addInitScript(() => { if (location.protocol === 'http:' || location.protocol === 'https:') localStorage.setItem('locale','zh-CN'); });
@@ -109,24 +110,40 @@ if (await boundedExit(init, 20_000) !== 0) throw new Error('formal initializatio
     await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   };
   await page.route('https://fonts.googleapis.com/**',route=>route.fulfill({contentType:'text/css',body:''}));
+  const messages = (await Bun.file(resolve(import.meta.dir,'../../plugins/user-auth/manifest.json')).json()).translations['zh-CN'];
+  const activationMessages = (await Bun.file(resolve(import.meta.dir,'../../packages/ui/src/i18n/locales/zh-CN.json')).json()).pluginActivation;
   phase = 'setup';
-  await page.goto(base+'/#/setup');
-  await page.locator('input[autocomplete="off"]').waitFor();
-  await page.locator('input[autocomplete="off"]').fill(prepared.code);
-  await page.locator('input[autocomplete="username"]').fill(setup.username);
-  await page.locator('input[autocomplete="new-password"]').nth(0).fill(password);
-  await page.locator('input[autocomplete="new-password"]').nth(1).fill(password);
-  await page.locator('form button').click();
-  await page.waitForURL(base+'/#/login');
-  await page.locator('form[aria-busy="false"] button:not([type="button"]):enabled').waitFor();
-  check(page.url().endsWith('/#/login'),'setup did not return to login');
-  check((await context.request.get(base+'/api/config')).status()===401,'setup created an authenticated session');
+  await page.goto(base+'/#/plugins');
+  const authCard = page.locator('.plugin-management-card').filter({hasText:messages['metadata.name']});
+  await authCard.getByRole('switch').click();
+  const activationDialog = page.getByRole('dialog');
+  await activationDialog.locator('input[autocomplete="username"]').fill(setup.username);
+  await activationDialog.locator('input[autocomplete="new-password"]').nth(0).fill(password);
+  await activationDialog.locator('input[autocomplete="new-password"]').nth(1).fill(password);
+  const [enabled] = await Promise.all([
+    page.waitForResponse(response => new URL(response.url()).pathname === '/api/plugins/user-auth/enable' && response.request().method() === 'POST'),
+    activationDialog.locator('button[form="plugin-activation"]').click(),
+  ]);
+  check(enabled.status()===202,'management enable was not accepted '+enabled.status());
+  const accepted = await enabled.json();
+  check(Number.isSafeInteger(accepted.revision) && accepted.revision > 0 && typeof accepted.operation_id === 'string', 'management enable did not identify its committed revision');
+  let revision: number = accepted.revision;
+  await activationDialog.getByRole('button',{name:activationMessages.done,exact:true}).waitFor();
+  check((await context.cookies()).some(cookie => cookie.httpOnly),'management enable did not create an HttpOnly cookie');
+  const enabledSession = await context.request.get(base+'/api/auth/verify');
+  check(enabledSession.ok() && (await enabledSession.json()).success===true,'management enable did not establish a verified cookie session');
+  check((await context.request.get(base+'/api/config')).status()===200,'management enable did not authenticate browser configuration access');
+  await activationDialog.getByRole('button',{name:activationMessages.done,exact:true}).click();
+  await dashboardAction(() => page.getByTestId('app-header').getByRole('link',{name:'BUNGEE',exact:true}).click());
   const signed = await fetch(base+'/api/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:setup.username,password,transport:'bearer'})});
   const session = await signed.json(); if (typeof session.token === 'string') secrets.push(session.token); check(signed.ok && session.success,'plugin bearer login failed');
   const bearer = {authorization:'Bearer '+session.token};
-  await wait(bearer,prepared.revision);
+  await wait(bearer,revision);
+  check((await (await fetch(base+'/api/config',{headers:bearer})).json()).revision===revision,'management enable committed revision differs from configuration');
   check((await fetch(base+'/api/config')).status===401,'anonymous management access was accepted');
   phase = 'cookie-login';
+  await page.goto('about:blank');
+  await context.clearCookies();
   await page.goto(base+'/#/login');
   await page.locator('input[autocomplete="username"]').fill(setup.username);
   await page.locator('input[autocomplete="current-password"]').fill(password);
@@ -140,9 +157,12 @@ if (await boundedExit(init, 20_000) !== 0) throw new Error('formal initializatio
     services:[{id:serviceId,position:1,name:'acceptance',plugins:[],endpoints:[{id:endpointId,position:1,target:`http://127.0.0.1:${upstream!.port}`,weight:100,priority:1,is_disabled:false,plugins:[]}]}],
     routes:[{id:routeId,position:1,path:'/acceptance',service_id:serviceId,plugins:[]}]}};
   const saved = await fetch(base+'/api/config',{method:'PUT',headers:{...bearer,'content-type':'application/json'},
-    body:JSON.stringify({expected_revision:prepared.revision,mutation_id:crypto.randomUUID(),aggregate})});
+    body:JSON.stringify({expected_revision:revision,mutation_id:crypto.randomUUID(),aggregate})});
   check(saved.status===202,'route commit failed '+saved.status+' '+(saved.status===202?'':await saved.text()));
-  await wait(bearer,prepared.revision+1);
+  const routeAccepted = await saved.json();
+  check(Number.isSafeInteger(routeAccepted.revision) && routeAccepted.revision > revision,'route commit did not identify its committed revision');
+  revision = routeAccepted.revision;
+  await wait(bearer,revision);
   const requestBody={marker:crypto.randomUUID(),nested:{value:123}};
   const proxied=await fetch(`http://127.0.0.1:${ports[0]}/acceptance`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(requestBody)});
   const received=await proxied.json(); check(proxied.status===200 && received.message==='storage-acceptance' && JSON.stringify(received.payload)===JSON.stringify(requestBody),'real proxy payload mismatch');
@@ -152,10 +172,9 @@ if (await boundedExit(init, 20_000) !== 0) throw new Error('formal initializatio
   phase = 'restart';
   await manager.stop(); started=false;
   await manager.start({workers:'1'}); started=true;
-  await wait(bearer,prepared.revision+1); await dashboardAction(() => page.goto(base+'/#/'));
+  await wait(bearer,revision); await dashboardAction(() => page.goto(base+'/#/'));
   check((await context.request.get(base+'/api/config')).status()===200,'browser session lost after restart');
   check((await fetch(`http://127.0.0.1:${ports[0]}/acceptance`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(requestBody)})).status===200,'proxy failed after restart');
-  const messages = (await Bun.file(resolve(import.meta.dir,'../../plugins/user-auth/manifest.json')).json()).translations['zh-CN'];
   phase = 'password-revocation';
   const changedPassword=randomBytes(24).toString('base64url'); secrets.push(changedPassword);
   await page.goto(base+'/#/extensions/user-auth/profile');

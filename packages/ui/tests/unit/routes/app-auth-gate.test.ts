@@ -98,7 +98,7 @@ test('activation only blocks new management enablement without this bundle’s p
   expect(source).toContain('hasManagementLoginComponent(plugin.name, plugin.management.loginComponent)');
   expect(source).toMatch(/if \([^\n]*loginUnavailable[^\n]*\) return/);
   expect(source).toMatch(/disabled=\{[^}]*loginUnavailable/);
-  for (const removed of ['RecoveryHelp', 'passwordConfirmation', 'createAccount', '/auth/setup?plugin=']) expect(source).not.toContain(removed);
+  for (const removed of ['RecoveryHelp', 'createAccount', '/auth/setup?plugin=']) expect(source).not.toContain(removed);
   // Preserve identity verification, publication confirmation, accepted-operation recovery and disable flows.
   for (const existing of ['managementSetup:', 'await waitForMode()', 'await establishSession()', 'async function recover()', "stage = accepted ? 'acceptedIncomplete'"]) expect(source).toContain(existing);
 });

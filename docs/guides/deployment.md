@@ -29,7 +29,7 @@ CLI state lives under `~/.bungee/`:
 
 Storage Workers validate schema and migration prefixes before serving. The observation Worker selects and checks the journal mode using the SQLite runtime actually loaded by Bun; installing a separate sqlite3 CLI does not change that runtime. If an existing WAL database conflicts with the selected mode, startup fails before migrations. Stop the whole instance and back up SQLite side files before offline conversion; never delete a WAL file as a conversion method. See [storage contracts](../architecture/storage.md) and [journal selection](../../packages/core/src/access-database.ts).
 
-Management is anonymous and proxy routes are public by default. `bungee init` initializes storage and persists its encryption key. To protect management with 用户认证 (`user-auth`), stop the instance, run `bungee recover --plugin user-auth --action issue-setup-code` in a local terminal, then start and complete `/#/setup`. Use offline `release-auth` to explicitly restore anonymous management; online disabling, replacement, import or installed-provider failure cannot release protection. Startup automatically removes records for plugins absent from the installed catalog, including a removed management-provider selection; plugin business state is retained. Enable 访问控制 (`key-access`) separately to create Keys and explicitly protect routes. See [authentication](./authentication.md).
+Management is anonymous and proxy routes are public by default. `bungee init` initializes storage and persists its encryption key. To protect management with 用户认证 (`user-auth`), enable it in the plugin center and enter a username, password and password confirmation. The activation dialog creates the first account and establishes a verified Cookie session; existing accounts use password verification. If the provider is already selected but uninitialized, `/#/setup` creates the account and returns to login. Use offline `release-auth` to explicitly restore anonymous management; online disabling, replacement, import or installed-provider failure cannot release protection. Startup automatically removes records for plugins absent from the installed catalog, including a removed management-provider selection; plugin business state is retained. Enable 访问控制 (`key-access`) separately to create Keys and explicitly protect routes. See [authentication](./authentication.md).
 
 ## Docker Compose
 
@@ -42,7 +42,15 @@ docker compose ps
 docker compose logs -f bungee
 ```
 
-For management authentication, stop the original container and use a temporary interactive container with the same image, original volumes and environment; follow [offline initialization and recovery](offline-recovery.md). Do not run recovery against a running instance or an empty replacement volume.
+Enable management authentication online in the plugin center. For offline account recovery, stop the original container and use a temporary interactive container with the same image, original volumes and environment. The official image uses `/usr/app` as its working directory:
+
+```sh
+docker compose stop bungee
+docker compose run --rm -it --no-deps --entrypoint bun bungee packages/core/dist/main.js --recover /usr/app/data/bungee.db --plugin user-auth --action reset-password
+docker compose up -d bungee
+```
+
+Restart only after recovery succeeds. Use `add-user` to create an account or `reset` to recover the original administrator; see [offline recovery](offline-recovery.md). These actions do not enable the plugin or change the selected provider. Do not run recovery against a running instance or an empty replacement volume.
 
 The supplied compose file requires `BUNGEE_PLUGIN_SECRETS_KEY` for encrypted plugin credentials. It is separate from API Keys, which are created and revoked through their lifecycle API rather than a core token list. The compose file persists `/usr/app/data` and `/usr/app/logs`; it does not mount a configuration file. It publishes the public listener and binds management to host loopback by default.
 

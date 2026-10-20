@@ -97,10 +97,29 @@ test('generic prompts preserve plugin field names and secret flags without accou
 test('prompt protocol rejects reserved or duplicate fields before asking and bounds answers', async () => {
   let asked = false;
   const ask = async () => {asked = true; return '';};
-  for (const name of ['operation', '__proto__', 'constructor']) {
+  for (const name of ['__proto__', 'constructor', 'prototype']) {
     await expect(collectRecoveryAnswers([{name, label: 'Prompt', secret: false}], ask)).rejects.toThrow('invalid_recovery_prompts');
   }
   await expect(collectRecoveryAnswers([{name: 'a', label: 'A', secret: false}, {name: 'a', label: 'A', secret: true}], ask)).rejects.toThrow('invalid_recovery_prompts');
   expect(asked).toBe(false);
   await expect(collectRecoveryAnswers([{name: 'credential', label: 'Credential', secret: true}], async () => 'x'.repeat(8192))).rejects.toThrow('too_large');
+});
+
+
+test('answer budget applies to the declared fields without a host business envelope',async()=>{
+ const credential='x'.repeat(8175);
+ expect(await collectRecoveryAnswers([{name:'credential',label:'Credential',secret:true}],async()=>credential)).toEqual({credential});
+ await expect(collectRecoveryAnswers([{name:'credential',label:'Credential',secret:true}],async()=>credential+'x')).rejects.toThrow('too_large');
+});
+
+
+test('plugins may name an action field operation without a host-injected value',async()=>{
+ expect(await collectRecoveryAnswers([{name:'operation',label:'Operation',secret:false}],async()=>'plugin-choice')).toEqual({operation:'plugin-choice'});
+});
+
+
+test('an action may declare no input fields',async()=>{
+ let asked=false;
+ expect(await collectRecoveryAnswers([],async()=>{asked=true;return '';})).toEqual({});
+ expect(asked).toBe(false);
 });

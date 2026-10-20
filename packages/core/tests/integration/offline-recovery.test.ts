@@ -144,7 +144,7 @@ test('built local recovery reads stdin without logging rejected identity secrets
  }finally{await rm(dir,{recursive:true,force:true});}
 },15000);
 
-test('offline setup removes obsolete plugin records and preserves their business state',async()=>{
+test('offline recovery removes obsolete plugin activations and preserves their business state',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'bungee-recover-missing-'));const path=join(dir,'config.db');
  try{
   const repository=ConfigRepository.open(path);try{
@@ -158,11 +158,10 @@ test('offline setup removes obsolete plugin records and preserves their business
   }finally{repository.close();}
   const state=await PluginStateClient.open(join(dir,'plugin-state.db'),{initialize:true});
   try{await state.durableState('missing-provider').transact([{key:'retained',expectedVersion:0,value:{schema:1,example:true}}]);}finally{await state.close();}
-  const issued=await withTerminal(()=>recoverOfflineAction(path,{plugin:'user-auth',action:'issue-setup-code'})) as {code:string};
-  expect(issued.code.length).toBeGreaterThan(30);
+  await resetIdentity(path,'owner','Recovery password 123!','Restore management identity');
   const checked=ConfigRepository.open(path);try{
-   expect(checked.getSnapshot().aggregate.plugin_activations).toEqual([{plugin_name:'user-auth'}]);
-   expect(checked.getManagementProtection()).toMatchObject({required:true,selectedProvider:'user-auth'});
+   expect(checked.getSnapshot().aggregate.plugin_activations).toEqual([]);
+   expect(checked.getManagementProtection()).toMatchObject({required:false,selectedProvider:null});
    expect(checked.getDatabase().query("SELECT name FROM sqlite_master WHERE name IN ('api_keys','plugin_durable_records','secret_store_objects')").all()).toEqual([]);
   }finally{checked.close();}
   const preserved=await PluginStateClient.open(join(dir,'plugin-state.db'));
@@ -191,41 +190,70 @@ async function resetIdentity(path: string, username: string, password: string, r
  return result;
 }
 
-test('setup issuance resumes a protected checkpoint, rotates codes, and release preserves identity',async()=>{
- const dir=await mkdtemp(join(tmpdir(),'bungee-setup-offline-')),path=join(dir,'config.db');
+test('plugin-declared add-user and reset-password actions preserve protection and release-auth preserves identity',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'bungee-identity-actions-')),path=join(dir,'config.db');
  try{
   await initializeConfigurationDatabase({configDbPath:path});
-  // A stopped process may exit after configuration ACK and before opening plugin state.
+  const identity=await resetIdentity(path,'owner','Owner password 123!','Initial recovery') as {id:string};
   const checkpoint=ConfigRepository.open(path,{offline:true,compileOptions:{pluginSchemas:new Map(),managementProviders:new Set(['user-auth'])}});
-  let revision:number;
-  try{checkpoint.setManagementProviderOffline('user-auth','interrupted-issuance',Date.now());revision=checkpoint.getSnapshot().revision;expect(checkpoint.getManagementProtection()).toMatchObject({required:true,selectedProvider:'user-auth'});}finally{checkpoint.close();}
-  const first=await withTerminal(()=>recoverOfflineAction(path,{plugin:'user-auth',action:'issue-setup-code'})) as {code:string;expiresAt:number};
-  expect(first.code.length).toBeGreaterThan(30);expect(first.expiresAt).toBeGreaterThan(Date.now());
-  const confirmed=ConfigRepository.open(path);try{expect(confirmed.getSnapshot().revision).toBe(revision!+1);expect(confirmed.getManagementProtection()).toMatchObject({required:true,selectedProvider:'user-auth'});}finally{confirmed.close();}
-  const second=await withTerminal(()=>recoverOfflineAction(path,{plugin:'user-auth',action:'issue-setup-code'})) as {code:string};
-  expect(second.code).not.toBe(first.code);
-  const state=await PluginStateClient.open(join(dir,'plugin-state.db'));
-  try{const records=await state.durableState('user-auth').list();expect(JSON.stringify(records)).not.toContain(first.code);expect(JSON.stringify(records)).not.toContain(second.code);expect(await state.durableState('user-auth').get('setup')).not.toBeNull();}finally{await state.close();}
-  const password='a-secure-recovery-password';
-  const identity=await resetIdentity(path,'owner',password,'Operator recovery') as {id:string};
-  const ready=ConfigRepository.open(path);let readyRevision:number;try{readyRevision=ready.getSnapshot().revision;}finally{ready.close();}
-  await expect(withTerminal(()=>recoverOfflineAction(path,{plugin:'user-auth',action:'issue-setup-code'}))).rejects.toThrow('already_initialized');
-  const unchanged=ConfigRepository.open(path);try{expect(unchanged.getSnapshot().revision).toBe(readyRevision!);}finally{unchanged.close();}
+  let before!: {snapshot: ReturnType<ConfigRepository['getSnapshot']>; guard: ReturnType<ConfigRepository['getManagementProtection']>};
+  try{checkpoint.setManagementProviderOffline('user-auth','protect-recovery',Date.now());before={snapshot:checkpoint.getSnapshot(),guard:checkpoint.getManagementProtection()};}finally{checkpoint.close();}
+  const added=await withRecoveryTerminal(()=>recoverOfflineAction(path,{plugin:'user-auth',action:'add-user'}),[
+   {label:'Username',answer:'second'}, {label:'New password',answer:'Second password 123!'},
+   {label:'Confirm password',answer:'Second password 123!'},
+  ]);
+  expect(added.result).toMatchObject({username:'second'});expect(added.output).not.toContain('Second password 123!');
+  const reset=await withRecoveryTerminal(()=>recoverOfflineAction(path,{plugin:'user-auth',action:'reset-password'}),[
+   {label:'Username',answer:'second'}, {label:'New password',answer:'Changed password 123!'},
+   {label:'Confirm password',answer:'Changed password 123!'},
+  ]);
+  expect(reset.result).toMatchObject({username:'second'});expect(reset.output).not.toContain('Changed password 123!');
+  const unchanged=ConfigRepository.open(path);try{expect({snapshot:unchanged.getSnapshot(),guard:unchanged.getManagementProtection()}).toEqual(before);}finally{unchanged.close();}
   await withTerminal(()=>recoverOfflineAction(path,{plugin:'user-auth',action:'release-auth'}));
   const released=ConfigRepository.open(path);try{expect(released.getManagementProtection()).toMatchObject({required:false,selectedProvider:null});expect(released.getSnapshot().aggregate.plugin_activations).toEqual([]);}finally{released.close();}
-  const reopened=await PluginStateClient.open(join(dir,'plugin-state.db'));try{expect((await reopened.durableState('user-auth').get('recovery-anchor'))?.value).toEqual({schema:3,userId:identity.id});expect((await reopened.durableState('user-auth').get('user:'+identity.id))?.value).toMatchObject({schema:3,user:{id:identity.id,username:'owner'}});}finally{await reopened.close();}
+  const reopened=await PluginStateClient.open(join(dir,'plugin-state.db'));
+  try{expect((await reopened.durableState('user-auth').get('recovery-anchor'))?.value).toEqual({schema:3,userId:identity.id});expect((await reopened.durableState('user-auth').get('user:'+identity.id))?.value).toMatchObject({schema:3,user:{id:identity.id,username:'owner'}});}finally{await reopened.close();}
  }finally{await rm(dir,{recursive:true,force:true});}
 },20000);
 
-test.each(['issue-setup-code','reset','release-auth'] as const)('terminal %s rejects before creating storage',async action=>{
+test.each(['add-user','reset-password','reset','release-auth'] as const)('terminal %s rejects before creating storage',async action=>{
  const dir=await mkdtemp(join(tmpdir(),'bungee-nontty-')),path=join(dir,'config.db');
  const prior=Object.getOwnPropertyDescriptor(process.stdin,'isTTY');
  try{Object.defineProperty(process.stdin,'isTTY',{value:false,configurable:true});await expect(recoverOfflineAction(path,{plugin:'user-auth',action})).rejects.toThrow('requires_terminal');expect(await Bun.file(path).exists()).toBe(false);}
  finally{if(prior)Object.defineProperty(process.stdin,'isTTY',prior);else delete (process.stdin as any).isTTY;await rm(dir,{recursive:true,force:true});}
 });
 
-test.each(['issue-setup-code','reset','release-auth'] as const)('terminal %s holds the actual stopped-instance lock',async action=>{
+test.each(['add-user','reset-password','reset','release-auth'] as const)('terminal %s holds the actual stopped-instance lock',async action=>{
  const dir=await mkdtemp(join(tmpdir(),'bungee-action-lock-')),path=join(dir,'config.db');const lock=await acquireMasterInstanceLock(path+'.lock');
  try{await expect(withTerminal(()=>recoverOfflineAction(path,{plugin:'user-auth',action}))).rejects.toThrow('held');expect(await Bun.file(path).exists()).toBe(false);}
  finally{await lock.release();await rm(dir,{recursive:true,force:true});}
 });
+
+
+test('unregistered and dangerous actions fail without touching identity state',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'bungee-unknown-action-')),path=join(dir,'config.db');
+ try{
+  await initializeConfigurationDatabase({configDbPath:path});
+  for(const action of ['unknown-action','toString','issue-setup-code']) await expect(withTerminal(()=>recoverOfflineAction(path,{plugin:'user-auth',action}))).rejects.toThrow('offline_recovery_action_not_supported');
+  for(const action of ['constructor','__proto__','../reset','x'.repeat(65)]) await expect(withTerminal(()=>recoverOfflineAction(path,{plugin:'user-auth',action}))).rejects.toThrow('invalid_recovery_arguments');
+  const state=await PluginStateClient.open(join(dir,'plugin-state.db'));
+  try{expect(await state.durableState('user-auth').list()).toEqual([]);}finally{await state.close();}
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('offline reset repairs a ready namespace with a missing recovery user without starting the provider',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'bungee-ready-missing-user-')),path=join(dir,'config.db');
+ try{
+  await initializeConfigurationDatabase({configDbPath:path});
+  const initial=await resetIdentity(path,'lost-owner','Owner password 123!','Initial recovery') as {id:string};
+  const state=await PluginStateClient.open(join(dir,'plugin-state.db'));
+  try{
+   const own=state.durableState('user-auth'),user=(await own.get('user:'+initial.id))!;
+   await own.transact([{key:user.key,expectedVersion:user.version,value:null}]);
+   const control=createControl({signal:new AbortController().signal,durableState:own,secretStore:{} as never,storage:{} as never});
+   try{const failure=await control.start().catch(error=>error);expect(failure).toHaveProperty('message','corrupt_state');}finally{await control.dispose();}
+  }finally{await state.close();}
+  const repaired=await resetIdentity(path,'restored-owner','Restored password 123!','Restore missing recovery user');
+  expect(repaired).toMatchObject({id:initial.id,username:'restored-owner'});
+ }finally{await rm(dir,{recursive:true,force:true});}
+},15000);

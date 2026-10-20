@@ -53,6 +53,7 @@ test('current setup page resolves uncertain initialization and keeps late reads 
           if (request.method() === 'GET' && url.pathname === '/api/auth/login/options') return route.fulfill({json: {local: {enabled: true, turnstile: {enabled: false}}, methods: []}});
           if (url.pathname !== '/api/auth/setup' || !['GET','POST'].includes(request.method())) { errors.push(`Unexpected API ${request.method()} ${url.pathname}`); return route.fulfill({status:501,json:{error:'unexpected_fixture_request'}}); }
           if (request.method() === 'POST') {
+            expect(request.postDataJSON()).toEqual({username:'admin',password:'fixture setup password',passwordConfirmation:'fixture setup password'});
             initialized = true;
             if (scenario === 'ack-lost') return route.fulfill({ body: '{', contentType: 'application/json' });
             if (scenario === 'already-initialized') return route.fulfill({ status: 409, json: { error: 'already_initialized' } });
@@ -76,7 +77,6 @@ test('current setup page resolves uncertain initialization and keeps late reads 
         }
         await expect(form).toBeVisible();
         const fill = async () => {
-          await form.getByLabel('一次性初始化码', { exact: true }).fill('fixture-code');
           await form.getByLabel('账号', { exact: true }).fill('admin');
           await form.getByLabel('密码（5–32 个字符）', { exact: true }).fill('fixture setup password');
           await form.getByLabel('确认密码', { exact: true }).fill('fixture setup password');

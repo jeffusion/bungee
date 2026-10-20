@@ -1,7 +1,7 @@
 import {expect, test} from 'bun:test';
 import {Database} from 'bun:sqlite';
 import {PLUGIN_DURABLE_STATE_SCHEMA_SQL, PluginDurableStateStore} from '../../../../packages/core/src/plugin-durable-state';
-import {createControl, recoverIdentity, readManagementSetup, prepareInitialization} from '../../server/control';
+import {createControl, recoverIdentity, readManagementSetup, addUserOffline, resetUserPasswordOffline} from '../../server/control';
 const password = 'previous-owner-password-2026', nextPassword = 'recovered-owner-password-2026';
 function fixture() {
   const db = new Database(':memory:'); db.exec(PLUGIN_DURABLE_STATE_SCHEMA_SQL);
@@ -50,19 +50,19 @@ test('offline reset preserves valid identity, changes forgotten username, revoke
 test('runtime rejects missing/damaged state; only explicit local reset rebuilds it, never imports old namespace', async () => {
   const f=fixture();
   try {
-    await expect(createControl(f.host).start()).rejects.toThrow('corrupt_state');
+    const empty=createControl(f.host,{now:f.now});await empty.start();
     expect(await readManagementSetup(f.durableState)).toEqual({initialized:false});
-    expect(await f.durableState.list()).toEqual([]);
+    expect((await f.durableState.list()).map(r=>r.key).sort()).toEqual(['clock','setup']);
     const old=new PluginDurableStateStore(f.db).forNamespace('local-accounts');
     await old.transact([{key:'administrator',expectedVersion:0,value:{schema:3,administrator:{id:'old-secret-identity'}}}]);
     expect(await readManagementSetup(f.durableState)).toEqual({initialized:false});
-    expect(await f.durableState.list()).toEqual([]);
+    expect((await f.durableState.list()).map(r=>r.key).sort()).toEqual(['clock','setup']);
     await recoverIdentity(reset(),f);
     const identity=((await f.durableState.list()).find(r=>r.key.startsWith('user:')))!;
     expect(JSON.stringify(identity)).not.toContain('old-secret-identity');
     await f.durableState.transact([{key:identity.key,expectedVersion:identity.version,value:{schema: 3,user:{id:'damaged'}}}]);
     await expect(createControl(f.host).start()).rejects.toThrow('corrupt_state');
-    await expect(prepareInitialization(f)).rejects.toThrow('corrupt_state');
+    await expect(createControl(f.host).start()).rejects.toThrow('corrupt_state');
     await expect(readManagementSetup(f.durableState)).rejects.toThrow('corrupt_state');
     await expect(recoverIdentity({...reset(),passwordConfirmation:'mismatch'},f)).rejects.toThrow('password_confirmation');
     await recoverIdentity(reset('rebuilt'),f);
@@ -72,17 +72,59 @@ test('runtime rejects missing/damaged state; only explicit local reset rebuilds 
   } finally {f.db.close();}
 });
 
-test('reset consumes outstanding setup code and disabled identity keeps its id',async()=>{
+test('reset completes pending setup and disabled identity keeps its id',async()=>{
   const f=fixture();
   try{
-    const {code}=await prepareInitialization(f); await recoverIdentity(reset(),f);
+    await createControl(f.host,{now:f.now}).start(); await recoverIdentity(reset(),f);
     const control=createControl(f.host,{now:f.now}); await control.start();
-    expect((await control.initialize(new Request('https://example.com/setup',{method:'POST',headers:{origin:'https://example.com'},body:JSON.stringify({setupCode:code,username:'attacker',password,passwordConfirmation:password})}))).status).toBe(409);
+    expect((await control.initialize(new Request('https://example.com/setup',{method:'POST',headers:{origin:'https://example.com'},body:JSON.stringify({username:'attacker',password,passwordConfirmation:password})}))).status).toBe(409);
     const account=((await f.durableState.list()).find(r=>r.key.startsWith('user:')))!,value=account.value as any; value.user.disabled=true;
     await f.durableState.transact([{key:account.key,expectedVersion:account.version,value}]);
     expect(await control.hasIdentity()).toBe(false);
-    await expect(control.bootstrap({username:'owner',password})).rejects.toThrow('invalid_credentials');
+    await expect(control.bootstrap({operation:'verify',username:'owner',password})).rejects.toThrow('invalid_credentials');
     const result=await recoverIdentity(reset(),f); expect(result.id).toBe(value.user.id);
-    await expect(prepareInitialization(f)).rejects.toThrow('already_initialized');
+    await expect(control.bootstrap({operation:'initialize',username:'replacement',password,passwordConfirmation:password})).rejects.toThrow('already_initialized');
   } finally{f.db.close();}
+});
+
+test('offline add-user initializes an empty namespace and password reset does not create a missing target',async()=>{
+ const f=fixture();
+ try {
+  await expect(resetUserPasswordOffline({operation:'reset-password',username:'missing',password,passwordConfirmation:password},f)).rejects.toThrow('not_found');
+  expect(await f.durableState.list()).toEqual([]);
+  const user=await addUserOffline({operation:'add-user',username:'FIRST',password,passwordConfirmation:password},f);
+  expect(user).toMatchObject({username:'first',disabled:false,hasLocalPassword:true});
+  expect(await readManagementSetup(f.durableState)).toEqual({initialized:true});
+  expect((await f.durableState.get('recovery-anchor'))!.value).toEqual({schema:3,userId:user.id});
+  const control=createControl(f.host,{now:f.now});await control.start();expect((await control.login(request('first'))).status).toBe(200);
+ } finally {f.db.close();}
+});
+test.each([false,true])('anchor reset restores its original id after complete user deletion with other user present=%s',async withOther=>{
+ const f=fixture();
+ try {
+  const original=await recoverIdentity(reset(),f);
+  const other=withOther?await addUserOffline({operation:'add-user',username:'second',password,passwordConfirmation:password},f):undefined;
+  const before=other?await f.durableState.get('user:'+other.id):null;
+  f.db.query('DELETE FROM plugin_durable_records WHERE namespace = ? AND key = ?').run('user-auth','user:'+original.id);
+  await expect(createControl(f.host,{now:f.now}).start()).rejects.toThrow('corrupt_state');
+  const restored=await recoverIdentity(reset('rebuilt'),f);expect(restored.id).toBe(original.id);
+  if(other)expect(await f.durableState.get('user:'+other.id)).toEqual(before);
+  const control=createControl(f.host,{now:f.now});await control.start();expect((await control.login(request('rebuilt'))).status).toBe(200);
+  if(other)expect((await control.login(request('second'))).status).toBe(200);
+ } finally {f.db.close();}
+});
+
+test('anchor reset repairs raw user and credential tombstones with their CAS versions',async()=>{
+ const f=fixture();
+ try {
+  const original=await recoverIdentity(reset(),f);
+  const other=await addUserOffline({operation:'add-user',username:'second',password,passwordConfirmation:password},f);
+  const preserved=await f.durableState.get('user:'+other.id);
+  const user=(await f.durableState.get('user:'+original.id))!,credential=(await f.durableState.get('credential:'+original.id))!;
+  await f.durableState.transact([{key:user.key,expectedVersion:user.version,value:null},{key:credential.key,expectedVersion:credential.version,value:null}]);
+  const restored=await recoverIdentity(reset('rebuilt'),f);expect(restored.id).toBe(original.id);
+  expect((await f.durableState.get(user.key))!.version).toBe(user.version+2);expect((await f.durableState.get(credential.key))!.version).toBe(credential.version+2);
+  expect(await f.durableState.get('user:'+other.id)).toEqual(preserved);
+  const control=createControl(f.host,{now:f.now});await control.start();expect((await control.login(request('rebuilt'))).status).toBe(200);expect((await control.login(request('second'))).status).toBe(200);
+ } finally {f.db.close();}
 });
