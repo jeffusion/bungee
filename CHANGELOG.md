@@ -1,3 +1,10 @@
+## [6.0.3](https://github.com/jeffusion/bungee/compare/v6.0.2...v6.0.3) (2026-10-20)
+
+
+### Bug Fixes
+
+* **core:** register stopped-process signals before initialization ([c5405f6](https://github.com/jeffusion/bungee/commit/c5405f6013b3132a5f0c38c207e3a19d0fd455a9))
+
 ## [6.0.2](https://github.com/jeffusion/bungee/compare/v6.0.1...v6.0.2) (2026-10-19)
 
 
