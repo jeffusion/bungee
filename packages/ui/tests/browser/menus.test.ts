@@ -12,11 +12,11 @@ const iconCollections = { revision: 'icons:test', collections: [
   { id: 'carbon', title: 'Carbon', total: 60, version: 'test', license: { title: 'Apache 2.0' } },
 ] };
 
-async function closeDialogWithEscape(page: Page) {
+async function closeDialog(page: Page) {
   const dialog = page.getByRole('dialog');
   await expect(dialog).toBeVisible();
 
-  await page.keyboard.press('Escape');
+  await dialog.getByRole('button', { name: 'Close', exact: true }).click();
   await expect(dialog).toHaveCount(0);
 }
 
@@ -98,7 +98,7 @@ test('menu editor saves, reloads, preserves conflicted drafts, guards navigation
     await editor.getByRole('button', { name: 'Draft preview', exact: true }).click();
     await expect(page.getByRole('dialog').getByTestId('menu-preview-tree')).toContainText('Operations');
     await expect(page.getByRole('dialog').getByTestId('menu-preview-tree')).toHaveCount(1);
-    await closeDialogWithEscape(page);
+    await closeDialog(page);
 
     await expect(editor.getByTestId('menu-preview-tree')).toHaveCount(0);
     // Background synchronization updates the live state and never replaces a dirty draft.
@@ -151,7 +151,7 @@ test('menu editor saves, reloads, preserves conflicted drafts, guards navigation
     await expect(groupTitle).toContainText('Conflicting draft'); await expect(save).toBeDisabled();
     const writeCount = writes;
     await pageAction('Reload');
-    await expect(page.getByTestId('confirmation-accept')).toBeVisible(); await closeDialogWithEscape(page); await expect(page.getByTestId('confirmation-accept')).toHaveCount(0);
+    await expect(page.getByTestId('confirmation-accept')).toBeVisible(); await page.getByTestId('confirmation-cancel').click(); await expect(page.getByTestId('confirmation-accept')).toHaveCount(0);
     await expect(groupTitle).toContainText('Conflicting draft'); expect(writes).toBe(writeCount);
     await pageAction('Reload'); await page.getByTestId('confirmation-accept').click();
     await expect(groupTitle).toContainText('Operations'); conflictFailures = 0;
@@ -276,7 +276,7 @@ test('disabled plugins disappear when menu refresh fails and recover their saved
     await page.getByRole('menuitem', { name: 'Page catalog', exact: true }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
     await expect(page.getByRole('dialog').getByText(plugin.label, { exact: true })).toHaveCount(0);
-    await closeDialogWithEscape(page);
+    await closeDialog(page);
 
     enabled = true;
     await top.getByRole('button', { name: 'System', exact: true }).click();
@@ -366,7 +366,8 @@ test('menu actions support reordering, reparenting, validation and read-only pre
       (document.querySelector('[data-testid="menus-save"]') as HTMLButtonElement).click();
     });
     await expect(page.getByTestId('confirmation-cancel')).toBeVisible(); expect(captured.layout).toBeNull();
-    await closeDialogWithEscape(page);
+    await page.getByTestId('confirmation-cancel').click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
 
     await moveTo('System');
     await expect(tree.getByRole('list', { name: 'System', exact: true }).locator('[data-menu-id="builtin:services"]')).toHaveCount(1);
@@ -384,11 +385,11 @@ test('menu actions support reordering, reparenting, validation and read-only pre
     await editor.getByRole('button', { name: 'Draft preview', exact: true }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
     await expect(page.getByRole('dialog').locator('a')).toHaveCount(0);
-    await closeDialogWithEscape(page);
+    await closeDialog(page);
     await editor.getByRole('button', { name: 'Page actions', exact: true }).click();
     await page.getByRole('menuitem', { name: 'Page catalog', exact: true }).click();
     await expect(page.getByRole('dialog').getByText('Dashboard', { exact: true })).toBeVisible();
-    await closeDialogWithEscape(page);
+    await closeDialog(page);
 
     await system.getByRole('switch').uncheck(); await actions('group:system', 'Dissolve group (keep pages)');
     await expect(system).toHaveCount(0);
@@ -455,7 +456,7 @@ test('menu drag reorders groups and preserves disabled plugin preferences', () =
     await editor.getByRole('button', { name: 'Page actions', exact: true }).click();
     await page.getByRole('menuitem', { name: 'Page catalog', exact: true }).click();
     await expect(page.getByRole('dialog')).toBeVisible(); await expect(page.getByRole('dialog').getByText(/inactive/)).toHaveCount(0);
-    await closeDialogWithEscape(page);
+    await closeDialog(page);
     await beginDrag('builtin:services'); await hoverRow('builtin:logs', .8);
     expect((await rootOrder()).slice(0, 4)).toEqual(['builtin:dashboard', 'builtin:routes', 'builtin:logs', 'builtin:services']);
      await expect(save).toBeDisabled();

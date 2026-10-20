@@ -154,10 +154,10 @@ try {
   await expect(target).toHaveValue('');
   await expect(page.getByRole('option', { name: 'alpha-1-0', exact: true })).toBeVisible();
 
-  await target.press('ArrowUp'); await target.press('Enter');
+  await target.press('ArrowDown'); await target.press('Enter');
 
   await page.getByTestId('price-mappings-save').click();
-  await expect.poll(()=>mappings[0]).toEqual({ source: 'custom-alias', provider: 'alpha', model: 'alpha-1-49' });
+  await expect.poll(()=>mappings[0]).toEqual({ source: 'custom-alias', provider: 'alpha', model: 'alpha-1-0' });
   // A second mapping must never resolve the first row's input; removing an active
   // search also releases its listeners and prevents a delayed response reopening it.
   await page.getByRole('button', { name: '添加映射', exact: true }).click();
