@@ -10,6 +10,8 @@ test('Token statistics query ranges, model sorting and refresh failures recover 
     await page.goto(`${runtime.origin}/#/extensions/token-stats${tokenManifest.contributes.navigation[0].path}`);
     await expect(page.getByTestId('token-stats-page')).toBeVisible();
     const rangeSelect = page.getByRole('combobox', { name: '时间范围' });
+    const refresh = page.getByRole('button', { name: '刷新', exact: true });
+    await expect(refresh).toBeEnabled();
 
     await rangeSelect.click();
 
@@ -23,6 +25,7 @@ test('Token statistics query ranges, model sorting and refresh failures recover 
 
       await expect.poll(() => nativeRequests.some(query => query.includes(`range=${range}`) && query.includes('groupBy=model'))).toBe(true);
       await expect.poll(() => nativeRequests.some(query => query.includes(`range=${range}`) && query.includes('groupBy=time'))).toBe(true);
+      await expect(refresh).toBeEnabled();
     }
     for (const calendarRange of ['day', 'week', 'month']) {
       expect(nativeRequests.some(query => query.includes(`range=${calendarRange}`) && query.includes('timeZone=Asia%2FShanghai'))).toBe(true);
