@@ -3,6 +3,7 @@ import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 import { expect } from 'playwright/test';
 import { chromium, type Browser } from 'playwright';
 import { collectApiEvidence } from '../helpers/editors/api-evidence';
+import { recordResponseDelivery } from '../helpers/editors/response-delivery';
 import { strict as assert } from 'node:assert';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
 import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
@@ -26,6 +27,7 @@ const results: object[] = [];
     try {
     await context.addInitScript(language => localStorage.setItem('locale', language), locale);
     const page = await context.newPage();
+    await recordResponseDelivery(page, '/api/config/runtime');
     // Recovery behavior does not depend on a remote font service.
     await page.route('https://fonts.googleapis.com/**', route => route.fulfill({status:200,contentType:'text/css',body:''}));
     const evidenceApi=collectApiEvidence(page);
@@ -36,6 +38,12 @@ const results: object[] = [];
     let posts = 0;
     let deniedRetries = 0;
     let runtimeReads = 0;
+    // Advancing the frozen clock is valid only after the current read has settled
+    // and the store has registered its next poll in the response continuation.
+    const waitForRuntimeDelivery = async () => {
+      await expect.poll(() => page.evaluate(() => (window as any).editorResponseDelivery.requests
+        .filter((entry: { delivered: boolean }) => entry.delivered).length)).toBe(runtimeReads);
+    };
     await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
       const request = route.request();
       const path = new URL(request.url()).pathname;
@@ -84,7 +92,7 @@ const results: object[] = [];
     await alert.waitFor();
 
     await retry.focus();
-
+    const readsBeforeDeniedRetry = runtimeReads;
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => document.querySelector('[data-testid="publication-recovery-error"]') !== null);
     assert.equal(posts, 0);
@@ -92,22 +100,30 @@ const results: object[] = [];
     assert.equal(runtime.publication.recovery?.state, 'stopped');
     await retry.waitFor();
     await page.waitForFunction(() => (document.querySelector('[data-testid="publication-retry-button"]') as HTMLButtonElement)?.disabled === false);
+    await expect.poll(() => runtimeReads).toBe(readsBeforeDeniedRetry + 1);
+    await waitForRuntimeDelivery();
     await retry.focus();
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => (document.querySelector('[data-testid="publication-retry-button"]') as HTMLButtonElement)?.disabled === true);
     await expect.poll(()=>posts).toBe(1);
+    const readsBeforeRetry = runtimeReads;
     releaseRetry();
+    await expect.poll(() => runtimeReads).toBe(readsBeforeRetry + 1);
+    await waitForRuntimeDelivery();
     await retry.waitFor({ state: 'hidden' });
     assert.equal(posts, 1);
     const reads = runtimeReads;
     await page.clock.runFor(999);
     assert.equal(runtimeReads, reads, 'active recovery does not poll before one second');
     await page.clock.runFor(1);
-    await expect.poll(() => runtimeReads).toBeGreaterThan(reads);
+    await expect.poll(() => runtimeReads).toBe(reads + 1);
+    await waitForRuntimeDelivery();
 
     runtime = configurationRuntimeFixture({ ...runtime.publication, serving_complete: true,
       serving_revision: 8, recovery: { ...runtime.publication.recovery!, state: 'succeeded', final_reason_code: 'target_serving' } });
     await page.clock.runFor(1000);
+    await expect.poll(() => runtimeReads).toBe(reads + 2);
+    await waitForRuntimeDelivery();
     await alert.waitFor({ state: 'hidden', timeout: 3000 });
     assert.equal(await retry.count(), 0);
 
