@@ -1,3 +1,10 @@
+# [6.1.0](https://github.com/jeffusion/bungee/compare/v6.0.4...v6.1.0) (2026-10-20)
+
+
+### Features
+
+* **auth:** initialize administrators online and add recovery actions ([064cf2f](https://github.com/jeffusion/bungee/commit/064cf2f2badfeaf482298b410f78f16689fd1d57))
+
 ## [6.0.4](https://github.com/jeffusion/bungee/compare/v6.0.3...v6.0.4) (2026-10-20)
 
 
