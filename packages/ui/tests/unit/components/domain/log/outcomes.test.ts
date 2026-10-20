@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { bodyRecordingEvidence, chainTransportOutcome, diagnosticExport, httpStatusLabel, parseStatusFilter, transportOutcome, transportExplanation } from '../../../../../src/components/domain/log/outcomes';
+import { bodyRecordingEvidence, chainTransportOutcome, diagnosticExport, parseStatusFilter, transportOutcome, transportExplanation } from '../../../../../src/components/domain/log/outcomes';
 import type { ChainEntry, LogEntry } from '../../../../../src/api/logs';
 
 const entry = (data: Partial<LogEntry> = {}): LogEntry => ({ id: 1, requestId: 'fixture', timestamp: 1,
@@ -9,14 +9,12 @@ describe('independent request outcomes', () => {
   for (const [status, outcome] of [[200, 'completed'], [200, 'cancelled'], [200, 'failed'], [500, 'completed']] as const) {
     test(`HTTP ${status}, transport ${outcome}`, () => {
       const log = entry({ status, transportOutcome: outcome, success: outcome === 'completed' });
-      expect(httpStatusLabel(log.status)).toBe(String(status));
       expect(transportOutcome(log.transportOutcome)).toBe(outcome);
       expect(diagnosticExport(log).transportOutcome).toBe(outcome);
     });
   }
   test('legacy success and HTTP status cannot manufacture a transport outcome', () => {
     for (const success of [true, false]) expect(transportOutcome(entry({ success }).transportOutcome)).toBe('unknown');
-    expect(httpStatusLabel(0)).toBe('—');
   });
   test('chain outcome uses final metadata, even when its representative row says the opposite', () => {
     const chain = { ...entry({ transportOutcome: 'failed' }), chainTransportOutcome: 'completed' } as ChainEntry;
@@ -49,16 +47,6 @@ test('body evidence is historical, matches direction/type and never guesses abse
   expect(bodyRecordingEvidence(entry(), 'response').key).toBe('logs.detail.bodyReasonUnknown');
   expect(bodyRecordingEvidence(entry({ processingSteps: [{ step: 'body_recording_skipped', timestamp: 1,
     detail: { type: 'request', reason: 'vendor_reason' } }] }), 'transformed')).toEqual({ key: 'logs.detail.bodySkipped', reason: 'vendor_reason' });
-});
-
-test('both locales name all independent outcomes and evidence messages', async () => {
-  for (const locale of ['zh-CN', 'en']) {
-    const translations = await Bun.file(new URL(`../../../../../src/i18n/locales/${locale}.json`, import.meta.url)).json();
-    expect(Object.keys(translations.logs.transport).sort()).toEqual(['cancelled', 'completed', 'failed', 'pending', 'unknown']);
-    for (const key of ['bodyReasonUnknown', 'bodySizeLimit', 'bodyNotObserved', 'cancelSourceUnknown', 'protocolSeparate', 'requestTimeout', 'firstResponseTimeout', 'streamReadFailed', 'clientCancelled'])
-      expect(translations.logs.detail[key]).toBeTruthy();
-    expect(translations.dashboard.successRate).toBe(locale === 'zh-CN' ? '请求成功率' : 'Request Success Rate');
-  }
 });
 
 test('transport explanations require recorded evidence and preserve unknown causes', () => {

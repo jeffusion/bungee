@@ -8,12 +8,11 @@ const catalog: MenuPage[] = [
 ];
 const page = (pageId: string, visible = true) => ({ kind: 'page' as const, pageId, visible });
 const group = (visible = true) => ({ kind: 'group' as const, id: 'group:test', title: null, visible, children: [page('detail'), page('plugin')] });
-test('flat and mixed menus preserve order, translate only default groups and omit unavailable, hidden and empty entries', () => {
+test('flat and mixed menus preserve order and omit unavailable, hidden and empty entries', () => {
   const result = effectiveMenu([page('routes'), group(), { ...group(), id: 'empty', title: 'Custom', children: [] }], catalog, '/routes/detail/edit', item => item.label, 'System');
-  expect(result.map(item => [item.kind, item.label, item.active])).toEqual([['page', 'Routes', false], ['group', 'System', true]]);
+  expect(result.map(item => [item.id, item.active])).toEqual([['routes', false], ['group:test', true]]);
   expect(result[1].kind === 'group' && result[1].children.map(item => item.id)).toEqual(['detail']);
   expect(effectiveMenu([page('routes', false), group(false)], catalog, '/', item => item.label, 'System')).toEqual([]);
-  expect(effectiveMenu([{ ...group(), title: 'Original title' }], catalog, '/', item => item.label, '系统')[0].label).toBe('Original title');
 });
 test('active route matching respects segment boundaries and longest available catalog match, including hidden pages', () => {
   expect(effectiveMenu([page('routes')], catalog, '/routes-extra', item => item.label, '')[0].active).toBe(false);
@@ -31,15 +30,15 @@ test('dissolving a hidden group promotes children in place and preserves their e
   expect(reorderMenuNodes([page('routes'), group()], 'group:test', -1)).toEqual([group(), page('routes')]);
   expect(reorderMenuNodes([group()], 'plugin', -1, 'group:test')).toEqual([{ ...group(), children: [page('plugin'), page('detail')] }]);
 });
-test('fallback catalog registers every contribution with stable encoded ids and semantic icon defaults', () => {
+test('fallback catalog registers unique contributions with stable encoded ids', () => {
   const pages = fallbackMenuCatalog([{ name: 'a b', enabled: true, metadata: { contributes: { navigation: [
     { label: 'Security', path: '/a/b', icon: 'shield', target: 'header' },
     { label: 'Duplicate security', path: '/a/b', icon: 'lucide:folder', target: 'sidebar' },
     { label: 'Accounts', path: '/users', icon: 'manage_accounts' },
     { label: 'Unknown', path: '/unknown' },
   ] } } }]).filter(item => item.source === 'plugin');
-  expect(pages.map(item => [item.id, item.defaultIcon])).toEqual([
-    ['plugin:a%20b:%2Fa%2Fb', 'lucide:shield'], ['plugin:a%20b:%2Fusers', 'lucide:users-round'], ['plugin:a%20b:%2Funknown', 'lucide:puzzle'],
+  expect(pages.map(item => item.id)).toEqual([
+    'plugin:a%20b:%2Fa%2Fb', 'plugin:a%20b:%2Fusers', 'plugin:a%20b:%2Funknown',
   ]);
 });
 

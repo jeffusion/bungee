@@ -27,8 +27,6 @@ export async function connectQuota(page: Page, origin: string, initiallyEnabled 
   const failingRefs = new Map<string, number>();
   const spoofed = { ...manifest.contributes.nativeWidgets[0], props: { pluginName: 'forged-owner', selectedRange: 'forged-range', onHeaderChange: 'forged-callback', summary: 'FORGED SUMMARY' } };
   let active = 0, maxActive = 0, holdUsage = false;
-  let holdLocale = false;
-  const localeReleases: Array<() => void> = [];
   const usageReleases: Array<() => void> = [];
   const apiRefs: string[] = [];
   const names = ['Personal', 'long.account.name@production.workspace.example.test', 'Stale snapshot', 'No windows', 'Unavailable quota', 'Disabled account', 'Reauth account', 'Malformed quota', 'Unknown percent', 'Usage count fallback'];
@@ -53,7 +51,6 @@ export async function connectQuota(page: Page, origin: string, initiallyEnabled 
       unexpected.push(`External resource: ${request.url()}`); return route.abort();
     }
     if (request.method() !== 'GET') { posts++; unexpected.push(`${request.method()} ${url.pathname}`); return route.abort(); }
-    if (holdLocale && /\/i18n\/locales\/(en|zh-CN)\.json$/.test(url.pathname)) await new Promise<void>(resolve => localeReleases.push(resolve));
     if (!url.pathname.startsWith('/api/')) return route.continue();
     const respond = (body: unknown) => route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
     if (url.pathname === '/api/plugins') return respond([
@@ -96,12 +93,6 @@ export async function connectQuota(page: Page, origin: string, initiallyEnabled 
   const panel = page.locator('article').filter({ has: widget });
   const refresh = () => panel.locator('header').getByRole('button');
   const ready = () => refresh().and(page.locator('[aria-busy="false"]')).waitFor();
-  const setViewport = async (width: number) => {
-    await page.setViewportSize({ width, height: 900 });
-    // Crossing the dashboard breakpoint replaces the card and widget instance.
-    await page.locator(width < 768 ? '.dashboard-mobile-card' : '.grid-stack-item')
-      .filter({ has: widget }).waitFor({ state: 'visible' });
-  };
 
  await page.goto(base); await page.getByTestId('page-dashboard').waitFor();
  if (initiallyEnabled) { await widget.waitFor(); await ready(); }
@@ -109,7 +100,7 @@ export async function connectQuota(page: Page, origin: string, initiallyEnabled 
  const rows = () => widget.getByTestId('quota-account');
  const assertClean = () => { network.assertSettled(); assert.equal(posts, 0); assert.deepEqual(unexpected, []); assert.deepEqual(errors, []); };
  return { base, manifest, widget, panel, refresh, ready, rows, accounts, usages, failingRefs, errors, unexpected,
- setViewport, assertClean, expectUsageAborts: (action: () => Promise<unknown>) => network.expectAborts([...activeUsageRequests], action), usageReleases, localeReleases,
+ assertClean, expectUsageAborts: (action: () => Promise<unknown>) => network.expectAborts([...activeUsageRequests], action), usageReleases,
 get enabled() { return enabled; }, set enabled(value: typeof enabled) { enabled = value; },
 get count() { return count; }, set count(value: typeof count) { count = value; },
 get malformedList() { return malformedList; }, set malformedList(value: typeof malformedList) { malformedList = value; },
@@ -120,7 +111,6 @@ get posts() { return posts; }, set posts(value: typeof posts) { posts = value; }
 get peer() { return peer; }, set peer(value: typeof peer) { peer = value; },
 get active() { return active; }, set active(value: typeof active) { active = value; },
 get maxActive() { return maxActive; }, set maxActive(value: typeof maxActive) { maxActive = value; },
-get holdUsage() { return holdUsage; }, set holdUsage(value: typeof holdUsage) { holdUsage = value; },
-get holdLocale() { return holdLocale; }, set holdLocale(value: typeof holdLocale) { holdLocale = value; }
+get holdUsage() { return holdUsage; }, set holdUsage(value: typeof holdUsage) { holdUsage = value; }
  };
 }

@@ -1,6 +1,5 @@
 <script lang="ts">
   import Dashboard from '$lib/routes/Dashboard.svelte';
-  import Widget from '@plugins/chatgpt-oauth/ui/ChatgptQuotaWidget.svelte';
   import { isLoading } from 'svelte-i18n';
   import { pluginList, refreshPlugins } from '$stores/plugins';
   import { onMount } from 'svelte';
@@ -13,7 +12,6 @@
   nativeWidgetRegistry.ChatgptQuotaWidget = QuotaPropsProbe as any;
   nativeWidgetRegistry.TokenStatsChart = QuotaPeerProbe as any;
   let mounted = $state(true);
-  const race = new URLSearchParams(location.search).has('race');
   onMount(() => {
     Object.assign(window, { unmountDashboard: () => mounted = false, refreshTestPlugins: refreshPlugins,
       testRuntimeStatus: () => get(publicationRecovery).readStatus,
@@ -23,5 +21,5 @@
   });
 </script>
 {#if mounted}
-  {#if race}<Widget onHeaderChange={header => (window as any).raceHeader = header} />{:else if !$isLoading}<Dashboard />{/if}
+  {#if !$isLoading}<Dashboard />{/if}
 {/if}

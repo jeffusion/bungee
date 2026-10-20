@@ -2,7 +2,6 @@ import { afterAll, beforeAll } from 'bun:test';
 import { chromium, type Browser, type Page } from 'playwright';
 import { expect } from 'playwright/test';
 import { resolve } from 'node:path';
-import oauthManifest from '../../../../../plugins/chatgpt-oauth/manifest.json';
 import {collectApiEvidence} from './api-evidence';
 import { startUiRuntime } from '../../../../../tests/helpers/ui-runtime';
 
@@ -27,8 +26,7 @@ export function editorFixture(scenarios: string[]) {
         if (request.method() === 'GET' && path === '/api/plugins/schemas') return route.fulfill({ json: {
           'fixture-plugin': { name: 'fixture-plugin', configSchema: [{ name: 'visible', type: 'string', label: 'Visible' }] },
         } });
-        if (request.method() === 'GET' && path === '/api/plugins') return route.fulfill({ json: scenario === 'endpoint' ? [{name:'chatgpt-oauth',enabled:true,metadata:{contributes:oauthManifest.contributes}}] : [{ name: 'fixture-plugin', enabled: true }] });
-        if(scenario === 'endpoint' && request.method() === 'GET' && ['/api/plugins/chatgpt-oauth/control/accounts','/api/plugins/chatgpt-oauth/control/accounts/codex'].includes(path)) return route.fulfill({json:{accounts:[{id:'account-1',label:'Primary',available:true}]}});
+        if (request.method() === 'GET' && path === '/api/plugins') return route.fulfill({ json: [{ name: 'fixture-plugin', enabled: true }] });
         if (scenario === 'service' && request.method() === 'GET' && path === '/api/runtime/upstreams') return route.fulfill({json:{schema:'bungee-runtime-upstreams-v1',generated_at:Date.now(),availability:'complete',reason:null,admission:{revision:1},workers:{observed:[],missing:[]},upstreams:[]}});
         if (request.method() === 'GET' && path === '/api/config') return route.fulfill({ json: { revision: 1, content_hash: `sha256:${'a'.repeat(64)}`,
           config: { plugin_activations: [], logical_configuration: { routes: [], services: [], plugins: [] } } } });

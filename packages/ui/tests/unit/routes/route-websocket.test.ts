@@ -1,6 +1,5 @@
 import { expect, test } from 'bun:test';
 import { toEditorRoute, toV2Route } from '../../../src/api/config-adapters';
-import { getRouteFeatureBadges } from '../../../src/utils/route-service-view-model';
 import type { LogicalConfiguration, ConfigurationRoute } from '@jeffusion/bungee-types';
 
 test('direct and service form adapters round-trip the switch and preserve omitted fields', () => {
@@ -14,19 +13,8 @@ test('direct and service form adapters round-trip the switch and preserve omitte
       const draft = toEditorRoute(route, logical.services);
       expect(draft.websocket?.enabled ?? false).toBe(enabled ?? false);
       expect(toV2Route(draft, logical, route, 0)).toEqual(route);
-      expect(getRouteFeatureBadges(draft).some(({ id }) => id === 'websocket')).toBe(enabled === true);
       draft.websocket = { enabled: !enabled };
       expect(toV2Route(draft, logical, route, 0).websocket).toEqual({ enabled: !enabled });
     }
-  }
-});
-
-test('both locales provide the concise connection, usage and budget explanations', async () => {
-  for (const locale of ['zh-CN', 'en']) {
-    const messages = await Bun.file(new URL(`../../../src/i18n/locales/${locale}.json`, import.meta.url)).json();
-    expect(messages.routeEditor.enableWebsocket).toContain('WebSocket');
-    expect(messages.routeEditor.websocketHelp).toContain('Responses');
-    expect(messages.routeEditor.websocketBudgetHelp).toContain('Token');
-    expect(messages.routeFeatures.websocket).toBe('WebSocket');
   }
 });

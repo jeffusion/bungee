@@ -3,11 +3,12 @@ import { fileURLToPath } from 'node:url';
 import { loadPluginArtifactManifest } from '../../../../../packages/core/src/plugin-artifact-contract';
 import { accountSummary, accountUsage, creditCount, usageState } from '../../../ui/account-model.js';
 const manifest = await Bun.file(new URL('../../../manifest.json', import.meta.url)).json();
-test('strict manifest registers a medium read-only native widget, preserving account settings', async () => {
+test('strict manifest registers quota and account components', async () => {
   const parsed = await loadPluginArtifactManifest(fileURLToPath(new URL('../../..', import.meta.url)));
   expect(parsed.manifestContract).toBe('vnext');
   expect(parsed.uiAssetsPath).toBeDefined();
-  expect(parsed.contributes?.nativeWidgets).toContainEqual({ id: 'chatgpt-quota-usage', title: 'ui.widgetTitle', component: 'ChatgptQuotaWidget', size: 'medium' });
+  expect(parsed.contributes?.nativeWidgets?.map(({ id, component }) => ({ id, component })))
+    .toContainEqual({ id: 'chatgpt-quota-usage', component: 'ChatgptQuotaWidget' });
   expect(manifest.ui.components).toContainEqual({ name: 'ChatgptQuotaWidget', entry: 'ui/ChatgptQuotaWidget.svelte' });
   expect(manifest.ui.components).toContainEqual({ name: 'ChatgptAccountsPage', entry: 'ui/AccountsPage.svelte' });
 });

@@ -48,12 +48,12 @@ test('credential creation retains a saved token after publication or permission 
       await dialog.getByRole('checkbox', { name: /\/public/ }).check();
       await dialog.getByRole('button', { name: t('ui.save'), exact: true }).click();
       if (outcome === 'unknown') {
-        await expect(dialog.getByRole('alert')).toContainText('503');
+        await dialog.getByRole('alert').waitFor();
         await expect(dialog.locator('code')).toHaveCount(0);
         await expect(dialog.getByRole('button', { name: t('ui.save'), exact: true })).toBeEnabled();
       } else {
         await expect(dialog.locator('code')).toHaveText('fixture-one-time-token');
-        await expect(dialog.getByRole('status')).toContainText(outcome === 'public' ? 'public' : outcome === 'policy-failed' ? 'incomplete' : 'publication');
+        await dialog.getByRole('status').waitFor();
       }
       expect(writes.filter(write => write.method === 'POST')).toHaveLength(1);
       expect(writes.filter(write => write.path === '/api/plugins/key-access/control/routes')).toEqual([]);

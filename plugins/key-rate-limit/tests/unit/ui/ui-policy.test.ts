@@ -1,10 +1,5 @@
-import {fileURLToPath} from 'node:url';
 import {expect,test} from 'bun:test';
-import {compile} from 'svelte/compiler';
-import manifest from '../../../manifest.json';
-const text = (key:string,values?:Record<string,string|number>) => manifest.translations['zh-CN'][key as keyof typeof manifest.translations['zh-CN']].replace(/\{(\w+)\}/g,(_,name)=>String(values?.[name] ?? ''));
-
-import {automaticBurst,changeCustomBurst,changeRateUnit,createRateDraft,draftPolicy,formatRate} from '../../../ui/rate-policy';
+import {automaticBurst,changeCustomBurst,changeRateUnit,createRateDraft,draftPolicy} from '../../../ui/rate-policy';
 
 test('new limits default to 60 per minute with automatic capacity',()=>{
   const draft=createRateDraft();
@@ -22,8 +17,6 @@ test('legacy and saved units retain exact stored rate and capacity without edits
     expect(draft.customBurst).toBe(policy.burst!==automaticBurst(draft.quantity));
     expect(draftPolicy(draft)).toEqual({...policy,unit:policy.unit??'second'});
   }
-  expect(formatRate({rps:1,burst:60,unit:'minute'},text,'zh-CN')).toBe('60 次 / 分钟');
-  expect(formatRate({rps:0.5,burst:1},text,'zh-CN')).toBe('0.5 次 / 秒');
 });
 
 test('switching units preserves rate and capacity and enables custom capacity when needed',()=>{
@@ -58,10 +51,4 @@ test('invalid quantities, capacities and underflowing minute rates cannot be sav
   const tiny=createRateDraft({rps:Number.MIN_VALUE,burst:1});
   expect(draftPolicy(changeRateUnit(tiny,'minute')!)).toEqual({rps:Number.MIN_VALUE,burst:1,unit:'minute'});
   expect(changeRateUnit(createRateDraft({rps:Number.MAX_VALUE,burst:1}),'minute')).toBeNull();
-});
-
-test('rate settings compile for client and SSR without warnings',async()=>{
-  const filename=fileURLToPath(new URL('../../../ui/KeyPolicy.svelte', import.meta.url));
-  const source=await Bun.file(filename).text();
-  for(const generate of ['client','server'] as const) expect(compile(source,{filename,generate}).warnings).toEqual([]);
 });

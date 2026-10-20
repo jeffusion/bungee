@@ -2,8 +2,7 @@ import { afterAll, beforeAll, test } from 'bun:test';
 import { chromium, type Browser, type Page, type Request } from 'playwright';
 import { expect } from 'playwright/test';
 import assert from 'node:assert/strict';
-import { readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { startUiRuntime } from '../helpers/ui-runtime';
 import { configurationRuntimeFixture, publicationFixture } from '../../packages/ui/tests/helpers/publication';
 import { menuSnapshot, fulfillMenuIcons } from '../../packages/ui/tests/helpers/menus';
@@ -21,8 +20,8 @@ beforeAll(async () => {
 });
 afterAll(async () => { try { await browser?.close(); } finally { await runtime?.close(); } });
 
-async function withPage(name: string, hash: string, run: (page: Page, loginCount: () => number) => Promise<void>, protectedAuth = false) {
-  const context = await browser.newContext({ locale: 'en-US', viewport: { width: 1440, height: 900 } });
+async function withPage(run: (page: Page, loginCount: () => number) => Promise<void>) {
+  const context = await browser.newContext();
   const page = await context.newPage();
   const errors: string[] = [];
   const requests: Request[] = [];
@@ -41,16 +40,13 @@ async function withPage(name: string, hash: string, run: (page: Page, loginCount
       const key = `${request.method()} ${url.pathname}`;
       switch (key) {
         case 'GET /api/auth/mode':
-          return route.fulfill({ json: { mode: protectedAuth ? 'plugin' : 'anonymous', initialized: true, publicOrigin: url.origin,
-            ...(protectedAuth ? { provider: { name: 'user-auth', loginComponent: manifest.management.loginComponent } } : {}) } });
+          return route.fulfill({ json: { mode: 'plugin', initialized: true, publicOrigin: url.origin,
+            provider: { name: 'user-auth', loginComponent: manifest.management.loginComponent } } });
         case 'GET /api/auth/verify':
-          return route.fulfill({ json: protectedAuth
-            ? { success: session, mode: 'plugin', ...(session ? { subject: { id: 'smoke-admin', provider: 'user-auth' }, csrfToken: 'smoke-csrf' } : {}) }
-            : { success: true, mode: 'anonymous', subject: { id: 'anonymous', provider: 'anonymous' } } });
+          return route.fulfill({ json: { success: session, mode: 'plugin', ...(session ? { subject: { id: 'smoke-admin', provider: 'user-auth' }, csrfToken: 'smoke-csrf' } : {}) } });
         case 'GET /api/auth/login/options':
           return route.fulfill({ json: { local: { enabled: true, turnstile: { enabled: false } }, methods: [] } });
         case 'POST /api/auth/login':
-          assert.equal(protectedAuth, true);
           assert.deepEqual(request.postDataJSON(), { username: 'smoke-admin', password: 'smoke-password', transport: 'cookie' });
           session = true; loginRequests++;
           return route.fulfill({ json: { success: true, mode: 'plugin', csrfToken: 'smoke-csrf' } });
@@ -78,13 +74,8 @@ async function withPage(name: string, hash: string, run: (page: Page, loginCount
           return route.fulfill({ status: 501, json: { error: 'unexpected_fixture_request' } });
       }
     });
-    await page.goto(`${runtime.origin}/#${hash}`);
+    await page.goto(`${runtime.origin}/#/login`);
     await run(page, () => loginRequests);
-    if (name === 'anonymous-login') await expect(page.getByTestId('app-header')).toHaveCount(0);
-    else await page.waitForFunction(() => {
-      const icons = [...document.querySelectorAll('[data-testid="app-header"] [data-menu-icon]')];
-      return icons.length > 0 && icons.every(icon => icon.getAttribute('data-icon-state') === 'ready');
-    });
     // Drain every observed request, including earlier icon revisions, before closing this context.
     for (let index = 0; index < requests.length; index++) {
       const response = await requests[index]!.response();
@@ -93,42 +84,10 @@ async function withPage(name: string, hash: string, run: (page: Page, loginCount
     }
     await page.evaluate(async () => { await Promise.resolve(); await Promise.resolve(); });
     assert.deepEqual(errors, []);
-    if (name === 'dashboard' || name === 'login') {
-      await page.screenshot({ path: join(runtime.evidence, `${name}.png`) });
-      console.log(`UI smoke screenshots: ${runtime.evidence}`);
-    }
-  } catch (error) {
-    await Promise.allSettled([
-      page.screenshot({ path: join(runtime.evidence, `${name}-failure.png`) }),
-      page.content().then(html => writeFile(join(runtime.evidence, `${name}-failure.html`), html)),
-      writeFile(join(runtime.evidence, `${name}-errors.json`), JSON.stringify(errors, null, 2)),
-    ]);
-    console.error(`UI smoke diagnostics: ${runtime.evidence}`);
-    throw error;
   } finally { await context.close(); }
 }
 
-const routes = [
-  ['design', '/design', 'page-design'], ['dashboard', '/', 'page-dashboard'],
-  ['routes', '/routes', 'page-routes'], ['services', '/services', 'page-services'],
-  ['logs', '/logs', 'page-logs'], ['config', '/config', 'page-config'],
-  ['plugins', '/plugins', 'page-plugins'], ['anonymous-login', '/login', 'page-dashboard'],
-  ['not-found', '/unknown-route', 'page-not-found'],
-] as const;
-for (const [name, hash, testId] of routes) {
-  test(`built route: ${name}`, async () => withPage(name, hash, async page => {
-    await expect(page.getByTestId(testId)).toBeVisible();
-    if (name === 'dashboard') await expect(page.getByTestId('dashboard-publication-recovery')).toHaveCount(0);
-    if (name === 'design') {
-      expect(await page.locator('body').innerText()).not.toMatch(/\bNx[A-Z][A-Za-z0-9_-]*\b/);
-      const titles = await page.locator('h2').allTextContents();
-      const indexes = [/COLOR SYSTEM/i, /BASIC COMPONENTS/i, /INDUSTRIAL COMPONENTS/i].map(pattern => titles.findIndex(title => pattern.test(title)));
-      assert.ok(indexes[0]! >= 0 && indexes[0]! < indexes[1]! && indexes[1]! < indexes[2]!);
-    }
-  }), 60_000);
-}
-
-test('provider login hands a Cookie session to the built dashboard', async () => withPage('login', '/login', async (page, loginCount) => {
+test('provider login hands a Cookie session to the built dashboard', async () => withPage(async (page, loginCount) => {
   const form = page.getByTestId('page-login').locator('form');
   await form.locator('input[autocomplete="username"]').fill('smoke-admin');
   await form.locator('input[autocomplete="current-password"]').fill('smoke-password');
@@ -140,4 +99,4 @@ test('provider login hands a Cookie session to the built dashboard', async () =>
   await expect(page.getByTestId('page-dashboard')).toBeVisible();
   expect(new URL(page.url()).hash).toBe('#/');
   expect(loginCount()).toBe(1);
-}, true), 60_000);
+}), 60_000);

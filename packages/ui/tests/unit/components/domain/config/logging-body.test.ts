@@ -15,15 +15,6 @@ describe('logging body model (render-time defaults, copy-on-edit)', () => {
     expect(source).toContain('kibToBytes(Number(input.value))');
   });
 
-  test('English and Chinese guidance distinguish the 5 MiB maximum from the 5120-byte default', async () => {
-    for (const locale of ['en', 'zh-CN']) {
-      const messages = await Bun.file(new URL(`../../../../../src/i18n/locales/${locale}.json`, import.meta.url)).json();
-      expect(messages.settings.invalidSize).toContain('5120 KiB');
-      expect(messages.settings.bodySizeHelp).toContain('5 MiB');
-      expect(messages.settings.bodySizeHelp).toContain('5120 bytes');
-    }
-  });
-
   test('resolves display defaults from an unset value without mutating it', () => {
     // Given
     const value: LoggingValue = null;

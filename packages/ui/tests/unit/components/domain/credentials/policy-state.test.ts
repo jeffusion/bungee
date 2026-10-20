@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { applicationKeys, canEditPolicy, requestedKey, keyStatus, latestRequest, policyPayload, modelPatterns } from '../../../../../src/components/domain/credentials/policy-state';
+import { applicationKeys, canEditPolicy, requestedKey, latestRequest, policyPayload, modelPatterns } from '../../../../../src/components/domain/credentials/policy-state';
 import type { ApiKey, KeyExtension } from '../../../../../src/api/keys';
 const key: ApiKey = { id: 'app', name: '开发', prefix: 'bg', createdAt: 1, expiresAt: null, revokedAt: null };
 const extension: KeyExtension = { plugin: 'key-access', component: 'Test', path: '/keys/:keyId', active: true, ready: true, value: null };
@@ -16,7 +16,6 @@ describe('凭证策略数据边界', () => {
     expect(canEditPolicy(key, extension, 100)).toBe(true);
     for (const candidate of [{ ...key, expiresAt: 100 }, { ...key, revokedAt: 1 }]) expect(canEditPolicy(candidate, extension, 100)).toBe(false);
     for (const policy of [{ ...extension, active: false }, { ...extension, ready: false }, null]) expect(canEditPolicy(key, policy, 100)).toBe(false);
-    expect(keyStatus({ ...key, expiresAt: 100 }, 100)).toBe('已过期');
   });
   test('晚到旧响应不覆盖当前 Key，卸载失效', async () => {
     const guard = latestRequest(); let visible = ''; let finishOld!: () => void;

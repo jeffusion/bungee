@@ -1,5 +1,5 @@
 import {afterEach, expect as bunExpect} from 'bun:test';
-import {expect, type Page, type Locator} from 'playwright/test';
+import {expect, type Page} from 'playwright/test';
 import {createDefaultMenuLayout} from '@jeffusion/bungee-types';
 import manifest from '../../../../../plugins/user-auth/manifest.json';
 import {configurationRuntimeFixture} from '../publication';
@@ -7,15 +7,6 @@ import {fulfillMenuIcons, menuSnapshot} from '../menus';
 
 export const control = '/api/plugins/user-auth/control';
 export const administrator = {id: 'admin', username: 'admin', displayName: 'Administrator', disabled: false, hasLocalPassword: true, requiresPasswordChange: false};
-export const evidence = '/tmp/bungee-user-auth';
-export async function expectVerticalFields(container: Locator) {
-  await expect.poll(() => container.locator('input:not([type=checkbox]):not([type=hidden]):visible, textarea:visible').evaluateAll(elements => {
-    const bounds = elements.map(element => element.getBoundingClientRect());
-    return bounds.length > 1 && bounds.every((bound, index) => index === 0 ||
-      (bound.top >= bounds[index - 1]!.bottom && Math.abs(bound.left - bounds[0]!.left) < 1));
-  })).toBe(true);
-}
-
 const violations: string[] = [];
 afterEach(() => { const found = violations.splice(0); bunExpect(found).toEqual([]); });
 const methods: Record<string, readonly string[]> = {

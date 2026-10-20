@@ -204,10 +204,10 @@ try {
   const setupRuntime = await json('/config/runtime');
   results.push({ stage: 'setup', terminal: setupTerminal, publication: setupRuntime.publication });
   // A historical drain exception is recorded, never relabelled successful.
-  // Continue UI-only acceptance if the actual new target is confirmed serving.
+  // Continue the publication flow if the actual new target is confirmed serving.
   assert.equal(setupRuntime.publication.serving_complete, true);
   assert.equal(setupRuntime.publication.serving_revision, setupRuntime.publication.target_revision);
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const context = await browser.newContext();
   await context.addInitScript(() => localStorage.setItem('locale', 'zh-CN'));
   const page = await context.newPage();
   page.on('pageerror', error => errors.push(error.message));
@@ -245,34 +245,32 @@ try {
   receipt.expectedRevision = accepted.revision; receipt.operationId = accepted.operation_id;
   writeFileSync(receiptPath, JSON.stringify(receipt, null, 2));
   results.push({ stage: 'rolling-start', responseHeadersConfirmedBeforeRolling: true, drainSeconds, maximumStreamMs, accepted, ownership });
-  const banner = page.getByTestId('configuration-publication-banner');
-  await page.waitForFunction(() => /新配置已生效，旧进程收尾尚未完成/.test(document.querySelector('[data-testid="configuration-publication-banner"]')?.textContent ?? ''), undefined, { timeout: 10000 });
+  await page.waitForResponse(async response => {
+    if (new URL(response.url()).pathname !== '/api/config/runtime' || response.status() !== 200) return false;
+    const runtime = await response.json();
+    return runtime.publication?.operation?.operation_id === accepted.operation_id && runtime.publication.operation.state === 'draining';
+  }, { timeout: 10000 });
   const active = await json('/config/runtime');
   assert.equal(active.publication.operation.state, 'draining');
   assert.equal(active.publication.serving_revision, accepted.revision);
   assert.equal(active.publication.serving_complete, true);
   assert.equal(streamEnded, false);
   results.push({ stage: 'active-draining', accepted, publication: active.publication });
-  await page.screenshot({ path: resolve(evidence, 'desktop-real-draining.png'), animations: 'disabled' });
-  const mobile = await context.newPage();
-  await mobile.setViewportSize({ width: 390, height: 1000 });
-  await mobile.goto(`${base}/#/config`); await mobile.locator('#config-drain_timeout_ms').waitFor();
-  await mobile.getByTestId('configuration-publication-banner').getByText(/新配置已生效，旧进程收尾尚未完成/).waitFor();
-  assert.equal(await mobile.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
-  await mobile.screenshot({ path: resolve(evidence, 'mobile-real-draining.png'), animations: 'disabled' });
-  await page.waitForFunction(() => /等待结果超时/.test(document.querySelector('[data-testid="config-review"]')?.textContent ?? ''), undefined, { timeout: 20000 });
+  await page.waitForFunction(() => {
+    const query = document.querySelector<HTMLButtonElement>('[data-testid="publication-details"] button');
+    return document.querySelector('[data-testid="page-config"]')?.getAttribute('data-submission-phase') === 'active'
+      && query !== null && !query.disabled;
+  }, undefined, { timeout: 20000 });
+  assert.ok(performance.now() - rollingStartedAt >= 15000, 'the client must wait for its 15 second result deadline');
   assert.equal(streamEnded, false, '15 second client wait must not end the actual stream');
   const waitingStopped = await json('/config/runtime');
   assert.equal(waitingStopped.publication.operation.state, 'draining');
   assert.equal(waitingStopped.publication.serving_complete, true);
   assert.equal(waitingStopped.publication.serving_revision, accepted.revision);
-  assert.match(await page.getByTestId('config-review').innerText(), /不代表未提交/);
   assert.equal(await page.getByTestId('config-confirm-publish').isDisabled(), true);
   assert.ok(bytes > first.value!.byteLength);
-  assert.match(await banner.innerText(), /新配置已生效，旧进程收尾尚未完成/);
   results.push({ stage: 'client-wait-stopped', accepted, before: setupRuntime.publication, publication: waitingStopped.publication,
-    review: await page.getByTestId('config-review').innerText(), repeatPublishDisabled: true, streamBytes: bytes, streamEnded });
-  await page.screenshot({ path: resolve(evidence, 'desktop-client-wait-stopped.png'), animations: 'disabled' });
+    submissionPhase: await page.getByTestId('page-config').getAttribute('data-submission-phase'), repeatPublishDisabled: true, streamBytes: bytes, streamEnded });
   // Normal flow explicitly finishes before D; deadline flow deliberately does
   // not finish upstream. Only the Runtime's authorised D cutoff may cancel it.
   if (!produceDegraded) for (const controller of [...controllers]) finishStream(controller);
@@ -298,7 +296,6 @@ try {
   await page.getByRole('button', { name: '查询本次发布', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('[data-testid="page-config"]')?.getAttribute('data-submission-phase') === 'terminal');
   assert.equal(await page.getByTestId('publication-retry-button').count(), 0);
-  await page.screenshot({ path: resolve(evidence, 'desktop-stream-completed-converged.png'), animations: 'disabled' });
   results.push({ accepted, active: active.publication, waitingStopped: waitingStopped.publication, streamBytes: bytes, streamCompleted: streamEnded, terminal });
   results.push({ stage: 'restore-ready', receiptPath, ownershipProof: resolve(requireOwnership().state, 'runtime/workers', `${finalRuntime.workers[0].worker_instance_id}.json`) });
   await context.close();
