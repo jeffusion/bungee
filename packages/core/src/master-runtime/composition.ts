@@ -2104,9 +2104,9 @@ export async function startMasterComposition(
           if (!await provider.hasIdentity()) throw new Error('provider_unavailable');
           return null;
         } catch (error) {
-          const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
-          if (code === 'invalid_credentials' || code === 'invalid_input') return Response.json({error:code},{status:422});
-          if (code === 'initialization_required') return Response.json({error:code},{status:409});
+          const code = errorCode(error);
+          if (code && ['invalid_credentials', 'invalid_input', 'invalid_username', 'invalid_password', 'password_confirmation', 'validation_error'].includes(code)) return Response.json({error:code},{status:422});
+          if (code && ['initialization_required', 'already_initialized', 'username_exists', 'version_conflict'].includes(code)) return Response.json({error:code},{status:409});
           return Response.json({error:'management_setup_failed'},{status:503});
         }
       },

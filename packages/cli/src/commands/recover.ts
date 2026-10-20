@@ -10,7 +10,8 @@ import { readPluginSecretsKey, withPluginSecretsKey } from '../config/plugin-sec
 export async function recoverCommand(options: {file?:string; plugin?:string; action?:string; directLaunch?:LaunchDescriptor; launchDescriptor?:LaunchDescriptor} = {}): Promise<void> {
   const interactive = options.plugin !== undefined || options.action !== undefined;
   if (interactive && (options.file !== undefined || !options.plugin || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(options.plugin)
-    || !['issue-setup-code', 'reset', 'release-auth'].includes(options.action ?? ''))) throw new Error('invalid_recovery_arguments');
+    || !options.action || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(options.action)
+    || ['__proto__', 'constructor', 'prototype'].includes(options.action))) throw new Error('invalid_recovery_arguments');
   if (interactive && (!process.stdin.isTTY || !process.stdout.isTTY)) throw new Error('recovery_requires_terminal');
   const db = resolve(process.env.BUNGEE_CONFIG_DB_PATH ?? join(ConfigPaths.DATA_DIR,'bungee.db'));
   let file: Awaited<ReturnType<typeof open>> | undefined;

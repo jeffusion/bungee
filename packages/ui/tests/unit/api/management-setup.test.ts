@@ -49,7 +49,7 @@ test('setup posts opaque input at the pinned host endpoint and confirms readines
   login('previous-credential'); logout();
   const owned = context(() => { completed++; });
   expect(await owned.check()).toBe(false);
-  const input = { setupCode: 'fixture-code', password: 'fixture-password', endpoint: 'https://foreign.example' };
+  const input = { username: 'owner', password: 'fixture-password', passwordConfirmation: 'fixture-password' };
   await owned.context.initialize(input);
   expect(requests.map(item => item.url)).toEqual(['/api/auth/setup', '/api/auth/setup', '/api/auth/setup', '/api/auth/mode']);
   const post = requests[1]!;
@@ -175,18 +175,18 @@ test('a confirmed uninitialized result permits a deliberate retry and preserves 
   globalThis.fetch = (async (input, init) => {
     requests.push(`${init?.method ?? 'GET'} ${input}`);
     if (init?.method === 'POST') {
-      if (!initialized) return Response.json({ error: 'invalid_setup_code' }, { status: 400 });
+      if (!initialized) return Response.json({ error: 'password_confirmation' }, { status: 400 });
       return Response.json({ success: true });
     }
     return Response.json(String(input) === '/api/auth/setup'
       ? { initialized, provider: mode.provider } : { ...mode, initialized });
   }) as typeof fetch;
   const owned = context(() => { completed++; });
-  await expect(owned.context.initialize({ setupCode: 'expired' })).rejects.toThrow('invalid_setup_code');
+  await expect(owned.context.initialize({ username: 'owner', password: 'fixture-password', passwordConfirmation: 'different' })).rejects.toThrow('password_confirmation');
   expect(get(authMode)?.initialized).toBe(false);
   expect(completed).toBe(0);
   initialized = true;
-  await owned.context.initialize({ setupCode: 'replacement' });
+  await owned.context.initialize({ username: 'owner', password: 'fixture-password', passwordConfirmation: 'fixture-password' });
   expect(requests).toEqual(['POST /api/auth/setup', 'GET /api/auth/setup',
     'POST /api/auth/setup', 'GET /api/auth/setup', 'GET /api/auth/mode']);
   expect(completed).toBe(1);

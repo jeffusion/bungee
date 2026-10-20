@@ -29,8 +29,8 @@ describe('user authentication durable management provider', () => {
     expect(await new PluginDurableStateStore(db).forNamespace('other-plugin').get('administrator')).toBeNull();
     const stored = JSON.stringify((await new PluginDurableStateStore(db).forNamespace('user-auth').list()).find(r=>r.key.startsWith('credential:'))); expect(stored).not.toContain(PASSWORD); expect(stored).not.toContain(data.token); expect(stored).toContain('$argon2id$v=19$m=65536,t=3');
     c.dispose(); db.close(); dbs.splice(dbs.indexOf(db), 1); const reopened = new Database(path); dbs.push(reopened); const next = createControl(host(reopened), { now: () => 1_000_001 }); await next.start(); expect(await next.hasIdentity()).toBe(true); expect(await next.authenticate(request('/self','GET',undefined,{ authorization: `Bearer ${data.token}` }))).not.toBeNull();
-    await expect(next.bootstrap({ username: 'new-owner', password: PASSWORD })).rejects.toThrow('invalid_credentials');
-    await next.bootstrap({ username: 'owner', password: PASSWORD });
+    await expect(next.bootstrap({operation:'verify', username: 'new-owner', password: PASSWORD })).rejects.toThrow('invalid_credentials');
+    await next.bootstrap({operation:'verify', username: 'owner', password: PASSWORD });
     expect((await call(next,'/self','GET',data.token)).status).toBe(200);
   }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
   test('missing durable capability and corrupt state fail closed', async () => {
@@ -55,7 +55,7 @@ describe('user authentication durable management provider', () => {
     expect(await c.authorize(subject!,'config.write')).toBe(false);
     expect((await c.login(request('/login','POST',{username:'owner',password:PASSWORD,transport:'bearer'}))).status).toBe(401);
     expect((await login(c,'owner',NEXT)).data.administrator).toMatchObject({username:'owner'});
-    await expect(c.bootstrap({username:'another',password:NEXT})).rejects.toThrow('invalid_credentials');
+    await expect(c.bootstrap({operation:'verify',username:'another',password:NEXT})).rejects.toThrow('invalid_credentials');
   }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
   test('cookie flags, CSRF and origin, bearer transport separation, logout', async () => {
     const { c } = await setup(); const { r, data } = await login(c,'owner',PASSWORD,'cookie'); const cookies = r.headers.get('set-cookie')!;

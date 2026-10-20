@@ -105,3 +105,30 @@ test('rejected storage open keeps the locks and independently cleans up every ac
     await expect(acquireMasterInstanceLock(path + '.lock')).rejects.toThrow('held');
   });
 });
+
+
+test('identity action waits for every storage close ACK before returning and releasing locks',async()=>{
+ await fixture(async path=>{
+  await initializeConfigurationDatabase({configDbPath:path});
+  const entered=Promise.withResolvers<void>(),release=Promise.withResolvers<void>();
+  const openPlugin=PluginStateClient.open,openConfig=AsyncConfigRepository.open;
+  let configClosed=false,returned=false;
+  const plugin=spyOn(PluginStateClient,'open').mockImplementation(async(...args)=>{
+   const client=await openPlugin(...args),close=client.close.bind(client);
+   client.close=async()=>{entered.resolve();await release.promise;await close();};return client;
+  });
+  const config=spyOn(AsyncConfigRepository,'open').mockImplementation(async(...args)=>{
+   const client=await openConfig(...args),close=client.close.bind(client);
+   client.close=async()=>{await close();configClosed=true;};return client;
+  });
+  const pending=withRecoveryTerminal(()=>recoverOfflineAction(path,{plugin:'user-auth',action:'reset'}),identityRecoveryAnswers('owner','Owner password 123!','Verified recovery')).then(value=>{returned=true;return value;});
+  try{
+   await entered.promise;
+   expect(returned).toBe(false);expect(configClosed).toBe(false);
+   await expect(acquireMasterInstanceLock(path+'.lock')).rejects.toThrow('held');
+   release.resolve();
+   expect((await pending).result).toMatchObject({username:'owner'});expect(configClosed).toBe(true);
+   const lock=await acquireMasterInstanceLock(path+'.lock');await lock.release();
+  }finally{release.resolve();try{await pending;}finally{plugin.mockRestore();config.mockRestore();}}
+ });
+},15000);

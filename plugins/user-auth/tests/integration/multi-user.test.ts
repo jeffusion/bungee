@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { authFixture, PASSWORD, request } from '../helpers/auth-fixture';
-import { createControl, recoverIdentity, readManagementSetup } from '../../server/control';
+import { createControl, recoverIdentity, readManagementSetup, addUserOffline, resetUserPasswordOffline } from '../../server/control';
 
 type User = { id: string; username: string; displayName: string; disabled: boolean; hasLocalPassword: boolean };
 const create = (username: string, password?: string) => ({ username, displayName: username, ...(password ? { password, passwordConfirmation: password } : {}) });
@@ -85,3 +85,55 @@ for (const missing of ['turnstile', 'login-settings']) {
     await expect(broken.authenticate(request('/verify','GET',undefined,{authorization:'Bearer '+token}))).rejects.toThrow('corrupt_state');
   });
 }
+
+const offlineInput = (operation: string, username: string, password = PASSWORD) => ({operation, username, password, passwordConfirmation: password});
+test('offline add-user preserves settings and sessions, rejects a duplicate username without writes', async () => {
+ const f=await authFixture(), token=await f.login();
+ await f.call(token,'/login-settings','PUT',{version:1,autoCreateUsers:true});
+ await f.call(token,'/session-policy','PUT',{version:0,policy:{idleTimeoutMinutes:0,absoluteTimeoutMinutes:60}});
+ const before=await f.state.list();f.advance(1);
+ const added=await addUserOffline(offlineInput('add-user','SECOND'),{durableState:f.state,now:f.now});
+ expect(added.username).toBe('second');
+ const after=await f.state.list();for(const record of before.filter(r=>r.key!=='clock'))expect(after.find(r=>r.key===record.key)).toEqual(record);
+ expect(await f.control.authenticate(request('/verify','GET',undefined,{authorization:'Bearer '+token}))).not.toBeNull();
+ expect(await f.login('second')).toBeString();
+ const existing=await f.state.list();f.advance(1);
+ await expect(addUserOffline(offlineInput('add-user','Second'),{durableState:f.state,now:f.now})).rejects.toThrow('username_exists');
+ expect(await f.state.list()).toEqual(existing);
+});
+test('offline reset-password clears effective global throttles, revokes target sessions and preserves other sessions and bindings', async () => {
+ const f=await authFixture(), admin=await f.login();
+ const second=await addUserOffline(offlineInput('add-user','second'),{durableState:f.state,now:f.now});
+ const connectionId=crypto.randomUUID();
+ expect((await f.call(admin,'/login-connections','POST',{id:connectionId,label:'Manual',provider:'oidc',clientId:'manual',configuration:{mode:'manual',issuer:'https://issuer.example',authorizationEndpoint:'https://issuer.example/authorize',tokenEndpoint:'https://issuer.example/token',jwksUri:'https://issuer.example/keys'}})).status).toBe(201);
+ expect((await f.call(admin,'/identities','POST',{userId:second.id,connectionId,subject:'external-second'})).status).toBe(200);
+ const target=await f.login('second');
+ for(let i=0;i<10;i++)expect((await f.control.login(request('/login','POST',{username:'second',password:'wrong',transport:'bearer'}))).status).toBe(401);
+ expect((await f.control.login(request('/login','POST',{username:'second',password:PASSWORD,transport:'bearer'}))).status).toBe(429);
+ const before=await f.state.list();f.advance(1);
+ const updated=await resetUserPasswordOffline(offlineInput('reset-password','SECOND','Replacement password'),{durableState:f.state,now:f.now});
+ expect(updated).toMatchObject({id:second.id,username:'second',disabled:false});
+ const after=await f.state.list();
+ const changed=new Set(['clock','login-settings','user:'+second.id,'credential:'+second.id]);
+ for(const record of before.filter(r=>!changed.has(r.key)))expect(after.find(r=>r.key===record.key)).toEqual(record);
+ const priorSettings=(before.find(r=>r.key==='login-settings')!.value as any).settings;
+ expect((await f.state.get('login-settings'))!.value).toMatchObject({settings:{sessionEpoch:priorSettings.sessionEpoch,failureEpoch:priorSettings.failureEpoch+1}});
+ expect(await f.control.authenticate(request('/verify','GET',undefined,{authorization:'Bearer '+target}))).toBeNull();
+ expect(await f.control.authenticate(request('/verify','GET',undefined,{authorization:'Bearer '+admin}))).not.toBeNull();
+ expect(await f.login('second','Replacement password')).toBeString();
+ expect((await f.control.login(request('/login','POST',{username:'second',password:PASSWORD,transport:'bearer'}))).status).toBe(401);
+});
+test('offline reset-password preserves disabled status, username and display name', async () => {
+ const f=await authFixture(), admin=await f.login();
+ const second=await addUserOffline(offlineInput('add-user','second'),{durableState:f.state,now:f.now});
+ await f.call(admin,'/users/update','PUT',{id:second.id,username:'second',displayName:'Second admin',disabled:true});
+ const before=(await f.state.get('user:'+second.id))!.value as any;
+ await resetUserPasswordOffline(offlineInput('reset-password','second','Disabled user password'),{durableState:f.state,now:f.now});
+ expect((await f.state.get('user:'+second.id))!.value).toEqual({schema:3,user:{...before.user,generation:before.user.generation+1}});
+ expect((await f.control.login(request('/login','POST',{username:'second',password:'Disabled user password',transport:'bearer'}))).status).toBe(401);
+});
+test('offline reset-password rejects missing targets with no writes or namespace creation', async () => {
+ const f=await authFixture(), before=await f.state.list();f.advance(1_000);
+ await expect(resetUserPasswordOffline(offlineInput('reset-password','missing'),{durableState:f.state,now:f.now})).rejects.toThrow('not_found');
+ expect(await f.state.list()).toEqual(before);
+});

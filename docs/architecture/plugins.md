@@ -8,7 +8,7 @@ Bungee 的基础层负责个人反代的 Route、Service、上游及通用插件
 
 | 基础层保留 | 通过插件实现 |
 | --- | --- |
-| 代理路由、服务、上游、协议传输与进程管理 | 账号密码、初始化码与会话 |
+| 代理路由、服务、上游、协议传输与进程管理 | 账号密码、首次账号初始化与会话 |
 | 匿名管理／代理主体、管理 provider 与准入接口 | 数据面 Key 生命周期、路由保护与最终模型范围 |
 | 通用只读 resource collection／extension DTO | Key ID、生成、验证、过期、撤销、速率与预算 |
 | catalog、依赖图、服务注册、生命周期和作用域 | token 协议解析、usage 规范化及统计展示 |
@@ -134,7 +134,7 @@ worker 中的 token-metering 接收框架提供的最终请求与原始上游响
 
 | 扩展点 | 平台保证 | 插件负责 |
 | --- | --- | --- |
-| management.setupStatus / initialize | 只路由当前 provider 的初始化请求、Origin 校验与页面框架 | 一次性码和账号校验、原子初始化，不创建登录会话 |
+| management.setupStatus / initialize | 只路由当前 provider 的初始化请求、Origin 校验与页面框架 | 账号校验、原子初始化；独立初始化页面不创建登录会话 |
 | management.authenticate | 唯一选中的提供者、互斥模式、错误不回退 | 验证账号会话并输出管理主体 |
 | management.authorize | API 声明能力及当前主体传入，拒绝结果强制执行 | 验证当前管理员会话并授权 |
 | data.finalAdmission | 最终目标冻结、身份插件最新状态、持久保护 guard、单次外部请求许可 | 范围、速率、预算业务判断 |
@@ -182,7 +182,7 @@ Host 维护命名空间和版本，插件声明业务记录 schema。命名空�
 | 持久化内容 | 所有者 | 是否受日志清理影响 |
 | --- | --- | --- |
 | 数据面 Key 摘要、授权、保护集合与撤销 | key-access | 否 |
-| 管理身份、初始化码及会话 | user-auth | 否 |
+| 管理身份、初始化状态及会话 | user-auth | 否 |
 | 管理 provider 选择、路由保护 guard | core 通用 Host | 否 |
 | 访问范围、Key 速率策略 | 对应策略插件 | 否 |
 | 预算策略、attempt、周期账本 | token-budget | 否 |
@@ -239,7 +239,9 @@ Host 维护命名空间和版本，插件声明业务记录 schema。命名空�
 
 访问控制插件设置页统一维护 Key 与路由保护；创建或编辑 Key 只保存授权；路由保护由独立的公开开关修改。保护集合与授权范围分开，最后一个 Key 撤销不解除保护。core 通过通用 resource extension 读取高级策略摘要及停用后的只读状态。
 
-没有强制认证时 Dashboard 直接进入。用户认证由停机、本地 TTY 的 `issue-setup-code` 准备：Host 先保存强制认证和 provider 选择，再调用插件签发初始化码，双库关闭确认后才显示。启动后 `/#/setup` 呈现 provider 初始化组件，成功后回登录页；正常登录由 Host Cookie-only verify 核验后才加载 Dashboard、导航与插件 API。core 不维护账号表，所有有效登录具有完整管理权限。
+没有强制认证时 Dashboard 直接进入。用户认证首次启用弹窗收集账号、密码和确认密码，以 `managementSetup.operation: "initialize"` 创建首个账号；已有账号以 `operation: "verify"` 验证。初始化状态查询只读，不启动插件。账号先提交到插件库，配置激活提交失败时保留账号，重读状态后改用已有账号验证；Host 不假设跨库原子性。启用弹窗随后建立 Cookie 会话，Host Cookie-only verify 核验后才加载 Dashboard、导航与插件 API。独立 `/#/setup` 呈现 provider 初始化组件，只创建账号并回登录页。core 不维护账号表，所有有效登录具有完整管理权限。
+
+身份插件通过 `offlineRecovery: {kind: "identity", actions}` 声明各动作的 prompts 和 run。Host 通用分发终端输入、插件命名空间和时钟，持停止锁并等待存储关闭 ACK，不先启动插件或读取初始化状态，也不自动修改 provider 选择。user-auth 声明新增用户、按用户名改密和恢复锚点管理员；宿主保留 `release-auth` 通用动作。结构化输入仍仅用于 `kind: plugin-state`，详见[SDK 参考](../reference/plugin-api.md#离线恢复能力)。
 
 插件开关保留原有 BSwitch；依赖或 guard 不能满足时 disabled，并说明具体原因，不修改基础组件样式。
 

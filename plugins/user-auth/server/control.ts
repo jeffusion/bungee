@@ -482,6 +482,13 @@ function validateFailure(value: unknown): Failure | null {
         fail('corrupt_state', 503);
     return f;
 }
+function validateFlow(v: unknown): AuthFlow | null {
+    if (v === null) return null;
+    const f = v as AuthFlow;
+    if (!f || Object.keys(f).some(k => !['id', 'state', 'nonce', 'verifierRef', 'connectionId', 'generation', 'created', 'expiresAt', 'epoch', 'returnTo', 'status', 'initiator', 'subject', 'issuer', 'protocol'].includes(k)) || typeof f.id !== 'string' || typeof f.state !== 'string' || typeof f.nonce !== 'string' || typeof f.verifierRef !== 'string' || typeof f.connectionId !== 'string' || !Number.isSafeInteger(f.generation) || !Number.isSafeInteger(f.created) || !Number.isSafeInteger(f.expiresAt) || !Number.isSafeInteger(f.epoch) || !['pending', 'exchanging', 'verified', 'consumed'].includes(f.status) || typeof f.returnTo !== 'string' || (f.subject !== undefined && typeof f.subject !== 'string') || (f.issuer !== undefined && typeof f.issuer !== 'string') || (f.protocol !== undefined && !['oidc', 'oauth2'].includes(f.protocol)) || (f.status === 'verified' && (!f.subject || !f.issuer || !f.protocol)) || (f.initiator !== undefined && (!f.initiator || typeof f.initiator.userId !== 'string' || typeof f.initiator.sessionDigest !== 'string' || !Number.isSafeInteger(f.initiator.generation))))
+        fail('corrupt_state', 503);
+    return f;
+}
 function slots<T extends Session | Failure | AuthFlow>(records: readonly DurableRecord[], kind: string, limit: number, validate: (v: unknown) => T | null): Slot<T>[] {
     const result: Slot<T>[] = Array.from({ length: limit }, (_, i) => ({ key: `${kind}:${i}`, version: 0, value: null }));
     const seen = new Set<string>();
@@ -504,10 +511,6 @@ function next(value: number): number { if (!Number.isSafeInteger(value + 1))
     fail('generation_overflow'); return value + 1; }
 interface Setup {
     phase: 'uninitialized' | 'ready';
-    code?: {
-        digest: string;
-        expiresAt: number;
-    };
 }
 interface Clock {
     version: number;
@@ -568,11 +571,7 @@ function setupRecord(records: readonly DurableRecord[]): {
     if (!record)
         fail('corrupt_state', 503);
     const value = envelope(record.value, 'setup') as Setup;
-    if (!value || !['uninitialized', 'ready'].includes(value.phase) || Object.keys(value).some(k => !['phase', 'code'].includes(k)))
-        fail('corrupt_state', 503);
-    if (value.code !== undefined && (!value.code || !/^[a-f0-9]{64}$/.test(value.code.digest) || !Number.isSafeInteger(value.code.expiresAt) || value.code.expiresAt < 0 || Object.keys(value.code).some(k => !['digest', 'expiresAt'].includes(k))))
-        fail('corrupt_state', 503);
-    if (value.phase === 'ready' && value.code !== undefined)
+    if (!value || !['uninitialized', 'ready'].includes(value.phase) || Object.keys(value).some(k => k !== 'phase'))
         fail('corrupt_state', 503);
     const all = users(records), anchor = records.find(r => r.key === 'recovery-anchor');
     if ((value.phase === 'ready') !== !!all.length || (value.phase === 'ready' && (!anchor || typeof envelope(anchor.value, 'userId') !== 'string')))
@@ -792,6 +791,8 @@ export class UserAuthControl implements PluginControl, ManagementProvider {
         return { version: record?.version ?? 0, policy: record ? validateSessionPolicy(envelope(record.value, 'policy'), 'corrupt_state', 503) : { ...DEFAULT_SESSION_POLICY } };
     }
     async start() {
+        await clearSetupCode(this.state);
+        await ensureSetup(this.state, this.now);
         await readManagementSetup(this.state);
         await observeClock(this.state, this.now);
         await this.readSessionPolicy();
@@ -813,19 +814,39 @@ export class UserAuthControl implements PluginControl, ManagementProvider {
     async hasIdentity() { return await this.setupStatus() === 'ready' && users(await this.records()).some(u => !u.disabled); }
     async revokeSessions() { await this.retry(async () => { const s = settings(await this.records()); return { mutations: [mutation(s, 'settings', { ...s.value!, sessionEpoch: next(s.value!.sessionEpoch) })], result: undefined }; }); }
     async bootstrap(input: unknown) {
-        const b = object(input);
-        exact(b, ['username', 'password']);
-        const name = username(b.username), p = password(b.password);
-        if (await this.setupStatus() !== 'ready')
-            fail('initialization_required', 409);
-        const prior = users(await this.records()).find(u => u.username === name);
-        if (!prior?.passwordHash)
-            fail('invalid_credentials', 401);
-        if (prior.username !== name || prior.disabled || !await Bun.password.verify(p, prior.passwordHash))
-            fail('invalid_credentials', 401);
-        const latest = (await this.readAdministrator(prior.id)).value;
-        if (!latest || latest.id !== prior.id || latest.generation !== prior.generation || latest.username !== prior.username || latest.disabled)
-            fail('invalid_credentials', 401);
+        try {
+            const b = object(input);
+            if (b.operation === 'initialize') {
+                exact(b, ['operation', 'username', 'password', 'passwordConfirmation']);
+                await this.createInitialUser(b);
+                return;
+            }
+            if (b.operation !== 'verify') fail('invalid_input');
+            exact(b, ['operation', 'username', 'password']);
+            const name = username(b.username), p = password(b.password);
+            if (await this.setupStatus() !== 'ready') fail('initialization_required', 409);
+            const prior = users(await this.records()).find(u => u.username === name);
+            if (!prior?.passwordHash || prior.disabled || !await Bun.password.verify(p, prior.passwordHash))
+                fail('invalid_credentials', 401);
+            const latest = (await this.readAdministrator(prior.id)).value;
+            if (!latest || latest.generation !== prior.generation || latest.username !== prior.username || latest.disabled)
+                fail('invalid_credentials', 401);
+        } catch (error) {
+            if (error instanceof AccountError && ['invalid_password', 'password_confirmation'].includes(error.code))
+                fail('invalid_input');
+            throw error;
+        }
+    }
+    private async createInitialUser(b: Record<string, unknown>) {
+        const name = username(b.username), p = this.confirmPassword(b);
+        if (validateState(await this.records()).value.phase !== 'uninitialized') fail('already_initialized', 409);
+        const passwordHash = await this.hash(p);
+        await this.retry(async () => {
+            const records = await this.records();
+            if (validateState(records).value.phase !== 'uninitialized') fail('already_initialized', 409);
+            const account: User = { id: randomUUID(), username: name, displayName: name, disabled: false, generation: 1 };
+            return { mutations: initialUserMutations(records, account, passwordHash), result: undefined };
+        });
     }
     private source(request: Request): string { return (this.dependencies.trustedSource ?? this.host.trustedSource)?.(request) ?? 'unknown'; }
     private async reserve(keys: string[]): Promise<number> {
@@ -852,28 +873,8 @@ export class UserAuthControl implements PluginControl, ManagementProvider {
                 fail('method_not_allowed', 405);
             origin(request, this.host.managementOrigin);
             const b = await body(request);
-            exact(b, ['setupCode', 'username', 'password', 'passwordConfirmation']);
-            await this.reserve(['source:' + digest(this.source(request))]);
-            const check = async (time: () => Promise<number>) => {
-                const records = await this.records(), setup = setupRecord(records), now = await time();
-                if (setup.value.phase !== 'uninitialized')
-                    fail('already_initialized', 409);
-                if (!setup.value.code || now >= setup.value.code.expiresAt || typeof b.setupCode !== 'string' || !constant(digest(b.setupCode), setup.value.code.digest))
-                    fail('invalid_setup_code', 401);
-                return { setup, records };
-            };
-            const initial = await this.retry(async (time) => ({ mutations: [], result: await check(time) }));
-            const name = username(b.username), p = password(b.password);
-            if (b.passwordConfirmation !== p)
-                fail('password_confirmation');
-            const passwordHash = await this.hash(p);
-            await this.retry(async (time) => {
-                const { setup, records } = await check(time);
-                if (setup.version !== initial.setup.version)
-                    fail('invalid_setup_code', 401);
-                const account: User = { id: randomUUID(), username: name, displayName: name, disabled: false, generation: 1 };
-                return { mutations: [mutation(setup, 'setup', { phase: 'ready' } as Setup), mutation(settings(records), 'settings', EMPTY_SETTINGS), mutation(turnstile(records), 'turnstile', EMPTY_TURNSTILE), { key: 'user:' + account.id, expectedVersion: 0, value: asJson({ schema: ACCOUNT_RECORD_SCHEMA, user: account }) }, this.credentialMutation(records, account.id, passwordHash), { key: 'recovery-anchor', expectedVersion: 0, value: { schema: ACCOUNT_RECORD_SCHEMA, userId: account.id } }], result: undefined };
-            });
+            exact(b, ['username', 'password', 'passwordConfirmation']);
+            await this.createInitialUser(b);
             return json({ initialized: true });
         }
         catch (e) {
@@ -1420,9 +1421,7 @@ export class UserAuthControl implements PluginControl, ManagementProvider {
         fail('invalid_return_to'); return u.pathname + u.search + u.hash; }
     private flowCookie(token: string, maxAge = 600) { return `${FLOW_COOKIE}=${token}; Path=/api/auth/login/callback/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${this.publicOrigin().startsWith('https:') ? '; Secure' : ''}`; }
     private flows(records: readonly DurableRecord[]): Slot<AuthFlow>[] {
-        return slots(records, 'flow', MAX_FLOWS, v => { if (v === null)
-            return null; const f = v as AuthFlow; if (!f || Object.keys(f).some(k => !['id', 'state', 'nonce', 'verifierRef', 'connectionId', 'generation', 'created', 'expiresAt', 'epoch', 'returnTo', 'status', 'initiator', 'subject', 'issuer', 'protocol'].includes(k)) || typeof f.id !== 'string' || typeof f.state !== 'string' || typeof f.nonce !== 'string' || typeof f.verifierRef !== 'string' || typeof f.connectionId !== 'string' || !Number.isSafeInteger(f.generation) || !Number.isSafeInteger(f.created) || !Number.isSafeInteger(f.expiresAt) || !Number.isSafeInteger(f.epoch) || !['pending', 'exchanging', 'verified', 'consumed'].includes(f.status) || typeof f.returnTo !== 'string' || (f.subject !== undefined && typeof f.subject !== 'string') || (f.issuer !== undefined && typeof f.issuer !== 'string') || (f.protocol !== undefined && !['oidc', 'oauth2'].includes(f.protocol)) || (f.status === 'verified' && (!f.subject || !f.issuer || !f.protocol)) || (f.initiator !== undefined && (!f.initiator || typeof f.initiator.userId !== 'string' || typeof f.initiator.sessionDigest !== 'string' || !Number.isSafeInteger(f.initiator.generation))))
-            fail('corrupt_state', 503); return f; });
+        return slots(records, 'flow', MAX_FLOWS, validateFlow);
     }
     private loginProviders() { return new LoginProviders(this.dependencies.fetch ?? fetch, this.host.signal); }
     private async oidcConfig(connection: Connection): Promise<oidc.Configuration> {
@@ -1592,38 +1591,130 @@ export const rpc = [], controlApi = api, controlRpc = rpc;
 export async function readManagementSetup(state: StateReader): Promise<{
     initialized: boolean;
 }> {
-    const records = await state.list();
+    const records = withoutSetupCode(await state.list());
     if (!records.length) return { initialized: false };
+    const setup = validateState(records);
+    return { initialized: setup.value.phase === 'ready' };
+}
+function validateState(records: readonly DurableRecord[]) {
     const setup = setupRecord(records);
     slots(records, 'session', MAX_SESSIONS, validateSession);
     slots(records, 'failure', MAX_FAILURES, validateFailure);
+    slots(records, 'flow', MAX_FLOWS, validateFlow);
     const policy = records.find(r => r.key === 'session-policy');
-    if (policy)
-        validateSessionPolicy(envelope(policy.value, 'policy'), 'corrupt_state', 503);
-    return { initialized: setup.value.phase === 'ready' };
+    if (policy) validateSessionPolicy(envelope(policy.value, 'policy'), 'corrupt_state', 503);
+    const all = users(records);
+    for (const record of records.filter(r => r.key.startsWith('credential:'))) {
+        localValue(record);
+        if (!all.some(u => record.key === 'credential:' + u.id)) fail('corrupt_state', 503);
+    }
+    return setup;
 }
-/** Only the stopped-instance host may create the namespace or rotate its code. */
-export async function prepareInitialization(context: RecoveryContext): Promise<{
-    code: string;
-    expiresAt: number;
-}> {
-    const state = context.durableState, now = context.now ?? Date.now;
+/** Recognize only the retired schema-3 pending-code shape, without mutating reads. */
+function withoutSetupCode(records: readonly DurableRecord[]): readonly DurableRecord[] {
+    const record = records.find(r => r.key === 'setup');
+    if (!record) return records;
+    const value = envelope(record.value, 'setup') as Record<string, unknown>;
+    if (!value || !Object.hasOwn(value, 'code')) return records;
+    const code = value.code as {digest?: unknown; expiresAt?: unknown};
+    if (value.phase !== 'uninitialized' || Object.keys(value).some(k => !['phase', 'code'].includes(k))
+        || !code || typeof code.digest !== 'string' || !/^[a-f0-9]{64}$/.test(code.digest)
+        || !Number.isSafeInteger(code.expiresAt) || (code.expiresAt as number) < 0
+        || Object.keys(code).some(k => !['digest', 'expiresAt'].includes(k))) fail('corrupt_state', 503);
+    return records.map(r => r === record ? {...r, value: {schema: ACCOUNT_RECORD_SCHEMA, setup: {phase: 'uninitialized'}}} : r);
+}
+async function clearSetupCode(state: PluginDurableState): Promise<void> {
     for (let i = 0; i < 64; i++) {
-        const records = await state.list(), fresh = !records.length;
-        if (!fresh)
-            await readManagementSetup(state);
-        const setup = fresh ? undefined : setupRecord(records);
-        if (setup?.value.phase === 'ready')
-            fail('already_initialized', 409);
-        const clock = fresh ? { version: 0, value: wallTime(now) } : await observeClock(state, now), code = randomBytes(32).toString('base64url'), expiresAt = clock.value + 30 * 60000;
+        const records = await state.list(), normalized = withoutSetupCode(records);
+        if (normalized === records) return;
+        const before = records.find(r => r.key === 'setup')!, after = normalized.find(r => r.key === 'setup')!;
+        const clock = records.find(r => r.key === 'clock');
         try {
-            await state.transact([{ key: 'setup', expectedVersion: setup?.version ?? 0, value: asJson({ schema: ACCOUNT_RECORD_SCHEMA, setup: { phase: 'uninitialized', code: { digest: digest(code), expiresAt } } }) }, clockMutation(clock)]);
-            return { code, expiresAt };
-        }
-        catch (e) {
-            if (!isDurableStateConflictError(e))
-                throw e;
-        }
+            await state.transact([{key: 'setup', expectedVersion: before.version, value: after.value}, clockMutation({version: clock?.version ?? 0, value: clockValue(clock)})]);
+            return;
+        } catch (error) { if (!isDurableStateConflictError(error)) throw error; }
+    }
+    fail('version_conflict', 409);
+}
+async function ensureSetup(state: PluginDurableState, now: () => number): Promise<void> {
+    for (let i = 0; i < 64; i++) {
+        if ((await state.list()).length) return;
+        try {
+            await state.transact([{key: 'setup', expectedVersion: 0, value: {schema: ACCOUNT_RECORD_SCHEMA, setup: {phase: 'uninitialized'}}}, clockMutation({version: 0, value: wallTime(now)})]);
+            return;
+        } catch (error) { if (!isDurableStateConflictError(error)) throw error; }
+    }
+    fail('version_conflict', 409);
+}
+function initialUserMutations(records: readonly DurableRecord[], user: User, hash: string): DurableMutation[] {
+    return [
+        {key: 'setup', expectedVersion: records.find(r => r.key === 'setup')?.version ?? 0, value: {schema: ACCOUNT_RECORD_SCHEMA, setup: {phase: 'ready'}}},
+        mutation(settings(records), 'settings', EMPTY_SETTINGS), mutation(turnstile(records), 'turnstile', EMPTY_TURNSTILE),
+        {key: 'user:' + user.id, expectedVersion: 0, value: asJson({schema: ACCOUNT_RECORD_SCHEMA, user})},
+        {key: 'credential:' + user.id, expectedVersion: 0, value: {schema: ACCOUNT_RECORD_SCHEMA, credential: {passwordHash: hash, temporary: false}}},
+        {key: 'recovery-anchor', expectedVersion: 0, value: {schema: ACCOUNT_RECORD_SCHEMA, userId: user.id}},
+    ];
+}
+function offlinePasswordInput(input: unknown, operation: string) {
+    const b = object(input);
+    exact(b, ['operation', 'username', 'password', 'passwordConfirmation']);
+    if (b.operation !== operation) fail('invalid_input');
+    const name = username(b.username), p = password(b.password);
+    if (b.passwordConfirmation !== p) fail('password_confirmation');
+    return {name, p};
+}
+export async function addUserOffline(input: unknown, context: RecoveryContext) {
+    const {name, p} = offlinePasswordInput(input, 'add-user');
+    const state = context.durableState, now = context.now ?? Date.now;
+    await clearSetupCode(state);
+    const hash = await Bun.password.hash(p, {algorithm: 'argon2id', memoryCost: 65536, timeCost: 3});
+    for (let i = 0; i < 64; i++) {
+        const records = await state.list();
+        if (records.length) validateState(records);
+        const all = users(records);
+        if (all.some(u => u.username === name)) fail('username_exists', 409);
+        if (all.length >= MAX_USERS) fail('user_limit', 409);
+        const user: User = {id: randomUUID(), username: name, displayName: name, disabled: false, generation: 1};
+        const pending = !records.length || setupRecord(records).value.phase === 'uninitialized';
+        const changes = pending ? initialUserMutations(records, user, hash) : [
+            {key: 'user:' + user.id, expectedVersion: 0, value: asJson({schema: ACCOUNT_RECORD_SCHEMA, user})},
+            {key: 'credential:' + user.id, expectedVersion: 0, value: asJson({schema: ACCOUNT_RECORD_SCHEMA, credential: {passwordHash: hash, temporary: false}})},
+        ];
+        const clock = records.find(r => r.key === 'clock');
+        changes.push(clockMutation({version: clock?.version ?? 0, value: Math.max(clock ? clockValue(clock) : 0, wallTime(now))}));
+        try {
+            await state.transact(changes);
+            return dto({...user, passwordHash: hash, temporary: false});
+        } catch (error) { if (!isDurableStateConflictError(error)) throw error; }
+    }
+    return fail('version_conflict', 409);
+}
+export async function resetUserPasswordOffline(input: unknown, context: RecoveryContext) {
+    const {name, p} = offlinePasswordInput(input, 'reset-password');
+    const state = context.durableState, now = context.now ?? Date.now;
+    await clearSetupCode(state);
+    // Resolve the target before hashing or observing time; missing users never write state.
+    const initial = await state.list();
+    if (initial.length) validateState(initial);
+    if (!users(initial).some(u => u.username === name)) fail('not_found', 404);
+    const hash = await Bun.password.hash(p, {algorithm: 'argon2id', memoryCost: 65536, timeCost: 3});
+    for (let i = 0; i < 64; i++) {
+        const records = await state.list();
+        validateState(records);
+        const target = users(records).find(u => u.username === name);
+        if (!target) fail('not_found', 404);
+        const record = records.find(r => r.key === 'user:' + target.id)!, credential = records.find(r => r.key === 'credential:' + target.id);
+        const {passwordHash: _, temporary: __, ...prior} = target, user = {...prior, generation: next(prior.generation)};
+        const s = settings(records), failures = slots(records, 'failure', MAX_FAILURES, validateFailure), clock = records.find(r => r.key === 'clock')!;
+        try {
+            await state.transact([
+                {key: record.key, expectedVersion: record.version, value: asJson({schema: ACCOUNT_RECORD_SCHEMA, user})},
+                {key: 'credential:' + user.id, expectedVersion: credential?.version ?? 0, value: {schema: ACCOUNT_RECORD_SCHEMA, credential: {passwordHash: hash, temporary: false}}},
+                mutation(s, 'settings', {...s.value!, failureEpoch: next(Math.max(s.value!.failureEpoch, ...failures.map(f => f.value?.epoch ?? 0)))}),
+                clockMutation({version: clock.version, value: Math.max(clockValue(clock), wallTime(now))}),
+            ]);
+            return dto({...user, passwordHash: hash, temporary: false});
+        } catch (error) { if (!isDurableStateConflictError(error)) throw error; }
     }
     return fail('version_conflict', 409);
 }
@@ -1638,7 +1729,9 @@ export async function recoverIdentity(input: unknown, context: RecoveryContext) 
         fail('password_confirmation');
     if (typeof b.reason !== 'string' || !b.reason.trim() || b.reason.length > 512)
         fail('invalid_reason');
-    const state = context.durableState, now = context.now ?? Date.now, hash = await Bun.password.hash(p, { algorithm: 'argon2id', memoryCost: 65536, timeCost: 3 });
+    const state = context.durableState, now = context.now ?? Date.now;
+    await clearSetupCode(state);
+    const hash = await Bun.password.hash(p, { algorithm: 'argon2id', memoryCost: 65536, timeCost: 3 });
     for (let i = 0; i < 64; i++) {
         const records = await state.list();
         validateKeys(records);
@@ -1651,11 +1744,11 @@ export async function recoverIdentity(input: unknown, context: RecoveryContext) 
             anchorId = id;
         }
         // Recovery deliberately does not accept a previous record schema or infer an anchor from a username.
-        for (const r of records)
-            if ((r.value as {
-                schema?: unknown;
-            })?.schema !== ACCOUNT_RECORD_SCHEMA)
+        for (const r of records) {
+            const anchorTombstone = anchorId && ['user:' + anchorId, 'credential:' + anchorId].includes(r.key) && r.value === null;
+            if (!anchorTombstone && (r.value as {schema?: unknown})?.schema !== ACCOUNT_RECORD_SCHEMA)
                 fail('corrupt_state', 503);
+        }
         const id = anchorId ?? randomUUID(), record = records.find(r => r.key === 'user:' + id);
         let prior: User | undefined;
         if (record) {
@@ -1670,16 +1763,25 @@ export async function recoverIdentity(input: unknown, context: RecoveryContext) 
         const other = records.filter(r => r.key.startsWith('user:') && r.key !== 'user:' + id).map(r => validateUser(envelope(r.value, 'user')));
         if (other.some(u => u.username === name))
             fail('username_exists', 409);
+        const user: User = { id, username: name, displayName: prior?.displayName ?? name, disabled: false, generation: next(prior?.generation ?? 0) };
+        const credential = records.find(r => r.key === 'credential:' + id);
+        if (records.length) {
+            if (!anchorId && setupRecord(records).value.phase === 'ready') fail('corrupt_state', 503);
+            // Only the anchor user and its local credential may be rebuilt. Keep every
+            // unrelated record under the same strict validation as normal startup.
+            const repaired = records.filter(r => !['user:' + id, 'credential:' + id].includes(r.key));
+            const setup = records.find(r => r.key === 'setup');
+            if (!setup) fail('corrupt_state', 503);
+            const phase = (envelope(setup.value, 'setup') as Setup).phase;
+            if (phase === 'ready') {
+                validateState([...repaired,
+                    {key: 'user:' + id, version: record?.version ?? 0, value: asJson({schema: ACCOUNT_RECORD_SCHEMA, user})},
+                    {key: 'credential:' + id, version: credential?.version ?? 0, value: {schema: ACCOUNT_RECORD_SCHEMA, credential: {passwordHash: hash, temporary: false}}},
+                ]);
+            } else validateState(records);
+        }
         const s = settings(records), turn = turnstile(records), clockRecord = records.find(r => r.key === 'clock');
-        let observed = 0;
-        try {
-            observed = clockValue(clockRecord);
-        }
-        catch (error) {
-            if (!(error instanceof AccountError))
-                throw error;
-        }
-        const at = Math.max(observed, wallTime(now)), user: User = { id, username: name, displayName: prior?.displayName ?? name, disabled: false, generation: next(prior?.generation ?? 0) }, credential = records.find(r => r.key === 'credential:' + id);
+        const at = Math.max(clockRecord ? clockValue(clockRecord) : 0, wallTime(now));
         const failures = slots(records, 'failure', MAX_FAILURES, validateFailure);
         slots(records, 'session', MAX_SESSIONS, validateSession);
         connections(records);
@@ -1705,5 +1807,13 @@ export async function recoverIdentity(input: unknown, context: RecoveryContext) 
     }
     return fail('version_conflict', 409);
 }
-export default { createControl, readManagementSetup, offlineRecovery: { kind: 'identity', prepareInitialization,
-        prompts: [{ name: 'username', label: 'Recovery username', secret: false }, { name: 'password', label: 'New password', secret: true }, { name: 'passwordConfirmation', label: 'Confirm password', secret: true }, { name: 'reason', label: 'Recovery reason', secret: false }, { name: 'disableTurnstile', label: 'Disable Turnstile? Type yes to disable; default no', secret: false }], recover: recoverIdentity } } satisfies ControlPlugin;
+const passwordPrompts = [
+    {name: 'username', label: 'Username', secret: false},
+    {name: 'password', label: 'New password', secret: true},
+    {name: 'passwordConfirmation', label: 'Confirm password', secret: true},
+] as const;
+export default { createControl, readManagementSetup, offlineRecovery: { kind: 'identity', actions: {
+    'add-user': {prompts: passwordPrompts, run: (input, context) => addUserOffline({...input, operation: 'add-user'}, context)},
+    'reset-password': {prompts: passwordPrompts, run: (input, context) => resetUserPasswordOffline({...input, operation: 'reset-password'}, context)},
+    reset: {prompts: [{name: 'username', label: 'Recovery username', secret: false}, ...passwordPrompts.slice(1), {name: 'reason', label: 'Recovery reason', secret: false}, {name: 'disableTurnstile', label: 'Disable Turnstile? Type yes to disable; default no', secret: false}], run: (input, context) => recoverIdentity({...input, operation: 'reset'}, context)},
+} } } satisfies ControlPlugin;

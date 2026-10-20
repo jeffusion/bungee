@@ -1,6 +1,6 @@
 # 离线插件恢复
 
-恢复必须在整个实例停止后执行，并持有同一实例的 master／ingress 锁。配置和插件状态由各自存储 Worker 执行；只有数据库关闭 ACK 齐备后才释放锁并返回结果，初始化码也只在此后显示。关闭超时或结果未知会保留锁并报告故障，不要删除锁文件绕过运行实例。
+恢复必须在整个实例停止后执行，并持有同一实例的 master／ingress 锁。配置和插件状态由各自存储 Worker 执行；只有数据库关闭 ACK 齐备后才释放锁并返回结果。关闭超时或结果未知会保留锁并报告故障，不要删除锁文件绕过运行实例。
 
 ## 前提与数据位置
 
@@ -8,31 +8,41 @@
 
 CLI 从配置数据库旁的 `plugin-secrets.key` 读取初始化时持久化的加密密钥，恢复命令不接受参数或环境变量覆盖。恢复数据库备份时，同时还原配套的密钥文件；CLI 初始化约定见 [CLI 参考](../reference/cli.md#bungee-init)。
 
-Docker 部署先停止原容器，再以同一镜像、原数据卷和环境变量运行临时交互容器。在该容器用原生入口明确指定配置库：
+Docker 部署先停止原容器，再以同一镜像、原数据卷和环境变量运行临时交互容器。官方镜像工作目录为 `/usr/app`，在原 Compose 项目目录执行：
 
 ```sh
-bun packages/core/dist/main.js --recover /usr/app/data/bungee.db --plugin user-auth --action issue-setup-code
+docker compose stop bungee
+docker compose run --rm -it --no-deps --entrypoint bun bungee packages/core/dist/main.js --recover /usr/app/data/bungee.db --plugin user-auth --action reset-password
+docker compose up -d bungee
 ```
 
-保持终端交互，不创建空数据卷；命令结束并删除临时容器后再启动原实例。其他部署可使用下述 CLI 命令。
+将 `reset-password` 换为所需动作。临时容器退出且恢复成功后再启动原实例；不要创建空数据卷。其他部署可使用下述 CLI 命令。
 
-## 初始化管理认证
+## 新增用户
 
 ```sh
-bungee recover --plugin user-auth --action issue-setup-code
+bungee recover --plugin user-auth --action add-user
 ```
 
-stdin、stdout 都必须为 TTY，不能从文件或管道签发初始化码。宿主先原子持久化强制认证 guard 和 provider 激活选择，再调用插件准备初始化。中途失败不能让下次启动恢复匿名管理；处理原错误后可重新签发。
+提示 Username、New password、Confirm password，不要求恢复原因。用户名重名时拒绝覆盖；密码为 5–32 个 Unicode 码点，允许空格，不裁剪。空命名空间或合法未初始化状态下，可建立首个 ready 账号及稳定恢复锚点。已有用户和会话保留。
 
-一次性码由 32 字节随机数生成，30 分钟有效，只保存摘要。命令确认配置与插件状态库均关闭后才在 TTY 显示码。再次签发撤销原码；账号已 ready 时拒绝签发。启动后访问公开管理地址的 `/#/setup`，输入码、账号和两次 5–32 个 Unicode 字符的密码。成功后回登录页，初始化不建立会话。完整步骤见[认证指南](authentication.md#管理认证)。
+## 按用户名重置密码
 
-## 重置账号密码
+```sh
+bungee recover --plugin user-auth --action reset-password
+```
+
+使用与新增用户相同的三个提示。按用户名定位已有账号，找不到时报错；保留 ID、显示名称、外部绑定和 disabled 状态。推进目标用户 generation，撤销该用户旧会话，其他用户会话保留；推进 failureEpoch，使旧登录限流失效。不要求旧密码或恢复原因，不会重新启用被禁用用户。
+
+## 恢复原管理员
 
 ```sh
 bungee recover --plugin user-auth --action reset
 ```
 
-命令要求 stdin、stdout 都是本地 TTY，交互输入新账号、两次隐藏密码及恢复原因，不要求或记录旧账号。输入历史关闭，公开提示不能通过方向键回显密码。命令定位初始化时建立的恢复锚点，完整身份保留原 ID；锚点身份缺失或损坏时允许重建，保留其他用户及 OIDC 连接。重置撤销全部旧会话与初始化码，保留不含凭据的恢复摘要，不改变强制认证状态、路由、服务或 API Key。Turnstile 关闭提示默认保留原配置，只有输入 `yes` 才关闭挑战。重置完成后启动实例并正常登录。
+提示 Recovery username、New password、Confirm password、Recovery reason 和 Disable Turnstile?。命令定位初始化时建立的稳定恢复锚点，保留原 ID；即使忘记原用户名，也不按用户名猜测身份。允许修复锚点用户缺失或损坏的身份和本地凭据，其他记录仍严格校验，不自动修复任意损坏数据库。保留其他用户、外部绑定、第三方登录连接及会话策略，撤销全部旧会话与在途认证流程，解除旧限流，并保存不含凭据的恢复摘要。Turnstile 默认保留，只有输入 `yes` 才关闭挑战。
+
+上述动作均要求 stdin、stdout 为本地 TTY。输入历史关闭，密码隐藏输入，不能通过 argv 或环境变量传入。它们不自动启用插件或修改 provider 选择，不改变强制认证状态、路由、服务或 API Key。恢复后按原状态启动；认证尚未启用时，在插件中心使用已有账号验证启用。首次在线创建账号见[认证指南](authentication.md#管理认证)。
 
 ## 解除强制认证
 

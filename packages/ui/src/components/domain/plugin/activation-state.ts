@@ -35,7 +35,7 @@ export function activationBlockedReason(plugin: Plugin, displayName: (name: stri
   return plugin.blockedReason ? t('pluginActivation.blocked.unavailable') : '';
 }
 
-const accountErrorCodes = new Set(["initialization_required", "management_setup_unavailable", "control_recovering", "invalid_credentials", "invalid_password", "password_confirmation", "password_unchanged", "invalid_input", "forbidden", "unauthorized", "invalid_origin", "invalid_csrf", "management_setup_failed", "login_limited", "session_limit", "version_conflict", "bootstrap_conflict", "management_provider_unavailable", "provider_unavailable", "authentication_switch_pending"]);
+const accountErrorCodes = new Set(["initialization_required", "management_setup_unavailable", "control_recovering", "invalid_credentials", "invalid_password", "password_confirmation", "password_unchanged", "invalid_input", "forbidden", "unauthorized", "invalid_origin", "invalid_csrf", "management_setup_failed", "login_limited", "session_limit", "version_conflict", "bootstrap_conflict", "already_initialized", "setup_state_changed", "management_provider_unavailable", "provider_unavailable", "authentication_switch_pending"]);
 export function accountError(error: unknown, t: ActivationTranslator = translate): { message: string; detail: string; key: string } {
   const detail = error instanceof Error ? error.message : String(error);
   const prefix = detail.split(':')[0];

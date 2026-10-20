@@ -12,7 +12,10 @@ import {loadImmutableControlArtifact} from '../plugin-control/artifact-loader';
 import {withOfflineStorageSession} from './offline-storage-session';
 import {readRecoveryAnswers, requireRecoveryTerminal} from './recovery-prompt';
 
-export type OfflineRecoveryAction = 'issue-setup-code' | 'reset' | 'release-auth';
+function validateAction(action: unknown): asserts action is string {
+  if (typeof action !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(action)
+    || ['__proto__', 'constructor', 'prototype'].includes(action)) throw new Error('invalid_recovery_arguments');
+}
 
 function validatePlugin(plugin: unknown): asserts plugin is string {
   if (typeof plugin !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(plugin)) throw new Error('invalid_recovery_plugin');
@@ -63,16 +66,17 @@ export async function recoverOffline(configDbPath: string, input: unknown): Prom
     }
     const module = await loadImmutableControlArtifact(record);
     const capability = module.offlineRecovery;
-    if (!capability || capability.kind !== b.kind) throw new Error('offline_recovery_not_supported');
+    if (!capability || capability.kind !== 'plugin-state') throw new Error('offline_recovery_not_supported');
     const state = await openState();
     return capability.recover(b.payload, {durableState: state.durableState(record.name)});
   });
 }
 
-/** Both databases close with an ACK before any result (especially a setup code) escapes. */
-export async function recoverOfflineAction(configDbPath: string, input: {plugin: string; action: OfflineRecoveryAction}): Promise<unknown> {
+/** Both databases close with an ACK before any result escapes. */
+export async function recoverOfflineAction(configDbPath: string, input: {plugin: string; action: string}): Promise<unknown> {
   validatePlugin(input.plugin);
-  if (!['issue-setup-code', 'reset', 'release-auth'].includes(input.action) || Object.keys(input).some(k => !['plugin', 'action'].includes(k))) throw new Error('invalid_recovery_arguments');
+  validateAction(input.action);
+  if (Object.keys(input).some(k => !['plugin', 'action'].includes(k))) throw new Error('invalid_recovery_arguments');
   requireRecoveryTerminal();
   return withRecoveryPlugin(configDbPath, input.plugin, async ({repository, record, openState}) => {
     assertIdentityProvider(repository, input.plugin, record.manifest.management);
@@ -84,25 +88,11 @@ export async function recoverOfflineAction(configDbPath: string, input: {plugin:
     const module = await loadImmutableControlArtifact(record);
     const capability = module.offlineRecovery;
     if (!capability || capability.kind !== 'identity') throw new Error('offline_recovery_not_supported');
-    if (input.action === 'reset') {
-      if (!capability.prompts) throw new Error('offline_recovery_prompts_not_supported');
-      const answers = await readRecoveryAnswers(capability.prompts);
-      const state = await openState();
-      return capability.recover({operation: 'reset', ...answers}, {durableState: state.durableState(record.name)});
-    }
-    if (!capability.prepareInitialization) throw new Error('offline_initialization_not_supported');
-    const state = await openState(), durableState = state.durableState(record.name);
-    if (module.readManagementSetup && (await durableState.list()).length
-      && (await module.readManagementSetup(durableState)).initialized) throw new Error('already_initialized');
-    // Protect before plugin writes: interrupted issuance must never restart anonymous.
-    const operationId = randomUUID(), now = Date.now();
-    await repository.setManagementProviderOffline(input.plugin, operationId, now);
-    const result = await capability.prepareInitialization({durableState});
-    if (!result || typeof result.code !== 'string' || !/^[A-Za-z0-9_-]{1,8192}$/.test(result.code)
-      || !Number.isSafeInteger(result.expiresAt) || result.expiresAt <= now) throw new Error('invalid_initialization_result');
-    const confirmation = await repository.setManagementProviderOffline(input.plugin, operationId, now);
-    if (!confirmation.managementProtection.required || confirmation.managementProtection.selectedProvider !== input.plugin) throw new Error('recovery_protection_not_confirmed');
-    return result;
+    const action = Object.hasOwn(capability.actions, input.action) ? capability.actions[input.action] : undefined;
+    if (!action || typeof action.run !== 'function') throw new Error('offline_recovery_action_not_supported');
+    const answers = await readRecoveryAnswers(action.prompts);
+    const state = await openState();
+    return action.run(answers, {durableState: state.durableState(record.name), now: Date.now});
   });
 }
 

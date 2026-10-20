@@ -5,7 +5,7 @@ addMessages('zh-CN', zh);
 addMessages('en', en);
 init({ initialLocale: 'zh-CN', fallbackLocale: 'zh-CN' });
 import {beforeEach,expect,test} from 'bun:test';
-import {activationDependencies,activationBlockedReason,originMatches} from '../../../../../src/components/domain/plugin/activation-state';
+import {activationDependencies,activationBlockedReason,originMatches,accountError} from '../../../../../src/components/domain/plugin/activation-state';
 import type {Plugin} from '../../../../../src/api/plugins';
 beforeEach(async () => { await locale.set('zh-CN'); await waitLocale(); });
 const plugin = (name:string, enabled=false, dependencies:Record<string,string>={}):Plugin => ({name,enabled,dependencies});
@@ -28,4 +28,12 @@ test('Origin precheck rejects missing configuration, alias hosts and port differ
   expect(originMatches('http://127.0.0.1:28089','http://localhost:60034')).toBe(false);
   expect(originMatches('http://localhost:28089','http://localhost:60034')).toBe(false);
   expect(originMatches('https://example.com','https://example.com')).toBe(true);
+});
+
+test('setup state changes and initialization conflicts retain actionable error codes',()=>{
+  for (const code of ['setup_state_changed','bootstrap_conflict','already_initialized']) {
+    const result=accountError(new Error(code),key=>key);
+    expect(result.key).toBe(`pluginActivation.errors.${code}`);
+    expect(result.detail).toBe(code);
+  }
 });

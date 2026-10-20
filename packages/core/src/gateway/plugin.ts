@@ -1,7 +1,7 @@
 /** Public SDK entry. This entry never boots the host process. */
 export * from '../plugin.types';
 export * from '../hooks';
-export type { RawResponseResult, RawResponseCompletion, RawResponseError, BoundControlClient, ControlPlugin, PluginControl, CredentialPolicy, CredentialLease, SecretStore, SecretValue, ControlRpcContext, ControlApiHandlerContext, ControlHostContext, UpstreamAccount, UpstreamDraft, BoundAttemptContext, ControlBindingIdentity, ControlApiDeclaration, ControlRpcDeclaration, OfflineRecoveryCapability, OfflineRecoveryContext } from '../plugin-control/contracts';
+export type { RawResponseResult, RawResponseCompletion, RawResponseError, BoundControlClient, ControlPlugin, PluginControl, CredentialPolicy, CredentialLease, SecretStore, SecretValue, ControlRpcContext, ControlApiHandlerContext, ControlHostContext, UpstreamAccount, UpstreamDraft, BoundAttemptContext, ControlBindingIdentity, ControlApiDeclaration, ControlRpcDeclaration, OfflineRecoveryCapability, OfflineRecoveryContext, OfflineRecoveryPrompt, PluginRecoveryAction } from '../plugin-control/contracts';
 export type * from '../plugin-extensions';
 export type * from '../plugin-services';
 export type * from './contracts';

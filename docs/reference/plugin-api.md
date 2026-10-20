@@ -25,7 +25,7 @@
 | `uiExtensionMode` | none、native-static 或 sandbox-iframe |
 | `ui.components` | 构建期原生组件名称及相对入口 |
 | `contributes` | API、导航、widgets、设置及资源扩展声明 |
-| `management.loginComponent`, `management.setupComponent` | 已声明的原生登录、一次性初始化组件名称 |
+| `management.loginComponent`, `management.setupComponent` | 已声明的原生登录、首次账号初始化组件名称 |
 | `translations` | 按语言组织的插件 namespace 翻译 |
 
 完整可运行例子见[最小插件](../guides/plugin-development.md#创建插件)。严格字段和组合约束由 [manifest parser](../../packages/core/src/plugin-manifest-catalog/manifest-parser.ts)维护。声明能力是 Host 授权边界，不是 JavaScript 代码安全沙箱。
@@ -157,7 +157,7 @@ hooks.onStreamChunk.tap('example', envelope => {
 
 ## 管理认证登录界面
 
-管理认证插件通过 manifest 声明登录与一次性初始化组件。`management.loginComponent` 和 `management.setupComponent` 必须引用 `ui.components` 中的组件名；组件随 `native-static` UI bundle 编译、发布，并应与运行它的 Bungee 版本匹配。
+管理认证插件通过 manifest 声明登录与首次账号初始化组件。`management.loginComponent` 和 `management.setupComponent` 必须引用 `ui.components` 中的组件名；组件随 `native-static` UI bundle 编译、发布，并应与运行它的 Bungee 版本匹配。
 
 ```json
 {
@@ -221,11 +221,42 @@ export interface ManagementSetupContext {
 }
 ```
 
-Host 将初始化请求绑定当前 provider 与页面生命周期，通过固定 `POST /api/auth/setup` 调用 `ManagementProvider.initialize(request)`。user-auth 的输入为 `{setupCode, username, password, passwordConfirmation}`，不接受 `code` 别名。Host 负责公开 Origin 校验和初始化框架，插件验证一次性码、字段与限流，并原子建立身份。初始化成功回登录页，不创建会话，也不执行登录后的 Dashboard 初始化。
+Host 将独立初始化页面的请求绑定当前 provider 与页面生命周期，通过固定 `POST /api/auth/setup` 调用 `ManagementProvider.initialize(request)`。user-auth 的输入为 `{username, password, passwordConfirmation}`，不接受其他字段。Host 负责公开 Origin 校验和初始化框架，插件校验字段并原子建立首个账号。此页面初始化成功回登录页，不创建会话，也不执行登录后的 Dashboard 初始化。
 
-`ManagementProvider.setupStatus()` 返回 `uninitialized` 或 `ready`。未初始化时 Host 只呈现受限初始化入口；状态或组件不可用时拒绝访问，不匿名放行。code 的签发、重签与身份恢复通过停机 TTY 能力完成，不通过在线激活向导收集凭据。具体账号、码及会话策略见 [user-auth](../../plugins/user-auth/README.md)。
+`ManagementProvider.setupStatus()` 返回 `uninitialized` 或 `ready`。未初始化时 Host 只呈现受限初始化入口；状态或组件不可用时拒绝访问，不匿名放行。`ControlPlugin.readManagementSetup(state)` 只取得 `get/list` 并返回 `{initialized:boolean}`，不启动插件或写状态，读取失败不能当作未初始化。user-auth 启动时才为真正的空命名空间 CAS 创建最小未初始化元数据；ready 状态丢失用户会明确报错。
 
-`OfflineRecoveryCapability.kind: identity` 仅通过停机后的本地 TTY action 调用。重置字段由插件的 `prompts` 声明，Host 关闭输入历史并隐藏 `secret: true` 的输入；Host 不解释账号或密码规则。结构化 stdin 和 owner-only 文件只接受 `kind: plugin-state`，不能调用身份恢复能力。输入限制与操作入口见[离线恢复](../guides/offline-recovery.md)。
+插件启用请求可附带 `managementSetup`，交给目标 provider 的 `bootstrap(input)`。user-auth 支持两个严格输入：
 
+- `{operation: "initialize", username, password, passwordConfirmation}`：仅未初始化时创建首个账号。
+- `{operation: "verify", username, password}`：仅验证已有本地账号，不创建身份。
+
+插件状态和配置库不构成跨库事务；账号创建成功而配置激活提交失败时，账号保留，后续按只读状态改用 verify。启用弹窗在确认 provider 选择后创建 Cookie 会话，并由宿主 Cookie-only verify 独立核验。账号、会话及恢复策略见 [user-auth](../../plugins/user-auth/README.md)。
+
+## 离线恢复能力
+
+`OfflineRecoveryCapability` 区分终端身份动作与结构化插件状态恢复。`PluginRecoveryAction`、`OfflineRecoveryPrompt` 和 `OfflineRecoveryContext` 由公开控制面 SDK 导出：
+
+```typescript
+interface OfflineRecoveryPrompt {
+  readonly name: string;
+  readonly label: string;
+  readonly secret: boolean;
+}
+interface OfflineRecoveryContext {
+  readonly durableState: PluginDurableState;
+  readonly now?: () => number;
+}
+interface PluginRecoveryAction {
+  readonly prompts: readonly OfflineRecoveryPrompt[];
+  run(input: Record<string, string>, context: OfflineRecoveryContext): unknown | Promise<unknown>;
+}
+type OfflineRecoveryCapability =
+  | {readonly kind: 'identity'; readonly actions: Readonly<Record<string, PluginRecoveryAction>>}
+  | {readonly kind: 'plugin-state'; recover(input: unknown, context: OfflineRecoveryContext): unknown | Promise<unknown>};
+```
+
+插件在 control 模块的 `offlineRecovery` 中声明 `identity.actions`；动作名映射到各自的 prompts 和 run。宿主以 `--plugin <name> --action <action>` 通用分发，要求整个实例停机、stdin／stdout 为本地 TTY，关闭输入历史并隐藏 `secret: true` 输入。run 只取得该插件命名空间的 durableState 和时钟；宿主不先启动 control、不调用初始化状态读取，也不解释账号字段或自动修改 provider 配置。只有数据库关闭 ACK 齐备后才释放实例锁并返回结果。
+
+user-auth 声明 `add-user`、`reset-password` 和 `reset`。`release-auth` 是宿主保留的通用解除保护动作，仍要求停机、本地 TTY 和匹配的 provider 选择。结构化 stdin 和 owner-only 文件只接受 `kind: plugin-state`，不能调用身份恢复能力；密码不通过 argv 或环境传入。输入限制与操作入口见[离线恢复](../guides/offline-recovery.md)。
 
 ---

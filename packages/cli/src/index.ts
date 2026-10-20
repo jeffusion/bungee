@@ -39,13 +39,12 @@ export function createProgram() {
     .description('Recover a stopped instance using plugin terminal actions or bounded JSON')
     .option('--file <path>', 'Owner-only 0600 recovery JSON input file')
     .option('--plugin <name>', 'Management plugin for an interactive offline action')
-    .option('--action <action>', 'Terminal action: issue-setup-code, reset, or release-auth')
+    .option('--action <action>', 'Plugin-declared terminal action, or release-auth')
     .addHelpText('after', `
 Stop the instance first. Supply one JSON object via stdin or bungee recover --file recovery.json (chmod 600).
-Initialize management access: bungee recover --plugin user-auth --action issue-setup-code
 Reset identity: bungee recover --plugin user-auth --action reset
 Release required authentication locally: bungee recover --plugin user-auth --action release-auth
-These actions require a terminal. Reset asks for the plugin's fields and recovery reason; secret fields are hidden.
+These actions require a terminal. Plugins declare the questions for each action; secret fields are hidden.
 Unresolved usage: {"kind":"plugin-state","plugin":"token-budget","payload":{"keyId":"KEY_ID","requestId":"REQUEST_ID","attemptId":"ATTEMPT_ID","inputTokens":100,"outputTokens":200,"reason":"Verified usage evidence"}}
 Usage counts are replacement totals for the specified attempt, applied to its original period.
 `)

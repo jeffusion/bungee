@@ -1,8 +1,8 @@
 import {createInterface} from 'node:readline/promises';
 import {PassThrough, Writable} from 'node:stream';
-import type {OfflineRecoveryCapability} from '../plugin-control/contracts';
+import type {OfflineRecoveryPrompt} from '../plugin-control/contracts';
 
-type RecoveryPrompts = NonNullable<OfflineRecoveryCapability['prompts']>;
+type RecoveryPrompts = readonly OfflineRecoveryPrompt[];
 export type RecoveryQuestion = (label: string, secret: boolean) => Promise<string>;
 
 export function requireRecoveryTerminal(): void {
@@ -11,11 +11,11 @@ export function requireRecoveryTerminal(): void {
 
 /** Plugins own field semantics; the host only validates the bounded prompt protocol. */
 export async function collectRecoveryAnswers(prompts: RecoveryPrompts, ask: RecoveryQuestion): Promise<Record<string, string>> {
-  if (!Array.isArray(prompts) || !prompts.length || prompts.length > 64) throw new Error('invalid_recovery_prompts');
+  if (!Array.isArray(prompts) || prompts.length > 64) throw new Error('invalid_recovery_prompts');
   const names = new Set<string>();
   for (const prompt of prompts) {
     if (!prompt || typeof prompt.name !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(prompt.name)
-      || ['operation', '__proto__', 'constructor', 'prototype'].includes(prompt.name) || names.has(prompt.name)
+      || ['__proto__', 'constructor', 'prototype'].includes(prompt.name) || names.has(prompt.name)
       || typeof prompt.label !== 'string' || !prompt.label || typeof prompt.secret !== 'boolean') throw new Error('invalid_recovery_prompts');
     names.add(prompt.name);
   }
@@ -24,7 +24,7 @@ export async function collectRecoveryAnswers(prompts: RecoveryPrompts, ask: Reco
     const answer = await ask(prompt.label, prompt.secret);
     if (typeof answer !== 'string') throw new Error('invalid_recovery_input');
     answers[prompt.name] = answer;
-    if (Buffer.byteLength(JSON.stringify({operation: 'reset', ...answers})) > 8192) throw new Error('recovery_input_too_large');
+    if (Buffer.byteLength(JSON.stringify(answers)) > 8192) throw new Error('recovery_input_too_large');
   }
   return answers;
 }
@@ -76,9 +76,4 @@ export async function readRecoveryAnswers(prompts: RecoveryPrompts): Promise<Rec
     if (!input.destroyed && typeof input.setRawMode === 'function' && input.isRaw !== wasRaw) input.setRawMode(wasRaw);
     if (!input.destroyed) { if (wasFlowing) input.resume(); else input.pause(); }
   }
-}
-
-export function writeSetupCodeToTerminal(result: {code: string; expiresAt: number}): void {
-  requireRecoveryTerminal();
-  process.stdout.write(`一次性初始化码：${result.code}\n有效期至：${new Date(result.expiresAt).toISOString()}\n`);
 }

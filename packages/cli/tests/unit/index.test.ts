@@ -61,7 +61,6 @@ describe('offline recovery command registration',()=>{
   let parsed:Record<string,string>={};registered.action(options=>{parsed=options;});
   await cli.parseAsync(['node','bungee','recover','--plugin','user-auth','--action','reset']);
   expect(parsed).toMatchObject({plugin:'user-auth',action:'reset'});
-  expect(registered.helpInformation()).toContain('issue-setup-code');
   expect(registered.helpInformation()).toContain('release-auth');
   expect(registered.helpInformation()).not.toContain('local-accounts');
  });
@@ -69,7 +68,17 @@ describe('offline recovery command registration',()=>{
 
 test('offline action validation rejects ambiguous input before resolving a launch',async()=>{
  const {recoverCommand}=await import('../../src/commands/recover');
- for(const options of [{plugin:'user-auth'}, {action:'reset'}, {plugin:'user-auth',action:'unknown'}, {plugin:'user-auth',action:'reset',file:'input.json'}, {plugin:'../user-auth',action:'reset'}]){
+ for(const options of [{plugin:'user-auth'}, {action:'reset'}, {plugin:'user-auth',action:'../reset'}, {plugin:'user-auth',action:'a'.repeat(65)}, {plugin:'user-auth',action:'constructor'}, {plugin:'user-auth',action:'reset',file:'input.json'}, {plugin:'../user-auth',action:'reset'}]){
   await expect(recoverCommand(options)).rejects.toThrow('invalid_recovery_arguments');
  }
+});
+
+
+test('plugin-declared actions pass argument validation and still require a terminal',async()=>{
+ const {recoverCommand}=await import('../../src/commands/recover');
+ const prior=Object.getOwnPropertyDescriptor(process.stdin,'isTTY');
+ try{
+  Object.defineProperty(process.stdin,'isTTY',{value:false,configurable:true});
+  for(const action of ['add-user','reset-password','custom-action']) await expect(recoverCommand({plugin:'user-auth',action})).rejects.toThrow('recovery_requires_terminal');
+ }finally{if(prior)Object.defineProperty(process.stdin,'isTTY',prior);else delete (process.stdin as any).isTTY;}
 });

@@ -6,25 +6,25 @@
 
 启用弹窗通过 `GET /api/plugins/user-auth/management-setup` 读取本插件的初始化状态。尚无记录时显示首次设置步骤；已初始化时才显示已有账号验证表单。查询不启动插件或写入数据，读取失败时显示错误并允许重新检查，不推断为已有账号。已有记录损坏仍明确报错。
 
-首次使用前，在服务器停止目标实例，在原部署目录使用原数据位置和环境变量执行：
-
-```sh
-bungee recover --plugin user-auth --action issue-setup-code
-```
-
-宿主完成实例锁检查、插件准备和配置激活后，才在交互终端显示一次性初始化码。码使用 32 字节随机数，30 分钟后失效；重新签发立即撤销原码。使用公开管理地址打开初始化页面，输入码、账号、密码及确认密码。初始化建立首个用户、本地密码和稳定恢复锚点；成功后跳转登录页，不创建会话。
+首次使用时，在插件中心打开“用户认证”开关，填写账号、密码和确认密码。启用请求通过 `managementSetup: {operation: "initialize", username, password, passwordConfirmation}` 原子建立首个用户、本地密码和稳定恢复锚点，再提交 provider 激活和强制认证选择；弹窗随后建立 Cookie 会话并经宿主核验。已有账号时改用 `{operation: "verify", username, password}`，只验证身份，不创建用户。若账号已创建而配置提交失败，账号保留；重新读取状态后使用已有账号验证继续启用。
 
 用户名为 1–64 个 ASCII 字符，只允许字母、数字及 `_ . @ -`，首字符必须为字母或数字，保存为小写。显示名称最多 128 个 Unicode 字符。密码为 5–32 个 Unicode 码点，允许空格，不裁剪。
 
-忘记用户名或密码时，停止实例、备份完整数据并执行：
+已选中 provider 但尚未初始化时，也可在公开管理地址的 `/#/setup` 填写账号、密码和确认密码。此独立页面成功后返回登录页，不创建会话。它与首次启用弹窗使用相同的首个账号创建规则。
+
+离线管理账号时，先停止整个实例并备份完整数据，在原部署目录使用原数据位置和环境执行：
 
 ```sh
+bungee recover --plugin user-auth --action add-user
+bungee recover --plugin user-auth --action reset-password
 bungee recover --plugin user-auth --action reset
 ```
 
-输入恢复用户名、新密码、确认密码和恢复原因。重置恢复锚点用户，即使忘记原用户名也不按用户名猜测身份；保留其他用户、外部绑定、第三方登录连接和会话策略，撤销全部会话与在途认证流程，重置有效登录限流。Turnstile 提示默认保留；只有显式输入 `yes` 才关闭挑战。重置不解除宿主强制认证，不修改路由、服务或 API Key。
+每次只执行所需动作。`add-user` 提示 Username、New password、Confirm password，拒绝重名；空命名空间可建立首个 ready 账号。`reset-password` 使用相同提示，按用户名精确定位，缺失时报错；保留用户 ID、绑定及禁用状态，推进目标用户 generation 和登录失败代际，使目标旧会话及旧限流失效，其他用户会话保留。这两个动作不要求恢复原因。
 
-Docker 部署需停止原容器，使用同一镜像、原数据卷和环境变量启动临时交互容器执行恢复，完成后删除临时容器并重启实例。不要创建空数据卷。
+`reset` 用于忘记账号或恢复原管理员，提示 Recovery username、New password、Confirm password、Recovery reason 和是否关闭 Turnstile。它定位初始化时建立的稳定恢复锚点，保留原 ID，并允许修复该用户缺失或损坏的身份与本地凭据，不按用户名猜测锚点，也不自动修复任意损坏状态。保留其他用户、外部绑定、第三方登录连接和会话策略，撤销全部会话与在途认证流程，重置有效登录限流。Turnstile 默认保留；只有显式输入 `yes` 才关闭挑战。
+
+离线动作不自动启用插件或改变 provider 选择，不解除宿主强制认证，不修改路由、服务或 API Key。stdin、stdout 都必须为 TTY，密码隐藏输入，不通过参数或环境变量传入。Docker 使用同一镜像、原数据卷和环境，具体命令见[离线恢复](../../docs/guides/offline-recovery.md)。
 
 ## 用户与外部身份
 
@@ -59,11 +59,11 @@ Turnstile 默认关闭。只有 site key、secret 和允许的 hostname 均完�
 
 ## 会话与持久化
 
-空闲超时默认 30 分钟，设为 0 可关闭；最长有效期默认 480 分钟，范围 1–43200 分钟，空闲超时上限同为 43200 分钟。策略只影响新会话，既有会话保留创建时的策略。Cookie `bungee_user_session` 使用 HttpOnly、SameSite=Strict，HTTPS 下使用 Secure。Cookie 写请求同时校验公开 Origin 和 CSRF；Bearer 与 Cookie 会话不能互换。退出撤销当前会话，全局撤销及离线恢复撤销全部会话。
+空闲超时默认 30 分钟，设为 0 可关闭；最长有效期默认 480 分钟，范围 1–43200 分钟，空闲超时上限同为 43200 分钟。策略只影响新会话，既有会话保留创建时的策略。Cookie `bungee_user_session` 使用 HttpOnly、SameSite=Strict，HTTPS 下使用 Secure。Cookie 写请求同时校验公开 Origin 和 CSRF；Bearer 与 Cookie 会话不能互换。退出撤销当前会话，全局撤销及离线 `reset` 撤销全部会话；离线 `reset-password` 只撤销目标用户会话，`add-user` 保留既有会话。
 
-插件仅使用宿主注入的 `user-auth` 命名空间，通过异步 durableState 和 CAS 保存 schema 3 记录，分别保存用户、本地密码、绑定、连接、设置和恢复锚点，不添加数据库表或 SQL 迁移。其他 schema 与当前格式不兼容，启动、初始化准备和恢复均明确拒绝，不转换或自动重开，也不读取 `local-accounts`。
+插件仅使用宿主注入的 `user-auth` 命名空间，通过异步 durableState 和 CAS 保存 schema 3 记录，分别保存用户、本地密码、绑定、连接、设置和恢复锚点，不添加数据库表或 SQL 迁移。空命名空间在插件启动时通过 CAS 创建最小 `uninitialized` 元数据；状态查询只读，不启动插件。ready 状态下用户丢失或记录损坏时明确报错，不重新开放初始化。其他 schema 明确拒绝，不转换，也不读取 `local-accounts`。历史 schema 3 待初始化记录中的 `setup.code` 仅由插件集中读取投影及启动／离线维护 CAS 清理；核心不添加迁移，已有 ready 用户格式和 ID 保持不变。
 
-密码使用 Argon2id（64 MiB、3 次迭代），会话和初始化码仅保存摘要。用户最多 128 个、第三方登录连接最多 32 个、有效绑定最多 512 个；会话最多 512 个固定槽、限流最多 1024 个固定槽、认证流程及审计各 128 个固定槽。审计仅记录 actor、action、result 和时间，不记录凭据。流程中的 PKCE verifier 通过 SecretStore 引用保存，10 分钟后流程失效，固定槽复用时清理原引用。秘密使用最多 512 个可复用键，引用同时绑定秘密版本，旧流程清理不能删除复用后的秘密；就绪后安全设置缺失时返回不可用，不回退默认关闭。
+密码使用 Argon2id（64 MiB、3 次迭代），会话仅保存令牌摘要。用户最多 128 个、第三方登录连接最多 32 个、有效绑定最多 512 个；会话最多 512 个固定槽、限流最多 1024 个固定槽、认证流程及审计各 128 个固定槽。审计仅记录 actor、action、result 和时间，不记录凭据。流程中的 PKCE verifier 通过 SecretStore 引用保存，10 分钟后流程失效，固定槽复用时清理原引用。秘密使用最多 512 个可复用键，引用同时绑定秘密版本，旧流程清理不能删除复用后的秘密；就绪后安全设置缺失时返回不可用，不回退默认关闭。
 
 固定 `clock` 用 CAS 保存已观察时间，拒绝请求不会回滚时间，时钟回拨或重启不能恢复过期凭据。所有有状态计划使用读前、读后时钟版本围栏核验读集。续期先保存 `pendingTouch`，只在重新读到已提交 pending、身份和原期限仍有效后，以槽版本和时钟版本 CAS 确认续期。授权与 Cookie 刷新只读取已确认时间，不续期。
 
@@ -106,7 +106,7 @@ PUT 连接省略 client secret 时保留原秘密。版本过期返回 `409 vers
 - `GET /api/auth/login/callback/:methodId` 验证回调后重定向；成功默认 `/#/`，绑定回到 `/#/extensions/user-auth/profile?oidcLink=<flowId>`，错误返回 `/#/login?oidcError=<code>`，不把授权码放进应用 URL。
 - 本地登录输入 `{username,password,transport?,turnstileToken?}`。Cookie 登录返回 `{administrator,csrfToken}`；Bearer 登录返回 `{administrator,token,expiresIn}`。
 
-初始化与恢复入口沿用 `setupStatus()`、`initialize(request)`、`readManagementSetup(state)` 和 `prepareInitialization(context)`。初始化输入 `{setupCode,username,password,passwordConfirmation}`；`bootstrap` 仅验证已存在本地身份，不创建用户。状态、存储或 provider 不可用时保持受保护，不回退匿名访问。
+初始化入口为 `setupStatus()`、`initialize(request)` 和只读 `readManagementSetup(state)`。独立初始化请求输入 `{username,password,passwordConfirmation}`；启用时 `bootstrap` 接受上述 `operation: "initialize"` 或 `operation: "verify"`。离线恢复通过 `offlineRecovery: {kind: "identity", actions}` 声明 `add-user`、`reset-password`、`reset`；`release-auth` 由宿主处理。状态、存储或 provider 不可用时保持受保护，不回退匿名访问。
 
 针对性验证：
 

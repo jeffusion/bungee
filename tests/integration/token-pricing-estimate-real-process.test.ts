@@ -125,7 +125,7 @@ test('original-lab estimates and context tiers settle protected USD budgets acro
     revision = prepared.revision;
     master = await startTrackedGatewayMaster(startup, fixture, lease);
     await waitUntil(async () => (await fetch(`${management}/health`)).ok, 'master did not become healthy');
-    await initializeManagementAccount(management, prepared.code, 'pricing-admin', password);
+    await initializeManagementAccount(management, 'pricing-admin', password);
     const login = await api('/api/auth/login', 'POST', { username: 'pricing-admin', password, transport: 'bearer' });
     authorization = `Bearer ${login.token}`;
     await inventory();
