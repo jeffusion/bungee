@@ -5,9 +5,7 @@
   import { onMount } from 'svelte';
   import { _ } from '$i18n';
   import { isLoading } from 'svelte-i18n';
-  import { ConfigurationOperationTimeoutError, ConfigurationOperationDegradedError } from '$api/config';
   import { publicationRecovery } from '$stores/runtime';
-  import { publicationMessage } from '$components/domain/config/publication-state';
   import { PluginsAPI, setPluginEnabled, type Plugin } from '$api/plugins';
   import { toast } from '$stores/toast';
   import { pluginList, pluginsLoading, refreshPlugins } from '$stores/plugins';
@@ -63,12 +61,6 @@
       }
     } catch (error) {
       await publicationRecovery.refresh();
-      const publicationWarning = error instanceof ConfigurationOperationTimeoutError || error instanceof ConfigurationOperationDegradedError;
-      if (publicationWarning) {
-        const message = error instanceof ConfigurationOperationTimeoutError ? $_('configurationSave.waitingStopped')
-          : $_(`configurationSave.${publicationMessage($publicationRecovery.publication, $publicationRecovery.fresh)}`);
-        toast.show(message, 'warning');
-      }
       const translated = accountError(error);
       operationNotice = {key:accepted ? 'pluginActivation.acceptedError' : 'pluginActivation.operationError',errorKey:translated.key};
       operationDetail = translated.detail;

@@ -5,7 +5,6 @@
   import { api } from '$api/client';
   import { readAuthMode, verifyToken, type AuthMode } from '$api/auth';
   import { PluginsAPI, setPluginEnabled, type Plugin } from '$api/plugins';
-  import { getConfigurationOperation, inspectTerminal, waitForConfigurationOperation } from '$api/config';
   import { token, csrfToken, beginAuthenticationHandoff } from '$stores/auth';
   import { hasManagementLoginComponent } from '$components/native-widgets';
   import { registerStaticPluginTranslations } from '$i18n/plugin-translations';
@@ -18,7 +17,7 @@
   let open = $state(true), busy = $state(false), checking = $state(!!plugin.management);
   let username = $state(''), password = $state(''), passwordConfirmation = $state('');
   let mode = $state<AuthMode | null>(null), message = $state(''), detail = $state(''), stage = $state('');
-  let accepted = $state(false), operationId = $state(''), complete = $state(false);
+  let accepted = $state(false), complete = $state(false);
   let browserOrigin = $state('');
   let initialized = $state<boolean | null>(null);
   let failedStage = $state('');
@@ -89,9 +88,9 @@
           ? initialized ? {operation: 'verify', username, password}
             : {operation: 'initialize', username, password, passwordConfirmation}
           : undefined,
-        onAccepted: async state => {
-          accepted = true; operationId = state.operation_id ?? ''; stage = 'awaitingPublication';
-          if (plugin.management) { await waitForMode(); await establishSession(); stage = 'confirmingPublication'; }
+        onAccepted: async () => {
+          accepted = true; stage = 'awaitingPublication';
+          if (plugin.management) { await waitForMode(); await establishSession(); }
         },
       });
       await finish();
@@ -100,7 +99,7 @@
       failure(error);
       if (plugin.management && !accepted) {
         // The response may have been lost after commit. Public mode can prove
-        // the transition happened, but cannot prove publication converged.
+        // the transition happened; publication remains tracked by runtime state.
         try { mode = await readAuthMode(); if (mode.mode === 'plugin' && mode.provider?.name === plugin.name) accepted = true; } catch { /* preserve the original failure */ }
         if (!accepted) {
           initialized = null;
@@ -115,14 +114,8 @@
     if (busy) return; busy = true; message = ''; detail = '';
     try {
       // Acceptance can enable authentication before a session exists. Recover
-      // through public mode/login endpoints before any protected status read.
+      // through public mode/login endpoints. Publication need not converge.
       if (plugin.management) { if (!await checkOrigin(false) || mismatch) return; await waitForMode(); await establishSession(); }
-      stage = 'recheckingPublication';
-      if (operationId) await (inspectTerminal(await getConfigurationOperation(operationId)) ?? waitForConfigurationOperation(operationId));
-      else if (accepted) {
-        await oncomplete(); stage = 'sessionRecovered';
-        password = ''; return;
-      }
       await finish();
     } catch (error) { failure(error); stage = 'needsRecovery'; }
     finally { busy = false; }

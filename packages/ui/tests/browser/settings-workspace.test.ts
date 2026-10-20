@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, test } from 'bun:test';
 import { chromium, expect, type Browser, type Page } from 'playwright/test';
 import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
-import type { ConfigurationOperationState } from '../../src/api/config';
+import type { ConfigurationOperationState, ConfigurationPublication } from '../../src/api/config';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
 import { collectApiEvidence } from '../helpers/editors/api-evidence';
@@ -19,7 +19,7 @@ const aggregate = (): ConfigurationAggregate => ({ logical_configuration: { log_
 const digest = `sha256:${'a'.repeat(64)}` as const;
 const envelope = (value: ConfigurationAggregate) => ({format:'bungee-config-snapshot',format_version:1,schema_version:1,
   exported_at:1,source_revision:42,content_hash:digest,envelope_hash:digest,aggregate:value});
-function operation(id: string, state: 'converged' | 'committed' | 'degraded' = 'converged'): ConfigurationOperationState {
+function operation(id: string, state: 'converged' | 'committed' | 'draining' | 'degraded' = 'converged'): ConfigurationOperationState {
   return { operation: { mutation_id:id, request_hash:digest, expected_revision:42, committed_revision:43, kind:'config',
     target_worker_count:2,drain_recovery_generation:0,last_drain_recovery_previous_generation:null,created_at:1,updated_at:1,
     state, result_status:state === 'converged' ? 200 : null,error_code:null,error_detail:null } as ConfigurationOperationState['operation'], workers:[] };
@@ -47,7 +47,7 @@ async function withSettings(run: (page: Page, model: ReturnType<typeof createMod
     if(path === '/api/plugin-translations') return json({});
     if(path === '/api/resources/api-key') return json({keys:[]});
     if(path === '/api/config/runtime') return model.runtimeUnavailable ? json({error:'runtime_unavailable'},503) : json({
-      ...configurationRuntimeFixture(publicationFixture({operation:null,recovery:null,retryable:false,serving_complete:true,
+      ...configurationRuntimeFixture(model.publication ?? publicationFixture({operation:null,recovery:null,retryable:false,serving_complete:true,
         serving_revision:model.revision,target_revision:model.revision})),config:model.saved});
     if(path === '/api/config' && method === 'GET') return json({revision:model.revision,content_hash:digest,config:model.saved});
     if(path === '/api/logs') return json({data:[],total:0,totalPages:0,page:1,limit:50});
@@ -79,7 +79,8 @@ async function withSettings(run: (page: Page, model: ReturnType<typeof createMod
 }
 function createModel() {
   return {saved:aggregate(),revision:42,id:'',writes:[] as Array<{method:string;path:string;body:any}>,validations:[] as any[],exports:0,
-    active:false,queryState:'converged' as 'converged'|'degraded',cleanupWrites:0,cleanupStatus:0,cleanupRefreshFailure:false,queries:0,rejection:'',status:503,networkFailure:false,nonJson:false,queryStatus:0,runtimeUnavailable:false,
+    active:false,queryState:'converged' as 'converged'|'draining'|'degraded',publication:null as ConfigurationPublication|null,
+    cleanupWrites:0,cleanupStatus:0,cleanupRefreshFailure:false,queries:0,rejection:'',status:503,networkFailure:false,nonJson:false,queryStatus:0,runtimeUnavailable:false,
 };
 }
 async function review(page:Page) {
@@ -193,6 +194,26 @@ test('accepted publication stays locked across query failure and reload, then ex
     model.queryStatus=0;model.queryState='degraded';await page.getByRole('button',{name:'Check this publication',exact:true}).click();
     await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','terminal');expect(model.writes).toHaveLength(1);
     await expect(page.getByTestId('settings-notice')).toBeVisible();
+  });
+},60_000);
+
+test('a restored plugin activation unlocks settings when background publication reaches its terminal state',async()=>{
+  for(const terminal of ['converged','degraded'] as const) await withSettings(async(page,model)=>{
+    model.id='10000000-0000-4000-8000-000000000009';model.revision=43;model.queryState='draining';
+    model.publication=publicationFixture({operation:{operation_id:model.id,committed_revision:43,state:'draining',
+      result_status:null,error_code:null,updated_at:1},recovery:null,retryable:false,serving_complete:true,serving_revision:43,target_revision:43});
+    await page.evaluate(id=>sessionStorage.setItem('bungee:settings-publication',JSON.stringify({version:1,mutationId:id,accepted:true})),model.id);
+    await page.reload();
+    await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','active');
+    await expect(page.getByTestId('logging-max-size')).toBeDisabled();
+    expect(model.queries).toBeGreaterThan(0);
+    model.queryState=terminal;
+    model.publication={...model.publication,operation:{...model.publication.operation!,state:terminal,
+      result_status:terminal==='converged'?200:202,error_code:terminal==='degraded'?'old_worker_drain_failed':null}};
+    await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','terminal');
+    await expect(page.getByTestId('logging-max-size')).toBeEnabled();
+    expect(await page.evaluate(()=>sessionStorage.getItem('bungee:settings-publication'))).toBeNull();
+    expect(model.writes).toHaveLength(0);
   });
 },60_000);
 

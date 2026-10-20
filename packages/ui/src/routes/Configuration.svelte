@@ -307,7 +307,8 @@
   }
   $effect(() => {
     const key = fresh && publication?.operation ? `${publication.operation.operation_id}:${publication.operation.state}` : '';
-    if (key && key !== lastDetailKey && !busy && !pendingId) {
+    const pendingFinished = publication?.operation?.operation_id === pendingId && isTerminal(publication?.operation?.state);
+    if (key && key !== lastDetailKey && !busy && (!pendingId || pendingFinished)) {
       lastDetailKey = key; void inspectOperation(publication!.operation!.operation_id);
     }
   });

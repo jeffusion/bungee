@@ -7,10 +7,11 @@ import { createAuthRuntime } from '../helpers/auth/runtime';
 import {menuSnapshot, fulfillMenuIcons} from '../helpers/menus';
 
 const {authRuntime} = createAuthRuntime();
+const activationOperationId = '10000000-0000-4000-8000-000000000009';
 
 test('management setup gates protected requests, confirms initialization, and joins the ordinary login shell', async () => {
   const {runtime, browser} = await authRuntime();
-  for (const scenario of ['setup', 'unavailable', 'foreign-component', 'activation-uninitialized', 'activation-initialize', 'activation-ready', 'activation-unavailable', 'activation-changed', 'activation-initialized-elsewhere', 'activation-conflict', 'activation-commit-failed', 'activation-recover', 'activation-initialize-recover'] as const) {
+  for (const scenario of ['setup', 'unavailable', 'foreign-component', 'activation-uninitialized', 'activation-initialize', 'activation-ready', 'activation-unavailable', 'activation-changed', 'activation-initialized-elsewhere', 'activation-conflict', 'activation-commit-failed', 'activation-recover', 'activation-initialize-recover', 'activation-initialize-draining', 'activation-verify-draining'] as const) {
       const context = await browser.newContext({ viewport: { width: 390, height: 1000 }, locale: 'zh-CN' });
       try {
         await context.addInitScript(() => localStorage.setItem('locale', 'zh-CN'));
@@ -29,9 +30,11 @@ test('management setup gates protected requests, confirms initialization, and jo
         await page.route('https://fonts.googleapis.com/**', route => route.fulfill({ contentType: 'text/css', body: '' }));
         let initialized = false, authenticated = false, setupReads = 0, selected = false, loginAttempts = 0;
         let enableAttempts = 0;
-        let accountReady = ['activation-ready', 'activation-unavailable', 'activation-recover', 'activation-changed'].includes(scenario);
+        let accountReady = ['activation-ready', 'activation-unavailable', 'activation-recover', 'activation-changed', 'activation-verify-draining'].includes(scenario);
         const activation = scenario.startsWith('activation-');
         const recoverSession = scenario === 'activation-recover' || scenario === 'activation-initialize-recover';
+        const backgroundPublication = scenario === 'activation-initialize-draining' || scenario === 'activation-verify-draining';
+        let publicationConverged = false;
         const initialPassword = ' 😀 甲 ';
         const provider = { name: manifest.name, ...manifest.management,
           ...(scenario === 'foreign-component' ? { setupComponent: 'TokenStatsChart' } : {}) };
@@ -63,11 +66,7 @@ test('management setup gates protected requests, confirms initialization, and jo
                 json:{error: scenario === 'activation-conflict' ? 'bootstrap_conflict' : 'configuration_commit_failed'}});
             }
             selected = true;
-            return json({operation_id:'enable-auth',operation:{state:'converged',result_status:200},workers:[]});
-          }
-          if (request.method() === 'GET' && url.pathname === '/api/config/operations/enable-auth') {
-            expect(authenticated).toBe(true);
-            return json({operation:{state:'converged',result_status:200},workers:[]});
+            return route.fulfill({status:202,json:{operation_id:activationOperationId,operation:{mutation_id:activationOperationId,state:backgroundPublication ? 'draining' : 'committed',result_status:null},workers:[]}});
           }
           if (['GET','POST'].includes(request.method()) && url.pathname === '/api/auth/setup') {
             if (scenario === 'unavailable') return json({});
@@ -105,7 +104,14 @@ test('management setup gates protected requests, confirms initialization, and jo
             return json({...snapshot,catalog,layout:createDefaultMenuLayout(catalog)});
           }
           if (request.method() === 'GET' && url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
-          if (request.method() === 'GET' && url.pathname === '/api/config/runtime') return json(config);
+          if (request.method() === 'GET' && url.pathname === '/api/config/runtime') {
+            if (!backgroundPublication || !selected) return json(config);
+            return json(configurationRuntimeFixture(publicationFixture({
+              operation:{operation_id:activationOperationId,committed_revision:1,state:publicationConverged ? 'converged' : 'draining',
+                result_status:publicationConverged ? 200 : null,error_code:null,updated_at:1},
+              recovery:null,retryable:false,serving_complete:true,serving_revision:1,target_revision:1,
+            })));
+          }
           if (request.method() === 'GET' && url.pathname === '/api/config') return json({ revision: 1, content_hash: config.content_hash, config: config.config });
           if (request.method() === 'GET' && url.pathname === '/api/runtime/upstreams') return json({ schema: 'bungee-runtime-upstreams-v1', generated_at: Date.now(),
             availability: 'complete', reason: null, admission: { revision: 1 }, workers: { observed: [], missing: [] }, upstreams: [] });
@@ -183,9 +189,24 @@ test('management setup gates protected requests, confirms initialization, and jo
             expect(authenticated).toBe(true);
             expect(loginAttempts).toBe(recoverSession ? 2 : 1);
             expect(enableAttempts).toBe(['activation-conflict', 'activation-commit-failed'].includes(scenario) ? 2 : 1);
+            expect(requests.some(value => value.startsWith('GET /api/config/operations/'))).toBe(false);
+            expect(await page.evaluate(() => JSON.parse(sessionStorage.getItem('bungee:settings-publication')!)))
+              .toEqual({version:1,mutationId:activationOperationId,accepted:true});
+            if (backgroundPublication) {
+              // The request is saved and login is usable while old workers still drain.
+              expect(publicationConverged).toBe(false);
+              await expect(dialog.locator('form')).toHaveAttribute('aria-busy','false');
+              await dialog.getByRole('button', {name:'完成',exact:true}).click();
+              const banner = page.getByTestId('configuration-publication-banner');
+              await expect(banner).toBeVisible();
+              expect(enableAttempts).toBe(1);
+              publicationConverged = true;
+              await expect(banner).toHaveCount(0);
+              expect(enableAttempts).toBe(1);
+            }
             if (recoverSession) {
               expect(setupReads).toBe(2);
-              expect(requests).toContain('GET /api/config/operations/enable-auth');
+              expect(requests.some(value => value.startsWith('GET /api/config/operations/'))).toBe(false);
             }
           }
           if (enableAttempts === 0) expect(requests.filter(value => value.startsWith('POST '))).toEqual([]);
