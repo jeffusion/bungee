@@ -109,3 +109,16 @@ test('an observation Worker without a close acknowledgement stays unhealthy and 
   expect(failure.resourceUnreleased).toBe(true);expect(stats.healthy!()).toBe(false);
   expect(await stats.close().catch(error=>error)).toBe(failure);
 },5000);
+
+test('registered observation namespace refuses unknown and inherited methods',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'bungee-observe-methods-'));const path=join(root,'access.db');
+  let stats:Awaited<ReturnType<typeof createAsyncMasterStats>>|undefined;
+  try {
+    await migrateAccessDatabaseAsync(path);stats=await createAsyncMasterStats(path);
+    const adapter=join(root,'adapter.ts');
+    await writeFile(adapter,'export function createObservationAdapter(){return {queryStats:()=>({count:1})};}');
+    await stats.registerObservationAdapter!('observer',adapter);
+    expect(await stats.observe!('observer','queryStats',[])).toEqual({count:1});
+    for(const method of ['recordSample','toString','__proto__']) {const denied=await stats.observe!('observer',method,[]).catch(error=>error);expect(String(denied)).toContain('observation_capability_unavailable');}
+  }finally{await stats?.close();await rm(root,{recursive:true,force:true});}
+});

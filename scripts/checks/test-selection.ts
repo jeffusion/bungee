@@ -132,7 +132,7 @@ export function selectTests(input: {
     for (const file of all.browser) if (moduleOf(file) === 'root' || moduleOf(file) === 'packages/ui' || moduleOf(file).startsWith('plugins/')) selected.browser.add(file);
   };
   const server = (modules: Iterable<string>): void => {
-    for (const module of reverseClosure(modules, input.relations)) include(module, ['integration']);
+    for (const module of reverseClosure(modules, input.relations)) include(module, module === 'plugins/llm-tps' ? ['integration', 'browser'] : ['integration']);
     include('packages/core', ['integration']); include('root', ['integration', 'browser']);
   };
   for (const file of [...new Set(input.changed)].sort()) {

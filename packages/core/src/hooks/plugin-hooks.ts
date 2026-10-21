@@ -98,6 +98,8 @@ export type AttemptObservationOutcome = 'completed' | 'failed' | 'cancelled';
 export type AttemptObservationEvent = Readonly<{
   /** Host-derived credential identity; never copied from client headers. */
   keyId?: string | null;
+  /** Host monotonic observation time, captured before observer queues. */
+  observedAtMonotonicMs?: number;
   requestId: string;
   routeId: string;
   attemptId: string;

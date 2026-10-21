@@ -5,7 +5,7 @@ import { bodyMetrics, bodyResources } from './body-resources';
 export class BodySSEFramer {
   private text='';private raw='';private data:string[]=[];private event='';private id:string|undefined;private retry:string|undefined;private comments:string[]=[];private count=0;private tail=false;private firstLine=true;
   private decoder=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true});
-  constructor(readonly configuredMax:number|(()=>number),readonly emit:(event:BodyEvent,bytes:number)=>void) {}
+  constructor(readonly configuredMax:number|(()=>number),readonly emit:(event:BodyEvent,bytes:number)=>void,readonly observeTime=true) {}
   get maxBytes():number{return typeof this.configuredMax==='number'?this.configuredMax:this.configuredMax();}
   private line(line:string,delimiter='\n'):void {
     this.count+=Buffer.byteLength(line+delimiter);
@@ -14,7 +14,7 @@ export class BodySSEFramer {
     if(this.firstLine){this.firstLine=false;if(line.startsWith('\uFEFF'))line=line.slice(1);}
     if(line===''){
       if(this.raw){const data=this.data.join('\n');let json:unknown;if(this.data.length)try{bodyMetrics.jsonParses++;json=freezeBodyValue(JSON.parse(data));}catch{}
-        this.emit(Object.freeze({data,hasData:this.data.length>0,json,event:this.event||undefined,id:this.id,retry:this.retry,comments:Object.freeze(this.comments) as unknown as string[],raw:this.raw,truncated:this.tail||undefined}),this.count);}
+        this.emit(Object.freeze({observedAtMonotonicMs:this.observeTime?performance.now():undefined,data,hasData:this.data.length>0,json,event:this.event||undefined,id:this.id,retry:this.retry,comments:Object.freeze(this.comments) as unknown as string[],raw:this.raw,truncated:this.tail||undefined}),this.count);}
       this.raw='';this.data=[];this.event='';this.comments=[];this.count=0;this.retry=undefined;return;
     }
     if(line.startsWith(':')){this.comments.push(line.slice(1));return;}

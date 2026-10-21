@@ -64,6 +64,7 @@ describe('PluginManifestCatalog filesystem snapshot', () => {
       'key-access',
       'key-rate-limit',
       'llm-protocol-adapter',
+      'llm-tps',
       'model-mapping',
       'models-dev',
       'signature-repair',

@@ -55,6 +55,7 @@ export interface ProxyRequestResult {
   completion: Promise<RawResponseCompletion>;
   protocolCompletion?: Promise<RawResponseCompletion>;
   observationCompletion?: Promise<void>;
+  observationEndedAtMonotonicMs?: () => number | undefined;
   drainRetryObservation?: () => Promise<void>;
   cleanup?: () => Promise<void>;
   streamCompletionState?: StreamCompletionState;
@@ -843,6 +844,7 @@ export async function executeForward(
   let rawResponse: RawResponseResult | undefined;
   let observedRawBodyCompleted = false;
   const observationCompletions: Promise<void>[] = [];
+  let observationEndedAtMonotonicMs:(() => number | undefined) | undefined;
   const wireTeardowns: Promise<void>[] = [];
   const ownedWireStreams: ReadableStream<Uint8Array>[] = [];
   const trackResponseWire = (source: ReadableStream<Uint8Array>,onRead?:()=>void): ReadableStream<Uint8Array> => {
@@ -1121,6 +1123,7 @@ export async function executeForward(
           attemptId: attemptOptions.attemptId,
           upstreamId: upstream_id,
           phase: 'request' as const,
+          observedAtMonotonicMs:performance.now(),
           direction:'request' as const,representation:'json' as const,
           view:{requestId,attemptId:attemptOptions.attemptId,direction:'request' as const,stage:'outbound-request' as const,version:requestWrite ? 1:0,contentType:fetchHeaders.get('content-type') ?? '',contentEncoding:fetchHeaders.get('content-encoding') ?? ''},
           isActive: () => true,
@@ -1266,6 +1269,7 @@ export async function executeForward(
           const handle=wireOwner.handle(view);
           const observer = createAttemptResponseObserver(protocol,{requestId,routeId,attemptId:attemptOptions.attemptId,upstreamId:upstream_id,status:proxyRes.status},
             event=>attemptOptions.observeResponse!(Object.freeze({...event,direction:'response',representation:protocol === 'sse' ? 'sse':'json',view:{requestId,attemptId:attemptOptions.attemptId,direction:'response',stage:'upstream-response',version:0,contentType:sourceResponse.headers.get('content-type') ?? '',contentEncoding:sourceResponse.headers.get('content-encoding') ?? ''}})),()=>{observedRawBodyCompleted=true;},proxyRes.headers.get('content-encoding') ?? '', 'response','',attemptSignal,{maxBytes:requestSnapshot.bodySource?.maxBytes,bodyHandle:handle});
+          observationEndedAtMonotonicMs=()=>observer.endedAtMonotonicMs;
           observationCompletions.push(observer.completion);
           const wireSource=wireOwner.take() as ReadableStream<Uint8Array>;
           const observedBody=observeBodyStream(wireSource,observer);
@@ -1536,6 +1540,7 @@ export async function executeForward(
         headers: responseHeaders,
       }),
       completion: strictCompletion,
+      observationEndedAtMonotonicMs,
       observationCompletion: rawBodyWasLeftUnconsumed || observationCompletions.length > 0
         ? Promise.all([rawObservationCompletion, ...observationCompletions]).then(() => undefined) : undefined,
       drainRetryObservation: instrumentedRawResponse && isJsonMediaType(instrumentedRawResponse.headers.get('content-type') ?? '') ? async () => {

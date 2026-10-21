@@ -27,3 +27,20 @@ test('bounded observer overflow emits incomplete once and preserves cleanup',asy
   await observers.close(close);
   expect(phases).toEqual(['open','incomplete','close']);
 });
+
+test('queued WS observations preserve producing time across independent branches',async()=>{
+  const slow=createPluginHooks(),fast=createPluginHooks();
+  const seen:WebSocketObservationEvent[][]=[[],[]];
+  let release!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  let entered!:()=>void;const started=new Promise<void>(resolve=>{entered=resolve;});
+  slow.onWebSocketObservation.tapPromise('slow',async event=>{seen[0]!.push(event);if(event.phase==='open'){entered();await gate;}});
+  fast.onWebSocketObservation.tap('fast',event=>{seen[1]!.push(event);});
+  const observers=new WebSocketObservers(context,[{pluginName:'slow',hooks:slow.onWebSocketObservation},{pluginName:'fast',hooks:fast.onWebSocketObservation}]);
+  observers.emit({phase:'open'});await started;
+  observers.emit({phase:'message',direction:'upstream',message:createWebSocketMessageView('{}')});
+  const enqueuedBy=performance.now();
+  await new Promise(resolve=>setTimeout(resolve,30));release();await observers.close(close);
+  expect(seen[0]![1]!.observedAtMonotonicMs).toBeLessThanOrEqual(enqueuedBy);
+  expect(seen[0]![1]!.observedAtMonotonicMs).toBe(seen[1]![1]!.observedAtMonotonicMs);
+});

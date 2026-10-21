@@ -679,6 +679,12 @@ export interface TokenMeteringResult {
   readonly requestId: string; readonly attemptId: string; readonly routeId: string; readonly upstreamId: string;
   readonly keyId?: string | null;
   readonly provider: string; readonly model?: string; readonly pricingProvider?: string;
+  /** Complete observable stream: first output to protocol completion (or normal EOF), in ms.
+   * Requires successful Host completion, no protocol failure/error or incomplete observation, and positive time.
+   * Independent of accounting outcome (which may reject a missing protocol terminal). */
+  readonly generationDurationMs?: number;
+  /** Output measured for that successful generation, before accounting-only usage degradation. */
+  readonly generationOutput?: Readonly<{ tokens: number; source: 'official' | 'estimated' }>;
   readonly inputTokens?: number; readonly outputTokens?: number; readonly cacheReadTokens?: number; readonly cacheWriteTokens?: number;
   readonly inputSource: TokenMeteringSource; readonly outputSource: TokenMeteringSource;
   readonly inputAuthority: TokenMeteringAuthority; readonly outputAuthority: TokenMeteringAuthority;

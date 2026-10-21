@@ -616,7 +616,12 @@ export async function startMasterComposition(
         let revoked = false;
         const adapter = methods ? Object.freeze(Object.fromEntries(Object.entries(methods).map(([method,call]) =>
           [method, (...args:unknown[]) => {if(revoked)throw new Error('observation_capability_revoked');return call(...args);}]))) : undefined;
-        const capability = Object.freeze({...kv,...(adapter ? {metering:adapter as unknown as import('../plugin.types').TokenStatsMeteringStorage} : {}),uncached:()=>capability});
+        const invokeObservation = adapter ? async<T>(operation:string,args:readonly unknown[]):Promise<T> => {
+          if(revoked)throw new Error('observation_capability_revoked');
+          if(!Object.hasOwn(adapter,operation))throw new Error('observation_capability_unavailable');
+          return await adapter[operation]!(...args) as T;
+        } : undefined;
+        const capability = Object.freeze({...kv,...(adapter ? {metering:adapter as unknown as import('../plugin.types').TokenStatsMeteringStorage,invokeObservation} : {}),uncached:()=>capability});
         revokeStorage.set(capability,()=>{revoked=true;pluginState.storage.revoke(kv);});return capability;
       },
       revoke: value => revokeStorage.get(value)?.(),
@@ -1124,8 +1129,9 @@ export async function startMasterComposition(
         authorizeWorker(worker) {
           const physical = resources.workerFactory?.lookupPhysicalSession?.({master_generation:worker.master_generation,
             worker_instance_id:worker.process_instance_id,worker_slot:worker.worker_slot,boot_nonce:worker.boot_nonce});
-          return physical && physical.status.phase !== 'stopped'
-            && resources.workerFactory!.owns(physical.process) ? 'active' : 'unknown';
+          // A shutdown ACK stops admission before plugin queues drain. Keep the exact
+          // physical session's namespaced storage until exit/ownership revocation.
+          return physical && resources.workerFactory!.owns(physical.process) ? 'active' : 'unknown';
         },
         async handle(operation, payload, worker) {
           if (!['storage','observe'].includes(operation) || !payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('invalid_storage_rpc');
@@ -1142,8 +1148,9 @@ export async function startMasterComposition(
           const snapshot = target ? cachedSnapshot(target) : null;
           if (!snapshot?.aggregate.plugin_activations.some(activation => activation.plugin_name === value.namespace)) throw new Error('plugin_storage_namespace_forbidden');
           if (operation === 'observe') {
-            if (!resources.stats?.observationAdapter?.(value.namespace)?.[value.operation]) throw new Error('observation_capability_unavailable');
-            return resources.stats.observe!(value.namespace,value.operation,value.args);
+            const methods=resources.stats?.observationAdapter?.(value.namespace);
+            if (!methods || !Object.hasOwn(methods,value.operation)) throw new Error('observation_capability_unavailable');
+            return resources.stats!.observe!(value.namespace,value.operation,value.args);
           }
           return pluginState.storageOperation(value.namespace, value.operation as PluginStorageOperation, value.args);
         },

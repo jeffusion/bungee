@@ -24,6 +24,8 @@ export interface WebSocketSessionMetrics {
 }
 
 export type WebSocketObservationEvent = Readonly<WebSocketSessionContext & {
+  /** Captured once before the independent observer queues. */
+  readonly observedAtMonotonicMs?: number;
   /** Delivery lease expires when the observer returns or exceeds its deadline. */
   readonly isActive: () => boolean;
 } & (

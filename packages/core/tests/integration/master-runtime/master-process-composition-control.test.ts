@@ -1,3 +1,4 @@
+import {createRemotePluginStorageFactory} from '../../../src/plugin-state/storage-rpc';
 import { expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { PluginStateClient } from '../../../src/plugin-state/client';
@@ -15,7 +16,8 @@ import { createAsyncMasterStats, migrateAccessDatabaseAsync } from '../../../src
 import { ConfigRepository, type ConfigurationRecovery, type RepositorySnapshot } from '../../../src/config-storage';
 import type { ConfigPublicationWorkerProcess, ServingConfigWorker, WorkerAdmissionController } from '../../../src/config-publication';
 import type { ConfigMasterMessage, ConfigProcessIdentity } from '../../../src/config-publication/types';
-import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed } from '../../../src/supervision';
+import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, WorkerSupervisionHttpServer } from '../../../src/supervision';
+import { WorkerControllerClient } from '../../../src/master-runtime/supervised-worker-client';
 import { MasterRuntime } from '../../../src/master-runtime/runtime';
 import type { ConfigurationRecoveryScheduler } from '../../../src/master-runtime/configuration-recovery';
 import type { SupervisedConfigWorkerFactoryOptions } from '../../../src/master-runtime/supervised-worker-factory';
@@ -87,6 +89,8 @@ test('composition retains ACKed serving/draining snapshots and installs the peer
   process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 1).toString('base64');
   let configDatabase: Database | undefined;
   let accessDatabase: Database | undefined;
+  let shutdownClient: WorkerControllerClient | undefined;
+  let shutdownServer: WorkerSupervisionHttpServer | undefined;
   try {
     const pluginRoot = join(root, 'fake-control');
     await mkdir(pluginRoot, { recursive: true });
@@ -133,7 +137,7 @@ test('composition retains ACKed serving/draining snapshots and installs the peer
     let coordinator: { startCurrent: (value: unknown, existing?: readonly ServingConfigWorker[]) => Promise<unknown>; publish: (active: unknown, old: readonly ServingConfigWorker[]) => Promise<unknown> } | undefined;
     let composedCoordinator: { startCurrent(value: unknown): Promise<unknown>; publish(active: unknown, old: readonly ServingConfigWorker[]): Promise<unknown> } | undefined;
     let initialServing: readonly ServingConfigWorker[] = [];
-    let stoppedPhysicalWorker = false;
+    let exitedPhysicalWorker = false;
     let adoptionAttempts = 0;
     const repository = {
       getSnapshot: () => current,
@@ -189,11 +193,12 @@ test('composition retains ACKed serving/draining snapshots and installs the peer
       committed,
       lookupPhysicalSession(input: any) {
         const candidate = [...owned].find(value => value.identity.worker_instance_id === input.worker_instance_id);
+        if (candidate === first.process && exitedPhysicalWorker) return null;
         if (!candidate || candidate.identity.master_generation !== input.master_generation
           || candidate.slot !== input.worker_slot || (candidate as any).boot_nonce !== input.boot_nonce) return null;
         const saved = candidate === first.process ? snapshot(6, false, 'serving-6') : current;
         return {process: candidate, status: {...workerStatus(evidence(candidate,saved,catalog.hash)),
-          phase: stoppedPhysicalWorker ? 'stopped' : 'serving'}, configurationTarget: saved};
+          phase: shutdownClient?.cachedStatus?.phase ?? 'serving'}, configurationTarget: saved};
       },
       lookupExactControlSession(identity: any) {
         const process = [...this.committed].find((candidate) => candidate.identity.worker_instance_id === identity.worker_instance_id);
@@ -236,7 +241,8 @@ test('composition retains ACKed serving/draining snapshots and installs the peer
       context: { cwd: root, moduleDirectory: root, executable: process.execPath, entry: join(root, 'worker.ts'), pid: process.pid, accessLogDbPath: join(root, 'access.db') },
       clock: { now: () => Date.now() },
       createMasterStats: () => ({
-
+        observationAdapter: (namespace:string) => namespace === 'fake-control' ? {queryStats:async(...args:unknown[])=>args} : undefined,
+        observe: async (_namespace:string,_operation:string,args:readonly unknown[]) => args,
         matches: () => false,
         handle: async () => new Response(null, { status: 404 }),
         close: async () => { accessDatabase?.close(true); },
@@ -367,15 +373,47 @@ test('composition retains ACKed serving/draining snapshots and installs the peer
     });
     await storageRpc()('storage',{namespace:'fake-control',operation:'set',args:['bridge-marker',17]});
     expect(await storageRpc()('storage',{namespace:'fake-control',operation:'get',args:['bridge-marker']})).toBe(17);
+    const remote=createRemotePluginStorageFactory(
+      (namespace,operation,args)=>storageRpc()('storage',{namespace,operation,args}),
+      (namespace,operation,args)=>storageRpc()('observe',{namespace,operation,args}),
+    );
+    expect(await remote.create('fake-control').invokeObservation!<number[]>('queryStats',[17])).toEqual([17]);
+    for(const operation of ['missing','toString']) {const denied=await storageRpc()('observe',{namespace:'fake-control',operation,args:[]}).catch(error=>error);expect(denied).toMatchObject({status:400});}
+    const deniedObservation=await storageRpc()('observe',{namespace:'undeclared',operation:'queryStats',args:[]}).catch(error=>error);
+    expect(deniedObservation).toMatchObject({status:400});
     const deniedNamespace = await storageRpc()('storage',{namespace:'undeclared',operation:'set',args:['bridge-marker',99]}).catch(error=>error);
     expect(deniedNamespace).toMatchObject({status:400});
     const wrongBoot = await storageRpc(crypto.randomUUID())('storage',{namespace:'fake-control',operation:'get',args:['bridge-marker']}).catch(error=>error);
     expect(wrongBoot).toMatchObject({status:403});
     const foreignWorker = await storageRpc(first.process.boot_nonce,crypto.randomUUID())('storage',{namespace:'fake-control',operation:'get',args:['bridge-marker']}).catch(error=>error);
     expect(foreignWorker).toMatchObject({status:403});
-    stoppedPhysicalWorker = true;
-    const stoppedWorker = await storageRpc()('storage',{namespace:'fake-control',operation:'get',args:['bridge-marker']}).catch(error=>error);
-    expect(stoppedWorker).toMatchObject({status:403}); stoppedPhysicalWorker = false;
+    const shutdownCredential = deriveWorkerSupervisionCredential(deriveWorkerSupervisionSeed(new Uint8Array(32).fill(9),
+      first.process.identity.master_generation, first.process.identity.worker_instance_id, first.process.slot), first.process.boot_nonce);
+    let enterCleanup!: () => void, releaseCleanup!: () => void, finishCleanup!: () => void;
+    const cleanupEntered = new Promise<void>(resolve => { enterCleanup = resolve; });
+    const cleanupGate = new Promise<void>(resolve => { releaseCleanup = resolve; });
+    const cleanupFinished = new Promise<void>(resolve => { finishCleanup = resolve; });
+    shutdownServer = new WorkerSupervisionHttpServer({ credential: shutdownCredential, identity: first.process.identity,
+      controlPort: 41001, masterControlPort: 41002, runtime: { async apply() { throw new Error('unexpected apply'); }, async failClosed() {} } as any,
+      onShutdown: async () => { enterCleanup(); await cleanupGate; finishCleanup(); } });
+    shutdownClient = new WorkerControllerClient({ baseUrl: 'http://127.0.0.1:41001', credential: shutdownCredential, authority,
+      fetch: ((input: any, init: any) => shutdownServer!.fetch(new Request(input, init))) as typeof fetch });
+    await shutdownClient.attach();
+    await shutdownClient.shutdown();
+    expect(shutdownClient.cachedStatus?.phase).toBe('stopped');
+    await cleanupEntered;
+    // The real signed shutdown ACK is cached while plugin cleanup is still pending.
+    // Already accepted queue work retains the exact physical session's storage.
+    try {
+      await storageRpc()('storage',{namespace:'fake-control',operation:'set',args:['reporting:incomplete',true]});
+      expect(await storageRpc()('storage',{namespace:'fake-control',operation:'get',args:['reporting:incomplete']})).toBe(true);
+      expect(await remote.create('fake-control').invokeObservation!<number[]>('queryStats',[29])).toEqual([29]);
+    } finally { releaseCleanup(); await cleanupFinished; }
+    exitedPhysicalWorker = true;
+    const exitedWorker = await storageRpc()('storage',{namespace:'fake-control',operation:'get',args:['bridge-marker']}).catch(error=>error);
+    expect(exitedWorker).toMatchObject({status:403});
+    const stoppedObservation=await storageRpc()('observe',{namespace:'fake-control',operation:'queryStats',args:[]}).catch(error=>error);
+    expect(stoppedObservation).toMatchObject({status:403}); exitedPhysicalWorker = false;
     const runtimeResponse = await publicManagementOptions.controlApi.handle(new Request('http://localhost/api/runtime/upstreams'));
     expect(await runtimeResponse.json()).toMatchObject({ availability: 'complete', upstreams: [{
       state_key: 'composition-state', upstream_id: 'composition-upstream', active_request_count: 1,
@@ -433,6 +471,7 @@ test('composition retains ACKed serving/draining snapshots and installs the peer
     first.exit();
     await shutdown;
   } finally {
+    shutdownClient?.disconnect(); await shutdownServer?.stop();
     delete (globalThis as any).__bungeeCompositionControlInvokes;
     if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
     else process.env.BUNGEE_PLUGIN_SECRETS_KEY = previousSecret;
@@ -576,8 +615,13 @@ test.each(['stopped', 'publication-failure'] as const)('selected generic authent
     expect(stores.get(dependency).metering).toBeUndefined();
     const observation = stores.get(provider).metering;
     expect(await observation.count()).toBe(1);
+    expect(stores.get(dependency).invokeObservation).toBeUndefined();
+    const invoke=stores.get(provider).invokeObservation;
+    expect(await invoke('count',[])).toBe(1);
+    await expect(invoke('missing',[])).rejects.toThrow('observation_capability_unavailable');
     await handle.shutdown();handle=undefined;
     expect(()=>observation.count()).toThrow('observation_capability_revoked');
+    await expect(invoke('count',[])).rejects.toThrow('observation_capability_revoked');
   } finally {
     await handle?.shutdown();configuration?.close();delete (globalThis as any).__isolatedManagementOrder;
     delete (globalThis as any).__isolatedManagementStores;

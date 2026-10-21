@@ -23,7 +23,7 @@ const ROOT = resolve(import.meta.dir, '../../../..');
 const SOURCE = join(ROOT, 'plugins');
 const BUILTINS = [
   'anthropic-request-sanitizer', 'anthropic-tool-name-transformer',
-  'chatgpt-oauth', 'codex-router', 'deepseek-reasoning-fix', 'key-access', 'key-rate-limit', 'llm-protocol-adapter', 'model-mapping', 'models-dev',
+  'chatgpt-oauth', 'codex-router', 'deepseek-reasoning-fix', 'key-access', 'key-rate-limit', 'llm-protocol-adapter', 'llm-tps', 'model-mapping', 'models-dev',
   'signature-repair', 'token-budget', 'token-metering', 'token-stats', 'user-auth',
 ] as const;
 const roots: string[] = [];

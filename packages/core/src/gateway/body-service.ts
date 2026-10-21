@@ -90,6 +90,8 @@ export class BodySource {
   readonly completion!: Promise<void>;
   readonly reasons: string[] = [];
   lastError?: BodyProcessingError;
+  /** Physical upstream EOF, independent of optional observer draining. */
+  endedAtMonotonicMs?: number;
   mode!: 'empty' | 'opaque-stream' | 'replayable-bytes';
   constructor(source: ReadableStream<Uint8Array> | null, public maxBytes: number, readonly coding = '', public signal?: AbortSignal,
     readonly identity: BodyViewIdentity = { ...defaultBodyIdentity, contentEncoding: coding }) {
@@ -172,6 +174,7 @@ export class BodySource {
     catch(error){if(this.mandatory)throw error;for(const c of this.captures.values())c.stop(error as BodyProcessingError);this.captures.clear();this.clear();}
   }
   private finish(): void {
+    this.endedAtMonotonicMs ??= performance.now();
     this.eventSession?.end();
     if(this.mandatory || this.optionalCache || this.captures.size){
       if(this.collectedSize!==this.size)throw new BodyProcessingError(503,'body_not_replayable');
@@ -258,7 +261,7 @@ export class BodySource {
         return {async *[Symbol.asyncIterator](){
           try{
           if(!source.eventsPromise)source.eventsPromise=(async()=>{const bytes=await source.cachedDecoded(consumer?.mandatory===false);const result:BodyEvent[]=[];bodyMetrics.sseParses++;
-            const parser=new BodySSEFramer(source.maxBytes,(event,size)=>{source.hold(128+size*4);result.push(event);});parser.feed(bytes);parser.finish(true);return result;
+            const parser=new BodySSEFramer(source.maxBytes,(event,size)=>{source.hold(128+size*4);result.push(event);},false);parser.feed(bytes);parser.finish(true);return result;
           })();
           for(const event of await consumerResult(source.eventsPromise,consumer)){if(consumer?.signal?.aborted)throw new BodyProcessingError(408,'body_consumer_cancelled');yield event;}
           }finally{await owned.release(!!consumer?.signal?.aborted).catch(()=>undefined);}

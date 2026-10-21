@@ -11,10 +11,14 @@ type Connection = {
   disabled: boolean;
 };
 export interface ResponsesWebSocketMeteringCallbacks {
-  emit(event: AttemptObservationEvent): Promise<void>;
+  emit(event: AttemptObservationEvent, settlement?: WebSocketMeteringSettlement): Promise<void>;
   prepareRequest(requestId: string): void;
   discardRequest(requestId: string, attemptId: string): void;
   hasDemand(): boolean;
+}
+export interface WebSocketMeteringSettlement {
+  readonly accountingUsageIncomplete?: boolean;
+  readonly generationResponse?: JsonRecord;
 }
 const MAX_CONNECTIONS = 128;
 const MAX_RESPONSES = 1024;
@@ -111,7 +115,8 @@ export class ResponsesWebSocketMetering {
     connection.finished.add(responseId);
     // Earlier usage may be intermediate. Only a terminal envelope proves both final totals.
     const usageComplete = count(usage?.input_tokens) && count(usage?.output_tokens);
-    await this.finish(response, event, type === 'response.completed' && usageComplete ? 'completed' : 'failed', !usageComplete);
+    await this.finish(response, event, type === 'response.completed' && usageComplete ? 'completed' : 'failed', !usageComplete,
+      type === 'response.completed' ? body : undefined);
     if (connection.finished.size > MAX_TOMBSTONES) connection.finished.delete(connection.finished.values().next().value!);
   }
 
@@ -145,16 +150,17 @@ export class ResponsesWebSocketMetering {
     return await this.emit(response,event,{phase:'selected'})
       && await this.emit(response,event,{phase:'request',url:event.upstreamUrl,body:{model:response.model,stream:true}});
   }
-  private async emit(response: LogicalResponse, event: WebSocketObservationEvent, phase: Record<string, unknown>): Promise<boolean> {
+  private async emit(response: LogicalResponse, event: WebSocketObservationEvent, phase: Record<string, unknown>, settlement?: WebSocketMeteringSettlement): Promise<boolean> {
     if (this.closed || !event.isActive()) { this.callbacks.discardRequest(response.requestId, response.attemptId); return false; }
-    await this.callbacks.emit({ requestId: response.requestId, attemptId: response.attemptId, keyId: event.keyId, routeId: event.routeId, upstreamId: event.upstreamId, isActive: event.isActive, ...phase } as AttemptObservationEvent);
+    await this.callbacks.emit({ requestId: response.requestId, attemptId: response.attemptId, observedAtMonotonicMs:event.observedAtMonotonicMs, keyId: event.keyId, routeId: event.routeId, upstreamId: event.upstreamId, isActive: event.isActive, ...phase } as AttemptObservationEvent, settlement);
     if (this.closed || !event.isActive()) { this.callbacks.discardRequest(response.requestId, response.attemptId); return false; }
     return true;
   }
-  private async finish(response: LogicalResponse, event: WebSocketObservationEvent, outcome: 'completed' | 'failed' | 'cancelled', incomplete: boolean): Promise<void> {
+  private async finish(response: LogicalResponse, event: WebSocketObservationEvent, outcome: 'completed' | 'failed' | 'cancelled', incomplete: boolean, generationResponse?: JsonRecord): Promise<void> {
     this.responseCount--;
-    if (incomplete && !await this.emit(response, event, { phase: 'incomplete', reason: 'raw-response-incomplete' })) return;
-    if (!await this.emit(response, event, { phase: 'end', sent: true, outcome })) return;
+    if (incomplete && !await this.emit(response, event, { phase: 'incomplete', reason: 'raw-response-incomplete' },
+      { accountingUsageIncomplete: generationResponse !== undefined })) return;
+    if (!await this.emit(response, event, { phase: 'end', sent: true, outcome }, { generationResponse })) return;
     await this.emit(response, event, { phase: 'request-end' });
   }
   private async interrupt(connection: Connection, event: WebSocketObservationEvent, outcome: 'failed' | 'cancelled'): Promise<void> {

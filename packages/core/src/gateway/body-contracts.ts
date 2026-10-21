@@ -16,6 +16,8 @@ export interface BodyConsumer {
   readonly backlogEvents?: number;
 }
 export interface BodyEvent {
+  /** Captured when the shared framer produces the event, before subscriber queues. */
+  readonly observedAtMonotonicMs?: number;
   readonly data: string;
   readonly hasData?: boolean;
   readonly json?: unknown;

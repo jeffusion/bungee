@@ -213,3 +213,59 @@ test('helper checks the delivery lease after await and never retains request inp
   expect(request?.phase === 'request' && request.body).toEqual({ model: 'gpt-4o', stream: true });
   expect(discarded).toHaveLength(1); helper.dispose();
 });
+
+test('interleaved WS responses keep independent original timing even with overlapping intervals',async()=>{
+  const f=await fixture();
+  const timed=(body:Record<string,unknown>,observedAtMonotonicMs:number)=>f.send({phase:'message',direction:'upstream',observedAtMonotonicMs,message:{kind:'text',byteLength:1,json:()=>body}});
+  await f.create('a','a');await f.create('b','b');
+  for(const id of ['a','b'])await timed({type:'response.created',stream_id:id,response:{id,object:'response',output:[]}},10);
+  await timed({type:'response.output_text.delta',response_id:'a',delta:'a'},100);
+  await timed({type:'response.function_call_arguments.delta',response_id:'b',delta:'{'},100);
+  await timed({type:'response.completed',response:{id:'b',object:'response',output:[],usage:{input_tokens:1,output_tokens:2}}},300);
+  await timed({type:'response.completed',response:{id:'a',object:'response',output:[],usage:{input_tokens:1,output_tokens:3}}},500);
+  expect(f.results.map(result=>[result.model,result.generationDurationMs])).toEqual([['b',200],['a',400]]);
+  await f.create();await timed({type:'response.completed',response:{id:'snapshot',object:'response',output:[{type:'message',content:[{type:'output_text',text:'only final'}]}],usage:{input_tokens:1,output_tokens:2}}},600);
+  expect(f.results.at(-1)?.generationDurationMs).toBeUndefined();
+  await f.close();await f.provider.onDestroy();
+});
+
+test.each([
+  [{ output_tokens: 10 }, 'official', 10],
+  [undefined, 'estimated', undefined],
+] as const)('complete WS generation is independent of missing input or output usage %#', async (usage, source, tokens) => {
+  const f = await fixture();
+  const timed = (body: Record<string, unknown>, observedAtMonotonicMs: number) => f.send({ phase: 'message', direction: 'upstream',
+    observedAtMonotonicMs, message: { kind: 'text', byteLength: 1, json: () => body } });
+  try {
+    await f.create(); await f.response('measured');
+    await timed({ type: 'response.output_text.delta', response_id: 'measured', delta: 'generated answer' }, 100);
+    await timed({ type: 'response.completed', response: { id: 'measured', object: 'response', status: 'completed', error: null,
+      output: [{ type: 'message', content: [{ type: 'output_text', text: 'generated answer' }] }], usage } }, 600);
+    expect(f.results).toHaveLength(1);
+    const result = f.results[0]!;
+    expect(result).toMatchObject({ outcome: 'failed', observationIncomplete: true, inputTokens: undefined,
+      complete: false, generationDurationMs: 500, generationOutput: { source } });
+    if (tokens !== undefined) expect(result.generationOutput?.tokens).toBe(tokens);
+    else {
+      expect(result.generationOutput!.tokens).toBeGreaterThan(0);
+      expect(result.outputTokens).toBeUndefined();
+      expect(result.outputSource).toBe('none');
+    }
+  } finally { await f.close(); await f.provider.onDestroy(); }
+});
+
+test('intermediate WS official usage is not mistaken for final generation output', async () => {
+  const f = await fixture();
+  const timed = (body: Record<string, unknown>, observedAtMonotonicMs: number) => f.send({ phase: 'message', direction: 'upstream',
+    observedAtMonotonicMs, message: { kind: 'text', byteLength: 1, json: () => body } });
+  try {
+    await f.create(); await f.response('intermediate-measurement');
+    await timed({ type: 'response.output_text.delta', response_id: 'intermediate-measurement', delta: 'a complete generated answer with several tokens' }, 100);
+    await f.response('intermediate-measurement', 'response.in_progress', { input_tokens: 5, output_tokens: 1 });
+    await timed({ type: 'response.completed', response: { id: 'intermediate-measurement', object: 'response', error: null,
+      output: [{ type: 'message', content: [{ type: 'output_text', text: 'a complete generated answer with several tokens' }] }] } }, 600);
+    expect(f.results[0]).toMatchObject({ outcome: 'failed', observationIncomplete: true, outputTokens: 1,
+      outputSource: 'official', generationDurationMs: 500, generationOutput: { source: 'estimated' } });
+    expect(f.results[0]!.generationOutput!.tokens).toBeGreaterThan(1);
+  } finally { await f.close(); await f.provider.onDestroy(); }
+});

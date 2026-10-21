@@ -432,8 +432,8 @@ async function executeHttpRequestInternal(
   const completedAttemptLoggers = new WeakSet<RequestLogger>();
   const completingAttemptLoggers = new WeakMap<RequestLogger, Promise<void>>();
   const participatingObservationOwners = new Map<string, { owner: AttemptObservationOwner; event: AttemptObservationEvent }>();
-  const attemptEndCallbacks = new WeakMap<ProxyRequestResult, (outcome: AttemptObservationOutcome) => Promise<void>>();
-  const pendingAttemptEnds = new Map<string, (outcome: AttemptObservationOutcome) => Promise<void>>();
+  const attemptEndCallbacks = new WeakMap<ProxyRequestResult, (outcome: AttemptObservationOutcome, observedAtMonotonicMs?:number) => Promise<void>>();
+  const pendingAttemptEnds = new Map<string, (outcome: AttemptObservationOutcome, observedAtMonotonicMs?:number) => Promise<void>>();
   const observationStates = new Map<string, {
     readonly owners: readonly AttemptObservationOwner[];
     readonly identity: Pick<AttemptObservationEvent, 'requestId' | 'routeId' | 'attemptId' | 'upstreamId' | 'keyId'>;
@@ -473,7 +473,7 @@ async function executeHttpRequestInternal(
   const notifyObservationIncomplete = async (
     attemptId: string,
     reason: Extract<AttemptObservationEvent,{phase:'incomplete'}>['reason'],
-    detail: Pick<AttemptObservationEvent,'direction'|'representation'|'view'> = {direction:'response',representation:'wire'},
+    detail: Pick<AttemptObservationEvent,'direction'|'representation'|'view'|'observedAtMonotonicMs'> = {direction:'response',representation:'wire'},
     affectedOwners?: readonly AttemptObservationOwner[],
   ): Promise<void> => {
     const state = observationStates.get(attemptId);
@@ -489,7 +489,7 @@ async function executeHttpRequestInternal(
       reqLogger.addStep('body_observer_incomplete',{source:detail.representation ?? 'wire',observer_incomplete:true,
         reason,direction,attemptId,consumerId,view:detail.view});
       const event: AttemptObservationEvent = Object.freeze({...state.identity,...detail,direction,consumerId,
-        phase:'incomplete',reason,isActive:()=>true});
+        phase:'incomplete',reason,observedAtMonotonicMs:detail.observedAtMonotonicMs ?? performance.now(),isActive:()=>true});
       const result = await dispatchObserver(owner,event);
       if (result.failed) logger.error({error:result.error,timeout:result.timedOut,pluginName:owner.pluginName,
         requestId:event.requestId,attemptId,phase:'incomplete'},'Attempt observer could not accept incomplete marker');
@@ -516,8 +516,9 @@ async function executeHttpRequestInternal(
   };
 
   const finishAttemptObservation = async (result: ProxyRequestResult, outcome: AttemptObservationOutcome): Promise<void> => {
+    const boundaryAt=performance.now();
     await result.observationCompletion;
-    await attemptEndCallbacks.get(result)?.(outcome);
+    await attemptEndCallbacks.get(result)?.(outcome,result.observationEndedAtMonotonicMs ? result.observationEndedAtMonotonicMs() : boundaryAt);
   };
 
   const completeAttempt = async (
@@ -574,6 +575,7 @@ async function executeHttpRequestInternal(
         attemptId: event.attemptId,
         upstreamId: event.upstreamId,
         phase: 'request-end' as const,
+        observedAtMonotonicMs:event.observedAtMonotonicMs,
         isActive: () => true,
       });
       await notifyObservationOwners([owner], requestEnd);
@@ -1189,21 +1191,21 @@ async function executeHttpRequestInternal(
         let preparedAdmission: PreparedAdmissionAttempt[] = [];
         const identity = { requestId, keyId, routeId: currentRouteId, attemptId, upstreamId: selectedUpstream.upstream_id };
         if (owners.length > 0) observationStates.set(attemptId, { owners, identity, disabled: new Set(), incompleteReasons: new Set() });
-        const selectedEvent: AttemptObservationEvent = Object.freeze({ ...identity, phase: 'selected', isActive: () => true });
+        const selectedEvent: AttemptObservationEvent = Object.freeze({ ...identity, phase: 'selected', observedAtMonotonicMs:performance.now(), isActive: () => true });
         for (const owner of owners) {
           participatingObservationOwners.set(`${owner.pluginName}\0${owner.scopeKey}`, { owner, event: selectedEvent });
         }
         await notifyObservationOwners(owners, selectedEvent);
         let sent = false;
         let ended = false;
-        const end = async (outcome: AttemptObservationOutcome): Promise<void> => {
+        const end = async (outcome: AttemptObservationOutcome, observedAtMonotonicMs?:number): Promise<void> => {
+          if(outcome !== 'completed') observedAtMonotonicMs ??= performance.now();
           if (ended) return;
           ended = true;
           pendingAttemptEnds.delete(attemptId);
-          await notifyObservationOwners(owners, Object.freeze({
-            ...identity,
-            phase: 'end' as const, outcome, sent, isActive: () => true,
-          }));
+          const endEvent=Object.freeze({...identity,phase:'end' as const,outcome,sent,observedAtMonotonicMs,isActive:()=>true});
+          for(const owner of owners) participatingObservationOwners.set(`${owner.pluginName}\0${owner.scopeKey}`,{owner,event:endEvent});
+          await notifyObservationOwners(owners,endEvent);
           const results = await Promise.allSettled(preparedAdmission.map(prepared => prepared.onResult?.({sent,outcome})));
           for (const result of results) if (result.status === 'rejected') {
             logger.error({error:result.reason,requestId,attemptId}, 'Admission attempt result could not be settled');

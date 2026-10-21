@@ -6,7 +6,8 @@ import type { CanonicalTokenAccountingEventV2 as CanonicalEvent } from '@jeffusi
 import { TOKEN_METERING_SERVICE_ID, TOKEN_METERING_CONTRACT_VERSION, type TokenMeteringResult, type TokenMeteringService, type TokenMeteringSubscription } from '@jeffusion/bungee-core/plugin';
 
 import { classifyRequest, classifyResponse, type SupportedProvider } from './classifier';
-import { ResponsesWebSocketMetering } from './websocket';
+import { ResponsesWebSocketMetering, type WebSocketMeteringSettlement } from './websocket';
+import { GenerationTiming } from './generation-timing';
 
 type JsonRecord = Record<string, unknown>;
 type TokenAccountingSession = ReturnType<typeof createTokenAccountingSession>;
@@ -27,8 +28,10 @@ interface AttemptState {
   responseSeen: boolean;
   responseFailed: boolean;
   observationIncomplete: boolean;
+  generationObservationIncomplete: boolean;
   incompleteReasonLogged: boolean;
   latestEvent?: CanonicalEvent;
+  timing: GenerationTiming;
 }
 
 const MAX_ACTIVE_ATTEMPTS = 1024;
@@ -68,8 +71,8 @@ function createAttempt(event: AttemptObservationEvent): AttemptState {
     keyId: event.keyId ?? null,
     routeId: event.routeId || 'unknown',
     upstreamId: event.upstreamId || 'unknown',
-    provider: 'unknown', sent: false, llm: false, streaming: false, responseSeen: false, responseFailed: false,
-    observationIncomplete: false, incompleteReasonLogged: false,
+    timing:new GenerationTiming(), provider: 'unknown', sent: false, llm: false, streaming: false, responseSeen: false, responseFailed: false,
+    observationIncomplete: false, generationObservationIncomplete: false, incompleteReasonLogged: false,
   };
 }
 
@@ -158,6 +161,10 @@ interface FinalizationTaskInput {
   observationIncomplete: boolean;
   model?: string;
   pricingProvider?: string;
+  generationDurationMs?: number;
+  generationCompleted?: boolean;
+  generationResponse?: JsonRecord;
+  generationObservationIncomplete?: boolean;
 
 }
 
@@ -170,6 +177,31 @@ function finalOutcome(input: FinalizationTaskInput, canonicalOutcome?: Canonical
 
 function finalizeAttempt(input: FinalizationTaskInput): TokenMeteringResult {
   let event = input.observedEvent;
+  const generationComplete = (input.generationCompleted ?? input.endOutcome === 'completed')
+    && input.responseSeen && !input.responseFailed && !(input.generationObservationIncomplete ?? input.observationIncomplete)
+    && input.generationDurationMs !== undefined;
+  let generationOutput: TokenMeteringResult['generationOutput'];
+  if (generationComplete) {
+    try {
+      // WS accounting deliberately preserves intermediate official usage on incomplete
+      // final usage. A generation measurement must instead use the terminal snapshot.
+      let measured: CanonicalEvent | undefined;
+      if (input.generationResponse) {
+        const measurement = createTokenAccountingSession({ provider: 'openai', model: input.model,
+          requestId: input.requestId, attemptId: input.attemptId, routeId: input.routeId, upstreamId: input.upstreamId, streaming: true },
+        { deferFinalization: true });
+        measurement.consumeStreamChunk({ chunk: input.generationResponse });
+        measured = measurement.finalizeCompletedStream();
+      } else measured = input.session?.finalizeCompletedStream();
+      if (measured) {
+        assertCanonicalTokenAccountingEventV2(measured);
+        const output = input.generationResponse ? measured : mergeOfficialUsage({ ...measured }, event);
+        if (output.outputTokens !== undefined && ['official', 'local', 'heuristic'].includes(output.outputAuthority)) {
+          generationOutput = Object.freeze({ tokens: output.outputTokens, source: output.outputAuthority === 'official' ? 'official' : 'estimated' });
+        }
+      }
+    } catch { /* Unusable output cannot become a TPS sample. Accounting still finalizes below. */ }
+  }
   try {
     const finalized = input.endOutcome === 'completed' && input.responseSeen && !input.responseFailed && !input.observationIncomplete
       ? input.session?.finalizeCompletedStream() : input.session?.finalizeAbortedStream();
@@ -200,6 +232,7 @@ function finalizeAttempt(input: FinalizationTaskInput): TokenMeteringResult {
     outcome, observationIncomplete: input.observationIncomplete,
     complete: outcome === 'completed' && event?.inputTokens !== undefined && event?.outputTokens !== undefined && event.inputAuthority !== 'partial' && event.outputAuthority !== 'partial' && (!input.observationIncomplete || (event.inputAuthority === 'official' && event.outputAuthority === 'official')),
     finishedAtMs: input.finishedAtMs, settlementVersion: 1,
+    ...(generationComplete ? { generationDurationMs: input.generationDurationMs, generationOutput } : {}),
   });
 }
 
@@ -216,7 +249,7 @@ export const TokenMeteringPlugin = definePlugin(
     private requiredPending = new Map<string, Set<Promise<void>>>();
     private closed = false;
     private websocket = new ResponsesWebSocketMetering({
-      emit: event => this.handleAttemptObservation(event, true),
+      emit: (event, settlement) => this.handleAttemptObservation(event, true, settlement),
       prepareRequest: requestId => this.prepareRequest(requestId),
       discardRequest: (requestId, attemptId) => { this.attempts.delete(attemptId); this.requests.delete(requestId); this.droppedAttempts.delete(attemptId); },
       hasDemand: () => !this.closed && this.subscriptions.size > 0,
@@ -321,7 +354,7 @@ export const TokenMeteringPlugin = definePlugin(
         });
       }
     }
-    private async handleAttemptObservation(event: AttemptObservationEvent, websocket = false): Promise<void> {
+    private async handleAttemptObservation(event: AttemptObservationEvent, websocket = false, settlement: WebSocketMeteringSettlement = {}): Promise<void> {
       if (!event.isActive()) {
         this.attempts.delete(event.attemptId);
         return;
@@ -375,7 +408,7 @@ export const TokenMeteringPlugin = definePlugin(
             attempt.session?.consumeRequest({ body: { model } });
           }
         }
-        attempt.responseFailed ||= event.status >= 400 || body.error !== undefined;
+        attempt.responseFailed ||= event.status >= 400 || body.error != null;
         const provider = attempt.provider === 'unknown' ? classifyResponse(body, attempt.llm, event.envelope?.event) : attempt.provider;
         if (!provider) return;
         if (!attempt.llm) {
@@ -387,6 +420,7 @@ export const TokenMeteringPlugin = definePlugin(
           ensureSession(attempt, provider);
           // The request payload is intentionally not retained for ambiguous protocols.
         }
+        if (event.protocol === 'sse') attempt.timing.observe(provider,body,event.observedAtMonotonicMs,event.envelope?.event);
         const session = attempt.session;
         if (!session) return;
         try {
@@ -400,6 +434,7 @@ export const TokenMeteringPlugin = definePlugin(
           attempt.latestEvent = attempt.responseFailed ? officialOnly(merged) : merged;
         } catch (error) {
           attempt.observationIncomplete = true;
+          attempt.generationObservationIncomplete = true;
           if (attempt.latestEvent) attempt.latestEvent = officialOnly(attempt.latestEvent);
           this.logger.debug('Failed to consume token metering attempt observation', { attemptId: event.attemptId, error });
         }
@@ -407,6 +442,7 @@ export const TokenMeteringPlugin = definePlugin(
       }
 
       if (event.phase === 'incomplete') {
+        if (!settlement.accountingUsageIncomplete) attempt.generationObservationIncomplete = true;
         if (!attempt.observationIncomplete) {
           attempt.observationIncomplete = true;
           if (!attempt.incompleteReasonLogged) {
@@ -439,6 +475,10 @@ export const TokenMeteringPlugin = definePlugin(
           observedEvent: attempt.latestEvent ? { ...attempt.latestEvent } : undefined,
           finishedAtMs: Date.now(),
           endOutcome: event.outcome,
+          generationDurationMs:attempt.timing.duration(event.observedAtMonotonicMs),
+          generationCompleted: websocket ? settlement.generationResponse !== undefined : event.outcome === 'completed',
+          generationResponse: settlement.generationResponse,
+          generationObservationIncomplete: attempt.generationObservationIncomplete,
           responseSeen: attempt.responseSeen,
           responseFailed: attempt.responseFailed,
           observationIncomplete: attempt.observationIncomplete,

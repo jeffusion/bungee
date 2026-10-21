@@ -143,6 +143,10 @@ hooks.onStreamChunk.tap('example', envelope => {
 
 普通 KV、秘密存储、可靠事件与命令日志位于 plugin-state.db；观察数据位于 access.db。状态、结果及 outbox 的原子契约、纯 planner 读集、队列与关闭 ACK 见[存储说明](../architecture/storage.md)。插件不能取得配置库裸连接。
 
+观察插件在 control entry 导出 `createObservationAdapter(observation)`，返回已注册的方法表；SQL 仅在观察 Worker 的 `observation.withDatabase` 回调内执行。Worker 和 control 实例通过可选的 `context.storage.invokeObservation<T>(operation, args)` 调用自身命名空间的方法，使用前必须检查能力是否已授予，缺失时报错。Host 校验激活状态、命名空间、已注册方法及撤销／关闭状态，不向插件调用方传递数据库连接。
+
+`AttemptObservationEvent`、`WebSocketObservationEvent` 的 `observedAtMonotonicMs` 在 Host 产生事件时、观察队列入队前捕获。只在同一 attempt 内计算差值，不能跨进程比较绝对值。`TokenMeteringResult.generationDurationMs` 仅对完整成功流提供：从上游转换前首个非空文本、推理或工具参数输出，到所有已观察输出分支的完成标记；没有完整完成标记时使用正常流 EOF。此字段要求 Host 正常完成，且无明确协议失败、响应错误或观察丢失；`generationOutput` 提供对应输出的 `tokens` 和 `source`（official 或 estimated），不要求输入用量已知。生成观测独立于既有会计 `outcome`、`observationIncomplete` 和用量字段：会计层仍可因缺少协议完成标记或完整官方用量判为 failed 或 incomplete，预算与原有 Token 统计继续使用会计字段。非流式、未观察到首输出、缺少时间或非正耗时不提供生成耗时；输出未知或部分估算时不提供 `generationOutput`。
+
 同进程服务通过 `context.services.consume` 使用已声明的 provider、ID 和版本；跨进程使用声明的 RPC，事件、snapshot 和可靠 channel 使用各自契约。消费另一个插件的 namespace 不是通信接口。声明例子可查 [model-mapping manifest](../../plugins/model-mapping/manifest.json)和[插件服务类型](../../packages/core/src/plugin-services.ts)。
 
 本地服务门面受控转发 AbortSignal、Promise、异步迭代器和函数回调，数据及二进制视图提供隔离副本；实现对象身份不对外开放。所有操作仍受消费方和提供方排空、租约及撤销检查。跨进程 RPC 继续使用数据契约，不能传递这些进程内句柄。需要在插件租约结束后保存的日志详情必须在记录时取快照。
