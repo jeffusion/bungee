@@ -1,3 +1,10 @@
+# [6.2.0](https://github.com/jeffusion/bungee/compare/v6.1.1...v6.2.0) (2026-10-21)
+
+
+### Features
+
+* **llm-tps:** add route-scoped generation speed statistics ([e47d0e5](https://github.com/jeffusion/bungee/commit/e47d0e510d4631dbd1bf8131f1711dc6eb075307))
+
 ## [6.1.1](https://github.com/jeffusion/bungee/compare/v6.1.0...v6.1.1) (2026-10-20)
 
 
