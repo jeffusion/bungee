@@ -257,6 +257,8 @@ test('log cleanup requires confirmation and distinguishes execution, status refr
     model.cleanupRefreshFailure=outcome === 'refresh-failure';model.cleanupStatus=outcome === 'rejected'?403:0;
     await start.click();await page.getByTestId('confirmation-accept').click();
     await expect(page.getByTestId('cleanup-outcome')).toBeVisible();
+    // The execution result appears before the follow-up status refresh finishes.
+    await expect(page.getByTestId('logs-maintenance').getByRole('button',{name:'Refresh status',exact:true})).toBeEnabled();
     if(outcome !== 'rejected') await expect(start).toBeDisabled();expect(model.cleanupWrites).toBe(1);
   },1440,'en','logs');
 },60_000);
