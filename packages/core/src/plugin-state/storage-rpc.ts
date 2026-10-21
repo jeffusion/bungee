@@ -5,7 +5,7 @@ export type PluginStorageOperation = typeof PLUGIN_STORAGE_OPERATIONS[number];
 export type PluginStorageTransport = (namespace:string,operation:PluginStorageOperation,args:readonly unknown[])=>Promise<unknown>;
 /** Host-side bridge over the existing authenticated master control transport.
  * Plugins receive only one namespace closure, never the transport or a database. */
-export function createRemotePluginStorageFactory(send:PluginStorageTransport):PluginStorageFactory {
+export function createRemotePluginStorageFactory(send:PluginStorageTransport, observe?: (namespace:string,operation:string,args:readonly unknown[])=>Promise<unknown>):PluginStorageFactory {
   const revocations=new WeakMap<PluginStorage,()=>void>();
   return {
     create(namespace) {
@@ -13,6 +13,7 @@ export function createRemotePluginStorageFactory(send:PluginStorageTransport):Pl
       const active=()=>{if(revoked)throw new Error('plugin_storage_capability_revoked');};
       const capability:any={uncached:()=>{active();return capability;}};
       for(const operation of PLUGIN_STORAGE_OPERATIONS) capability[operation]=async(...args:unknown[])=>{active();return send(namespace,operation,args);};
+      if(observe)capability.invokeObservation=async(operation:string,args:readonly unknown[])=>{active();return observe(namespace,operation,args);};
       revocations.set(capability,()=>{revoked=true;});return Object.freeze(capability);
     },
     revoke(storage){revocations.get(storage)?.();},

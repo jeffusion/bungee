@@ -71,6 +71,7 @@ export async function runSupervisedWorkerProcess(
   setWorkerRateLimitFailureObserver(profile?.observer ?? null);
   let profileWritten = false;
   let shuttingDown = false;
+  let storageClosed = false;
   let resolveStopped!: () => void;
   const stopped = new Promise<void>((resolvePromise) => { resolveStopped = resolvePromise; });
   const retireCommunication = (): void => {
@@ -86,6 +87,7 @@ export async function runSupervisedWorkerProcess(
     try {
       await runtime.failClosed(async () => {
         // Keep settlement routes and executor probes until HTTP work and Host leases drain.
+        storageClosed = true;
         try { pluginControl?.dispose(); } catch (error) { cleanupErrors.push(error); }
         try { peerBroker.dispose(); } catch (error) { cleanupErrors.push(error); }
         try { rateLimit?.dispose(); } catch (error) { cleanupErrors.push(error); }
@@ -270,10 +272,10 @@ export async function runSupervisedWorkerProcess(
     expectedServer:{role:'ingress',process_instance_id:environment.identity.master_generation,boot_nonce:environment.identity.master_generation},
     url:`http://127.0.0.1:${environment.masterControlPort}${PLUGIN_STORAGE_RPC_PATH}`,retry:false});
   const sendStorage = async (operation:string,namespace:string,method:string,args:readonly unknown[]) => {
-    if (!appliedActivatedPlugins.includes(namespace) || shuttingDown) throw new Error('plugin_storage_namespace_forbidden');
+    if (!appliedActivatedPlugins.includes(namespace) || storageClosed) throw new Error('plugin_storage_namespace_forbidden');
     return storageRpc(operation,{namespace,operation:method,args});
   };
-  const remoteStorage = createRemotePluginStorageFactory((namespace,operation,args)=>sendStorage('storage',namespace,operation,args));
+  const remoteStorage = createRemotePluginStorageFactory((namespace,operation,args)=>sendStorage('storage',namespace,operation,args),(namespace,operation,args)=>sendStorage('observe',namespace,operation,args));
   const originalStorage = new WeakMap<import('../plugin.types').PluginStorage,()=>void>();
   setWorkerPluginStorageFactory({
     create(namespace) {

@@ -120,3 +120,29 @@ test('mandatory SSE events, token observation and logging share one decoder and 
   expect(observed[0]).toBe(required[0]);expect((saved as any[])[0].data).toBe(required[0]);expect(snapshotBodyResources().decompressions-before.decompressions).toBe(1);expect(snapshotBodyResources().sseParses-before.sseParses).toBe(1);
   source.dispose();expect(snapshotBodyResources().retainedBytes).toBe(before.retainedBytes);expect(snapshotBodyResources().activeDecoders).toBe(before.activeDecoders);
 });
+
+test.each([true,false])('SSE frame and normal EOF times precede a delayed optional observer (shared=%s)',async shared=>{
+  let controller!:ReadableStreamDefaultController<Uint8Array>;
+  const stream=new ReadableStream<Uint8Array>({start(value){controller=value;}},{highWaterMark:0});
+  const source=shared?new BodySource(stream,1024):undefined;
+  const events:any[]=[];let release!:()=>void;let entered!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});const started=new Promise<void>(resolve=>{entered=resolve;});
+  const observer=createAttemptResponseObserver('sse',context,async event=>{events.push(event);if(events.length===1){entered();await gate;}},undefined,'','response','',undefined,{bodyHandle:source?.handle(),maxBytes:1024});
+  const output=new Response(((source?.take()??stream) as ReadableStream<Uint8Array>).pipeThrough(observer)).text();
+  controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"a"}}]}\n\n'));await started;
+  controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"b"}}]}\n\n'));controller.close();await output;
+  await new Promise(resolve=>setTimeout(resolve,30));const releasedAt=performance.now();release();await observer.completion;
+  expect(events).toHaveLength(2);
+  expect(events[1].observedAtMonotonicMs).toBeLessThan(releasedAt-10);
+  expect(observer.endedAtMonotonicMs).toBeLessThan(releasedAt-10);
+  expect(events[1].observedAtMonotonicMs).toBeGreaterThanOrEqual(events[0].observedAtMonotonicMs);
+  source?.dispose();
+});
+
+
+test('buffered SSE replay cannot invent live first-output timestamps',async()=>{
+  const source=new BodySource(new Response('data: {"x":1}\n\n').body!,1024);
+  await source.buffer('mandatory');
+  const events=[];for await(const event of source.handle().events({id:'replay',mandatory:false}))events.push(event);
+  expect(events).toHaveLength(1);expect(events[0]!.observedAtMonotonicMs).toBeUndefined();source.dispose();
+});

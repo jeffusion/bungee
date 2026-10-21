@@ -1,7 +1,8 @@
 import type { PluginHooks } from '../hooks';
 import type { WebSocketObservationEvent, WebSocketSessionContext } from '../gateway/websocket-contracts';
 
-type Detail = WebSocketObservationEvent extends infer E ? E extends WebSocketObservationEvent ? Omit<E, keyof WebSocketSessionContext | 'isActive'> : never : never;
+type Detail = WebSocketObservationEvent extends infer E ? E extends WebSocketObservationEvent ? Omit<E, keyof WebSocketSessionContext | 'isActive' | 'observedAtMonotonicMs'> : never : never;
+type TimedDetail = Detail & { readonly observedAtMonotonicMs: number };
 type Owner = { pluginName: string; hooks: PluginHooks['onWebSocketObservation'] };
 const MAX_BYTES = 8 * 1024 * 1024;
 const MAX_PROCESS_BYTES = 64 * 1024 * 1024;
@@ -15,19 +16,22 @@ export class WebSocketObservers {
   constructor(context: WebSocketSessionContext, owners: readonly Owner[]) {
     this.branches = owners.filter(owner=>owner.hooks.hasCallbacks()).map(owner => new Branch(context, owner));
   }
-  emit(detail: Detail): void { for (const branch of this.branches) branch.push(detail); }
+  emit(detail: Detail): void {
+    const timed = {...detail, observedAtMonotonicMs: performance.now()};
+    for (const branch of this.branches) branch.push(timed);
+  }
   async close(detail: Extract<Detail, {phase:'close'}>): Promise<void> {
     this.emit(detail);
     await Promise.all(this.branches.map(branch => branch.closeDrain()));
   }
 }
 class Branch {
-  private queue: Detail[] = [];
+  private queue: TimedDetail[] = [];
   private bytes = 0;
   private running: Promise<void> | undefined;
   private disabled = false;
   constructor(private context: WebSocketSessionContext, private owner: Owner) {}
-  push(detail: Detail): void {
+  push(detail: TimedDetail): void {
     if (this.disabled && detail.phase !== 'close') return;
     const bytes = detail.phase === 'message' ? detail.message.byteLength : 0;
     if (detail.phase === 'message' && (this.queue.length >= MAX_MESSAGES || this.bytes + bytes > MAX_BYTES || processBytes + bytes > MAX_PROCESS_BYTES)) {
@@ -42,7 +46,7 @@ class Branch {
     this.disabled = true;
     const terminal = this.queue.find(detail=>detail.phase==='close');
     this.drop();
-    this.queue.push({phase:'incomplete',reason});
+    this.queue.push({phase:'incomplete',reason,observedAtMonotonicMs:performance.now()});
     if (terminal) this.queue.push(terminal);
     this.kick();
   }

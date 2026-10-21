@@ -7,7 +7,7 @@ import { bodyResources, DEFAULT_BODY_PARSER_BYTES } from '../../gateway/body-res
 export interface AttemptBodyOptions { maxBytes?:number; bodyHandle?:BodyHandle; backlogBytes?:number; backlogEvents?:number }
 type IncompleteReason = Extract<AttemptObservationEvent,{phase:'incomplete'}>['reason'];
 export interface AttemptResponseObservationContext { readonly requestId:string;readonly routeId:string;readonly attemptId:string;readonly upstreamId:string;readonly status:number }
-export interface ByteObservation extends TransformStream<Uint8Array,Uint8Array> { completion:Promise<void>; finish():void }
+export interface ByteObservation extends TransformStream<Uint8Array,Uint8Array> { completion:Promise<void>; readonly endedAtMonotonicMs?:number; finish():void }
 
 /** Copies a bounded side queue; slow or failing observers cannot stall wire delivery. */
 export function createAttemptResponseObserver(
@@ -21,6 +21,7 @@ export function createAttemptResponseObserver(
   const lease=new BodyBufferLease(true);
   let held = 0; let callbackEvents=0; let queued = 0; let stopped = false; let eof = false; let callbackQueue = 0;
   const chunks:Uint8Array[]=[]; let wake:(()=>void)|undefined;
+  let endedAtMonotonicMs:number|undefined;
   let observerDisabled=false;
   let callbacks=Promise.resolve(); const incomplete=new Set<IncompleteReason>();
   const reserve = (bytes:number) => {try{lease.add(bytes);held+=bytes;return true;}catch{return false;} };
@@ -40,7 +41,7 @@ export function createAttemptResponseObserver(
     });
     return callbacks;
   };
-  const notify = (reason:IncompleteReason) => { if(incomplete.has(reason))return;incomplete.add(reason);deliver(Object.freeze({...context,phase:'incomplete',reason,direction:phase,representation:protocol==='json'?'json':'sse',view:options.bodyHandle?.identity,consumerId:'token-observer',isActive:()=>true})); };
+  const notify = (reason:IncompleteReason) => { if(incomplete.has(reason))return;incomplete.add(reason);deliver(Object.freeze({...context,observedAtMonotonicMs:performance.now(),phase:'incomplete',reason,direction:phase,representation:protocol==='json'?'json':'sse',view:options.bodyHandle?.identity,consumerId:'token-observer',isActive:()=>true})); };
   const stop = (reason:IncompleteReason) => { if(stopped)return;stopped=true;notify(reason);wake?.(); };
   const input=new ReadableStream<Uint8Array>({
     async pull(controller){while(!chunks.length&&!eof&&!stopped)await new Promise<void>(resolve=>{wake=resolve;});wake=undefined;
@@ -60,7 +61,7 @@ export function createAttemptResponseObserver(
         {
           if(owner)await owner.buffer('observer',true);else{while(!eof&&!stopped)await new Promise<void>(resolve=>{wake=resolve;});}
           if(!stopped){const body=await (options.bodyHandle??owner!.handle()).json({id:'token-observer',mandatory:false,signal});
-            if(isObjectBody(body))deliver(Object.freeze(phase==='request'?{...context,phase:'request',url,body,isActive:()=>true}:{...context,phase:'response',protocol,body,isActive:()=>true}));else notify('decode-error');}
+            if(isObjectBody(body))deliver(Object.freeze(phase==='request'?{...context,observedAtMonotonicMs:performance.now(),phase:'request',url,body,isActive:()=>true}:{...context,observedAtMonotonicMs:performance.now(),phase:'response',protocol,body,isActive:()=>true}));else notify('decode-error');}
         }
         return;
       }
@@ -71,7 +72,7 @@ export function createAttemptResponseObserver(
       const drain=owner?(async()=>{const stream=owner!.take() as ReadableStream<Uint8Array>;const r=stream.getReader();try{while(!(await r.read()).done){}}finally{r.releaseLock();}})():undefined;
       try{for await(const envelope of frames){
         if(stopped)break;if(envelope.hasData===false)continue;if(envelope.truncated){notify('frame-truncated');continue;}if(envelope.data.trim()==='[DONE]')continue;
-        if(isObjectBody(envelope.json))await deliver(Object.freeze(phase==='request'?{...context,phase:'request',url,body:envelope.json,isActive:()=>true}:{...context,phase:'response',protocol,body:envelope.json,envelope,isActive:()=>true}));
+        if(isObjectBody(envelope.json))await deliver(Object.freeze(phase==='request'?{...context,observedAtMonotonicMs:envelope.observedAtMonotonicMs,phase:'request',url,body:envelope.json,isActive:()=>true}:{...context,observedAtMonotonicMs:envelope.observedAtMonotonicMs,phase:'response',protocol,body:envelope.json,envelope,isActive:()=>true}));
       }}finally{await drain;}
     }catch(error){if(error instanceof BodyProcessingError&&error.code==='body_sse_frame_truncated')notify('frame-truncated');else if(error instanceof BodyProcessingError&&error.code==='body_sse_frame_too_large')notify('frame-limit');else if(error instanceof BodyProcessingError&&(error.status===503||error.status===413))notify('buffer-limit');else notify(coding && !['gzip','zstd','identity'].includes(coding.toLowerCase())?'unsupported-encoding':'decode-error');}
     finally{stopped=true;wake?.();await reader?.cancel().catch(()=>undefined);for(const chunk of chunks.splice(0))release(chunk.byteLength);let drain:Promise<void>;do{drain=callbacks;await drain;}while(drain!==callbacks);signal?.removeEventListener('abort',onAbort);sharedRelease();releaseView();owner?.dispose();if(held)release(held);onComplete();}
@@ -81,7 +82,7 @@ export function createAttemptResponseObserver(
       if(options.bodyHandle)return;
       if(chunk.byteLength+queued>Math.max(QUEUE_LIMIT,BODY_LIMIT) || !reserve(chunk.byteLength)){stop('buffer-limit');return;}
       const copied=chunk.slice();chunks.push(copied);queued+=copied.byteLength;wake?.();},
-    flush(){eof=true;wake?.();},
+    flush(){endedAtMonotonicMs=performance.now();eof=true;wake?.();},
   }) as ByteObservation;
   // Cancelling a TransformStream's readable side does not run flush. Wake the
   // independently owned decoder as well, so replacing/cancelling the wire
@@ -95,6 +96,7 @@ export function createAttemptResponseObserver(
     cancel(reason) { stop('raw-response-incomplete'); return outputReader.cancel(reason); },
   }, {highWaterMark:0});
   Object.defineProperty(tap, 'readable', {value:output});
+  Object.defineProperty(tap, 'endedAtMonotonicMs', {get:()=>options.bodyHandle ? bodySourceForHandle(options.bodyHandle)?.endedAtMonotonicMs : endedAtMonotonicMs});
   tap.finish = () => { if (!eof && !stopped) stop('raw-response-incomplete'); };
   tap.completion=work;return tap;
 }

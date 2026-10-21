@@ -549,6 +549,8 @@ export type PluginStorageReadResult<T> =
 
 export interface PluginStorage {
   readonly observation?: PluginObservationStorage;
+  /** Invoke a registered observation adapter method in this plugin namespace. */
+  invokeObservation?<T>(operation: string, args: readonly unknown[]): Promise<T>;
   /** Immediate namespaced KV access for cross-process shared values. */
   uncached?(): PluginStorage;
   /** Flush pending KV writes during host disposal. */

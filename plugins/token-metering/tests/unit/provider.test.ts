@@ -190,3 +190,30 @@ describe('shared token metering provider', () => {
     expect(results[0]!.outputTokens).toBeGreaterThan(0); await f.provider.onDestroy();
   });
 });
+
+describe('generation duration in shared results',()=>{
+  test('SSE output uses observed timestamps and protocol completion instead of settlement time',async()=>{
+    const f=await fixture();const results:TokenMeteringResult[]=[];
+    f.consumer('stats').subscribe({onResult:result=>{results.push(result);}});
+    await f.start();
+    await f.send({phase:'response',protocol:'sse',status:200,observedAtMonotonicMs:10,body:{choices:[{delta:{role:'assistant',content:''}}]}});
+    await f.send({phase:'response',protocol:'sse',status:200,observedAtMonotonicMs:100,body:{choices:[{delta:{reasoning_content:'reason'}}]}});
+    await f.send({phase:'response',protocol:'sse',status:200,observedAtMonotonicMs:300,body:{choices:[{delta:{content:'answer'},finish_reason:'stop'}]}});
+    await f.send({phase:'response',protocol:'sse',status:200,observedAtMonotonicMs:500,body:{usage:{prompt_tokens:1,completion_tokens:8},choices:[]}});
+    await f.send({phase:'end',sent:true,outcome:'completed',observedAtMonotonicMs:900});
+    expect(results[0]).toMatchObject({generationDurationMs:200,outputTokens:8,outputSource:'official'});
+    await f.provider.onDestroy();
+  });
+  test.each(['eof','eof-estimated','nonstream','missing-first','missing-time','failed','cancelled','protocol-failed','protocol-incomplete','response-error','incomplete','zero'] as const)('%s respects duration eligibility',async scenario=>{
+    const f=await fixture();const results:TokenMeteringResult[]=[];
+    f.consumer('stats').subscribe({onResult:result=>{results.push(result);}});await f.start();
+    await f.send({phase:'response',protocol:scenario==='nonstream'?'json':'sse',status:scenario==='response-error'?500:200,observedAtMonotonicMs:scenario==='missing-time'?undefined:100,body:scenario==='missing-first'?{usage:{prompt_tokens:1,completion_tokens:4}}:{choices:[{delta:{content:'a'}}],...(scenario==='eof-estimated'?{}:{usage:{prompt_tokens:1,completion_tokens:4}})}});
+    if(scenario==='protocol-failed' || scenario==='protocol-incomplete')await f.send({phase:'response',protocol:'sse',status:200,observedAtMonotonicMs:300,body:{type:scenario==='protocol-failed'?'response.failed':'response.incomplete',response:{object:'response',output:[],status:'failed'}}});
+    if(scenario==='incomplete')await f.send({phase:'incomplete',reason:'buffer-limit'});
+    await f.send({phase:'end',sent:true,outcome:scenario==='failed'?'failed':scenario==='cancelled'?'cancelled':'completed',observedAtMonotonicMs:scenario==='zero'?100:350});
+    expect(results[0]?.generationDurationMs).toBe(scenario==='eof'||scenario==='eof-estimated'?250:undefined);
+    if(scenario==='eof')expect(results[0]).toMatchObject({outcome:'failed',outputSource:'official',outputTokens:4});
+    if(scenario==='eof-estimated')expect(results[0]).toMatchObject({outcome:'failed',outputSource:'estimated'});
+    await f.provider.onDestroy();
+  });
+});

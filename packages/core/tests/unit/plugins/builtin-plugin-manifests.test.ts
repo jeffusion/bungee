@@ -7,7 +7,7 @@ const BUILTIN_PLUGINS_DIR = path.resolve(import.meta.dir, '../../../../../plugin
 const BUILTIN_PLUGIN_NAMES = [
   'anthropic-request-sanitizer', 'anthropic-tool-name-transformer',
   'chatgpt-oauth', 'codex-router', 'deepseek-reasoning-fix',
-  'key-access', 'key-rate-limit', 'llm-protocol-adapter', 'model-mapping', 'models-dev',
+  'key-access', 'key-rate-limit', 'llm-protocol-adapter', 'llm-tps', 'model-mapping', 'models-dev',
   'signature-repair', 'token-budget', 'token-metering', 'token-stats', 'user-auth',
 ] as const;
 

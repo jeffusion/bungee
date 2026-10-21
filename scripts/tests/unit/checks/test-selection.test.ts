@@ -93,6 +93,23 @@ describe('test scope selection', () => {
       expect(result.files.unit).toContain('plugins/llm-protocol-adapter/tests/unit/service.test.ts');
     }
   });
+  test('TPS service, UI, manifest and shared metering dependencies retain their corresponding coverage', () => {
+    const tps = 'plugins/llm-tps';
+    const tpsPaths = [...paths, ...['unit','integration','browser'].map(phase => entry(tps,phase)), ...['unit','integration'].map(phase => entry('plugins/token-metering',phase))];
+    const relations = buildRelations({...snapshot,
+      'plugins/token-metering/manifest.json':'{"name":"token-metering"}',
+      'plugins/llm-tps/manifest.json':'{"name":"llm-tps","dependencies":{"token-metering":"*"}}',
+    });
+    for(const changed of ['plugins/llm-tps/server/index.ts','plugins/llm-tps/manifest.json','plugins/token-metering/server/index.ts','packages/core/src/plugin-services.ts']) {
+      const result=plan([changed],{paths:tpsPaths,relations});
+      expect(result.files.integration).toContain(entry(tps,'integration'));
+      expect(result.files.browser).toContain(entry(tps,'browser'));
+      expect(result.files.unit).toEqual(discoverTests(tpsPaths).unit);
+    }
+    const ui=plan(['plugins/llm-tps/ui/TpsWidget.svelte'],{paths:tpsPaths,relations});
+    expect(ui.files.browser).toContain(entry(tps,'browser'));
+    expect(ui.files.unit).toEqual(discoverTests(tpsPaths).unit);
+  });
   test('direct tests select that entry with all units; deleted tests cannot become execution paths', () => {
     expect(plan([entry('plugins/b','browser')]).files.browser).toEqual([entry('plugins/b','browser')]);
     expect(plan(['plugins/b/tests/integration/removed.test.ts']).files.integration).toEqual([]);

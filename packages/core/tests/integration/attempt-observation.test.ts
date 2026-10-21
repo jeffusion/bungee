@@ -828,3 +828,17 @@ describe('attempt observation lifecycle', () => {
 });
 
 afterDataPlaneTests(() => dataPlaneRuntime.close());
+
+test('HTTP end and request-end retain actual upstream EOF while optional delivery is held',async()=>{
+  const {config}=await setup({lateObserver:true});
+  const body='data: {"choices":[{"delta":{"content":"answer"}}]}\n\n';
+  globalThis.fetch=consumingUpstreamFetch((async()=>new Response(body,{headers:{'content-type':'text/event-stream'}})) as unknown as typeof fetch);
+  const response=await handleRequest(new Request('http://local/attempt'),config);
+  expect(await response.text()).toBe(body);await waitForObservation('response');
+  await Bun.sleep(30);const releasedAt=performance.now();state().releaseResponseObserver!();
+  await waitForObservation('request-end');
+  const end=state().events.find(({event})=>event.phase==='end')!.event;
+  const requestEnd=state().events.find(({event})=>event.phase==='request-end')!.event;
+  expect(end.observedAtMonotonicMs).toBeLessThan(releasedAt-10);
+  expect(requestEnd.observedAtMonotonicMs).toBe(end.observedAtMonotonicMs);
+});

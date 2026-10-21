@@ -10,6 +10,8 @@ import ChatgptAccountsPage from '@plugins/chatgpt-oauth/ui/AccountsPage.svelte';
 import ChatgptQuotaWidget from '@plugins/chatgpt-oauth/ui/ChatgptQuotaWidget.svelte';
 import KeyAccessKeyPolicy from '@plugins/key-access/ui/KeyPolicy.svelte';
 import KeyRateLimitKeyPolicy from '@plugins/key-rate-limit/ui/KeyPolicy.svelte';
+import TpsOverview from '@plugins/llm-tps/ui/TpsOverview.svelte';
+import TpsEndpoints from '@plugins/llm-tps/ui/TpsEndpoints.svelte';
 import ModelsDevSettings from '@plugins/models-dev/ui/ModelsDevSettings.svelte';
 import TokenBudgetKeyPolicy from '@plugins/token-budget/ui/KeyPolicy.svelte';
 import TokenStatsChart from '@plugins/token-stats/ui/TokenStatsChart.svelte';
@@ -27,6 +29,8 @@ export const generatedWidgetRegistry: Record<string, ComponentType<SvelteCompone
   ChatgptQuotaWidget,
   KeyAccessKeyPolicy,
   KeyRateLimitKeyPolicy,
+  TpsOverview,
+  TpsEndpoints,
   ModelsDevSettings,
   TokenBudgetKeyPolicy,
   TokenStatsChart,
@@ -45,6 +49,8 @@ export const componentSourceMap: Record<string, string> = {
   ChatgptQuotaWidget: 'chatgpt-oauth',
   KeyAccessKeyPolicy: 'key-access',
   KeyRateLimitKeyPolicy: 'key-rate-limit',
+  TpsOverview: 'llm-tps',
+  TpsEndpoints: 'llm-tps',
   ModelsDevSettings: 'models-dev',
   TokenBudgetKeyPolicy: 'token-budget',
   TokenStatsChart: 'token-stats',
