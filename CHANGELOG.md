@@ -1,3 +1,10 @@
+# [6.3.0](https://github.com/jeffusion/bungee/compare/v6.2.1...v6.3.0) (2026-10-22)
+
+
+### Features
+
+* **llm-tps:** add model rankings and refine dashboard navigation ([e8cff90](https://github.com/jeffusion/bungee/commit/e8cff909a4fa534e34a5a42e1afea11bce234c8f))
+
 ## [6.2.1](https://github.com/jeffusion/bungee/compare/v6.2.0...v6.2.1) (2026-10-22)
 
 
