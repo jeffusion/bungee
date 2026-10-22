@@ -336,8 +336,14 @@ describe('phase-aware request pipeline', () => {
       if(mode==='deadline'){const response=await pending;expect(response.status).toBeGreaterThanOrEqual(400);await response.text();}
       else await expect(pending).rejects.toThrow('raw decoder abandoned');
     }
+    expect(getActiveRequestCount(config.services![0]!.name,'primary')).toBe(0);
     abandon=false;
-    for(coding of ['gzip','zstd'] as const){const response=await handleRequest(new Request('http://proxy.test/api'),config);expect(response.status).toBe(200);expect(await response.text()).toBe('data: {"x":1}\n\n');}
+    // The short deadline injects failure; recovery checks decoder reuse, not decoding speed.
+    const recoveryConfig: AppConfig = {
+      ...config,
+      routes: config.routes.map(route => ({ ...route, timeouts: { request_ms: 1_000 } })),
+    };
+    for(coding of ['gzip','zstd'] as const){const response=await handleRequest(new Request('http://proxy.test/api'),recoveryConfig);expect(response.status).toBe(200);expect(await response.text()).toBe('data: {"x":1}\n\n');}
     expect(getActiveRequestCount(config.services![0]!.name,'primary')).toBe(0);
   });
 
