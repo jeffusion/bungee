@@ -214,15 +214,18 @@ test('flat and grouped menus follow configured navigation order', () => runtime.
       await expect(top.locator('a')).toHaveCount(catalog.length);
       expect(await top.locator('a').evaluateAll(nodes => nodes.map(node => node.getAttribute('href')))).toEqual(catalog.map(item => item.href));
       await expect(top.locator('a[href="/#/menus"]')).toHaveAttribute('aria-current', 'page');
-      await expect(page.locator('#header-menu-trigger')).toHaveCount(0);
+      await expect(page.locator('#header-menu-trigger')).toBeHidden();
       await expect(page.getByTestId('header-menu')).toHaveCount(0);
+      await page.locator('#header-more-trigger').click();
+      await expect(page.getByTestId('header-more-menu').getByRole('menuitem', { name: catalog.at(-1)!.label, exact: true })).toBeVisible();
+      await page.keyboard.press('Escape');
     }
     snapshot = { ...snapshot, revision: 2, layout: [flat[0], { kind: 'group', id: 'group:mixed', title: 'Operations', visible: true, children: flat.slice(1, 4) as any }, ...flat.slice(4)] };
     await page.evaluate(() => window.dispatchEvent(new Event('focus')));
     await expect(top.getByRole('button', { name: 'Operations', exact: true })).toBeVisible();
     await top.getByRole('button', { name: 'Operations', exact: true }).click();
     await expect(page.getByRole('menuitem', { name: 'Routes', exact: true })).toBeVisible(); await page.keyboard.press('Escape');
-    await expect(top.locator(':scope > ul > li')).toHaveCount(catalog.length - 2);
+    await expect(top.locator('li')).toHaveCount(catalog.length - 2);
     network.assertSettled(); expect(errors).toEqual([]);
 }), 90_000);
 

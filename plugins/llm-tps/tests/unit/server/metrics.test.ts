@@ -20,6 +20,10 @@ describe('TPS sample eligibility', () => {
     expect(sampleFromResult({ ...result, outcome: 'failed' }, 'route')?.outputTokens).toBe(100);
     expect(sampleFromResult({ ...result, outcome: 'failed', generationDurationMs: undefined }, 'route')).toBeNull();
   });
+  test('preserves metered model identity and keeps unknown models eligible for other dimensions', () => {
+    expect(sampleFromResult({ ...result, model: 'upstream-model' }, 'route')?.model).toBe('upstream-model');
+    for (const model of [undefined, '', ' ']) expect(sampleFromResult({ ...result, model }, 'route')).toMatchObject({ model: null, outputTokens: 100 });
+  });
   test.each([
     { routeId: 'other' }, { outcome: 'failed', generationDurationMs: undefined }, { outcome: 'aborted', generationDurationMs: undefined },
     { generationOutput: undefined }, { generationOutput: { tokens: 1, source: 'partial' } }, { generationOutput: { tokens: 1, source: 'none' } },
@@ -42,7 +46,7 @@ describe('TPS sample eligibility', () => {
   test('rejects unsafe storage inputs and rate overflow', () => {
     const sample = sampleFromResult(result, 'route')!;
     for (const patch of [{ attemptId: '' }, { endpointId: 'https://secret@test/' }, { outputTokens: -1 },
-      { finishedAtMs: Infinity }, { generationDurationMs: Number.MIN_VALUE }, { outputSource: 'none' }]) {
+      { finishedAtMs: Infinity }, { generationDurationMs: Number.MIN_VALUE }, { outputSource: 'none' }, { model: undefined }, { model: '' }]) {
       expect(() => validateSample({ ...sample, ...patch } as typeof sample)).toThrow();
     }
   });

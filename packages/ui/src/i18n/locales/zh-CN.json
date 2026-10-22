@@ -161,6 +161,12 @@
     "retry": "重新加载页面"
   },
   "header": {
+    "more": "更多",
+    "workspace": "工作空间",
+    "pluginPages": "插件应用",
+    "menu": "页面",
+    "closeMenu": "关闭菜单",
+    "description": "切换页面和菜单分组。",
     "navigation": "页面导航",
     "language": "语言",
     "management": "系统管理"

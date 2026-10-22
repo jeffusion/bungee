@@ -14,8 +14,12 @@ function validAggregate(value: TpsAggregate): boolean {
 
 export function validateStats(data: TpsStatsResponse, range: TpsRange): TpsStatsResponse {
   if (!data || data.range !== range || !Number.isFinite(data.asOfMs) || !validAggregate(data.total)
-    || typeof data.reportingIncomplete !== 'boolean' || !Array.isArray(data.endpoints)
-    || !data.endpoints.every(row => validAggregate(row) && typeof row.routeId === 'string' && typeof row.endpointId === 'string')) {
+    || typeof data.reportingIncomplete !== 'boolean' || !Array.isArray(data.endpoints) || !Array.isArray(data.models) || !Array.isArray(data.history)
+    || !data.history.every((row, index) => validAggregate(row) && Number.isSafeInteger(row.bucketStartMs) && row.bucketStartMs >= 0
+      && (index === 0 || row.bucketStartMs > data.history[index - 1]!.bucketStartMs))
+    || !data.endpoints.every(row => validAggregate(row) && typeof row.routeId === 'string' && typeof row.endpointId === 'string')
+    || !data.models.every(row => validAggregate(row) && typeof row.routeId === 'string' && !!row.routeId.trim()
+      && typeof row.model === 'string' && !!row.model.trim())) {
     throw new Error('invalid_tps_stats');
   }
   return data;

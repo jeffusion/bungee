@@ -257,9 +257,12 @@ test('management setup gates protected requests, confirms initialization, and jo
         expect(protectedRequests()).toContain('GET /api/plugin-translations');
         expect(protectedRequests()).toContain('GET /api/plugins');
 
-        await expect(page.getByTestId('app-header').getByRole('link', { name: '用户信息', exact: true })).toBeVisible();
-        await page.getByTestId('header-top-menu').getByRole('button', {name: '系统管理', exact: true}).click();
-        await page.getByRole('menuitem', { name: '插件管理', exact: true }).click();
+        await page.locator('#header-menu-trigger').click();
+        const navigation = page.getByTestId('header-menu');
+        await expect(navigation.getByRole('link', { name: '用户信息', exact: true })).toBeVisible();
+        await expect(navigation.getByRole('button', {name: '系统管理', exact: true})).toHaveAttribute('aria-expanded', 'true');
+        await navigation.getByRole('link', { name: '插件管理', exact: true }).click();
+        await expect(navigation).toHaveCount(0);
         await expect(page.getByTestId('page-plugins')).toBeVisible();
 
         const toggle = page.getByTestId('page-plugins').getByRole('switch');

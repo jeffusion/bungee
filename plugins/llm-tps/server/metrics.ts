@@ -23,6 +23,7 @@ export function identifier(value: unknown, name: string): asserts value is strin
 
 export function validateSample(sample: TpsSample): void {
   for (const key of ['attemptId', 'requestId', 'routeId', 'endpointId'] as const) identifier(sample[key], key);
+  if (sample.model !== null) identifier(sample.model, 'model');
   if (isUrlIdentity(sample.endpointId)) throw new TypeError('llm-tps endpoint must be opaque');
   safeCount(sample.finishedAtMs, 'finishedAtMs');
   safeCount(sample.outputTokens, 'outputTokens');
@@ -41,6 +42,7 @@ export function sampleFromResult(result: TokenMeteringResult, routeId: string): 
   const sample: TpsSample = {
     attemptId: result.attemptId, requestId: result.requestId, routeId: result.routeId,
     endpointId: endpointIdentity(result.upstreamId), finishedAtMs: result.finishedAtMs,
+    model: typeof result.model === 'string' && result.model.trim() ? result.model : null,
     outputTokens: output.tokens, generationDurationMs: result.generationDurationMs!, outputSource: output.source,
   };
   validateSample(sample);
