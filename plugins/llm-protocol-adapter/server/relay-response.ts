@@ -22,7 +22,7 @@ export async function relayPayload(result: GatewayAuxiliaryResult, param: string
         // Relay requests explicitly use Responses with stream:true; native backends may omit Content-Type.
         if (contentType === '' || contentType.includes('text/event-stream') || contentType.includes('application/octet-stream')) {
             const iterator = result.bodyHandle.events({id:'llm-adapter.relay', mandatory:true, signal})[Symbol.asyncIterator]();
-            let call: any, callIndex:number|undefined, args = '', argumentBytes=0, argumentsDone: string | undefined, outputDone = false, terminal = false, done = false;
+            let call: any, callIndex:number|undefined, args = '', argumentBytes=0, sawArgumentDelta = false, argumentsDone: string | undefined, outputDone = false, terminal = false, done = false;
             const reasoning=new Map<number,{id:string;done:boolean}>();let reasoningBytes=0;
             const reasoningEvents=new Set(['response.reasoning_summary_part.added','response.reasoning_summary_part.done','response.reasoning_summary_text.delta','response.reasoning_summary_text.done','response.reasoning_text.delta','response.reasoning_text.done']);
             try {
@@ -37,6 +37,9 @@ export async function relayPayload(result: GatewayAuxiliaryResult, param: string
                     }
                     if (event.type === 'response.created' || event.type === 'response.in_progress') {
                         if (event.response?.error || ['failed','incomplete','cancelled'].includes(event.response?.status)) invalid(param);
+                    } else if (event.type === 'response.metadata') {
+                        // Native Codex sideband metadata does not carry relay payload.
+                        continue;
                     } else if (event.type === 'response.output_item.added') {
                         if(!Number.isSafeInteger(event.output_index)||event.output_index<0||event.output_index>=128||event.output_index===callIndex||reasoning.has(event.output_index)||typeof event.item?.id!=='string')invalid(param);
                         if(event.item.type==='reasoning')reasoning.set(event.output_index,{id:event.item.id,done:false});
@@ -50,10 +53,11 @@ export async function relayPayload(result: GatewayAuxiliaryResult, param: string
                     } else if (event.type === 'response.function_call_arguments.delta') {
                         if (!call || outputDone || argumentsDone !== undefined || event.item_id !== call.id || event.output_index !== callIndex || typeof event.delta !== 'string') invalid(param);
                         argumentBytes += Buffer.byteLength(event.delta); if (argumentBytes > result.bodyHandle.maxBytes) invalid(param);
-                        args += event.delta;
+                        sawArgumentDelta = true; args += event.delta;
                     } else if (event.type === 'response.function_call_arguments.done') {
-                        if (!call || argumentsDone !== undefined || event.item_id !== call.id || event.output_index !== callIndex || event.arguments !== args) invalid(param);
-                        argumentsDone = args;
+                        if (!call || argumentsDone !== undefined || event.item_id !== call.id || event.output_index !== callIndex || typeof event.arguments !== 'string' || (sawArgumentDelta && event.arguments !== args) || Buffer.byteLength(event.arguments) > result.bodyHandle.maxBytes) invalid(param);
+                        // A native stream may deliver complete arguments without any delta.
+                        args = event.arguments; argumentsDone = args;
                     } else if (event.type === 'response.output_item.done') {
                         const thought=reasoning.get(event.output_index);
                         if(thought){if(thought.done || event.item?.id!==thought.id || event.item?.type!=='reasoning')invalid(param);thought.done=true;}
