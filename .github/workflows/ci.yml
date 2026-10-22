@@ -63,10 +63,11 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # Keep Linux build/test on a Playwright-supported image; matrix.os also keys proof artifacts.
   build:
     needs: plan
     if: needs.plan.outputs.mode != 'none'
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'ubuntu-24.04' || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -110,7 +111,7 @@ jobs:
   integration:
     needs: [plan, build]
     if: needs.plan.outputs.integration != '0' && needs.build.result == 'success'
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'ubuntu-24.04' || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -149,7 +150,7 @@ jobs:
   browser:
     needs: [plan, build]
     if: needs.plan.outputs.browser != '0' && needs.build.result == 'success'
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'ubuntu-24.04' || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -201,7 +202,7 @@ jobs:
   test:
     needs: [plan, build, integration, browser]
     if: always()
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'ubuntu-24.04' || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
