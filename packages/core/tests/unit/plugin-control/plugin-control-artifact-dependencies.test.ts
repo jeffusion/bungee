@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { loadImmutableControlArtifact } from '../../../src/plugin-control/artifact-loader';
 import { PluginManifestCatalog } from '../../../src/plugin-manifest-catalog/catalog';
 import { externalRuntimeDependencyIdentity, hashRuntimeIdentity } from '../../../src/plugin-manifest-catalog/runtime-identity';
-import { BUILTINS, cleanupCatalogRoots, manifest, tempRoot, writePlugin } from '../../helpers/plugin-manifest-catalog';
+import { cleanupCatalogRoots, manifest, tempRoot, writePlugin } from '../../helpers/plugin-manifest-catalog';
 import { installPluginLogSink, type PluginLogSink } from '../../../src/plugin-logger';
 
 async function controlRecord(source: string) {
@@ -120,11 +120,4 @@ test('plugin artifacts keep the shared host log sink', async () => {
     if (previous === undefined) delete (globalThis as Record<symbol, unknown>)[key];
     else (globalThis as Record<symbol, unknown>)[key] = previous;
   }
-});
-
-test('repository control artifacts load through the built public package SDK', async () => {
-  const catalog = await PluginManifestCatalog.build({ scanDirectories: [BUILTINS] });
-  const controls = catalog.records().filter(record => record.controlPath !== undefined);
-  expect(controls.length).toBeGreaterThan(0);
-  for (const record of controls) expect(typeof (await loadImmutableControlArtifact(record)).createControl).toBe('function');
 });

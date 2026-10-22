@@ -9,6 +9,14 @@ import { PluginStateClient } from '../../../src/plugin-state/client';
 import { createAsyncMasterStats, migrateAccessDatabaseAsync } from '../../../src/master-runtime/observability-client';
 import type { MasterStatsApi } from '../../../src/master-runtime/master-stats';
 import type { TokenStatsMeteringStorage } from '../../../src/plugin.types.ts';
+import { BUILTINS } from '../../helpers/plugin-manifest-catalog';
+
+test('repository control artifacts load through the built public package SDK', async () => {
+  const catalog = await PluginManifestCatalog.build({ scanDirectories: [BUILTINS] });
+  const controls = catalog.records().filter(record => record.controlPath !== undefined);
+  expect(controls.length).toBeGreaterThan(0);
+  for (const record of controls) expect(typeof (await loadImmutableControlArtifact(record)).createControl).toBe('function');
+}, 30_000);
 
 test('formal token statistics and budget bundles start against the real plugin-state Worker', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'bungee-built-control-start-'));
