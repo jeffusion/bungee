@@ -20,6 +20,50 @@ test('complete JSON and Chinese escaped argument fragments preserve exact payloa
  for(const contentType of ['text/event-stream','application/octet-stream',''])
   expect(await relayPayload(stream(frames(),contentType),'input[1].content[0].encrypted_content',new AbortController().signal)).toBe(text);
 });
+// Native Codex streams may omit argument deltas and emit metadata before completion.
+for(const withDeltas of [false,true])test(`native Codex reasoning, metadata and ${withDeltas?'delta':'done-only'} arguments preserve the exact payload`,async()=>{
+ const thought={id:'thought',type:'reasoning',summary:[]};
+ const events=[
+  {type:'response.created',response:{status:'in_progress',output:[]}},
+  {type:'response.in_progress',response:{status:'in_progress',output:[]}},
+  {type:'response.output_item.added',output_index:0,item:thought},
+  {type:'response.output_item.done',output_index:0,item:thought},
+  ...frames().slice(1,-1).filter(event=>withDeltas || event.type!=='response.function_call_arguments.delta').map(event=>({...event,output_index:1})),
+  {type:'response.metadata',response_id:'native-response',metadata:{}},
+  {type:'response.completed',response:{...response,output:[thought,call]}},
+ ];
+ for(const contentType of ['text/event-stream','application/octet-stream',''])
+  expect(await relayPayload(stream(events,contentType),'input[5].content[1].encrypted_content',new AbortController().signal)).toBe(text);
+});
+test('done-only arguments retain identity, byte limits, output consistency and completion checks',async()=>{
+ const events=frames().filter(event=>event.type!=='response.function_call_arguments.delta');
+ const wrongDone=(patch:any)=>events.map(event=>event.type==='response.function_call_arguments.done'?{...event,...patch}:event);
+ const oversized=stream(events);oversized.bodyHandle.maxBytes=Buffer.byteLength(args)-1;
+ const incomplete=stream(events);incomplete.completion=Promise.resolve({status:'incomplete'});
+ const cancelled=stream(events);cancelled.completion=Promise.resolve({status:'cancelled'});
+ for(const input of [
+  stream(events.slice(0,-1)),
+  stream(events.filter(event=>event.type!=='response.output_item.done')),
+  stream(wrongDone({item_id:'another'})),stream(wrongDone({output_index:1})),stream(wrongDone({arguments:{payload:text}})),
+  stream(events.map(event=>event.type==='response.output_item.done'?{...event,item:{...call,arguments:'{}'}}:event)),
+  stream(events.map(event=>event.type==='response.completed'?{...event,response:{...response,output:[{...call,arguments:'{}'}]}}:event)),
+  stream(events.map(event=>event.type==='response.completed'?{...event,response:{...response,status:'incomplete'}}:event)),
+  oversized,incomplete,cancelled,
+ ])await expect(relayPayload(input,'input[5].content[1].encrypted_content',new AbortController().signal)).rejects.toMatchObject({status:502,code:'llm_adapter_relay_invalid_response'});
+});
+test('an observed empty or partial argument delta must still match arguments.done',async()=>{
+ const events=frames().filter(event=>event.type!=='response.function_call_arguments.delta');
+ for(const delta of ['',args.slice(0,-1)]){
+  const inconsistent=events.flatMap(event=>event.type==='response.function_call_arguments.done'
+   ?[{type:'response.function_call_arguments.delta',item_id:call.id,output_index:0,delta},event]:[event]);
+  await expect(relayPayload(stream(inconsistent),'input[0].content[0].encrypted_content',new AbortController().signal)).rejects.toMatchObject({status:502,code:'llm_adapter_relay_invalid_response'});
+ }
+});
+test('metadata cannot complete a relay or permit unknown and post-terminal events',async()=>{
+ const metadata={type:'response.metadata',response_id:'native-response',metadata:{}};
+ for(const events of [[metadata],[...frames().slice(0,-1),metadata],[...frames(),metadata],[...frames().slice(0,-1),{type:'response.unknown'},...frames().slice(-1)]])
+  await expect(relayPayload(stream(events),'input[0].content[0].encrypted_content',new AbortController().signal)).rejects.toMatchObject({status:502,code:'llm_adapter_relay_invalid_response'});
+});
 test('headerless relay still requires valid events, exact tool arguments and complete transport',async()=>{
  const malformed=frames();malformed[1]={...malformed[1],item:{...malformed[1].item,name:'another'}};
  const invalidArguments=frames().map(event=>event.type==='response.function_call_arguments.done'?{...event,arguments:'{'}:event);

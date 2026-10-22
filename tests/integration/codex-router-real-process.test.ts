@@ -138,9 +138,11 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
           const events=[
             {type:'response.created',response:{...result,status:'in_progress',output:[]}},
             {type:'response.output_item.added',output_index:0,item:{...item,status:'in_progress',arguments:''}},
-            ...[args.slice(0,9),args.slice(9)].map(delta=>({type:'response.function_call_arguments.delta',output_index:0,item_id:item.id,delta})),
+            // Native Codex can send complete arguments without deltas, then sideband metadata.
+            ...(cipher?.startsWith('fixture-headerless-')?[]:[args.slice(0,9),args.slice(9)].map(delta=>({type:'response.function_call_arguments.delta',output_index:0,item_id:item.id,delta}))),
             {type:'response.function_call_arguments.done',output_index:0,item_id:item.id,arguments:args},
             {type:'response.output_item.done',output_index:0,item},
+            {type:'response.metadata',response_id:result.id,metadata:{}},
             {type:'response.completed',response:result},
           ];
           const stream=sse(cipher==='fixture-headerless-truncated'?events.slice(0,-1):events);
