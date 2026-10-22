@@ -114,10 +114,10 @@
       <span>{t('ui.loadFailed')}</span><Button variant="ghost" size="sm" onclick={refresh} disabled={busy}>{t('page.retry')}</Button>
     </div>
   {/if}
-  <div class="grid grid-cols-2 gap-3 xl:grid-cols-4" data-testid="token-stats-page-summary" aria-busy={modelsLoading}>
+  <div class="grid grid-cols-2 gap-3 md:grid-cols-[repeat(auto-fit,minmax(min(100%,220px),1fr))]" data-testid="token-stats-page-summary" aria-busy={modelsLoading}>
     {#each summaryMetrics as item, index (item.metric)}
       {@const trend = trends[index]!}
-      <KpiCard fillHeight reserveFooter class="h-[144px] min-w-0 [container-type:inline-size] xl:h-[168px]"
+      <KpiCard fillHeight reserveFooter class="h-[144px] min-w-0 [container-type:inline-size]"
         label={item.label} value={item.value} valueTitle={item.title} children={modelsLoading ? loadingKpi : undefined}>
         {#snippet foot()}
           <div class="flex h-full min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5" data-testid={`token-stats-page-trend-${item.metric}`} title={t('page.trendHint')}>

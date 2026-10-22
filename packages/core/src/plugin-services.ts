@@ -677,6 +677,8 @@ export type TokenMeteringSource = 'official' | 'estimated' | 'partial' | 'none';
 export type TokenMeteringAuthority = 'official' | 'local' | 'heuristic' | 'partial' | 'none';
 export interface TokenMeteringResult {
   readonly requestId: string; readonly attemptId: string; readonly routeId: string; readonly upstreamId: string;
+  /** Actual outbound URL.host, including a non-default port; never a full URL. */
+  readonly upstreamHost?: string;
   readonly keyId?: string | null;
   readonly provider: string; readonly model?: string; readonly pricingProvider?: string;
   /** Complete observable stream: first output to protocol completion (or normal EOF), in ms.

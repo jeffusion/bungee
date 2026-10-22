@@ -117,7 +117,9 @@ export type AttemptObservationEvent = Readonly<{
   isActive: () => boolean;
 } & (
   | { phase: 'selected' }
-  | { phase: 'request'; url: string; body: unknown }
+  | { phase: 'request'; url: string; body: unknown;
+      /** Actual outbound URL.host; excludes credentials, path, query and fragment. */
+      upstreamHost?: string }
   | { phase: 'response'; status: number; protocol: 'json' | 'sse'; body: Record<string, unknown>; envelope?: SSEEnvelope }
   | { phase: 'incomplete'; reason: 'observer-timeout' | 'observer-error' | 'raw-response-incomplete' | 'buffer-limit' | 'frame-limit' | 'frame-truncated' | 'decode-error' | 'unsupported-encoding' }
   | { phase: 'end'; outcome: AttemptObservationOutcome; sent: boolean }

@@ -20,16 +20,18 @@ describe('route-bound TPS reporting', () => {
     await expect(plugin().init(fixture.context)).rejects.toThrow('observation storage is unavailable');
   });
   test('filters actual route, excludes non-streaming, hashes URL endpoints, and drains on destroy', async () => {
-    const { storage, adapter } = store(); const fixture = meteringContext(storage), instance = plugin(); const now = Date.now();
+    const { storage, adapter, access } = store(); const fixture = meteringContext(storage), instance = plugin(); const now = Date.now();
     await instance.init(fixture.context);
     fixture.emit(result({ routeId: 'other', attemptId: 'other' }));
     fixture.emit(result({ generationDurationMs: undefined, attemptId: 'non-stream' }));
-    fixture.emit(result({ upstreamId: 'https://user:secret@example.test/v1', finishedAtMs: now }));
+    fixture.emit(result({ upstreamId: 'https://user:secret@example.test/v1', upstreamHost: 'actual.example:8443', finishedAtMs: now }));
     await instance.onDestroy();
     expect(fixture.subscriptions.size).toBe(0);
     const stats = await adapter.queryStats({ range: '24h', asOfMs: now });
     expect(stats.total.sampleCount).toBe(1);
-    expect(stats.endpoints[0]!.endpointId).toBe('endpoint-5faca2ba8e7b52bc');
+    expect(stats.endpoints[0]!.upstreamHost).toBe('actual.example:8443');
+    expect(access.query('SELECT endpoint_id FROM llm_tps_samples').get()).toEqual({ endpoint_id: 'endpoint-5faca2ba8e7b52bc' });
+    expect(JSON.stringify(stats)).not.toContain('secret');
     fixture.emit(result({ attemptId: 'after-destroy' }));
     expect((await adapter.queryStats({ range: '24h', asOfMs: Date.now() })).total.sampleCount).toBe(1);
   });

@@ -44,7 +44,7 @@ describe('Responses WebSocket metering through the shared service', () => {
     expect(new Set(f.results.map(result => result.requestId)).size).toBe(2);
     for (const result of f.results) {
       expect(result.requestId).toMatch(/^[\da-f-]{36}$/); expect(result.attemptId).toMatch(/^[\da-f-]{36}$/);
-      expect(result).toMatchObject({ keyId: 'trusted-key', pricingProvider: url, provider: 'openai', inputTokens: 12, outputTokens: 3, complete: true, observationIncomplete: false });
+      expect(result).toMatchObject({ keyId: 'trusted-key', upstreamHost: new URL(url).host, pricingProvider: url, provider: 'openai', inputTokens: 12, outputTokens: 3, complete: true, observationIncomplete: false });
     }
     await f.provider.onDestroy();
   });
@@ -211,6 +211,7 @@ test('helper checks the delivery lease after await and never retains request inp
   expect(emitted.map(event => event.phase)).toEqual(['selected', 'request']);
   const request = emitted.find(event => event.phase === 'request');
   expect(request?.phase === 'request' && request.body).toEqual({ model: 'gpt-4o', stream: true });
+  expect(request?.phase === 'request' && request.upstreamHost).toBe('api.openai.com');
   expect(discarded).toHaveLength(1); helper.dispose();
 });
 

@@ -356,7 +356,7 @@
     </PanelCard>
   {:else}
     <!-- Summary header (also doubles as a section label) -->
-    <div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3" data-testid="services-board">
+    <div class="grid grid-cols-1 md:grid-cols-[repeat(auto-fit,minmax(min(100%,360px),1fr))] gap-3" data-testid="services-board">
       {#each filteredViewModels as vm (vm.service.name)}
         <PanelCard
           title={vm.service.name}

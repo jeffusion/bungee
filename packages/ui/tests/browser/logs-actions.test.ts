@@ -14,8 +14,8 @@ try {
   {
     const language = 'zh-CN';
     const text = await Bun.file(new URL(`../../src/i18n/locales/${language}.json`, import.meta.url)).json();
-    {
-      const width = 390, height = 900;
+    for (const width of [390, 1100]) {
+      const height = 900;
       const mobile = width < 768;
       const context = await browser.newContext({ viewport: { width, height }, locale: language, hasTouch: mobile, isMobile: mobile });
       try {
@@ -53,7 +53,7 @@ try {
       });
       await page.goto(baseUrl + '/#/logs');
       await expect(page.getByTestId('logs-table-scroll')).toBeVisible();
-      const trigger = page.getByRole('button', { name: mobile ? text.logs.actions : width < 1280 ? text.logs.filters : text.logs.moreFilters, exact: true });
+      const trigger = page.getByRole('button', { name: mobile ? text.logs.actions : text.logs.moreFilters, exact: true });
       const triggerNode=await trigger.elementHandle();
       try {
       await trigger.click();
@@ -79,7 +79,8 @@ try {
         const [download] = await Promise.all([page.waitForEvent('download'), footer.getByRole('button', { name: 'CSV', exact: true }).click()]);
         expect(download.suggestedFilename()).toMatch(/\.csv$/);
       }
-      await panel.getByRole('button', { name: text.common.close, exact: true }).click();
+      if (mobile) await panel.getByRole('button', { name: text.common.close, exact: true }).click();
+      else await page.keyboard.press('Escape');
       await expect(panel).toHaveCount(0);
 
       expect(errors).toEqual([]); evidence.verify();

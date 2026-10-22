@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { TokenMeteringResult } from '@jeffusion/bungee-core/plugin';
-import type { TpsAggregate, TpsRange, TpsSample } from '../contract';
+import { isUpstreamHost, type TpsAggregate, type TpsRange, type TpsSample } from '../contract';
 
 export function isUrlIdentity(value: string): boolean {
   return /^(?:[a-z][a-z\d+.-]*:)?\/\//i.test(value);
@@ -21,10 +21,16 @@ export function identifier(value: unknown, name: string): asserts value is strin
   if (typeof value !== 'string' || !value.trim()) throw new TypeError(`invalid llm-tps ${name}`);
 }
 
+/** Accept only a canonical URL.host, never URL credentials, path, query or fragment. */
+export function validateUpstreamHost(value: unknown): asserts value is string {
+  if (!isUpstreamHost(value)) throw new TypeError('invalid llm-tps upstream host');
+}
+
 export function validateSample(sample: TpsSample): void {
   for (const key of ['attemptId', 'requestId', 'routeId', 'endpointId'] as const) identifier(sample[key], key);
   if (sample.model !== null) identifier(sample.model, 'model');
   if (isUrlIdentity(sample.endpointId)) throw new TypeError('llm-tps endpoint must be opaque');
+  if (sample.upstreamHost !== null) validateUpstreamHost(sample.upstreamHost);
   safeCount(sample.finishedAtMs, 'finishedAtMs');
   safeCount(sample.outputTokens, 'outputTokens');
   if (!Number.isFinite(sample.generationDurationMs) || sample.generationDurationMs <= 0) throw new RangeError('invalid llm-tps duration');
@@ -42,6 +48,7 @@ export function sampleFromResult(result: TokenMeteringResult, routeId: string): 
   const sample: TpsSample = {
     attemptId: result.attemptId, requestId: result.requestId, routeId: result.routeId,
     endpointId: endpointIdentity(result.upstreamId), finishedAtMs: result.finishedAtMs,
+    upstreamHost: result.upstreamHost ?? null,
     model: typeof result.model === 'string' && result.model.trim() ? result.model : null,
     outputTokens: output.tokens, generationDurationMs: result.generationDurationMs!, outputSource: output.source,
   };

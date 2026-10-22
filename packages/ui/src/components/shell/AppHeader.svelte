@@ -28,24 +28,8 @@
   const overflowActive = $derived(overflowItems.some(item => item.active));
   let brand: HTMLAnchorElement | null = $state(null);
   let collapsedSections = $state<Record<string, boolean>>({});
-  type DrawerSection = { id: string; title: string; pages: EffectivePage[]; source: 'group' | 'builtin' | 'plugin' };
-  const sections = $derived.by(() => {
-    if ($isLoading) return [];
-    const result: DrawerSection[] = [];
-    for (const item of items) {
-      if (item.kind === 'group') {
-        result.push({ id: `group:${item.id}`, title: item.label, pages: item.children, source: 'group' });
-      } else {
-        const source = item.id.startsWith('plugin:') ? 'plugin' : 'builtin';
-        const previous = result.at(-1);
-        if (previous?.source === source) previous.pages.push(item);
-        else result.push({ id: `pages:${item.id}`, title: $_(source === 'plugin' ? 'header.pluginPages' : 'header.workspace'), pages: [item], source });
-      }
-    }
-    return result;
-  });
   $effect(() => {
-    const activeSections = sections.filter(section => section.pages.some(page => page.active));
+    const activeSections = items.filter(item => item.kind === 'group' && item.active);
     if (menuOpen) untrack(() => {
       for (const section of activeSections) collapsedSections[section.id] = false;
     });
@@ -112,13 +96,13 @@
   function selectNavigation(event: MouseEvent) {
     if (event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) menuOpen = false;
   }
-  const headerActionClass = 'header-action flex min-h-[44px] min-w-[44px] items-center justify-center gap-2 whitespace-nowrap font-mono text-[12px] font-normal uppercase tracking-normal transition-colors hover:bg-carbon-800 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500';
+  const headerActionClass = 'header-action flex min-h-[44px] min-w-[44px] items-center justify-center gap-2 whitespace-nowrap font-mono text-[11px] font-semibold uppercase tracking-command transition-colors hover:bg-carbon-800 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500';
   const headerUtilityClass = `${headerActionClass} header-utility w-11 px-0`;
-  const tabClass = `${headerActionClass} header-tab relative h-full gap-[12px] px-[18px] text-[14px] text-zinc-300 data-[state=open]:bg-carbon-800 data-[state=open]:text-nexus-300`;
+  const tabClass = `${headerActionClass} header-tab relative h-full gap-[12px] px-[18px] text-zinc-300 data-[state=open]:bg-carbon-800 data-[state=open]:text-nexus-300`;
 </script>
 {#snippet navigationLink(item: EffectivePage)}
   <Button href={item.href} variant="ghost" aria-current={item.active ? 'page' : undefined} onclick={selectNavigation}
-    class={`drawer-page h-auto min-h-[44px] w-full justify-start gap-[18px] whitespace-normal border-0 border-l-[3px] px-[18px] py-2.5 text-left font-mono text-[14px] font-normal ${item.active ? 'border-nexus-500 bg-nexus-500/10 text-nexus-300' : 'border-transparent text-zinc-300 hover:bg-carbon-800'}`}>
+  class={`drawer-page h-auto min-h-[44px] w-full justify-start gap-2 whitespace-normal border-0 border-l-[3px] px-3 py-2 text-left font-mono text-[11px] font-normal ${item.active ? 'border-nexus-500 bg-nexus-500/10 text-nexus-300' : 'border-transparent text-zinc-300 hover:bg-carbon-800'}`}>
     <MenuIcon icon={item.icon} /><span class="min-w-0 break-words [overflow-wrap:anywhere]">{item.label}</span>
   </Button>
 {/snippet}
@@ -141,21 +125,25 @@
         </div>
         <Sheet.Description class="sr-only">{$_('header.description')}</Sheet.Description>
         <!-- Business pages remain reachable on short landscape screens. -->
-        <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-[16px] pb-6 pt-2">
+        <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-2 pt-1">
           <nav aria-label={$_('header.navigation')}>
-            <ul class="space-y-4">
-              {#each sections as section (section.id)}
-                {@const contentId = `header-section-${encodeURIComponent(section.id)}`}
+            <ul>
+              {#each items as item (item.id)}
+                {#if item.kind === 'page'}
+                  <li>{@render navigationLink(item)}</li>
+                {:else}
+                {@const contentId = `header-section-${encodeURIComponent(item.id)}`}
                 <li data-testid="header-menu-section">
-                  <button type="button" class="drawer-section flex min-h-[44px] w-full items-center gap-3 px-2 text-left font-mono text-[12px] font-semibold uppercase tracking-command text-zinc-400 transition-colors hover:text-zinc-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-nexus-500"
-                    aria-expanded={!collapsedSections[section.id]} aria-controls={contentId} onclick={() => collapsedSections[section.id] = !collapsedSections[section.id]}>
-                    <span class="min-w-0 break-words [overflow-wrap:anywhere]">{section.title}</span><span class="min-w-4 flex-1 border-t border-carbon-600" aria-hidden="true"></span>
-                    <ChevronDown class={`h-4 w-4 shrink-0 transition-transform duration-150 ${collapsedSections[section.id] ? '-rotate-90' : ''}`} aria-hidden="true" />
+                  <button type="button" class="drawer-section flex min-h-[44px] w-full items-center gap-2 border-l-[3px] border-transparent px-3 text-left font-mono text-[11px] font-semibold uppercase tracking-command text-zinc-400 transition-colors hover:text-zinc-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-nexus-500"
+                    aria-expanded={!collapsedSections[item.id]} aria-controls={contentId} onclick={() => collapsedSections[item.id] = !collapsedSections[item.id]}>
+                    <MenuIcon icon={item.icon} /><span class="min-w-0 break-words [overflow-wrap:anywhere]">{item.label}</span><span class="min-w-4 flex-1 border-t border-carbon-600" aria-hidden="true"></span>
+                    <ChevronDown class={`h-4 w-4 shrink-0 transition-transform duration-150 ${collapsedSections[item.id] ? '-rotate-90' : ''}`} aria-hidden="true" />
                   </button>
-                  <ul id={contentId} class="drawer-pages space-y-1" hidden={collapsedSections[section.id]}>
-                    {#each section.pages as page (page.id)}<li>{@render navigationLink(page)}</li>{/each}
+                  <ul id={contentId} class="drawer-pages ml-4 border-l border-carbon-600" hidden={collapsedSections[item.id]}>
+                    {#each item.children as page (page.id)}<li>{@render navigationLink(page)}</li>{/each}
                   </ul>
                 </li>
+                {/if}
               {/each}
             </ul>
           </nav>
@@ -186,13 +174,13 @@
         <DropdownMenu.Trigger id="header-more-trigger" style={`width: ${moreControlWidth}px`} class={`${tabClass} shrink-0 gap-[8px] bg-carbon-800 ${overflowActive || moreOpen ? '!text-nexus-300' : ''}`} data-active={overflowActive}>
           <LayoutGrid class="h-[16px] w-[16px] shrink-0" aria-hidden="true" /><span>{$_('header.more')}</span><ChevronDown class="h-3 w-3 shrink-0" aria-hidden="true" />
         </DropdownMenu.Trigger>
-        <DropdownMenu.Content data-testid="header-more-menu" align="end" sideOffset={4} class="z-[60] w-max min-w-[192px] max-w-[min(320px,calc(100vw-24px))] max-h-[calc(100dvh-64px)] overflow-y-auto border-carbon-600 bg-carbon-900 p-[12px] text-zinc-200 shadow-industrial">
+        <DropdownMenu.Content data-testid="header-more-menu" align="end" sideOffset={4} class="z-[60] w-max min-w-[160px] max-w-[min(320px,calc(100vw-24px))] max-h-[calc(100dvh-64px)] overflow-y-auto border-carbon-600 bg-carbon-900 text-zinc-200 shadow-industrial">
           <div use:moreLifecycle>
             {#each overflowItems as item, index (item.id)}
               {#if item.kind === 'group'}
-                {#if index > 0}<DropdownMenu.Separator class="my-[12px] bg-carbon-600" />{/if}
+                {#if index > 0}<DropdownMenu.Separator class="bg-carbon-600" />{/if}
                 <DropdownMenu.Group>
-                  <DropdownMenu.Label class="px-[12px] py-[8px] font-mono text-[12px] font-normal text-zinc-400"><span class="min-w-0 break-words [overflow-wrap:anywhere]">{item.label}</span></DropdownMenu.Label>
+                  <DropdownMenu.Label class="font-mono text-[11px] font-normal text-zinc-400"><span class="min-w-0 break-words [overflow-wrap:anywhere]">{item.label}</span></DropdownMenu.Label>
                   {#each item.children as page (page.id)}
                     {@render overflowLink(page, true)}
                   {/each}
@@ -204,12 +192,12 @@
       </DropdownMenu.Root>
     {/if}
   </nav>
-  <div class="header-clock hidden shrink-0 items-center border-l border-carbon-600 px-[18px] xl:flex"><HudClock /></div>
+  <div class="header-clock hidden shrink-0 items-center border-l border-carbon-600 px-[18px] md:flex"><HudClock /></div>
   <div class="ml-auto flex shrink-0 items-stretch border-l border-carbon-600 md:ml-0 md:border-l-0">
     <DropdownMenu.Root bind:open={languageOpen}>
       <DropdownMenu.Trigger id="header-language-trigger" aria-label={$_('header.language')} title={`${$_('header.language')} · ${SUPPORTED_LOCALES.find(item => item.code === $locale)?.name ?? $locale}`}
         class={`${headerUtilityClass} ${languageOpen ? 'bg-nexus-500/10 text-nexus-300' : 'text-zinc-500'}`}><Languages aria-hidden="true" class="h-4 w-4" /></DropdownMenu.Trigger>
-      <DropdownMenu.Content data-testid="header-language-menu" align="end" sideOffset={8} class="z-[60] min-w-36 border-carbon-500 bg-carbon-900 text-zinc-200 shadow-industrial">
+      <DropdownMenu.Content data-testid="header-language-menu" align="end" sideOffset={4} class="z-[60] min-w-36 border-carbon-500 bg-carbon-900 text-zinc-200 shadow-industrial">
         <DropdownMenu.RadioGroup value={$locale || ''}>{#each SUPPORTED_LOCALES as supportedLocale}<DropdownMenu.RadioItem value={supportedLocale.code} class="min-h-[44px] font-mono" onclick={() => { switchLocale(supportedLocale.code); languageOpen = false; }}>{supportedLocale.name}</DropdownMenu.RadioItem>{/each}</DropdownMenu.RadioGroup>
       </DropdownMenu.Content>
     </DropdownMenu.Root>
@@ -219,16 +207,15 @@
 {/if}
 
 {#snippet overflowLink(page: EffectivePage, nested = false)}
-  <DropdownMenu.Item href={page.href} aria-current={page.active ? 'page' : undefined} class={`min-h-[44px] gap-[12px] border-l-2 px-[12px] text-[14px] ${nested ? 'pl-[24px]' : ''} ${page.active ? 'border-nexus-500 bg-nexus-500/10 text-nexus-300' : 'border-transparent'}`}>
+  <DropdownMenu.Item href={page.href} aria-current={page.active ? 'page' : undefined} class={`min-h-[44px] gap-2 border-l-2 text-[11px] ${nested ? 'pl-4' : ''} ${page.active ? 'border-nexus-500 bg-nexus-500/10 text-nexus-300' : 'border-transparent'}`}>
     <MenuIcon icon={page.icon} /><span class="min-w-0 break-words [overflow-wrap:anywhere]">{page.label}</span>
   </DropdownMenu.Item>
 {/snippet}
 
 <style>
-  .drawer-pages :global([data-menu-icon]), .drawer-pages :global(svg) { width: 18px; height: 18px; flex-shrink: 0; }
+  .drawer-section :global([data-menu-icon]), .drawer-page :global([data-menu-icon]) { width: 16px; height: 16px; flex-shrink: 0; }
   .header-tabs-viewport :global([data-menu-icon]) { width: 16px; height: 16px; flex-shrink: 0; }
   .header-tabs-viewport :global(.header-tab[data-active="true"]) { color: var(--nx-accent); }
   .header-tabs-viewport :global(.header-tab[data-active="true"])::before { content: ''; position: absolute; left: 6px; width: 3px; height: 12px; background: var(--nx-accent); }
   .header-tabs-viewport :global(.header-tab[data-active="true"])::after { content: ''; position: absolute; bottom: 0; left: 18px; right: 18px; height: 2px; background: var(--nx-accent); }
-  .header-clock :global(.nx-display) { font-size: 14px; }
 </style>

@@ -184,8 +184,8 @@
       </div>
     </PanelCard>
   {:else}
-    <div class="grid grid-cols-1 xl:grid-cols-[320px_1fr] gap-4">
-      <div class="space-y-2">
+    <div class="flex flex-wrap gap-4">
+      <div class="min-w-0 flex-[1_1_320px] space-y-2">
         {#each rules as rule, index}
           <button
             type="button"
@@ -213,7 +213,7 @@
       </div>
 
       {#if activeRule}
-        <PanelCard title={activeRule.type === 'direct_response' ? $_('routeEditor.directResponseMode') : $_('routeEditor.redirectMode')}>
+        <PanelCard class="min-w-0 flex-[2_1_480px]" title={activeRule.type === 'direct_response' ? $_('routeEditor.directResponseMode') : $_('routeEditor.redirectMode')}>
           <svelte:fragment slot="actions">
             <Button variant="outline" size="sm" onclick={() => duplicateRule(activeIndex)}>{$_('routeEditor.duplicateRule')}</Button>
             <Button variant="destructive" size="sm" onclick={() => removeRule(activeIndex)}>{$_('common.delete')}</Button>

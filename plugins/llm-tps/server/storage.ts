@@ -1,6 +1,6 @@
 import type { PluginObservationStorage, PluginStorage } from '@jeffusion/bungee-core/plugin';
 import { TPS_RETENTION_MS, type TpsRange, type TpsSample, type TpsStatsResponse } from '../contract';
-import { aggregate, identifier, isUrlIdentity, rangeDuration, safeCount, validateSample } from './metrics';
+import { aggregate, identifier, rangeDuration, safeCount, validateSample, validateUpstreamHost } from './metrics';
 
 export interface TpsObservationClient {
   recordSample(sample: TpsSample): Promise<void>;
@@ -34,9 +34,9 @@ export function createObservationAdapter(observation: PluginObservationStorage):
       observation.withDatabase(db => {
         db.transaction(() => {
           db.query(`INSERT OR IGNORE INTO llm_tps_samples
-            (attempt_id, request_id, route_id, endpoint_id, finished_at_ms, output_tokens, generation_duration_ms, output_source, model)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(sample.attemptId, sample.requestId, sample.routeId, sample.endpointId,
-            sample.finishedAtMs, sample.outputTokens, sample.generationDurationMs, sample.outputSource, sample.model);
+            (attempt_id, request_id, route_id, endpoint_id, finished_at_ms, output_tokens, generation_duration_ms, output_source, model, upstream_host)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(sample.attemptId, sample.requestId, sample.routeId, sample.endpointId,
+            sample.finishedAtMs, sample.outputTokens, sample.generationDurationMs, sample.outputSource, sample.model, sample.upstreamHost);
           db.query(`DELETE FROM llm_tps_samples WHERE attempt_id IN (
             SELECT attempt_id FROM llm_tps_samples INDEXED BY idx_llm_tps_samples_finished
             WHERE finished_at_ms < ? ORDER BY finished_at_ms LIMIT 500
@@ -50,8 +50,8 @@ export function createObservationAdapter(observation: PluginObservationStorage):
       return observation.withDatabase(db => db.transaction(() => {
         const where = 'WHERE finished_at_ms >= ? AND finished_at_ms <= ?';
         const totalRow = db.query<Record<string, unknown>, [number, number]>(`SELECT ${metrics} FROM llm_tps_samples ${where}`).get(start, input.asOfMs)!;
-        const rows = db.query<Record<string, unknown>, [number, number]>(`SELECT route_id AS routeId, endpoint_id AS endpointId, ${metrics}
-          FROM llm_tps_samples ${where} GROUP BY route_id, endpoint_id`).all(start, input.asOfMs);
+        const rows = db.query<Record<string, unknown>, [number, number]>(`SELECT route_id AS routeId, upstream_host AS upstreamHost, ${metrics}
+          FROM llm_tps_samples ${where} AND upstream_host IS NOT NULL GROUP BY route_id, upstream_host`).all(start, input.asOfMs);
         const checked = (row: Record<string, unknown>) => {
           if (safeCount(row.invalidSamples, 'invalid sample count') !== 0) throw new RangeError('invalid persisted llm-tps sample');
           return aggregate(row);
@@ -69,10 +69,9 @@ export function createObservationAdapter(observation: PluginObservationStorage):
           ...(buckets.get(firstBucket + index) ?? { tps: null, outputTokens: 0, generationDurationMs: 0, sampleCount: 0, estimatedSampleCount: 0 }),
         }));
         const endpoints = rows.map(row => {
-          identifier(row.routeId, 'routeId'); identifier(row.endpointId, 'endpointId');
-          if (isUrlIdentity(row.endpointId)) throw new TypeError('invalid persisted llm-tps endpoint');
-          return { routeId: row.routeId, endpointId: row.endpointId, ...checked(row) };
-        }).sort((a, b) => (b.tps! - a.tps!) || compare(a.routeId, b.routeId) || compare(a.endpointId, b.endpointId));
+          identifier(row.routeId, 'routeId'); validateUpstreamHost(row.upstreamHost);
+          return { routeId: row.routeId, upstreamHost: row.upstreamHost, ...checked(row) };
+        }).sort((a, b) => (b.tps! - a.tps!) || compare(a.routeId, b.routeId) || compare(a.upstreamHost, b.upstreamHost));
         const models = db.query<Record<string, unknown>, [number, number]>(`SELECT route_id AS routeId, model, ${metrics}
           FROM llm_tps_samples ${where} AND model IS NOT NULL GROUP BY route_id, model`).all(start, input.asOfMs).map(row => {
           identifier(row.routeId, 'routeId'); identifier(row.model, 'model');

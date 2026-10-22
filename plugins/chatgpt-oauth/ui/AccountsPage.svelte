@@ -444,7 +444,7 @@
   {#if refreshing && !accounts.length}<LoadingIndicator label={t('ui.accountsLoading')} height="sm" />
   {:else if !accounts.length}<p class="py-6 text-sm text-zinc-400">{t(notice ? 'ui.accountsFailed' : 'ui.noAccounts')}</p>
   {:else}
-    <div class="grid grid-cols-1 items-start gap-3 md:grid-cols-2 xl:grid-cols-3">
+    <div class="grid grid-cols-1 items-start gap-3 md:grid-cols-[repeat(auto-fit,minmax(min(100%,340px),1fr))]">
       {#each accounts as account (account.id)}
         {@const snapshot = usageFor(account)}
         {@const status = usageStatus(account)}

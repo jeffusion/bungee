@@ -186,6 +186,7 @@ top-of-file comment. Read the source — it's the spec.
 | `PanelCard`      | Generic panel: orange stripe + title + right-side tag     | Wraps every chart, list, form group, or section    |
 | `IndustrialDialog` | Shared complex modal: industrial chassis, stationary header/footer, body snippets | Multi-step flows and forms; no domain logic |
 | `KpiCard`        | Single headline metric (label + display number + unit)    | Dashboard KPI strip, summary cards                  |
+| `BKpiMetric`     | Shared KPI number, unit and optional right-side graphic  | KpiCard body and plugin KPI widgets                 |
 | `CornerBrackets` | The 4 L-shaped chassis indicators                         | Internal; PanelCard/KpiCard render it by default    |
 | `StatusDot`      | Tiny luminous indicator (ok/warn/danger/idle/accent)      | Anywhere status needs a glance                      |
 | `StatusBadge`    | Outlined pill (active/standby/online/fault/muted/info)    | Top-right of panel headers, list rows, KPI footers  |
@@ -653,6 +654,11 @@ Tailwind `max-w-screen-xl` is a fixed `1280px`.
 The utility keeps the title, KPI strip, controls, and body on one shared
 content axis. Do not introduce other page-width tiers.
 
+The 1280px cap does not define a layout mode. Desktop toolbars wrap according to
+their available space, and card grids use minimum readable card widths rather
+than `xl` viewport switches. Keep the existing mobile layouts below 768px;
+response-rule lists and editors wrap when their own content area cannot fit both.
+
 ---
 
 ## 5. Page composition recipes
@@ -757,20 +763,23 @@ groups retain their headings and indented pages. Recalculate on resize, font or
 menu changes. Do not widen the page, wrap the header or require horizontal scrolling.
 Highlight the active page, its group, or More when the current page is collected
 there. Keep language and sign-out visible independently of menu size. Preserve the
-48px Header height and the 1280px clock breakpoint.
+48px Header height. Show the HUD clock throughout desktop navigation at 768px
+and above; reserve its width before fitting navigation entries into More.
 
 The brand shows the build's package version beside BUNGEE in subdued monospace
 text. On narrow screens the compact brand retains the version beside its icon.
-Desktop navigation uses readable 14px labels and 16px icons, with a short orange
+Desktop navigation preserves compact 11px menu labels and 16px icons, with a short orange
 underline and slim leading marker for the current entry. Avoid per-entry boxes;
 fine rules separate the brand and utility areas. More uses a raised carbon surface
-and a grid icon. Dropdowns fit their content between 192px and 320px, capped by the
-viewport; longer labels wrap. Groups use a muted heading, a fine separator and
+and a grid icon. Dropdowns fit their content between 160px and 320px, capped by the
+viewport; longer labels wrap. Use the shared dropdown's `p-1` content padding and
+`px-2` item padding without extra panel gutters. The HUD clock retains its native
+`text-xl` display size. Groups use a muted heading, a fine separator and
 indented child links instead of empty panel space.
 
-Below 768px, a left Sheet contains the complete navigation as collapsible sections.
-Configured groups retain their names; consecutive standalone pages form Workspace
-or Plugin pages sections. Reopening expands the current page's section. Section
+Below 768px, a left Sheet preserves the configured top-level order and groups.
+Standalone pages remain direct links; only configured groups become collapsible
+sections with their names and icons. Reopening expands the current page's section. Section
 headings use a fine divider; child links are indented and the active page has an
 orange left edge. The body scrolls on short screens. Menu Management is an ordinary
 entry in the default System group; its direct route is `/#/menus`.
@@ -895,6 +904,12 @@ the host provides, so:
 - Don't render your own card chrome.
 - Don't import a third-party UI kit that conflicts visually.
 - Use the `industrial/*` barrel for any sub-components you need.
+
+Use `BKpiMetric` for a plugin KPI's number, unit and optional `icon` snippet.
+It owns the same Orbitron sizing, baseline alignment and narrow-card wrapping
+as `KpiCard`; do not override its number size. Its live reference is the KPI
+strip in `/#/design`. Keep ranking rows compact and preserve native scroll
+chaining at both ends of their scrollable region and when all rows fit.
 
 ---
 

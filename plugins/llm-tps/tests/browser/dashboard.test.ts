@@ -8,7 +8,7 @@ import { LAYOUT_KEY } from '../../../../packages/ui/src/components/dashboard/lay
 const runtime = dashboardRuntime();
 const manifest = await Bun.file(new URL('../../manifest.json', import.meta.url)).json();
 
-test('dashboard supplies endpoint configuration to TPS widgets and preserves navigation when menus overflow', () => runtime.run(async page => {
+test('dashboard displays observed upstream hosts independently of endpoint configuration and preserves navigation', () => runtime.run(async page => {
   const fixture = await connectDashboard(page);
   const overview = 'plugin:native:llm-tps:llm-tps-overview';
   const endpoints = 'plugin:native:llm-tps:llm-tps-endpoints';
@@ -43,22 +43,31 @@ test('dashboard supplies endpoint configuration to TPS widgets and preserves nav
     const total = { tps: 56.2, outputTokens: 16860, generationDurationMs: 300000, sampleCount: 30, estimatedSampleCount: 0 };
     return route.fulfill({ json: { range: new URL(route.request().url()).searchParams.get('range'), asOfMs: Date.now(),
       total, history: Array.from({ length: 12 }, (_, i) => ({ ...total, bucketStartMs: i * 60000, tps: [38,42,40,48,46,53,49,58,55,63,59,56.2][i]! })), reportingIncomplete: false, endpoints: [
-        { ...total, routeId: 'route-0', endpointId: 'ep-0-0', tps: 64.8 },
-        { ...total, routeId: 'route-1', endpointId: 'ep-1-0', tps: 56.2 },
-        { ...total, routeId: 'route-2', endpointId: 'ep-2-0', tps: 42.1 },
+        { ...total, routeId: '/v1/chat/completions', upstreamHost: 'actual.openai.example.com:8443', tps: 64.8 },
+        { ...total, routeId: '/v1/messages', upstreamHost: 'actual.anthropic.example.com', tps: 56.2 },
+        { ...total, routeId: '/v1beta/models', upstreamHost: 'actual.gemini.example.com', tps: 42.1 },
       ], models: [
-        { ...total, routeId: 'route-0', model: 'gpt-4.1-mini', tps: 94.6 },
-        { ...total, routeId: 'route-1', model: 'gpt-4.1-mini', tps: 71.3 },
-        { ...total, routeId: 'route-2', model: 'gemini-2.5-pro', tps: 63.8 },
+        { ...total, routeId: '/v1/chat/completions', model: 'gpt-4.1-mini', tps: 94.6 },
+        { ...total, routeId: '/v1/messages', model: 'gpt-4.1-mini', tps: 71.3 },
+        { ...total, routeId: '/v1beta/models', model: 'gemini-2.5-pro', tps: 63.8 },
       ] } });
   });
   await page.goto(`${runtime.origin}/#/`);
   const rows = page.getByTestId('tps-endpoint-row');
   await expect(rows).toHaveCount(3);
-  await expect(rows.first().getByText('openai-pool.example.com', { exact: true })).toBeVisible();
+  await expect(rows.first().getByText('actual.openai.example.com:8443', { exact: true })).toBeVisible();
   await expect(rows.first().getByText('/v1/chat/completions', { exact: true })).toBeVisible();
   await expect(page.getByTestId('tps-total-samples')).toBeVisible();
   await expect(page.getByTestId('tps-model-row')).toHaveCount(3);
+  for (const mode of ['endpoints', 'models']) {
+    const body = page.getByTestId(`tps-${mode}`);
+    const card = page.locator('article').filter({ has: body });
+    await expect(card.locator('.nx-panel-head').getByText('TOKENS/S', { exact: true })).toBeVisible();
+    await expect(body.getByText('TOKENS/S', { exact: true })).toHaveCount(0);
+  }
+  await expect(rows.first().locator('.ranking-value')).toHaveCSS('font-size', '14px');
+  await expect(page.getByTestId('tps-model-row').first().locator('.ranking-value')).toHaveCSS('font-size', '14px');
+  await expect(page.getByTestId('tps-model-row').first().getByText('/v1/chat/completions', { exact: true })).toBeVisible();
   assert(reads).toBe(1);
   await page.setViewportSize({ width: 1304, height: 820 });
   await page.screenshot({ path: '/tmp/bungee-tps-redesign-wide.png', fullPage: true, animations: 'disabled' });
