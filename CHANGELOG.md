@@ -1,3 +1,11 @@
+## [6.3.1](https://github.com/jeffusion/bungee/compare/v6.3.0...v6.3.1) (2026-10-22)
+
+
+### Bug Fixes
+
+* **dashboard:** correct TPS upstream grouping and fluid desktop layouts ([bbee34f](https://github.com/jeffusion/bungee/commit/bbee34f7c1492c7c3ad9a5860a5575c9cfe20818))
+* **test:** run repository control artifact checks as integration tests ([4c71a57](https://github.com/jeffusion/bungee/commit/4c71a570c4d67c63d33baa5acdd60ef86f150363))
+
 # [6.3.0](https://github.com/jeffusion/bungee/compare/v6.2.1...v6.3.0) (2026-10-22)
 
 
