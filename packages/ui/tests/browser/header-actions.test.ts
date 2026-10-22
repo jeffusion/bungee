@@ -26,6 +26,12 @@ browserTest('header navigation and confirmed session logout', async () => {
       await page.route('https://fonts.googleapis.com/**', route => route.fulfill({contentType:'text/css',body:''}));
       let authenticated = true, logoutCalls = 0;
       const snapshot = menuSnapshot();
+      const pluginLinks = ['访问控制', 'TOKEN预算', 'TOKEN统计'].map((label, index) => ({
+        id: `plugin:fixture:${index}`, label, href: `/#/extensions/fixture/${index}`, source: 'plugin' as const,
+        pluginName: 'fixture', defaultIcon: 'lucide:puzzle', available: true,
+      }));
+      snapshot.catalog.push(...pluginLinks);
+      snapshot.layout.push(...pluginLinks.map(page => ({ kind: 'page' as const, pageId: page.id, visible: true })));
       const mockApi = (route: Route) => {
         const url = new URL(route.request().url());
         const json = (value: unknown) => route.fulfill({ json: value });
@@ -56,10 +62,10 @@ browserTest('header navigation and confirmed session logout', async () => {
       {
 
         await expect(top).toBeVisible();
-        await expect(page.locator('#header-menu-trigger')).toHaveCount(0);
+        await expect(page.locator('#header-menu-trigger')).toBeHidden();
         await expect(page.getByTestId('header-menu')).toHaveCount(0);
         const topKeys = await top.locator('li').evaluateAll(nodes => nodes.map(node => node.querySelector('a')?.getAttribute('href') ?? 'group'));
-        expect(topKeys).toEqual(['/#/', '/#/routes', '/#/services', '/#/logs', 'group']);
+        expect(topKeys).toEqual(['/#/', '/#/routes', '/#/services', '/#/logs', 'group', ...pluginLinks.map(page => page.href)]);
 
       }
 
@@ -77,7 +83,93 @@ browserTest('header navigation and confirmed session logout', async () => {
       await system.click(); await expect(menus).toHaveAttribute('aria-current', 'page');
 
       await page.keyboard.press('Escape');
+      const initialLayout = [...snapshot.layout];
+      const initialCatalog = [...snapshot.catalog];
+      const overflowPages = Array.from({ length: 28 }, (_, index) => ({
+        id: `plugin:overflow:${index}`, label: `扩展应用 ${index + 1}`, href: `/#/extensions/overflow/${index}`,
+        source: 'plugin' as const, pluginName: 'overflow', defaultIcon: 'lucide:puzzle', available: true,
+      }));
+      snapshot.catalog.push(...overflowPages);
+      const systemLayout = snapshot.layout.splice(4, 1)[0]!;
+      snapshot.layout.push(...overflowPages.map(page => ({ kind: 'page' as const, pageId: page.id, visible: true })), systemLayout);
+      await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+      const more = page.locator('#header-more-trigger');
+      await expect(more).toBeVisible();
+      await expect(more).toHaveAttribute('data-active', 'true');
+      await more.focus(); await page.keyboard.press('Enter');
+      const overflow = page.getByTestId('header-more-menu');
+      await expect(overflow.getByRole('menuitem', { name: '扩展应用 28', exact: true })).toBeVisible();
+      await expect(overflow.getByRole('menuitem', { name: '菜单管理', exact: true })).toHaveAttribute('aria-current', 'page');
+      if (mode === 'anonymous') await page.screenshot({ path: '/tmp/bungee-header-overflow-open.png' });
+      await page.setViewportSize({ width: 1024, height: 900 });
+      await expect(overflow).toHaveCount(0);
+      await more.focus(); await page.keyboard.press('Enter');
+      await expect(overflow).toBeVisible();
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await expect(overflow).toHaveCount(0);
+      await more.focus(); await page.keyboard.press('Enter');
+      await expect(overflow).toBeVisible();
+      await page.keyboard.press('Escape');
+      await expect(overflow).toHaveCount(0);
+      await expect(more).toBeFocused();
+      await more.click();
+      await overflow.getByRole('menuitem', { name: '菜单管理', exact: true }).click();
+      await expect(overflow).toHaveCount(0);
+      snapshot.layout = initialLayout;
+      snapshot.catalog = initialCatalog;
+      await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+      await expect(more).toHaveCount(0);
       await system.hover();
+      await page.setViewportSize({ width: 320, height: 820 });
+      const navigation = page.locator('#header-menu-trigger');
+      await expect(navigation).toBeVisible();
+      await navigation.click();
+      const compact = page.getByTestId('header-menu');
+      const section = compact.getByRole('button', { name: '系统管理', exact: true });
+      await expect(section).toHaveAttribute('aria-expanded', 'true');
+      await expect(compact.getByRole('link', { name: '菜单管理', exact: true })).toHaveAttribute('aria-current', 'page');
+      await section.click();
+      await expect(section).toHaveAttribute('aria-expanded', 'false');
+      await expect(compact.getByRole('link', { name: '菜单管理', exact: true })).toBeHidden();
+      await page.keyboard.press('Enter');
+      await expect(section).toHaveAttribute('aria-expanded', 'true');
+      await compact.getByRole('link', { name: '菜单管理', exact: true }).click();
+      await expect(compact).toHaveCount(0);
+      await expect(page.getByTestId('page-menus')).toBeVisible();
+      await navigation.click();
+      await section.click();
+      await page.keyboard.press('Escape');
+      await expect(compact).toHaveCount(0);
+      await navigation.click();
+      await expect(section).toHaveAttribute('aria-expanded', 'true');
+      await compact.getByRole('link', { name: '插件管理', exact: true }).click();
+      await expect(page).toHaveURL(/#\/plugins$/);
+      await expect(compact).toHaveCount(0);
+      if (mode === 'anonymous') {
+        await page.emulateMedia({ reducedMotion: 'reduce' });
+        await page.setViewportSize({ width: 390, height: 844 });
+      }
+      await navigation.click();
+      await expect(compact.getByRole('link', { name: '插件管理', exact: true })).toHaveAttribute('aria-current', 'page');
+      if (mode === 'anonymous') {
+        await page.screenshot({ path: '/tmp/bungee-menu-sections-active.png', animations: 'disabled' });
+        await section.click();
+        await page.screenshot({ path: '/tmp/bungee-menu-sections-collapsed.png', animations: 'disabled' });
+      }
+      await compact.getByRole('button', { name: '关闭菜单', exact: true }).click();
+      await expect(compact).toHaveCount(0);
+      if (mode === 'anonymous') {
+        await page.setViewportSize({ width: 640, height: 420 });
+        await navigation.click();
+        const lastPage = compact.getByRole('link', { name: 'TOKEN统计', exact: true });
+        await lastPage.focus();
+        await expect(lastPage).toBeInViewport();
+        await compact.getByRole('button', { name: '关闭菜单', exact: true }).click();
+        await expect(compact).toHaveCount(0);
+      }
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await expect(navigation).toBeHidden();
+      await expect(system).toBeVisible();
       if (mode === 'plugin') {
         {
 

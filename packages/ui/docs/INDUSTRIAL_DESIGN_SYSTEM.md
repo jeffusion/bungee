@@ -751,12 +751,28 @@ assigned icons in Menu Management. The initial System group contains Global
 Settings, Plugins and Menu Management; it is editable like other groups.
 Language, sign-out and the HUD clock remain separate shell utilities.
 
-At every viewport width, navigation renders all effective top-level entries in
-their configured order on one line. Groups open dropdowns. Do not measure the
-available width, collect overflow entries, or switch to a mobile navigation
-panel. Users control horizontal overflow through grouping, names and visibility.
-Highlight the active page or its group without reordering it. Preserve the 48px
-Header height and the 1280px clock breakpoint. Menu Management is an ordinary
+At widths of 768px and above, navigation fits whole top-level entries into the
+available space in configured order. Remaining entries appear in a More dropdown;
+groups retain their headings and indented pages. Recalculate on resize, font or
+menu changes. Do not widen the page, wrap the header or require horizontal scrolling.
+Highlight the active page, its group, or More when the current page is collected
+there. Keep language and sign-out visible independently of menu size. Preserve the
+48px Header height and the 1280px clock breakpoint.
+
+The brand shows the build's package version beside BUNGEE in subdued monospace
+text. On narrow screens the compact brand retains the version beside its icon.
+Desktop navigation uses readable 14px labels and 16px icons, with a short orange
+underline and slim leading marker for the current entry. Avoid per-entry boxes;
+fine rules separate the brand and utility areas. More uses a raised carbon surface
+and a grid icon. Dropdowns fit their content between 192px and 320px, capped by the
+viewport; longer labels wrap. Groups use a muted heading, a fine separator and
+indented child links instead of empty panel space.
+
+Below 768px, a left Sheet contains the complete navigation as collapsible sections.
+Configured groups retain their names; consecutive standalone pages form Workspace
+or Plugin pages sections. Reopening expands the current page's section. Section
+headings use a fine divider; child links are indented and the active page has an
+orange left edge. The body scrolls on short screens. Menu Management is an ordinary
 entry in the default System group; its direct route is `/#/menus`.
 
 Use native links and the shared unsaved-changes guard; preserve keyboard

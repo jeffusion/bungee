@@ -24,9 +24,10 @@
   import { formatCompactNumber } from '$utils/format-number';
   import RefreshCw from 'lucide-svelte/icons/refresh-cw';
   import type { ComponentType, SvelteComponent } from 'svelte';
-  import { RoutesAPI } from '$api/routes';
+  import { getConfigSnapshot } from '$api/config';
+  import { toEditorRoute, toEditorService } from '$api/config-adapters';
+  import { configActions } from '$stores/config';
   import type { Route, Service } from '$api/routes';
-  import { ServicesAPI } from '$api/services';
   import {
     getRouteTargetSummary,
     getRouteFeatureBadges,
@@ -152,10 +153,11 @@
     if (layoutEditing || disposed) return;
     const version = ++configVersion;
     try {
-      const [services, routes] = await Promise.all([ServicesAPI.list(), RoutesAPI.list()]);
+      const { config: { logical_configuration: logical } } = await getConfigSnapshot();
       if (version !== configVersion || disposed || layoutEditing) return;
-      servicesData = services;
-      routesData = routes;
+      configActions.setConfig(logical);
+      servicesData = logical.services.map(toEditorService);
+      routesData = logical.routes.map(route => toEditorRoute(route, logical.services));
       configError = false;
     } catch (e) {
       if (version === configVersion && !disposed) configError = true;

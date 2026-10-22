@@ -239,14 +239,16 @@ test('local tracking storage failures report a warning and corrupted metadata re
 },60_000);
 
 test('dirty settings navigation can be cancelled or confirmed without an implicit save',async()=>{
-  await withSettings(async(page,model)=>{
+  for (const width of [1440, 320]) await withSettings(async(page,model)=>{
     await page.getByTestId('logging-max-size').fill('52');
+    if (width === 320) await page.locator('#header-menu-trigger').click();
     const routes=page.getByRole('link',{name:'Routes',exact:true});await routes.click();
     await page.getByTestId('confirmation-cancel').click();await expect(page).toHaveURL(/#\/config$/);
     await expect(page.getByTestId('logging-max-size')).toHaveValue('52');
+    if (width === 320) await page.locator('#header-menu-trigger').click();
     await routes.click();await page.getByTestId('confirmation-accept').click();await expect(page).toHaveURL(/#\/routes$/);
     expect(model.writes).toHaveLength(0);
-  });
+  }, width);
 },60_000);
 
 test('log cleanup requires confirmation and distinguishes execution, status refresh failure and rejection',async()=>{

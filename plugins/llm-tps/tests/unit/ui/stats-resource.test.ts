@@ -1,11 +1,11 @@
 import { expect, test } from 'bun:test';
 import type { TpsRange, TpsStatsResponse } from '../../../contract';
 import { createTpsResources, validateStats, type TpsState } from '../../../ui/stats-resource';
-import { endpointIdentity, formatTps, rankedEndpoints } from '../../../ui/presentation';
+import { endpointIdentity, endpointLabel, formatTps, rankedEndpoints, rankedModels } from '../../../ui/presentation';
 
 function stats(range: TpsRange = '24h'): TpsStatsResponse {
   return { range, asOfMs: 1000, total: { tps: 20, outputTokens: 100, generationDurationMs: 5000,
-    sampleCount: 2, estimatedSampleCount: 1 }, endpoints: [], reportingIncomplete: false };
+    sampleCount: 2, estimatedSampleCount: 1 }, endpoints: [], models: [], history: [], reportingIncomplete: false };
 }
 
 test('plugin/range subscribers share requests, manual refreshes and one polling timer', async () => {
@@ -20,6 +20,7 @@ test('plugin/range subscribers share requests, manual refreshes and one polling 
   let state: TpsState | undefined;
   const stopFirst = resource.subscribe(next => { state = next; });
   const stopSecond = resource.subscribe(() => {});
+  const stopThird = resource.subscribe(() => {});
   try {
     await Promise.resolve();
     expect(requests.length).toBe(1); expect(polls.size).toBe(1);
@@ -31,11 +32,12 @@ test('plugin/range subscribers share requests, manual refreshes and one polling 
     await Promise.resolve();
     expect(requests.length).toBe(2);
     stopFirst(); expect(requests[1]!.signal.aborted).toBe(false);
-    stopSecond(); expect(requests[1]!.signal.aborted).toBe(true);
+    stopSecond(); expect(requests[1]!.signal.aborted).toBe(false);
+    stopThird(); expect(requests[1]!.signal.aborted).toBe(true);
     expect(polls.size).toBe(0);
     expect(resources.get('llm-tps', '24h')).not.toBe(resource);
     requests[1]!.resolve(stats());
-  } finally { stopFirst(); stopSecond(); }
+  } finally { stopFirst(); stopSecond(); stopThird(); }
 });
 
 test('range changes and late cancelled responses cannot overwrite the new resource', async () => {
@@ -95,13 +97,32 @@ test('last unsubscribe removes the snapshot and an old completion cannot publish
 test('finite values, range identity and estimated sample counts are validated', () => {
   expect(validateStats(stats(), '24h')).toEqual(stats());
   expect(() => validateStats(stats('1h'), '24h')).toThrow();
+  const point = { ...stats().total, bucketStartMs: 0 };
+  expect(() => validateStats({ ...stats(), history: [point, point] }, '24h')).toThrow();
+  expect(() => validateStats({ ...stats(), history: [{ ...point, tps: Infinity }] }, '24h')).toThrow();
+  expect(() => validateStats({ ...stats(), history: [{ ...point, bucketStartMs: -1 }] }, '24h')).toThrow();
   for (const patch of [{ tps: NaN }, { generationDurationMs: Infinity }, { sampleCount: -1 }, { estimatedSampleCount: 3 }]) {
     expect(() => validateStats({ ...stats(), total: { ...stats().total, ...patch } }, '24h')).toThrow();
   }
   for (const invalid of [NaN, Infinity, -1, null, undefined]) expect(formatTps(invalid)).toBe('—');
   expect(endpointIdentity('endpoint-abcdef1234567890')).toBe('endpoint-abcdef1234567890');
   expect(endpointIdentity('https://secret.example/path?key=secret')).toBe('endpoint');
+  expect(endpointLabel('https://user:secret@api.example.com:8443/private?key=secret', 'endpoint-id')).toBe('api.example.com:8443');
+  expect(endpointLabel(undefined, 'd541d5a5-d009-43ee-8d56-7cc4cc5c4084')).toBe('endpoint · d541d5a5');
+  expect(endpointLabel('data:text/plain,secret', 'endpoint-id')).toBe('endpoint · endpoint');
   const row = { ...stats().total, routeId: 'route', endpointId: 'endpoint' };
   expect(rankedEndpoints([{ ...row, endpointId: 'slow', tps: 10 }, { ...row, endpointId: 'fast', tps: 30 },
     { ...row, endpointId: 'empty', tps: null }]).map(item => item.endpointId)).toEqual(['fast', 'slow', 'empty']);
+});
+
+test('model identities and aggregates are validated and ranked independently per route', () => {
+  const row = { ...stats().total, routeId: 'a', model: 'shared' };
+  const data = { ...stats(), models: [row] };
+  expect(validateStats(data, '24h')).toBe(data);
+  for (const patch of [{ model: '' }, { model: null }, { routeId: ' ' }, { tps: Infinity }, { estimatedSampleCount: 3 }]) {
+    expect(() => validateStats({ ...stats(), models: [{ ...row, ...patch }] } as TpsStatsResponse, '24h')).toThrow();
+  }
+  expect(() => validateStats({ ...stats(), models: undefined } as unknown as TpsStatsResponse, '24h')).toThrow();
+  expect(rankedModels([{ ...row, routeId: 'b', tps: 30 }, { ...row, model: 'slow', tps: 10 }, { ...row, tps: 30 }])
+    .map(item => [item.routeId, item.model])).toEqual([['a', 'shared'], ['b', 'shared'], ['a', 'slow']]);
 });

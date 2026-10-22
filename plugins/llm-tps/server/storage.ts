@@ -34,9 +34,9 @@ export function createObservationAdapter(observation: PluginObservationStorage):
       observation.withDatabase(db => {
         db.transaction(() => {
           db.query(`INSERT OR IGNORE INTO llm_tps_samples
-            (attempt_id, request_id, route_id, endpoint_id, finished_at_ms, output_tokens, generation_duration_ms, output_source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(sample.attemptId, sample.requestId, sample.routeId, sample.endpointId,
-            sample.finishedAtMs, sample.outputTokens, sample.generationDurationMs, sample.outputSource);
+            (attempt_id, request_id, route_id, endpoint_id, finished_at_ms, output_tokens, generation_duration_ms, output_source, model)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(sample.attemptId, sample.requestId, sample.routeId, sample.endpointId,
+            sample.finishedAtMs, sample.outputTokens, sample.generationDurationMs, sample.outputSource, sample.model);
           db.query(`DELETE FROM llm_tps_samples WHERE attempt_id IN (
             SELECT attempt_id FROM llm_tps_samples INDEXED BY idx_llm_tps_samples_finished
             WHERE finished_at_ms < ? ORDER BY finished_at_ms LIMIT 500
@@ -57,12 +57,28 @@ export function createObservationAdapter(observation: PluginObservationStorage):
           return aggregate(row);
         };
         const total = checked(totalRow);
+        const bucketMs = input.range === '1h' ? 60_000 : input.range === '12h' ? 1_800_000 : 3_600_000;
+        const historyRows = db.query<Record<string, unknown>, [number, number, number]>(
+          `SELECT CAST(finished_at_ms / ? AS INTEGER) AS bucket, ${metrics}
+           FROM llm_tps_samples ${where} GROUP BY bucket ORDER BY bucket`,
+        ).all(bucketMs, start, input.asOfMs);
+        const buckets = new Map(historyRows.map(row => [safeCount(row.bucket, 'bucket'), checked(row)]));
+        const firstBucket = Math.floor(Math.max(0, start) / bucketMs), lastBucket = Math.floor(input.asOfMs / bucketMs);
+        const history = Array.from({ length: lastBucket - firstBucket + 1 }, (_, index) => ({
+          bucketStartMs: (firstBucket + index) * bucketMs,
+          ...(buckets.get(firstBucket + index) ?? { tps: null, outputTokens: 0, generationDurationMs: 0, sampleCount: 0, estimatedSampleCount: 0 }),
+        }));
         const endpoints = rows.map(row => {
           identifier(row.routeId, 'routeId'); identifier(row.endpointId, 'endpointId');
           if (isUrlIdentity(row.endpointId)) throw new TypeError('invalid persisted llm-tps endpoint');
           return { routeId: row.routeId, endpointId: row.endpointId, ...checked(row) };
         }).sort((a, b) => (b.tps! - a.tps!) || compare(a.routeId, b.routeId) || compare(a.endpointId, b.endpointId));
-        return { range: input.range, asOfMs: input.asOfMs, total, endpoints, reportingIncomplete: false };
+        const models = db.query<Record<string, unknown>, [number, number]>(`SELECT route_id AS routeId, model, ${metrics}
+          FROM llm_tps_samples ${where} AND model IS NOT NULL GROUP BY route_id, model`).all(start, input.asOfMs).map(row => {
+          identifier(row.routeId, 'routeId'); identifier(row.model, 'model');
+          return { routeId: row.routeId, model: row.model, ...checked(row) };
+        }).sort((a, b) => (b.tps! - a.tps!) || compare(a.routeId, b.routeId) || compare(a.model, b.model));
+        return { range: input.range, asOfMs: input.asOfMs, total, endpoints, models, history, reportingIncomplete: false };
       })());
     },
   });

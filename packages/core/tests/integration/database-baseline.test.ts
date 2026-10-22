@@ -47,19 +47,19 @@ test('schema descriptor normalizes formatting while preserving quoted literal me
  try{a.exec("CREATE TABLE t (value TEXT CHECK(value='x  y'))");b.exec("CREATE TABLE t (value TEXT\n  CHECK(value='x  y'))");c.exec("CREATE TABLE t (value TEXT CHECK(value='x y'))");expect(databaseSchemaDescriptor(a)).toBe(databaseSchemaDescriptor(b));expect(databaseSchemaDescriptor(a)).not.toBe(databaseSchemaDescriptor(c));}finally{a.close();b.close();c.close();}
 });
 
-test('access 001 upgrades to TPS 002 while preserving existing rows and supports reopening',()=>{
+test('access 001 upgrades TPS storage while preserving existing rows and supports reopening',()=>{
   const db=new Database(':memory:');
   try {
     migrateAccessDatabase(db,[migrations[0]!]);
     db.run("INSERT INTO access_logs(request_id,timestamp,method,path,status,duration,created_at) VALUES('retained',1,'GET','/',200,1,1)");
     migrateAccessDatabase(db);
-    db.run("INSERT INTO llm_tps_samples VALUES('attempt','request','route','endpoint',1000,12,250.5,'official')");
+    db.run("INSERT INTO llm_tps_samples VALUES('attempt','request','route','endpoint',1000,12,250.5,'official',NULL)");
     migrateAccessDatabase(db);
     expect(db.query('SELECT request_id FROM access_logs').all()).toEqual([{request_id:'retained'}]);
     expect(db.query('SELECT output_tokens,generation_duration_ms FROM llm_tps_samples').all()).toEqual([{output_tokens:12,generation_duration_ms:250.5}]);
-    expect(()=>db.run("INSERT INTO llm_tps_samples VALUES('bad','request','route','endpoint',1000,1,0,'official')")).toThrow();
-    expect(()=>db.run("INSERT INTO llm_tps_samples VALUES('bad','request','route','endpoint',1000,1,1,'partial')")).toThrow();
-    expect(db.query('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([{version:'001'},{version:'002'}]);
+    expect(()=>db.run("INSERT INTO llm_tps_samples VALUES('bad','request','route','endpoint',1000,1,0,'official',NULL)")).toThrow();
+    expect(()=>db.run("INSERT INTO llm_tps_samples VALUES('bad','request','route','endpoint',1000,1,1,'partial',NULL)")).toThrow();
+    expect(db.query('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([{version:'001'},{version:'002'},{version:'003'}]);
   }finally{db.close();}
 });
 
@@ -74,9 +74,30 @@ test('TPS migration failure rolls back 002 and a real access database reopens wi
   expect(()=>migrateAccessDatabase(db!,[migrations[0]!,{...migration,up(database){migration.up(database);throw new Error('injected TPS migration failure');}}])).toThrow('injected TPS migration failure');
   expect(db.query('SELECT version FROM schema_migrations').all()).toEqual([{version:'001'}]);
   expect(db.query("SELECT name FROM sqlite_schema WHERE name='llm_tps_samples'").get()).toBeNull();
-  migrateAccessDatabase(db);db.run("INSERT INTO llm_tps_samples VALUES('a','r','route','endpoint',1,2,5,'estimated')");db.close();
+  migrateAccessDatabase(db);db.run("INSERT INTO llm_tps_samples VALUES('a','r','route','endpoint',1,2,5,'estimated',NULL)");db.close();
   db=new Database(path);migrateAccessDatabase(db);
   expect(db.query('SELECT request_id FROM access_logs').all()).toEqual([{request_id:'preserve'}]);
   expect(db.query('SELECT output_source FROM llm_tps_samples').all()).toEqual([{output_source:'estimated'}]);
+ }finally{db?.close();await rm(root,{recursive:true,force:true});}
+});
+
+test('TPS model migration preserves pre-model samples, rolls back atomically and persists on reopen',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'bungee-tps-model-'));const path=join(root,'access.db');
+ let db:Database|undefined;
+ try {
+  db=new Database(path);migrateAccessDatabase(db,migrations.slice(0,2));
+  db.run("INSERT INTO llm_tps_samples VALUES('before','request','route','endpoint',1,12,250,'official')");
+  const before=databaseSchemaDescriptor(db),migration=migrations[2]!;
+  expect(()=>migrateAccessDatabase(db!,[...migrations.slice(0,2),{...migration,up(database){migration.up(database);throw new Error('injected model migration failure');}}])).toThrow('injected model migration failure');
+  expect(databaseSchemaDescriptor(db)).toBe(before);
+  expect(db.query('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([{version:'001'},{version:'002'}]);
+  expect(db.query('SELECT output_tokens FROM llm_tps_samples').get()).toEqual({output_tokens:12});
+  migrateAccessDatabase(db);
+  db.run("INSERT INTO llm_tps_samples VALUES('after','request','route','endpoint',2,25,500,'estimated','model')");
+  expect(()=>db!.run("INSERT INTO llm_tps_samples VALUES('invalid','request','route','endpoint',2,25,500,'official',' ')")).toThrow();
+  db.close();db=new Database(path);migrateAccessDatabase(db);
+  expect(db.query('SELECT attempt_id,model,output_tokens FROM llm_tps_samples ORDER BY attempt_id').all()).toEqual([
+   {attempt_id:'after',model:'model',output_tokens:25},{attempt_id:'before',model:null,output_tokens:12},
+  ]);
  }finally{db?.close();await rm(root,{recursive:true,force:true});}
 });

@@ -161,6 +161,12 @@
     "retry": "Reload page"
   },
   "header": {
+    "more": "More",
+    "workspace": "Workspace",
+    "pluginPages": "Plugin pages",
+    "menu": "Pages",
+    "closeMenu": "Close menu",
+    "description": "Navigate between pages and menu groups.",
     "navigation": "Pages",
     "language": "Language",
     "management": "System"

@@ -19,7 +19,8 @@
   "ui": {
     "components": [
       { "name": "TpsOverview", "entry": "ui/TpsOverview.svelte" },
-      { "name": "TpsEndpoints", "entry": "ui/TpsEndpoints.svelte" }
+      { "name": "TpsEndpoints", "entry": "ui/TpsEndpoints.svelte" },
+      { "name": "TpsModels", "entry": "ui/TpsModels.svelte" }
     ]
   },
   "configSchema": [],
@@ -27,7 +28,8 @@
     "api": [{ "path": "/stats", "methods": ["GET"], "capability": "logs.read", "handler": "getStats", "execution": "control" }],
     "nativeWidgets": [
       { "id": "llm-tps-overview", "title": "widgets.overview.title", "size": "medium", "component": "TpsOverview", "presentation": "kpi" },
-      { "id": "llm-tps-endpoints", "title": "widgets.endpoints.title", "size": "full", "component": "TpsEndpoints" }
+      { "id": "llm-tps-endpoints", "title": "widgets.endpoints.title", "size": "full", "component": "TpsEndpoints" },
+      { "id": "llm-tps-models", "title": "widgets.models.title", "size": "full", "component": "TpsModels" }
     ]
   },
   "translations": {
@@ -36,28 +38,32 @@
       "plugin.description": "Measure streamed output generation speed for routes with this plugin bound.",
       "widgets.overview.title": "LLM Generation Speed",
       "widgets.endpoints.title": "Endpoint Generation Speed",
+      "widgets.models.title": "Model Generation Speed",
       "ui.refresh": "Refresh",
       "ui.loading": "Loading generation speed",
       "ui.loadFailed": "Unable to load generation speed. Refresh to retry.",
-      "ui.noData": "No valid streaming samples in this range",
-      "ui.weightedHint": "Time-weighted generation speed: output tokens divided by total time from first valid output to generation end.",
+      "ui.noData": "No data in this range",
+      "ui.sampleCount": "Samples",
+      "ui.estimatedCount": "Estimated",
       "ui.samples": "Valid samples: {count} · estimated: {estimated}",
       "ui.ranking": "Generation speed by route and endpoint, fastest first",
-      "ui.incomplete": "Reporting is incomplete. Some samples may be missing."
+      "ui.modelRanking": "Generation speed by route and model, fastest first"
     },
     "zh-CN": {
       "metadata.name": "LLM 生成速度",
       "plugin.description": "统计绑定此插件的路由上的流式输出生成速度。",
       "widgets.overview.title": "LLM 生成速度",
       "widgets.endpoints.title": "端点生成速度",
+      "widgets.models.title": "模型生成速度",
       "ui.refresh": "刷新",
       "ui.loading": "正在加载生成速度",
       "ui.loadFailed": "生成速度加载失败，请刷新重试。",
-      "ui.noData": "所选范围暂无有效流式样本",
-      "ui.weightedHint": "耗时加权平均生成速度：输出 Token 总量除以从首个有效输出到生成结束的总耗时。",
+      "ui.noData": "所选范围暂无数据",
+      "ui.sampleCount": "样本",
+      "ui.estimatedCount": "估算",
       "ui.samples": "有效样本：{count} · 其中估算：{estimated}",
       "ui.ranking": "按路由与端点统计生成速度，由高到低排列",
-      "ui.incomplete": "上报不完整，部分样本可能缺失。"
+      "ui.modelRanking": "按路由与模型统计生成速度，由高到低排列"
     }
   }
 }

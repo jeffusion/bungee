@@ -16,19 +16,24 @@ afterAll(async () => { try { await browser?.close(); } finally { await runtime?.
 function stats(range: TpsRange, empty = false): TpsStatsResponse {
   const total = { tps: empty ? null : 20, outputTokens: empty ? 0 : 100, generationDurationMs: empty ? 0 : 5000,
     sampleCount: empty ? 0 : 3, estimatedSampleCount: empty ? 0 : 1 };
-  return { range, asOfMs: Date.now(), total, reportingIncomplete: false, endpoints: empty ? [] : [
+  return { range, asOfMs: Date.now(), total, history: empty ? [] : Array.from({ length: 12 }, (_, i) => ({ ...total, bucketStartMs: i * 60000, tps: [38,42,40,48,46,53,49,58,55,63,59,56.2][i]! })), reportingIncomplete: false, endpoints: empty ? [] : [
     { ...total, routeId: 'route-1', endpointId: 'slow', tps: 10 },
     { ...total, routeId: 'route-2', endpointId: 'fast', tps: 15 },
     { ...total, routeId: 'route-1', endpointId: 'fast', tps: 30 },
+  ], models: empty ? [] : [
+    { ...total, routeId: 'route-1', model: 'gpt-4.1-mini', tps: 94.6 },
+    { ...total, routeId: 'route-2', model: 'gpt-4.1-mini', tps: 71.3 },
+    { ...total, routeId: 'route-1', model: 'gemini-2.5-pro', tps: 63.8 },
   ] };
 }
 async function open(page: Page) {
   await page.goto(`${runtime.origin}/@fs${fixture}`);
   await expect(page.getByTestId('overview-refresh')).toBeEnabled();
   await expect(page.getByTestId('endpoints-refresh')).toBeEnabled();
+  await expect(page.getByTestId('models-refresh')).toBeEnabled();
 }
 
-test('both cards share reads, range changes, refreshes and the polling timer; unmount resets headers', async () => {
+test('all three cards share reads, range changes, refreshes and the polling timer; unmount resets headers', async () => {
   const context = await browser.newContext();
   try {
     const page = await context.newPage();
@@ -51,14 +56,18 @@ test('both cards share reads, range changes, refreshes and the polling timer; un
     ]);
     await expect(page.getByTestId('tps-total-samples')).toBeVisible();
     const text = await page.locator('body').innerText();
-    expect(text).toContain('Fast endpoint'); expect(text).toContain('较慢端点');
-    await expect(page.getByTestId('tps-endpoint-row').first().getByText('/test', { exact: true })).toBeVisible();
-    await expect(page.getByTestId('tps-endpoint-row').nth(1).getByText('/other', { exact: true })).toBeVisible();
+    await expect(page.getByTestId('tps-endpoint-row').last().getByText('slow.example.com', { exact: true })).toBeVisible();
+    await expect(page.getByTestId('tps-endpoint-row').first().getByText('fast.example.com', { exact: true })).toBeVisible();
+    await expect(page.getByTestId('tps-endpoint-row').first().getByText('/chat/', { exact: true })).toBeVisible();
+    await expect(page.getByTestId('tps-endpoint-row').nth(1).getByText('/agents/', { exact: true })).toBeVisible();
     expect(text).not.toContain('never-render');
+    expect(await page.getByTestId('tps-model-row').evaluateAll(rows => rows.map(row => [row.getAttribute('data-route-id'), row.getAttribute('data-model')]))).toEqual([
+      ['route-1', 'gpt-4.1-mini'], ['route-2', 'gpt-4.1-mini'], ['route-1', 'gemini-2.5-pro'],
+    ]);
     await page.getByRole('button', { name: '1h', exact: true }).click();
     await expect(page.getByTestId('overview-refresh')).toBeEnabled();
     expect(calls).toEqual(['24h', '1h']);
-    await page.getByTestId('endpoints-refresh').click();
+    await page.getByTestId('models-refresh').click();
     await expect(page.getByTestId('overview-refresh')).toBeEnabled();
     expect(calls).toEqual(['24h', '1h', '1h']);
     await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
@@ -75,12 +84,12 @@ test('both cards share reads, range changes, refreshes and the polling timer; un
   } finally { await context.close(); }
 }, 60_000);
 
-test('failed reads clear values; empty and incomplete states remain distinct; all endpoint groups remain accessible', async () => {
+test('failed reads clear all cards; model-only empty results remain distinct; every group remains accessible', async () => {
   const context = await browser.newContext();
   try {
     const page = await context.newPage();
     const evidence = collectApiEvidence(page);
-    let mode: 'ready' | 'failure' | 'empty' | 'many' = 'ready';
+    let mode: 'ready' | 'failure' | 'empty' | 'models-empty' | 'many' = 'ready';
     await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
       const url = new URL(route.request().url());
       if (url.pathname !== '/api/plugins/llm-tps/control/stats' || route.request().method() !== 'GET') {
@@ -92,27 +101,38 @@ test('failed reads clear values; empty and incomplete states remain distinct; al
         return route.fulfill({ status: 503, json: { error: 'unavailable' } });
       }
       let data = stats(url.searchParams.get('range') as TpsRange, mode === 'empty');
+      if (mode === 'models-empty') data = { ...data, models: [] };
       if (mode === 'many') data = { ...data, reportingIncomplete: true, endpoints: Array.from({ length: 45 }, (_, i) => ({
         ...data.total, routeId: i < 3 ? 'route-1' : `route-${i}`, endpointId: i === 0 ? 'fast' : i === 1 ? 'slow' : `endpoint-${i}`, tps: 100 - i,
+      })), models: Array.from({ length: 45 }, (_, i) => ({
+        ...data.total, routeId: 'route-1', model: i === 0 ? 'model-with-an-unusually-long-name-that-must-remain-readable-in-narrow-cards' : `model-${i}`, tps: 400 - i,
       })) };
       return route.fulfill({ json: data });
     });
     await open(page);
+    mode = 'models-empty'; await page.getByTestId('models-refresh').click();
+    await expect(page.getByTestId('tps-models').getByTestId('tps-empty')).toBeVisible();
+    await expect(page.getByTestId('tps-endpoint-row')).toHaveCount(3);
+    await expect(page.getByTestId('tps-model-row')).toHaveCount(0);
     mode = 'failure'; await page.getByTestId('overview-refresh').click();
-    await expect(page.getByTestId('tps-error')).toHaveCount(2);
+    await expect(page.getByTestId('tps-error')).toHaveCount(3);
     await expect(page.getByTestId('tps-total-value')).toHaveText('—');
     await expect(page.getByTestId('tps-endpoint-row')).toHaveCount(0);
     await page.screenshot({ path: '/tmp/llm-tps-widgets-failure.png', fullPage: true });
     mode = 'empty'; await page.getByTestId('overview-refresh').click();
-    await expect(page.getByTestId('tps-empty')).toHaveCount(2);
+    await expect(page.getByTestId('tps-empty')).toHaveCount(3);
     await expect(page.getByTestId('tps-error')).toHaveCount(0);
     mode = 'many'; await page.getByTestId('endpoints-refresh').click();
     await expect(page.getByTestId('tps-endpoint-row')).toHaveCount(45);
-    await expect(page.getByTestId('tps-incomplete')).toHaveCount(2);
+    await expect(page.getByTestId('tps-model-row')).toHaveCount(45);
     await page.getByTestId('tps-endpoint-list').focus();
     await page.keyboard.press('End');
     await expect(page.getByTestId('tps-endpoint-row').last()).toBeInViewport();
     await page.getByTestId('tps-endpoint-list').evaluate(element => { element.scrollTop = 0; });
+    await page.getByTestId('tps-model-list').focus();
+    await page.keyboard.press('End');
+    await expect(page.getByTestId('tps-model-row').last()).toBeInViewport();
+    await page.getByTestId('tps-model-list').evaluate(element => { element.scrollTop = 0; });
     await page.setViewportSize({ width: 390, height: 844 });
     await page.screenshot({ path: '/tmp/llm-tps-widgets-narrow-en.png', fullPage: true });
     await page.getByRole('button', { name: '中文', exact: true }).click();

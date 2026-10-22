@@ -12,6 +12,7 @@ import KeyAccessKeyPolicy from '@plugins/key-access/ui/KeyPolicy.svelte';
 import KeyRateLimitKeyPolicy from '@plugins/key-rate-limit/ui/KeyPolicy.svelte';
 import TpsOverview from '@plugins/llm-tps/ui/TpsOverview.svelte';
 import TpsEndpoints from '@plugins/llm-tps/ui/TpsEndpoints.svelte';
+import TpsModels from '@plugins/llm-tps/ui/TpsModels.svelte';
 import ModelsDevSettings from '@plugins/models-dev/ui/ModelsDevSettings.svelte';
 import TokenBudgetKeyPolicy from '@plugins/token-budget/ui/KeyPolicy.svelte';
 import TokenStatsChart from '@plugins/token-stats/ui/TokenStatsChart.svelte';
@@ -31,6 +32,7 @@ export const generatedWidgetRegistry: Record<string, ComponentType<SvelteCompone
   KeyRateLimitKeyPolicy,
   TpsOverview,
   TpsEndpoints,
+  TpsModels,
   ModelsDevSettings,
   TokenBudgetKeyPolicy,
   TokenStatsChart,
@@ -51,6 +53,7 @@ export const componentSourceMap: Record<string, string> = {
   KeyRateLimitKeyPolicy: 'key-rate-limit',
   TpsOverview: 'llm-tps',
   TpsEndpoints: 'llm-tps',
+  TpsModels: 'llm-tps',
   ModelsDevSettings: 'models-dev',
   TokenBudgetKeyPolicy: 'token-budget',
   TokenStatsChart: 'token-stats',

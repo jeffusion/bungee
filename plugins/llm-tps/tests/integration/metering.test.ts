@@ -51,6 +51,9 @@ test('HTTP and WebSocket generation reach TPS storage without requiring complete
     expect(stats.total.generationDurationMs).toBe(1500);
     expect(stats.total.outputTokens).toBeGreaterThan(110);
     expect(stats.endpoints.find(endpoint => endpoint.endpointId === 'http-endpoint')).toMatchObject({ sampleCount: 1, tps: 200 });
+    expect(stats.models).toHaveLength(1);
+    expect(stats.models[0]).toMatchObject({ routeId: 'route-a', model: 'gpt-4o', sampleCount: 3, estimatedSampleCount: 1,
+      outputTokens: stats.total.outputTokens, generationDurationMs: stats.total.generationDurationMs });
     expect(await store.storage.get('reporting:incomplete')).toBeNull();
   } finally {
     await provider.onDestroy(); await tps.onDestroy(); store.close();
