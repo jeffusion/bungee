@@ -1,3 +1,11 @@
+## [6.2.1](https://github.com/jeffusion/bungee/compare/v6.2.0...v6.2.1) (2026-10-22)
+
+
+### Bug Fixes
+
+* **ci:** pin Linux regression jobs to Ubuntu 24.04 ([c67c35d](https://github.com/jeffusion/bungee/commit/c67c35da34928e1f73aa9264d610f0de4abbe6bc))
+* **codex-router:** accept native relay completion events ([aa68439](https://github.com/jeffusion/bungee/commit/aa684391e73472e396320e2d8be022244fdf1d9d))
+
 # [6.2.0](https://github.com/jeffusion/bungee/compare/v6.1.1...v6.2.0) (2026-10-21)
 
 
