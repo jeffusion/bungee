@@ -20,12 +20,13 @@ function invoke(control: PluginControl, host: ControlHostContext, query = '', re
 describe('TPS control API', () => {
   test('queries default window and merges persisted reporting status through strict read', async () => {
     const { storage, adapter, host, control } = setup();
-    await adapter.recordSample({ attemptId: 'sample', requestId: 'request', routeId: 'route', endpointId: 'endpoint', model: 'model', finishedAtMs: Date.now(), outputTokens: 200, generationDurationMs: 1000, outputSource: 'estimated' });
+    await adapter.recordSample({ attemptId: 'sample', requestId: 'request', routeId: 'route', endpointId: 'endpoint', upstreamHost: 'api.test:8443', model: 'model', finishedAtMs: Date.now(), outputTokens: 200, generationDurationMs: 1000, outputSource: 'estimated' });
     await storage.set('reporting:incomplete', true);
     storage.get = async () => { throw new Error('must use strict read'); };
     const response = await invoke(control, host);
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ range: '24h', total: { tps: 200, sampleCount: 1, estimatedSampleCount: 1 },
+      endpoints: [{ routeId: 'route', upstreamHost: 'api.test:8443', tps: 200, sampleCount: 1 }],
       models: [{ routeId: 'route', model: 'model', tps: 200, sampleCount: 1, estimatedSampleCount: 1 }], reportingIncomplete: true });
   });
   test.each(['?range=2h', '?range=', '?range=1h&range=1h', '?range=1h&range=24h', '?unknown=1'])('rejects invalid query %s', async query => {

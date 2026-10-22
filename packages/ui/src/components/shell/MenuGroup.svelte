@@ -17,10 +17,10 @@
   <DropdownMenu.Trigger id={triggerId} class={triggerClass} aria-label={item.label} data-active={item.active}>
     <MenuIcon icon={item.icon} /><span>{item.label}</span><ChevronDown class="h-3 w-3" aria-hidden="true" />
   </DropdownMenu.Trigger>
-  <DropdownMenu.Content align="start" sideOffset={4} class="z-[60] max-h-[calc(100dvh-64px)] w-max min-w-[192px] max-w-[min(320px,calc(100vw-24px))] overflow-y-auto border-carbon-600 bg-carbon-900 p-[12px] text-zinc-200 shadow-industrial">
+  <DropdownMenu.Content align="start" sideOffset={4} class="z-[60] max-h-[calc(100dvh-64px)] w-max min-w-[160px] max-w-[min(320px,calc(100vw-24px))] overflow-y-auto border-carbon-600 bg-carbon-900 text-zinc-200 shadow-industrial">
     <div use:lifecycle>
       {#each item.children as page (page.id)}
-        <DropdownMenu.Item href={page.href} aria-current={page.active ? 'page' : undefined} class={`min-h-[44px] gap-[12px] px-[12px] text-[14px] ${page.active ? 'bg-nexus-500/10 text-nexus-300' : ''}`}>
+        <DropdownMenu.Item href={page.href} aria-current={page.active ? 'page' : undefined} class={`min-h-[44px] gap-2 text-[11px] ${page.active ? 'bg-nexus-500/10 text-nexus-300' : ''}`}>
           <MenuIcon icon={page.icon} /><span class="break-words [overflow-wrap:anywhere]">{page.label}</span>
         </DropdownMenu.Item>
       {/each}

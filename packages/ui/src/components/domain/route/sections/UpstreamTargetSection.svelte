@@ -231,7 +231,7 @@ import { LoadingIndicator, SystemAlertBar, PanelCard, IconButton, StatusBadge } 
               <p class="text-zinc-500">{$_('routeEditor.noServicesFound')}</p>
             </div>
           {:else}
-            <div class="grid grid-cols-1 xl:grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 gap-3 md:grid-cols-[repeat(auto-fit,minmax(min(100%,280px),1fr))]">
               {#each filteredServices as service}
                 <button
                   type="button"

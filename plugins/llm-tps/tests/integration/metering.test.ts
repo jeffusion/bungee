@@ -23,7 +23,7 @@ test('HTTP and WebSocket generation reach TPS storage without requiring complete
     const identity = { requestId: 'http-request', attemptId: 'http-attempt', routeId: 'route-a', upstreamId: 'http-endpoint', isActive: () => true };
     const http = (phase: Record<string, unknown>) => hooks.onAttemptObservation.promise({ ...identity, ...phase } as AttemptObservationEvent);
     await http({ phase: 'selected' });
-    await http({ phase: 'request', url: 'https://api.openai.com/v1/chat/completions', body: { model: 'gpt-4o', stream: true, messages: [{ role: 'user', content: 'answer' }] } });
+    await http({ phase: 'request', upstreamHost: 'http.actual.test:8443', url: '/v1/chat/completions', body: { model: 'gpt-4o', stream: true, messages: [{ role: 'user', content: 'answer' }] } });
     await http({ phase: 'response', status: 200, protocol: 'sse', observedAtMonotonicMs: 100, body: { choices: [{ index: 0, delta: { content: 'answer' } }] } });
     await http({ phase: 'response', status: 200, protocol: 'sse', observedAtMonotonicMs: 600,
       body: { choices: [{ index: 0, finish_reason: 'stop' }], usage: { prompt_tokens: 2, completion_tokens: 100 } } });
@@ -31,7 +31,7 @@ test('HTTP and WebSocket generation reach TPS storage without requiring complete
     await http({ phase: 'request-end' });
 
     const connection = { connectionId: 'ws', routeId: 'route-a', upstreamId: 'ws-endpoint',
-      upstreamUrl: 'https://api.openai.com/v1/responses', isActive: () => true };
+      upstreamUrl: 'https://user:secret@ws.actual.test:9443/v1/responses?key=private#fragment', isActive: () => true };
     const ws = (phase: Record<string, unknown>) => hooks.onWebSocketObservation.promise({ ...connection, ...phase } as WebSocketObservationEvent);
     const message = (direction: 'client' | 'upstream', body: unknown, at: number) => ws({ phase: 'message', direction,
       observedAtMonotonicMs: at, message: { kind: 'text', byteLength: 1, json: () => body } });
@@ -50,7 +50,9 @@ test('HTTP and WebSocket generation reach TPS storage without requiring complete
     expect(stats.total.estimatedSampleCount).toBe(1);
     expect(stats.total.generationDurationMs).toBe(1500);
     expect(stats.total.outputTokens).toBeGreaterThan(110);
-    expect(stats.endpoints.find(endpoint => endpoint.endpointId === 'http-endpoint')).toMatchObject({ sampleCount: 1, tps: 200 });
+    expect(stats.endpoints.find(endpoint => endpoint.upstreamHost === 'http.actual.test:8443')).toMatchObject({ sampleCount: 1, tps: 200 });
+    expect(stats.endpoints.find(endpoint => endpoint.upstreamHost === 'ws.actual.test:9443')).toMatchObject({ sampleCount: 2 });
+    expect(JSON.stringify(stats)).not.toMatch(/secret|private|fragment|http-endpoint|ws-endpoint/);
     expect(stats.models).toHaveLength(1);
     expect(stats.models[0]).toMatchObject({ routeId: 'route-a', model: 'gpt-4o', sampleCount: 3, estimatedSampleCount: 1,
       outputTokens: stats.total.outputTokens, generationDurationMs: stats.total.generationDurationMs });

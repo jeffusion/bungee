@@ -44,11 +44,11 @@
     </KpiCard>
     <div class="detail-panels" data-testid="tps-detail-panels">
     <PanelCard title={t('widgets.endpoints.title')} tag={endpoints?.summary} class="flex h-[560px] flex-col">
-      <svelte:fragment slot="actions"><button data-testid="endpoints-refresh" class="nx-btn-secondary" aria-label="Refresh endpoints" disabled={endpoints?.refresh.busy || endpoints?.refresh.disabled} onclick={() => endpoints?.refresh.run()}>{endpoints?.refresh.label}</button></svelte:fragment>
+      <svelte:fragment slot="actions">{#if endpoints?.actions}{@render endpoints.actions()}{/if}<button data-testid="endpoints-refresh" class="nx-btn-secondary" aria-label="Refresh endpoints" disabled={endpoints?.refresh.busy || endpoints?.refresh.disabled} onclick={() => endpoints?.refresh.run()}>{endpoints?.refresh.label}</button></svelte:fragment>
       <TpsEndpoints {selectedRange} onHeaderChange={value => endpoints = value} />
     </PanelCard>
     <PanelCard title={t('widgets.models.title')} tag={models?.summary} class="flex h-[560px] flex-col">
-      <svelte:fragment slot="actions"><button data-testid="models-refresh" class="nx-btn-secondary" aria-label="Refresh models" disabled={models?.refresh.busy || models?.refresh.disabled} onclick={() => models?.refresh.run()}>{models?.refresh.label}</button></svelte:fragment>
+      <svelte:fragment slot="actions">{#if models?.actions}{@render models.actions()}{/if}<button data-testid="models-refresh" class="nx-btn-secondary" aria-label="Refresh models" disabled={models?.refresh.busy || models?.refresh.disabled} onclick={() => models?.refresh.run()}>{models?.refresh.label}</button></svelte:fragment>
       <TpsModels {selectedRange} onHeaderChange={value => models = value} />
     </PanelCard>
     </div>

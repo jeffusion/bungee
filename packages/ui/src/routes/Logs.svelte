@@ -441,9 +441,9 @@ $: refreshIntervalOptions = $isLoading ? [] : [
   <!-- 统一操作栏（响应式设计） -->
   <div class="mb-6">
     <!-- 操作控制行 -->
-    <div class="flex items-center gap-2 mb-3">
+    <div class="flex items-center gap-2 mb-3 md:flex-wrap">
       <!-- 搜索框（弹性伸缩） -->
-      <div class="flex-1 min-w-0 xl:max-w-md">
+      <div class="flex-1 min-w-0 md:flex-[1_1_16rem]">
         <input
           type="text"
           bind:value={searchTerm}
@@ -453,8 +453,8 @@ $: refreshIntervalOptions = $isLoading ? [] : [
         />
       </div>
 
-      <!-- 宽屏布局（≥1280px）：所有控件展开 -->
-      <div class="hidden xl:flex items-center gap-2 flex-wrap flex-1">
+      <!-- 桌面布局（≥768px）：控件按可用空间自然换行 -->
+      <div class="hidden md:flex min-w-0 items-center gap-2 flex-wrap flex-[2_1_36rem]">
         <!-- 左侧：过滤按钮组 -->
         <div class="flex items-center gap-2 flex-wrap">
           <!-- Method 下拉 -->
@@ -623,11 +623,8 @@ $: refreshIntervalOptions = $isLoading ? [] : [
           {/if}
         </div>
 
-        <!-- 弹性空间 -->
-        <div class="flex-1"></div>
-
         <!-- 右侧：刷新和操作按钮组 -->
-        <div class="flex items-center gap-2 flex-wrap">
+        <div class="ml-auto flex items-center gap-2 flex-wrap">
           <!-- 刷新设置下拉菜单 -->
           <BDropdownAction width="w-64" align="end" triggerClass="nx-btn-outline nx-btn-md">
             {#snippet trigger()}
@@ -671,6 +668,11 @@ $: refreshIntervalOptions = $isLoading ? [] : [
                       <span class="nx-field-label">{$_('logs.refreshInterval')}</span>
                     </div>
                     <Select options={refreshIntervalOptions} bind:value={refreshInterval} placeholder="30s" ariaLabel={$_('logs.refreshInterval')} />
+                  </div>
+                {/if}
+                {#if lastRefreshTime > 0}
+                  <div class="text-xs text-gray-500 text-center">
+                    {$_('logs.lastRefreshed')}: {new Date(lastRefreshTime).toLocaleTimeString()}
                   </div>
                 {/if}
               </div>
@@ -717,231 +719,6 @@ $: refreshIntervalOptions = $isLoading ? [] : [
           </BDropdownAction>
 
         </div>
-      </div>
-
-      <!-- 中屏布局（768-1280px）：部分收起 -->
-      <div class="hidden md:flex xl:hidden items-center gap-2">
-        <!-- 筛选菜单（合并所有过滤选项） -->
-        <BDropdownAction
-          width="w-96"
-          align="end"
-          triggerClass={`${method || statusFilter || transportFilter !== undefined || requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc' ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-md`}
-        >
-            {#snippet trigger()}
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
-              </svg>
-              {$_('logs.filters')}
-              {#if method || statusFilter || transportFilter !== undefined || requestTypeFilter || timeRangeType !== 'recent' || recentHours !== 1 || sortBy !== 'timestamp' || sortOrder !== 'desc'}
-                <span class="nx-feature-tag">
-                  {[method, statusFilter, transportFilter !== undefined, requestTypeFilter, timeRangeType !== 'recent' || recentHours !== 1, sortBy !== 'timestamp' || sortOrder !== 'desc'].filter(Boolean).length}
-                </span>
-              {/if}
-            {/snippet}
-            <div class="p-3">            <div class="grid grid-cols-2 gap-3">
-              <!-- Method -->
-              <div class="min-w-0 space-y-1">
-                <div class="label py-1">
-                  <span class="nx-field-label">{$_('logs.method')}</span>
-                </div>
-                <Select options={methodOptions} bind:value={method} placeholder={$_('logs.allMethods')} ariaLabel={$_('logs.method')} />
-              </div>
-
-              <!-- Status -->
-              <div class="min-w-0 space-y-1">
-                <div class="label py-1">
-                  <span class="nx-field-label">{$_('logs.status')}</span>
-                </div>
-                <input
-                  type="text"
-                  bind:value={statusFilter}
-                  placeholder="200, 404, 5xx"
-                  class="nx-input"
-                />
-              </div>
-
-              <!-- Result -->
-              <div class="min-w-0 space-y-1">
-                <div class="label py-1">
-                  <span class="nx-field-label">{$_('logs.transportResult')}</span>
-                </div>
-                <Select options={transportOptions} value={transportSelectValue} onchange={onTransportSelectChange} placeholder={$_('logs.allResults')} ariaLabel={$_('logs.transportResult')} />
-              </div>
-
-              <div class="col-span-2 border-t border-carbon-600"></div>
-
-              <!-- Request Type -->
-              <div class="min-w-0 space-y-1">
-                <div class="label py-1">
-                  <span class="nx-field-label">{$_('logs.requestTypeFilter')}</span>
-                </div>
-                <Select options={requestTypeOptions} bind:value={requestTypeFilter} placeholder={$_('logs.requestType_all')} ariaLabel={$_('logs.requestTypeFilter')} />
-              </div>
-
-              <!-- Time Range -->
-              <div class="min-w-0 space-y-1">
-                <div class="label py-1">
-                  <span class="nx-field-label">{$_('logs.timeRange')}</span>
-                </div>
-                <Select options={timeRangeOptions} bind:value={timeRangeType} placeholder={$_('logs.allTime')} ariaLabel={$_('logs.timeRange')} />
-              </div>
-
-              {#if timeRangeType === 'recent'}
-                <div class="min-w-0 space-y-1">
-                  <div class="label py-1">
-                    <span class="nx-field-label">{$_('logs.recentHours')}</span>
-                  </div>
-                  <input
-                    type="number"
-                    bind:value={recentHours}
-                    min="1"
-                    class="nx-input"
-                  />
-                </div>
-              {/if}
-
-              {#if timeRangeType === 'custom'}
-                <div class="col-span-2 min-w-0 space-y-1">
-                  <div class="label py-1">
-                    <span class="nx-field-label">{$_('logs.startTime')}</span>
-                  </div>
-                  <input
-                    type="datetime-local"
-                    bind:value={customStartTime}
-                    class="nx-input min-w-0"
-                  />
-                </div>
-
-                <div class="col-span-2 min-w-0 space-y-1">
-                  <div class="label py-1">
-                    <span class="nx-field-label">{$_('logs.endTime')}</span>
-                  </div>
-                  <input
-                    type="datetime-local"
-                    bind:value={customEndTime}
-                    class="nx-input min-w-0"
-                  />
-                </div>
-              {/if}
-
-              <!-- Sort -->
-              <div class="col-span-2 border-t border-carbon-600"></div>
-              <div class="col-span-2 min-w-0 space-y-1">
-                <div class="label py-1">
-                  <span class="nx-field-label">{$_('logs.sortBy')}</span>
-                </div>
-                <div class="flex flex-wrap gap-2">
-                  <Select options={sortByOptions} bind:value={sortBy} placeholder={$_('logs.sortByTimestamp')} ariaLabel={$_('logs.sortBy')} class="flex-1" />
-                  <Select options={sortOrderOptions} bind:value={sortOrder} placeholder={$_('logs.desc')} ariaLabel={$_('logs.sortBy')} width="w-24 min-w-[6rem]" />
-                </div>
-              </div>
-            </div>
-          
-            </div>
-          </BDropdownAction>
-
-        {#if activeFiltersCount > 0}
-          <button
-            type="button"
-            class="nx-btn-ghost nx-btn-md focus-visible:ring-2 focus-visible:ring-nexus-500"
-            on:click={clearAllFilters}
-          >
-            {$_('logs.resetFilters')}
-          </button>
-        {/if}
-
-        <!-- 刷新菜单（合并刷新控制） -->
-        <BDropdownAction width="w-72" align="end" triggerClass="nx-btn-ghost nx-btn-md">
-            {#snippet trigger()}
-              {#if loading}
-                <LoadingIndicator label="" size="xs" centered={false} />
-              {:else}
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  class="h-4 w-4"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-                  />
-                </svg>
-              {/if}
-              {$_('common.refresh')}
-            {/snippet}
-            <div class="p-3">            <div class="space-y-3">
-              <!-- Auto Refresh Toggle -->
-              <div class="space-y-1">
-                <label class="flex w-full items-center justify-between gap-3 cursor-pointer">
-                  <span class="nx-field-label">{$_('logs.autoRefresh')}</span>
-                  <BSwitch bind:checked={autoRefreshEnabled} description={$_('logs.autoRefresh')} />
-                </label>
-              </div>
-
-              <!-- Refresh Interval -->
-              {#if autoRefreshEnabled}
-                <div class="space-y-1">
-                  <div class="label py-1">
-                    <span class="nx-field-label">{$_('logs.refreshInterval')}</span>
-                  </div>
-                  <Select options={refreshIntervalOptions} bind:value={refreshInterval} placeholder="30s" ariaLabel={$_('logs.refreshInterval')} />
-                </div>
-              {/if}
-
-              <!-- Manual Refresh Button -->
-              <div class="border-t border-carbon-600 my-2"></div>
-              <button
-                type="button"
-                class="nx-btn-primary nx-btn-md w-full"
-                on:click={manualRefresh}
-                disabled={loading}
-              >
-                {#if loading}
-                  <LoadingIndicator label="" size="xs" centered={false} />
-                {:else}
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    class="h-4 w-4"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                  >
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                      d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-                    />
-                  </svg>
-                {/if}
-                {$_('common.refresh')}
-              </button>
-
-              <!-- Last Refresh Time -->
-              {#if lastRefreshTime > 0}
-                <div class="text-xs text-gray-500 text-center">
-                  {$_('logs.lastRefreshed')}: {new Date(lastRefreshTime).toLocaleTimeString()}
-                </div>
-              {/if}
-            </div>
-          
-            </div>
-          </BDropdownAction>
-
-        <!-- 导出按钮 -->
-        <BDropdownAction items={exportItems} width="w-32" onselect={onExportSelect} triggerClass="nx-btn-ghost nx-btn-md">
-          {#snippet trigger()}
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-            </svg>
-            {$_('logs.export')}
-          {/snippet}
-        </BDropdownAction>
-
       </div>
 
       <!-- 窄屏布局（<768px）：底部操作抽屉 -->

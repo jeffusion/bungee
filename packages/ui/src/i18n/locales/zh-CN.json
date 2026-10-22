@@ -162,8 +162,6 @@
   },
   "header": {
     "more": "更多",
-    "workspace": "工作空间",
-    "pluginPages": "插件应用",
     "menu": "页面",
     "closeMenu": "关闭菜单",
     "description": "切换页面和菜单分组。",

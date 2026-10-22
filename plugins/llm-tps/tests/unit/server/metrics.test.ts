@@ -39,6 +39,17 @@ describe('TPS sample eligibility', () => {
     expect(endpointIdentity('https://user:secret@example.test/v1')).not.toContain('secret');
     expect(endpointIdentity('provider:primary')).toBe('provider:primary');
   });
+  test('uses only the observed host and never infers it from endpoint identity or request URLs', () => {
+    expect(sampleFromResult({ ...result, upstreamId: 'https://user:secret@configured.test/path' }, 'route')?.upstreamHost).toBeNull();
+    expect(sampleFromResult({ ...result, upstreamHost: 'actual.test:8443' }, 'route')?.upstreamHost).toBe('actual.test:8443');
+  });
+  test.each(['api.test', 'api.test:8443', 'api.test:80', 'api.test:443', '[2001:db8::1]', '[2001:db8::1]:8443', 'localhost'])('preserves URL.host %s', upstreamHost => {
+    expect(sampleFromResult({ ...result, upstreamHost }, 'route')?.upstreamHost).toBe(upstreamHost);
+  });
+  test.each(['', 'https://api.test', '//api.test', 'user:secret@api.test', 'api.test/path', 'api.test?key=secret',
+    'api.test#fragment', 'api.test\\path', 'api.test secret', 'api.test\n', 'api.test\u0000', 'api.test:65536', 'api.test:', '[bad]'])('rejects unsafe observed host without exposing input %j', upstreamHost => {
+    expect(() => sampleFromResult({ ...result, upstreamHost }, 'route')).toThrow('invalid llm-tps upstream host');
+  });
   test('uses independently complete generation output when accounting usage is incomplete', () => {
     expect(sampleFromResult({ ...result, outputTokens: undefined, outputSource: 'none', observationIncomplete: true,
       generationOutput: { tokens: 12, source: 'estimated' } }, 'route')).toMatchObject({ outputTokens: 12, outputSource: 'estimated' });

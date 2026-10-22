@@ -12,23 +12,49 @@ const directories: string[] = [];
 afterEach(() => { for (const store of stores.splice(0)) store.close(); for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
 function store() { const value = createStorage(); stores.push(value); return value; }
 function sample(patch: Partial<TpsSample> = {}): TpsSample {
-  return { attemptId: 'attempt', requestId: 'request', routeId: 'route', endpointId: 'endpoint', model: 'model-shared', finishedAtMs: Date.now(), outputTokens: 100,
+  return { attemptId: 'attempt', requestId: 'request', routeId: 'route', endpointId: 'endpoint', upstreamHost: 'api.test', model: 'model-shared', finishedAtMs: Date.now(), outputTokens: 100,
     generationDurationMs: 1000, outputSource: 'official', ...patch };
 }
 
 describe('TPS observation storage', () => {
+  test('groups actual hosts across endpoints, separates routes and changed hosts, and omits unknown hosts', async () => {
+    const { adapter } = store(); const now = Date.now();
+    await adapter.recordSample(sample({ attemptId: 'a', endpointId: 'first', upstreamHost: 'same.test:8443', finishedAtMs: now }));
+    await adapter.recordSample(sample({ attemptId: 'b', endpointId: 'second', upstreamHost: 'same.test:8443', outputTokens: 300, generationDurationMs: 9000, finishedAtMs: now }));
+    await adapter.recordSample(sample({ attemptId: 'c', endpointId: 'first', upstreamHost: '[2001:db8::1]:9443', outputTokens: 50, finishedAtMs: now }));
+    await adapter.recordSample(sample({ attemptId: 'd', routeId: 'other', upstreamHost: 'same.test:8443', finishedAtMs: now }));
+    await adapter.recordSample(sample({ attemptId: 'unknown', upstreamHost: null, finishedAtMs: now }));
+    const stats = await adapter.queryStats({ range: '1h', asOfMs: now });
+    expect(stats.endpoints.map(row => [row.routeId, row.upstreamHost, row.tps, row.sampleCount])).toEqual([
+      ['other', 'same.test:8443', 100, 1], ['route', '[2001:db8::1]:9443', 50, 1], ['route', 'same.test:8443', 40, 2],
+    ]);
+    expect(stats.total.sampleCount).toBe(5);
+    expect(stats.models.reduce((sum, row) => sum + row.sampleCount, 0)).toBe(5);
+    expect(JSON.stringify(stats.endpoints)).not.toMatch(/endpointId|first|second/);
+  });
+  test.each(['https://user:secret@api.test/path?key=private#fragment', 'user:secret@api.test', 'api.test/path', 'api.test?private', 'api.test#private', 'api.test\\private', 'api.test\n', 'api.test\u0000'])('rejects confidential or malformed host on write and read %j', async upstreamHost => {
+    const { adapter, access } = store(); const now = Date.now();
+    await expect(adapter.recordSample(sample({ upstreamHost, finishedAtMs: now }))).rejects.toThrow('invalid llm-tps upstream host');
+    expect(access.query('SELECT COUNT(*) AS count FROM llm_tps_samples').get()).toEqual({ count: 0 });
+    await adapter.recordSample(sample({ finishedAtMs: now }));
+    expect(() => access.run('UPDATE llm_tps_samples SET upstream_host = ?', [upstreamHost])).toThrow();
+    access.run('PRAGMA ignore_check_constraints = ON');
+    try { access.run('UPDATE llm_tps_samples SET upstream_host = ?', [upstreamHost]); }
+    finally { access.run('PRAGMA ignore_check_constraints = OFF'); }
+    await expect(adapter.queryStats({ range: '1h', asOfMs: now })).rejects.toThrow('invalid llm-tps upstream host');
+  });
   test('weights by duration, counts estimates, and sorts by descending TPS with stable ties', async () => {
     const { adapter } = store(); const now = Date.now();
-    await adapter.recordSample(sample({ attemptId: 'a', endpointId: 'slow', outputTokens: 100, generationDurationMs: 1000, finishedAtMs: now }));
-    await adapter.recordSample(sample({ attemptId: 'b', endpointId: 'slow', outputTokens: 300, generationDurationMs: 9000, outputSource: 'estimated', finishedAtMs: now }));
-    await adapter.recordSample(sample({ attemptId: 'c', endpointId: 'fast', finishedAtMs: now }));
-    await adapter.recordSample(sample({ attemptId: 'd', endpointId: 'alpha', finishedAtMs: now }));
-    await adapter.recordSample(sample({ attemptId: 'e', endpointId: 'fast', routeId: 'aaa', finishedAtMs: now }));
+    await adapter.recordSample(sample({ attemptId: 'a', endpointId: 'slow', upstreamHost: 'slow.test', outputTokens: 100, generationDurationMs: 1000, finishedAtMs: now }));
+    await adapter.recordSample(sample({ attemptId: 'b', endpointId: 'slow', upstreamHost: 'slow.test', outputTokens: 300, generationDurationMs: 9000, outputSource: 'estimated', finishedAtMs: now }));
+    await adapter.recordSample(sample({ attemptId: 'c', endpointId: 'fast', upstreamHost: 'fast.test', finishedAtMs: now }));
+    await adapter.recordSample(sample({ attemptId: 'd', endpointId: 'alpha', upstreamHost: 'alpha.test', finishedAtMs: now }));
+    await adapter.recordSample(sample({ attemptId: 'e', endpointId: 'fast', upstreamHost: 'fast.test', routeId: 'aaa', finishedAtMs: now }));
     const stats = await adapter.queryStats({ range: '24h', asOfMs: now });
     expect(stats.total).toMatchObject({ outputTokens: 700, generationDurationMs: 13000, sampleCount: 5, estimatedSampleCount: 1 });
     expect(stats.total.tps!).toBeCloseTo(700 / 13, 10);
-    expect(stats.endpoints.map(row => [row.routeId, row.endpointId, row.tps])).toEqual([
-      ['aaa', 'fast', 100], ['route', 'alpha', 100], ['route', 'fast', 100], ['route', 'slow', 40],
+    expect(stats.endpoints.map(row => [row.routeId, row.upstreamHost, row.tps])).toEqual([
+      ['aaa', 'fast.test', 100], ['route', 'alpha.test', 100], ['route', 'fast.test', 100], ['route', 'slow.test', 40],
     ]);
   });
   test.each(['1h', '12h', '24h'] as const)('uses inclusive %s boundaries and excludes future samples', async range => {
@@ -108,7 +134,7 @@ describe('TPS observation storage', () => {
     await adapter.recordSample(sample({ attemptId: 'b', endpointId: 'second', outputTokens: 300, generationDurationMs: 9000, outputSource: 'estimated', finishedAtMs: now }));
     await adapter.recordSample(sample({ attemptId: 'c', routeId: 'other', outputTokens: 90, finishedAtMs: now }));
     await adapter.recordSample(sample({ attemptId: 'd', model: 'model-fast', outputTokens: 150, finishedAtMs: now }));
-    // An existing row with no model remains in total and endpoint aggregates.
+    // An existing row without model or host remains in total only.
     access.run('INSERT INTO llm_tps_samples (attempt_id,request_id,route_id,endpoint_id,finished_at_ms,output_tokens,generation_duration_ms,output_source) VALUES (?,?,?,?,?,?,?,?)',
       ['unknown', 'request', 'route', 'endpoint', now, 999, 1000, 'official']);
     await adapter.recordSample(sample({ attemptId: 'a', model: 'different', outputTokens: 999, finishedAtMs: now }));
@@ -117,7 +143,7 @@ describe('TPS observation storage', () => {
       ['route', 'model-fast', 150, 1, 0], ['other', 'model-shared', 90, 1, 0], ['route', 'model-shared', 40, 2, 1],
     ]);
     expect(stats.total.sampleCount).toBe(5);
-    expect(stats.endpoints.reduce((sum, row) => sum + row.sampleCount, 0)).toBe(5);
+    expect(stats.endpoints.reduce((sum, row) => sum + row.sampleCount, 0)).toBe(4);
   });
   test('models retain zero speeds, sort ties deterministically and reject invalid model names', async () => {
     const { adapter } = store(); const now = Date.now();

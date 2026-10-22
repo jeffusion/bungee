@@ -50,12 +50,13 @@ describe('shared token metering provider', () => {
     await f.send({phase:'selected',keyId:'trusted-key'});
     const support = service.prepareAttempt({requestId:'request',attemptId:'request:attempt',routeId:'route',upstreamId:'upstream',url:'https://api.x.ai/v1/chat/completions',body:{model:'grok',messages:[{role:'user',content:'hi'}]}});
     expect(support).toMatchObject({supported:true,provider:'openai',model:'grok',pricingProvider:'https://api.x.ai/v1/chat/completions'});
-    await f.send({phase:'request',keyId:'trusted-key',url:'https://api.x.ai/v1/chat/completions',body:{model:'grok',messages:[{role:'user',content:'hi'}]}});
+    await f.send({phase:'request',keyId:'trusted-key',upstreamHost:'actual.x.ai:8443',url:'https://api.x.ai/v1/chat/completions',body:{model:'grok',messages:[{role:'user',content:'hi'}]}});
     await f.send({phase:'response',status:200,protocol:'json',body:{usage:{prompt_tokens:1,completion_tokens:2}}});
     await f.send({phase:'end',outcome:'completed',sent:true});
-    expect(results[0]).toMatchObject({keyId:'trusted-key',pricingProvider:'https://api.x.ai/v1/chat/completions'});
+    expect(results[0]).toMatchObject({keyId:'trusted-key',upstreamHost:'actual.x.ai:8443',pricingProvider:'https://api.x.ai/v1/chat/completions',inputTokens:1,outputTokens:2});
     await f.start('anonymous'); await f.send({phase:'end',outcome:'completed',sent:true},'anonymous');
     expect(results[1]?.keyId).toBeNull();
+    expect(results[1]?.upstreamHost).toBeUndefined();
     await f.provider.onDestroy();
   });
 

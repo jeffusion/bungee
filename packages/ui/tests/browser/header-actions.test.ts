@@ -58,6 +58,7 @@ browserTest('header navigation and confirmed session logout', async () => {
       const header = page.getByTestId('app-header'), top = page.getByTestId('header-top-menu');
       const logout = page.locator('#header-logout-button');
       await expect(header).toBeVisible();
+      await expect(header.locator('.header-clock .nx-display')).toHaveCSS('font-size', '17.5px');
       await expect(logout).toHaveCount(mode === 'plugin' ? 1 : 0);
       {
 
@@ -75,6 +76,7 @@ browserTest('header navigation and confirmed session logout', async () => {
       const plugins = page.getByRole('menuitem', { name: language === 'en' ? 'Plugins' : '插件管理', exact: true });
       const menus = page.getByRole('menuitem', { name: language === 'en' ? 'Menu Management' : '菜单管理', exact: true });
       await expect(config).toBeVisible(); await expect(plugins).toBeVisible(); await expect(menus).toBeVisible();
+      await expect(page.getByRole('menu')).toHaveCSS('padding', '3.5px');
       await page.keyboard.press('Escape'); await expect(config).toHaveCount(0);
       await system.click(); await menus.click();
       await expect(page.getByTestId('page-menus')).toBeVisible();
@@ -115,7 +117,9 @@ browserTest('header navigation and confirmed session logout', async () => {
       await more.click();
       await overflow.getByRole('menuitem', { name: '菜单管理', exact: true }).click();
       await expect(overflow).toHaveCount(0);
-      snapshot.layout = initialLayout;
+      snapshot.layout = initialLayout.filter(node => node.kind !== 'page' || !pluginLinks.slice(0, 2).some(page => page.id === node.pageId));
+      snapshot.layout.splice(1, 0, { kind: 'group', id: 'access-tools', title: '访问工具', visible: true,
+        children: pluginLinks.slice(0, 2).map(page => ({ kind: 'page', pageId: page.id, visible: true })) });
       snapshot.catalog = initialCatalog;
       await page.evaluate(() => window.dispatchEvent(new Event('focus')));
       await expect(more).toHaveCount(0);
@@ -125,6 +129,13 @@ browserTest('header navigation and confirmed session logout', async () => {
       await expect(navigation).toBeVisible();
       await navigation.click();
       const compact = page.getByTestId('header-menu');
+      await expect(compact.getByTestId('header-menu-section')).toHaveCount(2);
+      await expect(compact.getByRole('button', { name: '访问工具', exact: true })).toBeVisible();
+      const accessGroup = compact.getByTestId('header-menu-section').filter({ has: page.getByRole('button', { name: '访问工具', exact: true }) });
+      await expect(accessGroup.getByRole('link', { name: '访问控制', exact: true })).toBeVisible();
+      await expect(accessGroup.getByRole('link', { name: 'TOKEN预算', exact: true })).toBeVisible();
+      await expect(compact.getByRole('button', { name: '工作空间', exact: true })).toHaveCount(0);
+      await expect(compact.getByRole('button', { name: '插件应用', exact: true })).toHaveCount(0);
       const section = compact.getByRole('button', { name: '系统管理', exact: true });
       await expect(section).toHaveAttribute('aria-expanded', 'true');
       await expect(compact.getByRole('link', { name: '菜单管理', exact: true })).toHaveAttribute('aria-current', 'page');

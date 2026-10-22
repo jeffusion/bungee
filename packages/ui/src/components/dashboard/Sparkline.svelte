@@ -1,5 +1,5 @@
 <script lang="ts">
-  let { values, tone = 'orange' }: { values: number[]; tone?: 'orange' | 'sky' | 'emerald' | 'red' } = $props();
+  let { values, tone = 'orange', wide = false }: { values: number[]; tone?: 'orange' | 'sky' | 'emerald' | 'red'; wide?: boolean } = $props();
   const points = $derived.by(() => {
     const samples = values.filter(Number.isFinite);
     const lo = Math.min(...samples), hi = Math.max(...samples), spread = hi - lo || 1;
@@ -10,8 +10,16 @@
 </script>
 {#if values.length > 1}
   <svg viewBox="0 0 100 44" preserveAspectRatio="none" class="dashboard-sparkline h-11 min-w-0 w-16 shrink-0" aria-hidden="true"
+    class:wide
     class:text-nexus-500={tone === 'orange'} class:text-sky-400={tone === 'sky'} class:text-emerald-500={tone === 'emerald'} class:text-red-500={tone === 'red'}>
     {#if values.every(Number.isFinite)}<path d={`${points} L100,44 L0,44 Z`} fill="currentColor" opacity=".08" />{/if}<path d={points} fill="none" stroke="currentColor" stroke-width="1.4" vector-effect="non-scaling-stroke" />
   </svg>
 {/if}
-<style>@container (max-width: 250px) { .dashboard-sparkline { width: 36px; height: 32px; } }</style>
+<style>
+  .dashboard-sparkline.wide { width: 96px; }
+  @container (max-width: 250px) {
+    .dashboard-sparkline { width: 36px; height: 32px; }
+    .dashboard-sparkline.wide { width: 72px; }
+  }
+  @container (max-width: 190px) { .dashboard-sparkline.wide { width: 100%; } }
+</style>

@@ -129,7 +129,7 @@ export class ResponsesWebSocketMetering {
     this.callbacks.prepareRequest(response.requestId);
     try {
       if (await this.emit(response, event, { phase: 'selected' })
-        && await this.emit(response, event, { phase: 'request', url: event.upstreamUrl, body: { model, stream: true } })) return response;
+        && await this.emit(response, event, { phase: 'request', url: event.upstreamUrl, upstreamHost: new URL(event.upstreamUrl).host, body: { model, stream: true } })) return response;
     } catch (error) {
       this.responseCount--;
       this.callbacks.discardRequest(response.requestId, response.attemptId);
@@ -148,7 +148,7 @@ export class ResponsesWebSocketMetering {
     response.requestId=uuid('request');response.attemptId=uuid('attempt');response.bound=true;
     this.callbacks.prepareRequest(response.requestId);
     return await this.emit(response,event,{phase:'selected'})
-      && await this.emit(response,event,{phase:'request',url:event.upstreamUrl,body:{model:response.model,stream:true}});
+      && await this.emit(response,event,{phase:'request',url:event.upstreamUrl,upstreamHost:new URL(event.upstreamUrl).host,body:{model:response.model,stream:true}});
   }
   private async emit(response: LogicalResponse, event: WebSocketObservationEvent, phase: Record<string, unknown>, settlement?: WebSocketMeteringSettlement): Promise<boolean> {
     if (this.closed || !event.isActive()) { this.callbacks.discardRequest(response.requestId, response.attemptId); return false; }

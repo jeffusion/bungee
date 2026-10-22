@@ -18,6 +18,7 @@ interface AttemptState {
   keyId?: string | null;
   routeId: string;
   upstreamId: string;
+  upstreamHost?: string;
   provider: SupportedProvider | 'unknown';
   pricingProvider?: string;
   model?: string;
@@ -94,6 +95,7 @@ function getAttempt(attempts: Map<string, AttemptState>, event: AttemptObservati
   if (event.keyId !== undefined) attempt.keyId = event.keyId;
   attempt.routeId = event.routeId || attempt.routeId;
   attempt.upstreamId = event.upstreamId || attempt.upstreamId;
+  if (event.phase === 'request') attempt.upstreamHost = event.upstreamHost;
   return attempt;
 }
 
@@ -151,6 +153,7 @@ interface FinalizationTaskInput {
   keyId?: string | null;
   routeId: string;
   upstreamId: string;
+  upstreamHost?: string;
   provider: string;
   session?: TokenAccountingSession;
   observedEvent?: CanonicalEvent;
@@ -224,6 +227,7 @@ function finalizeAttempt(input: FinalizationTaskInput): TokenMeteringResult {
     value === undefined || authority === 'none' ? 'none' : authority === 'official' ? 'official' : authority === 'partial' ? 'partial' : 'estimated';
   return Object.freeze({
     requestId: input.requestId, keyId: input.keyId ?? null, attemptId: input.attemptId, routeId: input.routeId, upstreamId: input.upstreamId,
+    upstreamHost: input.upstreamHost,
     provider: input.provider, model: input.model, pricingProvider: input.pricingProvider,
     inputTokens: event?.inputTokens, outputTokens: event?.outputTokens,
     cacheReadTokens: event?.cacheReadTokens, cacheWriteTokens: event?.cacheWriteTokens,
@@ -468,6 +472,7 @@ export const TokenMeteringPlugin = definePlugin(
           keyId: attempt.keyId ?? null,
           routeId: attempt.routeId,
           upstreamId: attempt.upstreamId,
+          upstreamHost: attempt.upstreamHost,
           provider: attempt.provider,
           model: attempt.model,
           pricingProvider: attempt.pricingProvider,

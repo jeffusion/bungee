@@ -1129,11 +1129,12 @@ export async function executeForward(
           isActive: () => true,
           // Query strings may contain provider API keys. Path preserves model context without credentials.
           url: finalTargetUrl.pathname,
+          upstreamHost: finalTargetUrl.host,
           body: immutableSnapshot(finalBody),
       })));
       if (finalBody === undefined && attemptOptions?.observeRequest && fetchOptions.body !== null && fetchOptions.body !== undefined) {
         const observer = createAttemptResponseObserver('json',{requestId,routeId,attemptId:attemptOptions.attemptId,upstreamId:upstream_id,status:0},
-          event=>attemptOptions.observeRequest!(Object.freeze({...event,direction:'request',representation:'json',view:{requestId,attemptId:attemptOptions.attemptId,direction:'request',stage:'outbound-request',version:requestWrite ? 1:0,contentType:fetchHeaders.get('content-type') ?? '',contentEncoding:fetchHeaders.get('content-encoding') ?? ''}})),undefined,fetchHeaders.get('content-encoding') ?? '', 'request',finalTargetUrl.pathname,attemptSignal,{maxBytes:requestSnapshot.bodySource?.maxBytes,bodyHandle:requestWrite ? undefined:requestSnapshot.bodySource?.handle()});
+          event=>attemptOptions.observeRequest!(Object.freeze({...event,...(event.phase === 'request' ? {upstreamHost:finalTargetUrl.host}:{}),direction:'request',representation:'json',view:{requestId,attemptId:attemptOptions.attemptId,direction:'request',stage:'outbound-request',version:requestWrite ? 1:0,contentType:fetchHeaders.get('content-type') ?? '',contentEncoding:fetchHeaders.get('content-encoding') ?? ''}})),undefined,fetchHeaders.get('content-encoding') ?? '', 'request',finalTargetUrl.pathname,attemptSignal,{maxBytes:requestSnapshot.bodySource?.maxBytes,bodyHandle:requestWrite ? undefined:requestSnapshot.bodySource?.handle()});
         const observerSource = fetchOptions.body instanceof ReadableStream ? fetchOptions.body : new Response(fetchOptions.body).body!;
         fetchOptions.body = observeBodyStream(observerSource,observer); observationCompletions.push(observer.completion);
         void transportCompletion.promise.then(() => observer.finish());

@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { TpsRange, TpsStatsResponse } from '../../../contract';
 import { createTpsResources, validateStats, type TpsState } from '../../../ui/stats-resource';
-import { endpointIdentity, endpointLabel, formatTps, rankedEndpoints, rankedModels } from '../../../ui/presentation';
+import { formatTps, rankedEndpoints, rankedModels } from '../../../ui/presentation';
 
 function stats(range: TpsRange = '24h'): TpsStatsResponse {
   return { range, asOfMs: 1000, total: { tps: 20, outputTokens: 100, generationDurationMs: 5000,
@@ -105,14 +105,13 @@ test('finite values, range identity and estimated sample counts are validated', 
     expect(() => validateStats({ ...stats(), total: { ...stats().total, ...patch } }, '24h')).toThrow();
   }
   for (const invalid of [NaN, Infinity, -1, null, undefined]) expect(formatTps(invalid)).toBe('—');
-  expect(endpointIdentity('endpoint-abcdef1234567890')).toBe('endpoint-abcdef1234567890');
-  expect(endpointIdentity('https://secret.example/path?key=secret')).toBe('endpoint');
-  expect(endpointLabel('https://user:secret@api.example.com:8443/private?key=secret', 'endpoint-id')).toBe('api.example.com:8443');
-  expect(endpointLabel(undefined, 'd541d5a5-d009-43ee-8d56-7cc4cc5c4084')).toBe('endpoint · d541d5a5');
-  expect(endpointLabel('data:text/plain,secret', 'endpoint-id')).toBe('endpoint · endpoint');
-  const row = { ...stats().total, routeId: 'route', endpointId: 'endpoint' };
-  expect(rankedEndpoints([{ ...row, endpointId: 'slow', tps: 10 }, { ...row, endpointId: 'fast', tps: 30 },
-    { ...row, endpointId: 'empty', tps: null }]).map(item => item.endpointId)).toEqual(['fast', 'slow', 'empty']);
+  const row = { ...stats().total, routeId: '/chat/', upstreamHost: 'actual.example.com:8443' };
+  expect(validateStats({ ...stats(), endpoints: [row] }, '24h').endpoints).toEqual([row]);
+  for (const upstreamHost of ['', 'https://secret.example/path?key=secret', 'user:secret@host', 'host/path', undefined]) {
+    expect(() => validateStats({ ...stats(), endpoints: [{ ...row, upstreamHost }] } as TpsStatsResponse, '24h')).toThrow();
+  }
+  expect(rankedEndpoints([{ ...row, upstreamHost: 'slow.example.com', tps: 10 }, { ...row, upstreamHost: 'fast.example.com', tps: 30 },
+    { ...row, upstreamHost: 'empty.example.com', tps: null }]).map(item => item.upstreamHost)).toEqual(['fast.example.com', 'slow.example.com', 'empty.example.com']);
 });
 
 test('model identities and aggregates are validated and ranked independently per route', () => {

@@ -57,9 +57,13 @@ export default class Observer {
   static createHandler(config) {
     return {
       pluginName: 'attempt-observer', config,
-      bodyRequirements() { return { request: 'none', response: config.oauthAdapter ? ['json','sse-json'] : [], observe: { request: true, response: true, sse: true } }; },
+      bodyRequirements() { return { request: config.jsonWrite ? 'json-write' : 'none', response: config.oauthAdapter ? ['json','sse-json'] : [], observe: { request: true, response: true, sse: true } }; },
       register(hooks) {
-        hooks.onBeforeRequest.tapPromise('business', async (ctx) => { state().business++; return ctx; });
+        hooks.onBeforeRequest.tapPromise('business', async (ctx) => {
+          state().business++;
+          if (config.label === 'upstream' && config.outboundTarget) ctx.url = new URL(config.outboundTarget);
+          return ctx;
+        });
         hooks.onAttemptObservation.tapPromise('observer', async (event) => {
           state().events.push({ label: config.label, event });
           if (event.phase === 'response') state().order.push('observed:' + event.protocol + ':' + JSON.stringify(event.body));
@@ -142,11 +146,11 @@ function controlObserverDeadline(phase: 'request' | 'response' = 'response') {
   return { deadline, restore: () => { timer.mockRestore(); expire(); } };
 }
 
-async function setup(options: { twoUpstreams?: boolean; retry?: boolean; intercept?: boolean; multiScope?: boolean; throwObserver?: boolean; hangObserver?: boolean; lateObserver?: boolean; rawTransform?: boolean; rawReplaceWithoutRead?: boolean; rawCleanupThrows?: boolean; oauthAdapter?: boolean; noObserver?: boolean; holdRequestObserver?: boolean; firstResponseTimeoutMs?: number } = {}) {
+async function setup(options: { twoUpstreams?: boolean; retry?: boolean; intercept?: boolean; multiScope?: boolean; throwObserver?: boolean; hangObserver?: boolean; lateObserver?: boolean; rawTransform?: boolean; rawReplaceWithoutRead?: boolean; rawCleanupThrows?: boolean; oauthAdapter?: boolean; noObserver?: boolean; holdRequestObserver?: boolean; firstResponseTimeoutMs?: number; jsonWrite?: boolean; outboundTarget?: string } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'bungee-attempt-observer-'));
   roots.push(root);
   const path = pluginFile(root);
-  const binding = (label: string, allowIntercept = false) => ({ name: 'attempt-observer', path, options: { label, intercept: allowIntercept && options.intercept, throwObserver: options.throwObserver, hangObserver: options.hangObserver, lateObserver: options.lateObserver, holdRequestObserver: options.holdRequestObserver, rawTransform: options.rawTransform, rawReplaceWithoutRead: options.rawReplaceWithoutRead, rawCleanupThrows: options.rawCleanupThrows, oauthAdapter: options.oauthAdapter } });
+  const binding = (label: string, allowIntercept = false) => ({ name: 'attempt-observer', path, options: { label, intercept: allowIntercept && options.intercept, throwObserver: options.throwObserver, hangObserver: options.hangObserver, lateObserver: options.lateObserver, holdRequestObserver: options.holdRequestObserver, rawTransform: options.rawTransform, rawReplaceWithoutRead: options.rawReplaceWithoutRead, rawCleanupThrows: options.rawCleanupThrows, oauthAdapter: options.oauthAdapter, jsonWrite: options.jsonWrite, outboundTarget: options.outboundTarget } });
   const endpoints = [
     { id: 'a', target: 'http://attempt-a.test', priority: 1, plugins: options.multiScope || options.intercept ? [binding('upstream', true)] : [] },
     ...(options.twoUpstreams ? [{ id: 'b', target: 'http://attempt-b.test', priority: 2, plugins: [] }] : []),
@@ -180,6 +184,26 @@ afterEach(async () => {
 });
 
 describe('attempt observation lifecycle', () => {
+  test.each([false, true])('observes actual final host after retargeting for jsonWrite=%s', async jsonWrite => {
+    const { config } = await setup({ multiScope: true, jsonWrite,
+      outboundTarget: 'https://user:secret@[2001:db8::7]:8443/v1/chat/completions?key=private#hidden' });
+    let sentHost: string | undefined;
+    globalThis.fetch = consumingUpstreamFetch((async input => {
+      sentHost = new URL(String(input)).host;
+      return Response.json({ ok: true });
+    }) as typeof fetch);
+    const response = await handleRequest(new Request('http://local/attempt', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'model', messages: [] }),
+    }), config);
+    expect(await response.json()).toEqual({ ok: true });
+    await waitForObservation('request-end');
+    const events = state().events.filter(({ event }) => event.phase === 'request');
+    expect(events).toHaveLength(1);
+    expect(sentHost).toBe('[2001:db8::7]:8443');
+    expect(events[0]!.event).toMatchObject({ upstreamId: 'a', upstreamHost: sentHost, url: '/v1/chat/completions',
+      body: { model: 'model', messages: [] }, view: { version: jsonWrite ? 1 : 0 } });
+    expect(JSON.stringify(events)).not.toMatch(/secret|private|hidden|attempt-a\.test/);
+  });
   test('pending optional request observer does not block dispatch or cause a first-response deadline', async () => {
     const { config } = await setup({ holdRequestObserver: true, firstResponseTimeoutMs: 20 });
     let fetchCalls = 0;
