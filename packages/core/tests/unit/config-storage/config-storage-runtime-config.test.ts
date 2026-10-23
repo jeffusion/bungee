@@ -5,11 +5,8 @@ import type {
   ConfigurationServiceRoute,
 } from '@jeffusion/bungee-types';
 import type { RepositorySnapshot } from '../../../src/config-storage';
-import {
-  compileRuntimeConfigSnapshot,
-  parseNormalizeCompileAggregate,
-  RuntimeConfigCompileError,
-} from '../../../src/config-storage';
+import { compileRuntimeConfigSnapshot, RuntimeConfigCompileError } from '../../../src/config-storage/runtime-config';
+import { parseNormalizeCompileAggregate } from '../../../src/config-storage/aggregate';
 
 const ID = {
   service: '10000000-0000-4000-8000-000000000001',
@@ -99,7 +96,7 @@ function fullSnapshot(): CommittedConfigurationSnapshot {
           id: ID.routeService,
           position: 2,
           path: '/service',
-          service_id: ID.service,
+          service_references: [{ id: '50000000-0000-4000-8000-000000000007', position: 0, service_id: ID.service, weight: 100, priority: 1, is_disabled: false }],
           path_rewrite: { '^/service': '/v1' },
           plugins: [{ id: ID.routeBinding, position: 1, name: 'active-plugin', options: { scope: 'route' }, enabled: true }],
         },
@@ -110,7 +107,7 @@ function fullSnapshot(): CommittedConfigurationSnapshot {
 }
 
 function isServiceRoute(route: ConfigurationRoute): route is ConfigurationServiceRoute {
-  return route.service_id !== undefined;
+  return route.service_references !== undefined;
 }
 
 describe('compileRuntimeConfigSnapshot', () => {
@@ -167,7 +164,7 @@ describe('compileRuntimeConfigSnapshot', () => {
       failover: { enabled: true, retry_on: [429, '5xx'], passive_health: { consecutive_failures: 2 } },
       load_balancing: { policy: 'consistent_hash', hash_policy: { header: 'x-key' } },
     });
-    expect(serviceRoute).toMatchObject({ id: ID.routeService, path: '/service', service: 'primary', path_rewrite: { '^/service': '/v1' } });
+    expect(serviceRoute).toMatchObject({ id: ID.routeService, path: '/service', service_references: [{ service_id: ID.service }], path_rewrite: { '^/service': '/v1' } });
     expect(directRoute).toMatchObject({
       id: ID.routeDirect, path: '/direct', endpoints: [{ id: ID.directUpstream, target: 'https://direct.example' }],
       request: { headers: { replace: { host: 'direct' } }, body: { add: { stream: true } },
@@ -178,8 +175,10 @@ describe('compileRuntimeConfigSnapshot', () => {
       direct_response: { enabled: false, status: 200 }, redirect: { enabled: false, url: 'https://redirect.example' },
       retry: { enabled: true, max_retries: 2, retry_on: [500] },
     });
-    expect(serviceRoute).toMatchObject({ service_id: ID.service });
-    expect(JSON.stringify(output.config)).not.toMatch(/position|plugin_activations/);
+    expect(serviceRoute).toMatchObject({ service_references: [{ service_id: ID.service }] });
+    expect(serviceRoute).not.toHaveProperty('position');
+    expect(service).not.toHaveProperty('position');
+    expect(output.config).not.toHaveProperty('plugin_activations');
     expect(service).toMatchObject({ id: ID.service });
   });
 
@@ -257,7 +256,7 @@ describe('compileRuntimeConfigSnapshot', () => {
           ...valid.aggregate.logical_configuration,
           routes: [{
             ...serviceRoute,
-            service_id: '90000000-0000-4000-8000-000000000009',
+            service_references: [{ id: '50000000-0000-4000-8000-000000000009', position: 0, service_id: '90000000-0000-4000-8000-000000000009', weight: 100, priority: 1, is_disabled: false }],
           }],
         },
       },

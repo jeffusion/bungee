@@ -194,7 +194,7 @@ try {
   const serviceId = crypto.randomUUID();
   aggregate.logical_configuration.services.push({ id: serviceId, position: aggregate.logical_configuration.services.length, name: 'Local browser drain acceptance', plugins: [],
   endpoints: [{ id: crypto.randomUUID(), position: 0, target: upstreamTarget, weight: 100, priority: 1, is_disabled: false, plugins: [] }] });
-  aggregate.logical_configuration.routes.push({ id: crypto.randomUUID(), position: aggregate.logical_configuration.routes.length, path: '/publication-ui-drain', service_id: serviceId, plugins: [] });
+  aggregate.logical_configuration.routes.push({ id: crypto.randomUUID(), position: aggregate.logical_configuration.routes.length, path: '/publication-ui-drain', service_references: [{ id: crypto.randomUUID(), position: 0, service_id: serviceId, weight: 100, priority: 1, is_disabled: false }], plugins: [] });
   const setup = await json('/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expected_revision: snapshot.revision, mutation_id: crypto.randomUUID(), aggregate }) });
   receiptPath = resolve(evidence, 'restore-receipt.json');
   const receipt = { schema: 'publication-owned-restore-v1', ownership: requireOwnership(), originalConfig: snapshot.config, expectedConfig: aggregate,

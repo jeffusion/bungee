@@ -46,7 +46,7 @@ export function aggregate(): ConfigurationAggregate {
         ],
       }],
       routes: [{
-        id: IDS.route, position: 1, path: '/v1', service_id: IDS.service,
+        id: IDS.route, position: 1, path: '/v1', service_references: [{id:'70000000-0000-4000-8000-000000000001',position:0,service_id:IDS.service,weight:100,priority:1,is_disabled:false}],
         plugins: [{ id: IDS.routeBinding, position: 1, name: 'alpha', enabled: true }],
       }],
     },

@@ -177,7 +177,7 @@ describe('plugin communication channels real-process integration (control provid
             }],
           }],
           routes: [{
-            id: ROUTE_ID, position: 1, path: '/channel-probe-noop', service_id: SERVICE_ID, plugins: [],
+            id: ROUTE_ID, position: 1, path: '/channel-probe-noop', service_references: [{ id: crypto.randomUUID(), position: 0, service_id: SERVICE_ID, weight: 100, priority: 1, is_disabled: false }], plugins: [],
           }],
         },
       };

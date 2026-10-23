@@ -1,6 +1,6 @@
 import type { AppConfig, PluginConfig } from '@jeffusion/bungee-types';
 import type { PluginRuntimeOrchestratorStatusReport } from '../plugin-runtime-orchestrator';
-import { resolveEffectiveRouteEndpoints, resolveRouteService } from '../utils/endpoint-resolver';
+import { resolveReachableEndpoints, resolveReachableServices } from '../utils/endpoint-resolver';
 
 function addBindings(names: Set<string>, bindings: readonly (PluginConfig | string)[] | undefined): void {
   for (const binding of bindings ?? []) {
@@ -14,8 +14,8 @@ export function requiredPluginNames(config: AppConfig): readonly string[] {
   addBindings(names, config.plugins);
   for (const route of config.routes) {
     addBindings(names, route.plugins);
-    addBindings(names, resolveRouteService(config, route)?.plugins);
-    for (const endpoint of resolveEffectiveRouteEndpoints(route, config.services)) {
+    for (const service of resolveReachableServices(route,config.services)) addBindings(names,service.plugins);
+    for (const endpoint of resolveReachableEndpoints(route, config.services)) {
       addBindings(names, endpoint.plugins);
     }
   }

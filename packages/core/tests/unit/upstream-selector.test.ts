@@ -224,7 +224,7 @@ describe('selectUpstream', () => {
 describe('consistent_hash (formerly stickySession)', () => {
   const stickyRoute: EffectiveRouteConfig = {
     path: '/sticky',
-    service: 'sticky-service',
+    service_references:[{id:'ref-'+('sticky-service'),service_id:'sticky-service',position:0,weight:100,priority:1,is_disabled:false}],
     endpoints: [
       { target: 'http://u1:3000', weight: 100, priority: 1 },
       { target: 'http://u2:3000', weight: 100, priority: 1 }

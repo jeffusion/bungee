@@ -7,6 +7,7 @@ import { AsyncConfigRepository, ConfigRepository, type ConfigurationCompileOptio
   type CommitConfigurationCommandV1, type RepositorySnapshot } from '../../src/config-storage';
 import { migrateConfigurationDatabase, CONFIG_MIGRATIONS } from '../../src/config-storage/migrations';
 import { prepareCommitCommand } from '../../src/config-storage/prepared-command';
+import { CONFIG_SCHEMA_STATEMENTS } from '../../src/config-storage/schema';
 
 const roots: string[] = [];
 const backends: ConfigRepository[] = [];
@@ -47,17 +48,20 @@ describe('durable management protection', () => {
     previous.close(); backends.splice(backends.indexOf(previous), 1);
     const db = new Database(dbPath, { strict: true });
     // Reconstruct and validate the published prefix around real repository history.
+    db.run('DROP TABLE service_references');
+    db.run('DROP TABLE routes');
+    db.run(CONFIG_SCHEMA_STATEMENTS.find(statement=>statement.startsWith('CREATE TABLE routes'))!);
     db.run('DROP TABLE management_protection');
     db.run('ALTER TABLE configuration_operations DROP COLUMN management_provider');
     db.run('ALTER TABLE configuration_operations DROP COLUMN offline_management');
-    db.run('DELETE FROM schema_migrations WHERE version=4');
+    db.run('DELETE FROM schema_migrations WHERE version>=4');
     migrateConfigurationDatabase(db, CONFIG_MIGRATIONS.slice(0, 3));
     const revisions = db.query('SELECT * FROM configuration_revisions').all();
     db.close();
     const repository = open(dbPath);
     expect(repository.getManagementProtection()).toEqual({ required: false, selectedProvider: null, generation: 0 });
     expect(repository.getSnapshot().revision).toBe(2);
-    expect(repository.getDatabase().query('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
+    expect(repository.getDatabase().query('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual(CONFIG_MIGRATIONS.map(({version})=>({version})));
     expect(repository.getSnapshot().aggregate).toEqual(empty);
     expect(repository.getDatabase().query('SELECT * FROM configuration_revisions').all()).toEqual(revisions);
     expect(repository.getMenuLayout()).toEqual({revision: 1, layout});

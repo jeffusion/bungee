@@ -1,3 +1,4 @@
+import { validateServiceReferences } from './service-references';
 import { validateDirectionalRules } from './directional-validator';
 import { resolveRouteEndpoints, type Route, type Service } from '$api/routes';
 import { validateUpstream } from './upstream-validator';
@@ -21,9 +22,8 @@ export async function validateRoute(route: Partial<Route>, services: Service[] =
     errors.push({ field: 'path', message: get(_)('validation.pathStartSlash') });
   }
 
-  if (route.service && !services.some((service) => service.name === route.service)) {
-    errors.push({ field: 'service', message: `Service "${route.service}" not found` });
-  }
+  errors.push(...validateServiceReferences(route.service_references, services));
+  if (route.service_references?.length && route.endpoints?.length) errors.push({ field: 'service_references', message: '服务引用与自定义端点不能同时使用' });
 
   const hasGlobalResponseBypass = route.direct_response?.enabled || route.redirect?.enabled;
 
@@ -37,9 +37,9 @@ export async function validateRoute(route: Partial<Route>, services: Service[] =
     }
   });
 
-  if (!hasGlobalResponseBypass && !route.service && endpoints.length === 0) {
+  if (!hasGlobalResponseBypass && !route.service_references?.length && endpoints.length === 0) {
     errors.push({ field: 'endpoints', message: get(_)('validation.upstreamRequired') });
-  } else if (!hasGlobalResponseBypass) {
+  } else if (!hasGlobalResponseBypass && !route.service_references?.length) {
     const upstreamValidations = endpoints.map((upstream, index) =>
       validateUpstream(upstream, index)
     );

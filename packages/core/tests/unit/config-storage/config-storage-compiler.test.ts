@@ -5,10 +5,8 @@ import {
   resolvePublicationPolicy,
   validatePublicationPolicy,
 } from '@jeffusion/bungee-types';
-import {
-  type ConfigurationCompileOptions,
-  parseNormalizeCompile,
-} from '../../../src/config-storage';
+import { type ConfigurationCompileOptions } from '../../../src/config-storage/plugin-schema';
+import { parseNormalizeCompile } from '../../../src/config-storage/compiler';
 
 declare global {
   var __configCompilerProbe: number;
@@ -43,7 +41,7 @@ function errorSummary(
 describe('parseNormalizeCompile', () => {
   test('rejects model protocol fields on routes and services', () => {
     const service = { id: IDS.service, name: 'primary', endpoints: [{ id: IDS.upstream, target: 'https://example.com' }] };
-    const route = { id: IDS.route, path: '/v1', service_id: IDS.service };
+    const route = { id: IDS.route, path: '/v1', service_references: [{ id: '50000000-0000-4000-8000-000000000001', position: 0, service_id: IDS.service, weight: 100, priority: 1, is_disabled: false }] };
     expect(errorSummary({ services: [{ ...service, llm_protocol: 'responses' }], routes: [route] }))
       .toContainEqual({ code: 'unknown_field', path: 'services[0].llm_protocol' });
     expect(errorSummary({ services: [service], routes: [{ ...route, llm_protocol: 'responses' }] }))
@@ -123,7 +121,7 @@ describe('parseNormalizeCompile', () => {
           plugins: [{ id: IDS.binding, name: 'audit', options: { level: 'info' } }],
         }],
       }],
-      routes: [{ id: IDS.route, path: '/v1', service_id: IDS.service }],
+      routes: [{ id: IDS.route, path: '/v1', service_references: [{ id: '50000000-0000-4000-8000-000000000002', position: 0, service_id: IDS.service, weight: 100, priority: 1, is_disabled: false }] }],
     }, PLUGINS);
 
     expect(result.ok).toBe(true);
@@ -220,19 +218,19 @@ describe('parseNormalizeCompile', () => {
     const unknownService = '10000000-0000-4000-8000-000000000099';
     expect(errorSummary({
       routes: [
-        { id: IDS.route, path: '/missing', service_id: unknownService },
+        { id: IDS.route, path: '/missing', service_references: [{ id: '50000000-0000-4000-8000-000000000003', position: 0, service_id: unknownService, weight: 100, priority: 1, is_disabled: false }] },
         {
           id: '20000000-0000-4000-8000-000000000002',
           path: '/owned-twice',
-          service_id: IDS.service,
+          service_references: [{ id: '50000000-0000-4000-8000-000000000004', position: 0, service_id: IDS.service, weight: 100, priority: 1, is_disabled: false }],
           endpoints: [{ id: IDS.upstream, target: 'https://example.com' }],
         },
       ],
       services: [{ id: IDS.service, name: 'primary', endpoints: [] }],
     }, PLUGINS)).toEqual([
       { code: 'empty_service', path: 'services[0].endpoints' },
-      { code: 'unknown_service', path: 'routes[0].service_id' },
       { code: 'conflicting_owner', path: 'routes[1].endpoints' },
+      { code: 'unknown_service', path: 'routes[0].service_references[0].service_id' },
     ]);
   });
 
@@ -249,7 +247,7 @@ describe('parseNormalizeCompile', () => {
         }],
       }],
     }, PLUGINS)).toEqual([
-      { code: 'invalid_value', path: 'routes[0].service' },
+      { code: 'unknown_field', path: 'routes[0].service' },
       { code: 'conflicting_owner', path: 'routes[0].endpoints[0].route_id' },
     ]);
   });
@@ -294,7 +292,7 @@ describe('parseNormalizeCompile', () => {
       routes: [{
         id: IDS.route,
         path: '/v1',
-        service_id: IDS.service,
+        service_references: [{ id: '50000000-0000-4000-8000-000000000005', position: 0, service_id: IDS.service, weight: 100, priority: 1, is_disabled: false }],
         body: { add: { bad: Number.NaN } },
       }],
     }, PLUGINS)).toEqual([
@@ -392,7 +390,7 @@ describe('parseNormalizeCompile', () => {
       routes: [{
         id: IDS.route,
         path: '/rate',
-        service_id: IDS.service,
+        service_references: [{ id: '50000000-0000-4000-8000-000000000006', position: 0, service_id: IDS.service, weight: 100, priority: 1, is_disabled: false }],
         rate_limit: { enabled: true, key_expression: '{{ headers[ }}' },
       }],
     })).toEqual([

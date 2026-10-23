@@ -106,8 +106,8 @@ describe('plugin manifest vNext contract', () => {
     try {
       const result = await orchestrator.applyConfig({
         plugins: [{ ...binding, enabled: false }],
-        services: [{ name: 'svc', plugins: [binding], endpoints: [{ target: 'http://example.test', plugins: [binding] }] }],
-        routes: [{ path: '/any', service: 'svc', plugins: [binding] }],
+        services: [{ id:'svc', name: 'svc', plugins: [binding], endpoints: [{ target: 'http://example.test', plugins: [binding] }] }],
+        routes: [{ path: '/any', service_references:[{id:'ref-'+('svc'),service_id:'svc',position:0,weight:100,priority:1,is_disabled:false}], plugins: [binding] }],
       });
       const status = result.status.plugins.find((plugin) => plugin.pluginName === name);
       expect(status?.state.runtime.servingScopes).toEqual([{ type: 'global' }]);

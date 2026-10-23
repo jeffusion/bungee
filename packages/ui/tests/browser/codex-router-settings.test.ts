@@ -1,3 +1,4 @@
+import { serviceReference } from '../helpers/service-references';
 import { test as browserTest } from 'bun:test';
 import { expect, type Route } from 'playwright/test';
 import { dashboardRuntime } from '../helpers/dashboard/runtime';
@@ -16,7 +17,7 @@ const runtime = configurationRuntimeFixture(publicationFixture({ operation: null
   retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 }));
 const entryId = '10000000-0000-4000-8000-000000000001', serviceId = '20000000-0000-4000-8000-000000000001';
 runtime.config.logical_configuration.services = [{ id: serviceId, position: 0, name: 'fixture-service', plugins: [], endpoints: [{ id: '30000000-0000-4000-8000-000000000001', position: 0, target: 'https://fixture.invalid', weight: 100, priority: 1, is_disabled: false, plugins: [] }] }];
-runtime.config.logical_configuration.routes = [{ id: entryId, position: 0, path: '/codex', service_id: serviceId, plugins: [{ id: '40000000-0000-4000-8000-000000000001', position: 0, name: 'codex-router', enabled: true, options: { models: [] } }] }];
+runtime.config.logical_configuration.routes = [{ id: entryId, position: 0, path: '/codex', service_references: [serviceReference(serviceId)], plugins: [{ id: '40000000-0000-4000-8000-000000000001', position: 0, name: 'codex-router', enabled: true, options: { models: [] } }] }];
 const requests: string[] = [], errors: string[] = [];
 const catalogQueries: URLSearchParams[] = [];
 let holdSourceCatalog: ((route: Route) => void) | undefined;

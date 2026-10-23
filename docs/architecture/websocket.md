@@ -7,12 +7,20 @@
 ```json
 {
   "path": "/v1/responses",
-  "service": "openai",
+  "service_references": [{
+    "id": "eeeeeeee-0000-4000-8000-000000000001",
+    "position": 0,
+    "service_id": "aaaaaaaa-0000-4000-8000-000000000001",
+    "weight": 100,
+    "priority": 1,
+    "is_disabled": false
+  }],
   "websocket": { "enabled": true }
 }
 ```
 
 上游 target 继续填写 HTTP(S) URL；WS 转发会转换为对应的 ws/wss 连接。
+引用通过 Service ID 选择目标，配置格式见[配置参考](../reference/configuration.md#aggregate-schema)。握手按与 HTTP 相同的层级选择 Endpoint；子 Service 先处理自身故障转移，再由父层决定是否切换分支。
 
 数据路径为客户端 → ingress → 固定 revision 的 worker → 上游。只接受 RFC 6455 GET Upgrade；两个出站握手各自生成 Key/Accept，不复用客户端密钥。上游完成握手后才 Upgrade 下游；拒绝握手返回受限大小的 HTTP 响应。保留文本/二进制消息类型、内容、顺序、完整消息边界和合法子协议选择，不保留底层分片布局。不协商消息压缩、不自动跟随重定向、不在已建立的连接上重试或迁移。
 
@@ -30,7 +38,7 @@ Ingress 清除外部伪造的内部头，签名 requestId、principal、原始 U
 
 `WebSocketGatewayPlugin` 与其他内置/外部插件一样实现 Plugin.register，通过 `onGatewayWebSocket` 调用，启动时要求恰好一个 provider。
 
-- `onWebSocketHandshake`：只修改握手 URL/Headers，按 route/global、service、upstream 阶段执行。
+- `onWebSocketHandshake`：只修改握手 URL/Headers，按现有 Global／Route 阶段、实际经过的 Service 调用栈、Endpoint 阶段执行。
 - `onWebSocketObservation`：只读 open/message/incomplete/close 事件，包含连接身份、routeId、upstreamId、upstreamUrl、servingRevision 和合作式 `isActive()` 租约。
 - `WebSocketMessageView`：消息种类和字节数；`json()` 按需解析一次、共享且深冻结；二进制/非法 JSON 返回 undefined。与 HTTP BodyHandle 分离。
 

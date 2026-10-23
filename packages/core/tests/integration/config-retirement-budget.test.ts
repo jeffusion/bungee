@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { ConfigRepository, AsyncConfigRepository } from '../../src/config-storage';
 import { CONFIG_MIGRATIONS, migrateConfigurationDatabase } from '../../src/config-storage/migrations';
 import { verifySchemaFingerprint } from '../../src/config-storage/schema-fingerprint';
+import { CONFIG_SCHEMA_STATEMENTS } from '../../src/config-storage/schema';
 
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), 'bungee-retirement-store-'));
@@ -102,6 +103,9 @@ test('migration 2 rollback and reopen preserve multiple operation, worker and re
     repository.close();
     db = new Database(path, { readwrite: true, strict: true });
     // Remove the later schema additions around unchanged baseline business rows.
+    db.run('DROP TABLE service_references');
+    db.run('DROP TABLE routes');
+    db.run(CONFIG_SCHEMA_STATEMENTS.find(statement=>statement.startsWith('CREATE TABLE routes'))!);
     db.run('DROP TABLE management_protection');
     db.run('ALTER TABLE configuration_operations DROP COLUMN management_provider');
     db.run('ALTER TABLE configuration_operations DROP COLUMN offline_management');
@@ -111,7 +115,8 @@ test('migration 2 rollback and reopen preserve multiple operation, worker and re
     db.run('DELETE FROM schema_migrations WHERE version>=2');
     verifySchemaFingerprint(db, 1);
     const tables = db.query<{ name: string }, []>("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map(row => row.name);
-    const columns = new Map(tables.map(table => [table, db!.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all().map(row => row.name).join(',')]));
+    const columns = new Map(tables.map(table => [table, db!.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all()
+      .map(row => row.name).filter(name=>table!=='routes'||name!=='service_id').join(',')]));
     const snapshot = (database: Database) => Object.fromEntries(tables.map(table => [table,
       database.query(`SELECT ${columns.get(table)} FROM ${table}`).all().map(row => JSON.stringify(row)).sort()]));
     const before = snapshot(db);

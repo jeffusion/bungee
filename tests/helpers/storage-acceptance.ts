@@ -155,7 +155,7 @@ if (await boundedExit(init, 20_000) !== 0) throw new Error('formal initializatio
   const serviceId=crypto.randomUUID(), endpointId=crypto.randomUUID(), routeId=crypto.randomUUID();
   const aggregate = {...snapshot.config,logical_configuration:{...snapshot.config.logical_configuration,
     services:[{id:serviceId,position:1,name:'acceptance',plugins:[],endpoints:[{id:endpointId,position:1,target:`http://127.0.0.1:${upstream!.port}`,weight:100,priority:1,is_disabled:false,plugins:[]}]}],
-    routes:[{id:routeId,position:1,path:'/acceptance',service_id:serviceId,plugins:[]}]}};
+    routes:[{id:routeId,position:1,path:'/acceptance',service_references: [{ id: crypto.randomUUID(), position: 0, service_id: serviceId, weight: 100, priority: 1, is_disabled: false }],plugins:[]}]}};
   const saved = await fetch(base+'/api/config',{method:'PUT',headers:{...bearer,'content-type':'application/json'},
     body:JSON.stringify({expected_revision:revision,mutation_id:crypto.randomUUID(),aggregate})});
   check(saved.status===202,'route commit failed '+saved.status+' '+(saved.status===202?'':await saved.text()));

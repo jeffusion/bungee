@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { parseNormalizeCompile } from '../../../src/config-storage';
+import { parseNormalizeCompile } from '../../../src/config-storage/compiler';
 
 const IDs = {
   service: '10000000-0000-4000-8000-000000000020',
@@ -61,7 +61,7 @@ function completeConfig(): Record<string, unknown> {
     routes: [{
       id: IDs.route,
       path: '/v1',
-      service_id: IDs.service,
+      service_references: [{ id: '50000000-0000-4000-8000-000000000010', position: 0, service_id: IDs.service, weight: 100, priority: 1, is_disabled: false }],
       path_rewrite: { '^/v1': '/v2' },
       auth: { enabled: false, tokens: [] },
       timeouts: { request_ms: 1000 },

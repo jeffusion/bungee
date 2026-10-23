@@ -96,7 +96,7 @@ function createConfig(pluginPath: string): AppConfig {
     plugins: [pluginConfig(pluginPath, 'global')],
     services: [
       {
-        name: SERVICE_NAME,
+        id:SERVICE_NAME, name: SERVICE_NAME,
         plugins: [pluginConfig(pluginPath, 'service')],
         endpoints: [
           { id: PRIMARY_UPSTREAM_ID, target: 'http://primary.test', plugins: [pluginConfig(pluginPath, 'endpoint-primary')] },
@@ -107,7 +107,7 @@ function createConfig(pluginPath: string): AppConfig {
     routes: [
       {
         path: ROUTE_ID,
-        service: SERVICE_NAME,
+        service_references:[{id:'ref-'+(SERVICE_NAME),service_id:SERVICE_NAME,position:0,weight:100,priority:1,is_disabled:false}],
         plugins: [pluginConfig(pluginPath, 'route')],
       },
     ],

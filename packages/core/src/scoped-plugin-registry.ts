@@ -36,7 +36,7 @@ import type {
   PluginScopeInfo,
 } from './hooks';
 import { createPluginHooks } from './hooks';
-import type { Endpoint, PluginConfig, Service } from '@jeffusion/bungee-types';
+import type { Endpoint, PluginConfig, Service, ServiceReference } from '@jeffusion/bungee-types';
 import type { PluginStorage, PluginMetadata, PluginConfigField, PluginTranslations } from './plugin.types';
 import { getPluginContextManager, isPluginContextManagerInitialized } from './plugin-context-manager';
 import { validatePluginConfig, applyDefaults } from './utils/config-validator';
@@ -45,7 +45,7 @@ import { classifyPluginValidationFailure, createPluginRuntimeStateSnapshot } fro
 import type { PluginRuntimeStateSnapshot } from './plugin-runtime-state-machine';
 import * as path from 'path';
 import { PluginPathResolver } from './plugin-path-resolver';
-import { resolveEffectiveRouteEndpoints } from './utils/endpoint-resolver';
+import { resolveReachableServices, resolveReachableEndpoints } from './utils/endpoint-resolver';
 
 // ============ 配置常量 ============
 
@@ -267,6 +267,7 @@ export interface PhaseAwareHooks {
   dispatchAdapter?: PrecompiledHooks;
   routePhase: PrecompiledHooks;
   servicePhase: PrecompiledHooks | null;
+  servicePhases?: PrecompiledHooks[];
   upstreamPhase: PrecompiledHooks;
   inbound: InboundChain;
   globalPrecompiled: PrecompiledHooks | null;
@@ -414,6 +415,8 @@ export class ScopedPluginRegistry {
 
   /** Phase-aware Hooks 缓存：`phase-aware:${routeId}#${upstreamId}#${serviceName}` → PhaseAwareHooks */
   private phaseAwareCache: Map<string, PhaseAwareHooks> = new Map();
+  private routeRequestPhases=new Map<string,PrecompiledHooks>();
+  private dispatchRequestHooks=new WeakMap<ScopedPluginInstance,PluginHooks['onDispatchRequest']>();
   private websocketHandshakeHooks = new WeakMap<ScopedPluginInstance, PluginHooks['onWebSocketHandshake']>();
   private websocketObservationHooks = new WeakMap<ScopedPluginInstance, PluginHooks['onWebSocketObservation']>();
   private attemptObservationHooks = new WeakMap<ScopedPluginInstance, PluginHooks['onAttemptObservation']>();
@@ -1042,50 +1045,57 @@ export class ScopedPluginRegistry {
    * }
    * ```
    */
-  getPrecompiledHooks(routeId: string, upstreamId?: string, serviceName?: string, adapter?: import('./plugin.types').Plugin): PhaseAwareHooks {
+  getPrecompiledHooks(routeId: string, upstreamId?: string, serviceName?: string | readonly string[], adapter?: import('./plugin.types').Plugin): PhaseAwareHooks {
     // 确保已预编译
     if (!this.precompiled) {
       this.precompileAllHooks();
     }
 
-    const cacheKey = `phase-aware:${routeId}#${upstreamId || ''}#${serviceName || ''}`;
-    const cached = adapter ? undefined : this.phaseAwareCache.get(cacheKey);
+    const serviceNames = typeof serviceName === 'string' ? [serviceName] : serviceName ?? [];
+    const cacheKey = JSON.stringify(['phase-aware',routeId,upstreamId ?? '',serviceNames]);
+    const cacheable=!adapter && !Array.isArray(serviceName);
+    const cached = cacheable ? this.phaseAwareCache.get(cacheKey) : undefined;
     if (cached) {
       return cached;
     }
 
-    const routePhase = this.buildRoutePhaseHooks(routeId);
-    const servicePhase = serviceName ? this.buildServicePhaseHooks(routeId, serviceName) : null;
-    const upstreamPhase = upstreamId ? this.buildUpstreamPhaseHooks(routeId, upstreamId) : this.buildEmptyPrecompiledHooks();
+    const routePhase = this.routeRequestPhases.get(routeId) ?? this.globalPrecompiled ?? this.buildEmptyPrecompiledHooks();
+    const servicePhases = serviceNames.map(name => this.servicePrecompiled.get(`${routeId}#${name}`) ?? null).filter((phase): phase is PrecompiledHooks => phase !== null);
+    const servicePhase = servicePhases.at(-1) ?? null;
+    const upstreamPhase = upstreamId ? this.upstreamPrecompiled.get(`${routeId}#${upstreamId}`) ?? this.buildEmptyPrecompiledHooks() : this.buildEmptyPrecompiledHooks();
     const dispatchAdapter = adapter ? this.buildPrecompiledHooks([{scope:{type:'route',routeId},config:{name:'gateway-dispatch-adapter'},priority:0,
       handler:{pluginName:'gateway-dispatch-adapter',config:{},bodyRequirements:adapter.bodyRequirements.bind(adapter),register:adapter.register.bind(adapter)}}], 'dispatch-adapter') : undefined;
     const inbound = this.buildInboundChain(routeId, upstreamId || '', serviceName, dispatchAdapter);
-    const result: PhaseAwareHooks = { dispatchAdapter, routePhase, servicePhase, upstreamPhase, inbound, globalPrecompiled: this.globalPrecompiled, routePrecompiled: this.routePrecompiled.get(routeId) ?? null };
+    const result: PhaseAwareHooks = { dispatchAdapter, routePhase, servicePhase, servicePhases, upstreamPhase, inbound, globalPrecompiled: this.globalPrecompiled, routePrecompiled: this.routePrecompiled.get(routeId) ?? null };
 
-    if (!adapter) this.phaseAwareCache.set(cacheKey, result);
+    if (cacheable) this.phaseAwareCache.set(cacheKey, result);
     return result;
   }
 
+  getServicePluginOwners(routeId:string, serviceId:string):Array<{pluginName:string;scopeKey:string}> {
+    return (this.serviceInstances.get(`${routeId}#${serviceId}`) ?? []).map(instance => ({pluginName:instance.handler.pluginName,scopeKey:getScopeKey(instance.scope)}));
+  }
+
   /** Retain every instance actually executed by handshake phases; observer precedence is different. */
-  getWebSocketHandshakeOwners(routeId:string,upstreamId:string,serviceName?:string):Array<{pluginName:string;scopeKey:string}> {
+  getWebSocketHandshakeOwners(routeId:string,upstreamId:string,serviceName?:string | readonly string[]):Array<{pluginName:string;scopeKey:string}> {
     if (!this.precompiled) this.precompileAllHooks();
     const routeInstances=this.routeInstances.get(routeId) ?? [];
     const routeNames=new Set(routeInstances.map(instance=>instance.handler.pluginName));
     const instances=[
       ...this.globalInstances.filter(instance=>!routeNames.has(instance.handler.pluginName)),
       ...routeInstances,
-      ...(serviceName ? this.serviceInstances.get(`${routeId}#${serviceName}`) ?? [] : []),
+      ...(typeof serviceName === 'string' ? [serviceName] : serviceName ?? []).flatMap(name => this.serviceInstances.get(`${routeId}#${name}`) ?? []),
       ...(this.upstreamInstances.get(`${routeId}#${upstreamId}`) ?? []),
     ];
     return instances.filter(instance=>this.websocketHandshakeHooks.get(instance)?.hasCallbacks())
       .map(instance=>({pluginName:instance.handler.pluginName,scopeKey:getScopeKey(instance.scope)}));
   }
 
-  getWebSocketOwners(routeId: string, upstreamId?: string, serviceName?: string): Array<{pluginName:string;scopeKey:string;hooks:PluginHooks['onWebSocketObservation']}> {
+  getWebSocketOwners(routeId: string, upstreamId?: string, serviceName?: string | readonly string[]): Array<{pluginName:string;scopeKey:string;hooks:PluginHooks['onWebSocketObservation']}> {
     if (!this.precompiled) this.precompileAllHooks();
     const candidates = [
       ...(upstreamId ? this.upstreamInstances.get(`${routeId}#${upstreamId}`) ?? [] : []),
-      ...(serviceName ? this.serviceInstances.get(`${routeId}#${serviceName}`) ?? [] : []),
+      ...[...(typeof serviceName === 'string' ? [serviceName] : serviceName ?? [])].reverse().flatMap(name => this.serviceInstances.get(`${routeId}#${name}`) ?? []),
       ...(this.routeInstances.get(routeId) ?? []),
       ...this.globalInstances,
     ];
@@ -1102,11 +1112,11 @@ export class ScopedPluginRegistry {
     return owners;
   }
 
-  getAttemptObservationOwners(routeId: string, upstreamId?: string, serviceName?: string, context?: PluginBodyRequirementContext): AttemptObservationOwner[] {
+  getAttemptObservationOwners(routeId: string, upstreamId?: string, serviceName?: string | readonly string[], context?: PluginBodyRequirementContext): AttemptObservationOwner[] {
     if (!this.precompiled) this.precompileAllHooks();
     const candidates = [
       ...(upstreamId ? this.upstreamInstances.get(`${routeId}#${upstreamId}`) ?? [] : []),
-      ...(serviceName ? this.serviceInstances.get(`${routeId}#${serviceName}`) ?? [] : []),
+      ...[...(typeof serviceName === 'string' ? [serviceName] : serviceName ?? [])].reverse().flatMap(name => this.serviceInstances.get(`${routeId}#${name}`) ?? []),
       ...(this.routeInstances.get(routeId) ?? []),
       ...this.globalInstances,
     ];
@@ -1171,7 +1181,7 @@ export class ScopedPluginRegistry {
       if (instances.length > 0) {
         this.servicePrecompiled.set(
           key,
-          this.buildPrecompiledHooks(instances, `service-phase:${key}`)
+          this.buildPrecompiledHooks(instances, `service-phase:${key}`,true)
         );
       }
     }
@@ -1181,7 +1191,7 @@ export class ScopedPluginRegistry {
       if (instances.length > 0) {
         this.upstreamPrecompiled.set(
           upstreamId,
-          this.buildPrecompiledHooks(instances, `upstream:${upstreamId}`)
+          this.buildPrecompiledHooks(instances, `upstream-phase:${upstreamId}`,true)
         );
       }
     }
@@ -1194,10 +1204,14 @@ export class ScopedPluginRegistry {
     ]) {
       const isolatedHooks = createPluginHooks();
       instance.handler.register(isolatedHooks);
+      this.dispatchRequestHooks.set(instance,isolatedHooks.onDispatchRequest);
       this.attemptObservationHooks.set(instance, isolatedHooks.onAttemptObservation);
       this.websocketObservationHooks.set(instance, isolatedHooks.onWebSocketObservation);
       this.websocketHandshakeHooks.set(instance, isolatedHooks.onWebSocketHandshake);
     }
+
+    this.routeRequestPhases.clear();
+    for(const routeId of this.routeInstances.keys())this.routeRequestPhases.set(routeId,this.buildRoutePhaseHooks(routeId));
 
     // 4. 清空组合缓存（下次请求时按需创建）
     this.combinedHooksCache.clear();
@@ -1353,9 +1367,9 @@ export class ScopedPluginRegistry {
     return this.buildPrecompiledHooks(instances, `upstream-phase:${key}`, true);
   }
 
-  buildInboundChain(routeId: string, upstreamId: string, serviceName?: string, adapter?: PrecompiledHooks): InboundChain {
+  buildInboundChain(routeId: string, upstreamId: string, serviceName?: string | readonly string[], adapter?: PrecompiledHooks): InboundChain {
     const upstreamHooks = this.upstreamPrecompiled.get(`${routeId}#${upstreamId}`);
-    const serviceHooks = serviceName ? this.servicePrecompiled.get(`${routeId}#${serviceName}`) : null;
+    const serviceHooks = [...(typeof serviceName === 'string' ? [serviceName] : serviceName ?? [])].reverse().map(name => this.servicePrecompiled.get(`${routeId}#${name}`)).filter((phase): phase is PrecompiledHooks => !!phase);
     const routeHooks = this.routePrecompiled.get(routeId);
     const globalHooks = this.globalPrecompiled;
 
@@ -1363,7 +1377,7 @@ export class ScopedPluginRegistry {
       onResponse: async (res: Response, ctx: any) => {
         let response = res;
         if (upstreamHooks) response = await upstreamHooks.hooks.onResponse.promise(response, ctx);
-        if (serviceHooks) response = await serviceHooks.hooks.onResponse.promise(response, ctx);
+        for (const phase of serviceHooks) response = await phase.hooks.onResponse.promise(response, ctx);
         if (routeHooks) response = await routeHooks.hooks.onResponse.promise(response, ctx);
         if (globalHooks) response = await globalHooks.hooks.onResponse.promise(response, ctx);
         if (adapter) response = await adapter.hooks.onResponse.promise(response, ctx);
@@ -1372,7 +1386,7 @@ export class ScopedPluginRegistry {
       onRawResponse: async (result, ctx) => {
         let current = result;
         if (upstreamHooks) current = await upstreamHooks.hooks.onRawResponse.promise(current, ctx);
-        if (serviceHooks) current = await serviceHooks.hooks.onRawResponse.promise(current, ctx);
+        for (const phase of serviceHooks) current = await phase.hooks.onRawResponse.promise(current, ctx);
         if (routeHooks) current = await routeHooks.hooks.onRawResponse.promise(current, ctx);
         if (globalHooks) current = await globalHooks.hooks.onRawResponse.promise(current, ctx);
         if (adapter) current = await adapter.hooks.onRawResponse.promise(current, ctx);
@@ -1380,7 +1394,7 @@ export class ScopedPluginRegistry {
       },
       onStreamChunk: async (chunk: any, ctx: any) => {
         let chunks: any[] = [chunk];
-        const phaseHooks = [upstreamHooks, serviceHooks, routeHooks, globalHooks, adapter];
+        const phaseHooks = [upstreamHooks, ...serviceHooks, routeHooks, globalHooks, adapter];
         for (const precompiledHooks of phaseHooks) {
           if (!precompiledHooks) continue;
 
@@ -1396,7 +1410,7 @@ export class ScopedPluginRegistry {
       onFlushStream: async (chunks: any[], ctx: any) => {
         let result = chunks;
         if (upstreamHooks) result = await upstreamHooks.hooks.onFlushStream.promise(result, ctx);
-        if (serviceHooks) result = await serviceHooks.hooks.onFlushStream.promise(result, ctx);
+        for (const phase of serviceHooks) result = await phase.hooks.onFlushStream.promise(result, ctx);
         if (routeHooks) result = await routeHooks.hooks.onFlushStream.promise(result, ctx);
         if (globalHooks) result = await globalHooks.hooks.onFlushStream.promise(result, ctx);
         if (adapter) result = await adapter.hooks.onFlushStream.promise(result, ctx);
@@ -1404,7 +1418,7 @@ export class ScopedPluginRegistry {
       },
       onError: async (ctx: any) => {
         if (upstreamHooks) await upstreamHooks.hooks.onError.promise(ctx);
-        if (serviceHooks) await serviceHooks.hooks.onError.promise(ctx);
+        for (const phase of serviceHooks) await phase.hooks.onError.promise(ctx);
         if (routeHooks) await routeHooks.hooks.onError.promise(ctx);
         if (globalHooks) await globalHooks.hooks.onError.promise(ctx);
         if (adapter) await adapter.hooks.onError.promise(ctx);
@@ -1489,23 +1503,24 @@ export class ScopedPluginRegistry {
 
   /** Entry plugins retained across dispatch/session work even when the final route differs. */
   getRoutePluginOwners(routeId:string,dispatchOnly=false):Array<{pluginName:string;scopeKey:string}> {
+    if(!this.precompiled)this.precompileAllHooks();
     return (this.routeInstances.get(routeId) ?? []).filter(instance=>{
       if(!dispatchOnly)return true;
-      const hooks=createPluginHooks();instance.handler.register(hooks);
-      return hooks.onDispatchRequest.hasCallbacks();
+      return this.dispatchRequestHooks.get(instance)?.hasCallbacks();
     }).map(instance=>({pluginName:instance.handler.pluginName,scopeKey:getScopeKey(instance.scope)}));
   }
 
   /** Dispatch and deferred response callbacks share the retained entry owner's RPC authority. */
   async dispatchRequest(routeId:string,input:import('./gateway/contracts').DispatchRequestInput,callee:unknown):Promise<import('./gateway/contracts').DispatchRequestDecision|undefined> {
+    if(!this.precompiled)this.precompileAllHooks();
     for(const instance of this.routeInstances.get(routeId) ?? []){
-      const hooks=createPluginHooks();instance.handler.register(hooks);
-      if(!hooks.onDispatchRequest.hasCallbacks())continue;
+      const hooks=this.dispatchRequestHooks.get(instance);
+      if(!hooks?.hasCallbacks())continue;
       const context=this.rpcContexts.get(`${instance.handler.pluginName}\0${getScopeKey(instance.scope)}`);
       const lease=this.requestLeases.getStore()?.get(`${instance.handler.pluginName}\0${getScopeKey(instance.scope)}`);
       if (lease) this.dispatchInvocations.set(lease, {callee, signal: input.signal});
       const invoke=<T>(run:()=>T):T=>context && this.serviceHost.rpc ? this.serviceHost.runInInvocation(context,{purpose:'request',callee,signal:input.signal,lease},run):run();
-      const result=await invoke(()=>hooks.onDispatchRequest.promise(input));
+      const result=await invoke(()=>hooks.promise(input));
       if(!result)continue;
       const wrapAdapter=(adapter:import('./plugin.types').Plugin):import('./plugin.types').Plugin=>({bodyRequirements:adapter.bodyRequirements.bind(adapter),register(target){
         const wrapped={...target};
@@ -1544,7 +1559,7 @@ export class ScopedPluginRegistry {
       path: string;
       plugins?: Array<PluginConfig | string>;
       endpoints?: Endpoint[];
-      service?: string;
+      service_references?: ServiceReference[];
       upstreams?: Array<{
         id?: string;
         target: string;
@@ -1644,10 +1659,11 @@ export class ScopedPluginRegistry {
       }
 
       const dispatchServices = this.getDeclaredDispatchTargets(routeId).filter(target => target.type === 'service').map(target => config.services?.find(service => service.id === target.id)).filter((service): service is Service => !!service);
-      const relatedServices = [...new Map([...(config.services?.filter(service => service.name === route.service) ?? []),...dispatchServices].map(service => [service.name,service])).values()];
+      const roots = {...route, service_references:[...(route.service_references ?? []),...dispatchServices.map(service => ({id:`dispatch:${service.id}`,service_id:service.id!,position:0,weight:100,priority:1,is_disabled:false}))]};
+      const relatedServices = resolveReachableServices(roots,config.services);
       for (const service of relatedServices) {
         if (service?.plugins?.length) {
-          const serviceName = service.name;
+          const serviceName = service.id;
 
           for (const pluginConfig of orderBindings(service.plugins)) {
             const normalized = normalizePluginConfig(pluginConfig);
@@ -1664,16 +1680,8 @@ export class ScopedPluginRegistry {
         }
       }
 
-      // 3. 加载上游级插件
-      // Positional legacy endpoints can share a URL while owning different plugins.
-      // Preserve their order/identity; only explicit endpoint IDs deduplicate dispatch prewarming.
-      const endpoints = [...resolveEffectiveRouteEndpoints(route, config.services)];
-      const endpointIds = new Set(endpoints.flatMap(endpoint => endpoint.id ? [endpoint.id] : []));
-      for(const endpoint of dispatchServices.flatMap(service=>service.endpoints)){
-        if(endpoint.id && endpointIds.has(endpoint.id))continue;
-        if(endpoint.id)endpointIds.add(endpoint.id);
-        endpoints.push(endpoint);
-      }
+      // Compile endpoint scopes across the reachable DAG once, without changing selection layers.
+      const endpoints = resolveReachableEndpoints(roots, config.services);
 
       for (const [upstreamIndex, upstream] of endpoints.entries()) {
         const upstreamId = upstream.id || String(upstreamIndex); // Use config id or fallback to index

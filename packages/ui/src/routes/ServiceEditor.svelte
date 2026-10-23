@@ -4,6 +4,7 @@
   import { sortBy } from 'lodash-es';
   import { ServicesAPI, ServiceStaleError, type Service, type ServiceBaseline } from '$api/services';
   import { ConfigurationStaleError, ConfigurationOperationTimeoutError } from '$api/config';
+  import { validateServiceReferences } from '$validation/service-references';
   import { ManagedBindingError } from '$api/config-adapters';
   import { consumeSourceHandoff, prepareSourceHandoff } from '$api/source-handoff';
   import { RoutesAPI, type Route } from '$api/routes';
@@ -46,11 +47,12 @@ import PluginEditor from '$components/domain/plugin/PluginEditor.svelte';
   let activeSection = $state<SectionId>('identity');
   let showValidationDetails = $state(false);
   let allRoutes = $state<Route[]>([]);
+  let allServices = $state<Service[]>([]);
 
 let service = $state<Service>({
   name: '',
   description: '',
-  endpoints: [{ _uid: uuidv4(), target: '', weight: 100, priority: 1 }],
+  endpoints: [{ _uid: uuidv4(), _position: 0, target: '', weight: 100, priority: 1 }],
   failover: { enabled: false },
   health_check: { enabled: false },
   load_balancing: undefined,
@@ -134,11 +136,12 @@ let service = $state<Service>({
     } else if (!/^[a-z0-9-]+$/.test(service.name)) {
       currentErrors.push({ field: 'name', message: $_('serviceEditor.serviceNameHelp') });
     }
-    if (!service.endpoints || service.endpoints.length === 0) {
+    if (!service.endpoints?.length && !service.service_references?.length) {
       currentErrors.push({ field: 'endpoints', message: $_('validation.upstreamRequired') });
     }
     const upstreamErrors = service.endpoints.flatMap((endpoint, index) => validateUpstreamSync(endpoint, index));
-    const currentWeightErrors = validateWeights(service.endpoints);
+    const currentWeightErrors = validateWeights([...service.endpoints, ...(service.service_references ?? []).map(reference => ({ target: '', weight: reference.weight, is_disabled: reference.is_disabled }))]);
+    currentErrors.push(...validateServiceReferences(service.service_references, allServices, service));
     errors = [...currentErrors, ...upstreamErrors];
     weightErrors = currentWeightErrors;
     allErrors = [...errors, ...currentWeightErrors];
@@ -147,13 +150,13 @@ let service = $state<Service>({
 
   $effect(() => {
     if ($isLoading) return;
-    JSON.stringify(service);
+    JSON.stringify(service); JSON.stringify(allServices);
     const timer = setTimeout(() => performValidation(), 300);
     return () => clearTimeout(timer);
   });
 
-  let consumers = $derived(getServiceConsumers(service.name, allRoutes));
-  let healthAggregate = $derived(getServiceHealthAggregate(service, $runtimeUpstreams));
+  let consumers = $derived(getServiceConsumers(service._uid ?? '', allRoutes, allServices));
+  let healthAggregate = $derived(getServiceHealthAggregate(service, $runtimeUpstreams, allServices));
 
   async function loadExistingService() {
     const loaded = await ServicesAPI.getForEdit(originalName, baseline?.id);
@@ -185,6 +188,8 @@ let service = $state<Service>({
     if (!isValid || saving || loading || reloading || conflictMessage) return;
     try {
       saving = true;
+      await performValidation();
+      if (!isValid) return;
       const sortedService = {
         ...service,
         endpoints: sortBy(service.endpoints, [(e: any) => e.priority ?? 1]),
@@ -279,6 +284,7 @@ let service = $state<Service>({
         toast.show(result.duplicate ? '该账号已在此服务中使用，已定位已有上游。' : '已加入未保存的上游草稿，请检查后保存服务。', 'success');
       } catch (error: any) { if (!lifetime.signal.aborted) toast.show(error.message, 'error'); }
     }
+    try { allServices = await ServicesAPI.list(); } catch (error: any) { toast.show(error.message, 'error'); }
     loading = false;
     if (focusIndex >= 0) { await tick(); upstreamSection?.openUpstreamModal(focusIndex); }
   });
@@ -301,7 +307,7 @@ let service = $state<Service>({
       id: 'endpoints'    as SectionId,
       label: $_('serviceEditor.builder.endpoints'),
       icon: 'M13 10V3L4 14h7v7l9-11h-7z',
-      badge: service.endpoints.length ? `EP·${service.endpoints.length}` : '',
+      badge: `×${service.endpoints.length + (service.service_references?.length ?? 0)}`,
     },
     {
       id: 'transport'    as SectionId,
@@ -437,7 +443,7 @@ let service = $state<Service>({
 
         {:else if activeSection === 'endpoints'}
           <div data-testid="service-nav-endpoints" class="space-y-4">
-            <UpstreamsSection bind:this={upstreamSection} bind:route={service} {errors} {weightErrors} isService={true} />
+            <UpstreamsSection bind:this={upstreamSection} bind:route={service} {errors} {weightErrors} isService={true} services={allServices} ownerId={service._uid} />
           </div>
 
         {:else if activeSection === 'availability'}
@@ -460,6 +466,7 @@ let service = $state<Service>({
             {#if service.name}
               {#if consumers.count > 0}
                 <div class="space-y-2" data-testid="service-consumers-list">
+                  {#each consumers.services as consumerService}<div class="border border-carbon-600 px-3 py-2"><RelationshipLink type="service" name={consumerService.name} /></div>{/each}
                   {#each consumers.routes as consumerRoute}
                     <div class="flex items-center justify-between gap-3 border border-carbon-600 bg-carbon-900/60 px-3 py-2 hover:bg-carbon-700/40 transition-colors">
                       <RelationshipLink type="route" name={consumerRoute.path} />
@@ -511,9 +518,9 @@ let service = $state<Service>({
                 </div>
                 <div class="border border-carbon-600 bg-carbon-900/60 px-3 py-2">
                   <span class="nx-label-sm block mb-1">{$_('services.endpointLabel')}</span>
-                  <p class="nx-display text-2xl text-nexus-300">{service.endpoints.length}</p>
+                  <p class="nx-display text-2xl text-nexus-300">EP·{service.endpoints.length} SVC·{service.service_references?.length ?? 0}</p>
                   <p class="font-mono text-[10px] text-zinc-500 mt-0.5">
-                    {$_('serviceEditor.reviewTotalWeight', { values: { weight: service.endpoints.reduce((sum, e) => sum + (e.weight || 100), 0) } })}
+                    {$_('serviceEditor.reviewTotalWeight', { values: { weight: [...service.endpoints, ...(service.service_references ?? [])].reduce((sum, e) => sum + (e.weight || 100), 0) } })}
                   </p>
                 </div>
                 <div class="border border-carbon-600 bg-carbon-900/60 px-3 py-2">
@@ -527,7 +534,8 @@ let service = $state<Service>({
             </PanelCard>
 
             <PanelCard title={$_('serviceEditor.builder.endpoints')} tag="EP-LIST">
-              <EndpointQuickPreview stateKey={service.name} endpoints={service.endpoints} limit={5} />
+              <EndpointQuickPreview stateKey={service._uid ?? ''} endpoints={service.endpoints} limit={5} />
+              {#each service.service_references ?? [] as reference}<div class="mt-2 font-mono text-sm text-nexus-300">SVC · {allServices.find(service => service._uid === reference.service_id)?.name ?? reference.service_id} · p:{reference.priority} · w:{reference.weight}</div>{/each}
             </PanelCard>
 
             <PanelCard title={$_('serviceEditor.builder.availability')} tag="AVAIL">

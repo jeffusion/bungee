@@ -27,7 +27,7 @@ export class WorkerRequestAdmission {
   private admittedBody: unknown;
   constructor(private readonly plugins: readonly WorkerAdmissionPlugin[], private readonly targetBase: Omit<AdmissionTarget,'attemptId'|'upstreamId'|'url'|'model'|'now'>, private readonly invokeBudget: (plugin: string, method: string, payload: unknown, target: AdmissionTarget) => Promise<unknown>) {}
   /** Access and transport capability checks without planning, admission or budget reservation. */
-  async inspect(input: {attemptId:string;upstreamId:string;url:string;model:string|null;body:unknown;transport?:'websocket'},signal:AbortSignal):Promise<void> {
+  async inspect(input: {attemptId:string;upstreamId:string;url:string;model:string|null;body:unknown;transport?:'websocket';serviceId?:string|null},signal:AbortSignal):Promise<void> {
     if (!session) throw new DataAdmissionError(503,'admission_unavailable');
     signal.throwIfAborted();
     let model=input.model;
@@ -41,7 +41,7 @@ export class WorkerRequestAdmission {
     if(authorized?.policyVersion!==result.policyVersion)throw new DataAdmissionError(503,'admission_authorize_failed');
     signal.throwIfAborted();
   }
-  async prepare(input: { attemptId: string; upstreamId: string; url: string; model: string | null; body: unknown; transport?: 'websocket' },signal: AbortSignal, loadBody?: () => Promise<unknown>): Promise<PreparedAdmissionAttempt[]> {
+  async prepare(input: { attemptId: string; upstreamId: string; url: string; model: string | null; body: unknown; transport?: 'websocket'; serviceId?:string|null },signal: AbortSignal, loadBody?: () => Promise<unknown>): Promise<PreparedAdmissionAttempt[]> {
     if (!session) throw new DataAdmissionError(503,'admission_unavailable');
     const {body: _body,transport,...targetInput}=input;
     let body = input.body === undefined && this.grant ? this.admittedBody : input.body;

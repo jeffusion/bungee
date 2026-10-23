@@ -24,7 +24,7 @@ function input(websocket?: unknown): unknown {
       services: [{ id: IDs.service, name: 'responses', endpoints: [{ id: IDs.serviceUpstream, target: 'https://service.example' }] }],
       routes: [
         { id: IDs.route, path: '/direct', endpoints: [{ id: IDs.upstream, target: 'http://direct.example' }], ...policy },
-        { id: IDs.serviceRoute, path: '/service', service_id: IDs.service, ...structuredClone(policy) },
+        { id: IDs.serviceRoute, path: '/service', service_references:[{id:'40000000-0000-4000-8000-000000000081',service_id:IDs.service,position:0,weight:100,priority:1,is_disabled:false}], ...structuredClone(policy) },
       ],
     },
     plugin_activations: [],
@@ -48,7 +48,7 @@ describe('explicit route WebSocket configuration', () => {
         else expect(route.websocket).toEqual({ enabled });
       }
       expect(runtime.config.routes[0]?.endpoints?.[0]?.target).toBe('http://direct.example');
-      expect(runtime.config.routes[1]?.service).toBe('responses');
+      expect(runtime.config.routes[1]?.service_references?.[0]?.service_id).toBe(IDs.service);
     }
   });
 

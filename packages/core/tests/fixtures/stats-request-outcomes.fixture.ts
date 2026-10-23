@@ -126,7 +126,7 @@ async function main(): Promise<void> {
       } as any);
       const config = {
         services: [{
-          name: 'managed',
+          id:'managed', name: 'managed',
           failover: { enabled: true, retry_on: [503] },
           endpoints: [{
             id: 'managed', target: `http://127.0.0.1:${upstream.port}`, priority: 0,
@@ -134,7 +134,7 @@ async function main(): Promise<void> {
             managedBy: { plugin: 'provider', contributionId: 'provider', bindingId: 'binding' },
           }, { id: 'fallback', target: `http://127.0.0.1:${upstream.port}`, priority: 1 }],
         }],
-        routes: [{ path: '/control-unavailable', service: 'managed' }],
+        routes: [{ path: '/control-unavailable', service_references:[{id:'ref-'+('managed'),service_id:'managed',position:0,weight:100,priority:1,is_disabled:false}] }],
       } as any;
       initializeRuntimeState(config);
       const gateway = serve(config);
@@ -156,13 +156,13 @@ async function main(): Promise<void> {
       servers.push(upstream);
       const config = {
         services: [{
-          name: 'failover', failover: { enabled: true, retry_on: [503] },
+          id:'failover', name: 'failover', failover: { enabled: true, retry_on: [503] },
           endpoints: [
             { id: 'first', target: `http://127.0.0.1:${upstream.port}`, priority: 0 },
             { id: 'second', target: `http://127.0.0.1:${upstream.port}`, priority: 1 },
           ],
         }],
-        routes: [{ path: '/failover', service: 'failover' }],
+        routes: [{ path: '/failover', service_references:[{id:'ref-'+('failover'),service_id:'failover',position:0,weight:100,priority:1,is_disabled:false}] }],
       } as any;
       initializeRuntimeState(config);
       const gateway = serve(config);
@@ -183,7 +183,7 @@ async function main(): Promise<void> {
       servers.push(upstream);
       const endpoints = [{ target: `http://127.0.0.1:${upstream.port}` }];
       const config = (scenario === 'finite-recovery'
-        ? { services: [{ name: 'recovery', endpoints, failover: { enabled: true } }], routes: [{ path: '/finite', service: 'recovery' }] }
+        ? { services: [{ id:'recovery', name: 'recovery', endpoints, failover: { enabled: true } }], routes: [{ path: '/finite', service_references:[{id:'ref-'+('recovery'),service_id:'recovery',position:0,weight:100,priority:1,is_disabled:false}] }] }
         : { routes: [{ path: '/finite', endpoints }] }) as AppConfig;
       initializeRuntimeState(config);
       if (scenario === 'finite-recovery') runtimeState.get('recovery')!.upstreams[0].status = 'HALF_OPEN';
@@ -232,12 +232,12 @@ async function main(): Promise<void> {
       });
       servers.push(upstream);
       const config = {
-        services: [{ name: 'sse',
+        services: [{ id:'sse', name: 'sse',
           failover: scenario === 'terminal-failover' ? { enabled: true, retry_on: [503] } : undefined,
           endpoints: [{ id: 'sse', target: `http://127.0.0.1:${upstream.port}`, priority: 0 },
             ...(scenario === 'terminal-failover' ? [{ id: 'fallback', target: `http://127.0.0.1:${upstream.port}`, priority: 1 }] : [])],
         }],
-        routes: [{ path, service: 'sse', ...(scenario === 'timed-out' ? { timeouts: { request_ms: 500 } } : {}) }],
+        routes: [{ path, service_references:[{id:'ref-'+('sse'),service_id:'sse',position:0,weight:100,priority:1,is_disabled:false}], ...(scenario === 'timed-out' ? { timeouts: { request_ms: 500 } } : {}) }],
       } as any;
       initializeRuntimeState(config);
       const gateway = serve(config);
@@ -291,11 +291,11 @@ async function main(): Promise<void> {
       const fallback = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => { fallbackHits++; return new Response('unexpected'); } });
       servers.push(pending, fallback);
       const config = {
-        services: [{ name: 'aborted', failover: { enabled: true, retry_on: [503] }, endpoints: [
+        services: [{ id:'aborted', name: 'aborted', failover: { enabled: true, retry_on: [503] }, endpoints: [
           { id: 'first', target: `http://127.0.0.1:${pending.port}`, priority: 0 },
           { id: 'second', target: `http://127.0.0.1:${fallback.port}`, priority: 1 },
         ] }],
-        routes: [{ path: '/aborted', service: 'aborted' }],
+        routes: [{ path: '/aborted', service_references:[{id:'ref-'+('aborted'),service_id:'aborted',position:0,weight:100,priority:1,is_disabled:false}] }],
       } as any;
       initializeRuntimeState(config);
       const gateway = serve(config);
@@ -317,7 +317,7 @@ async function main(): Promise<void> {
     unavailable.stop(true);
     const config = {
       services: [{
-        name: 'edges', failover: { enabled: true, retry_on: [503] },
+        id:'edges', name: 'edges', failover: { enabled: true, retry_on: [503] },
         endpoints: [
           { id: 'retry', target: `http://127.0.0.1:${upstream.port}`, priority: 0 },
           { id: 'throws', target: `http://127.0.0.1:${unavailablePort}`, priority: 1 },
@@ -325,7 +325,7 @@ async function main(): Promise<void> {
       }],
       routes: [
         { path: '/before-attempt', endpoints: [] },
-        { path: '/after-attempt', service: 'edges' },
+        { path: '/after-attempt', service_references:[{id:'ref-'+('edges'),service_id:'edges',position:0,weight:100,priority:1,is_disabled:false}] },
       ],
     } as any;
     initializeRuntimeState(config);

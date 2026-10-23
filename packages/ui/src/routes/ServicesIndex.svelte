@@ -44,8 +44,9 @@
   let serviceToDelete: Service | null = $state(null);
   let deleteConfirmationInput = $state('');
 
-  let isReferenced = $derived(serviceToDelete ? getServiceConsumers(serviceToDelete.name, routes).count > 0 : false);
-  let referencingRoutes = $derived(serviceToDelete ? getServiceConsumers(serviceToDelete.name, routes).routes : []);
+  let isReferenced = $derived(serviceToDelete ? getServiceConsumers(serviceToDelete._uid ?? '', routes, services).count > 0 : false);
+  let referencingRoutes = $derived(serviceToDelete ? getServiceConsumers(serviceToDelete._uid ?? '', routes, services).routes : []);
+  let referencingServices = $derived(serviceToDelete ? getServiceConsumers(serviceToDelete._uid ?? '', routes, services).services : []);
   let canConfirmDelete = $derived(serviceToDelete && !isReferenced && deleteConfirmationInput === serviceToDelete.name);
 
   // Endpoint drawer
@@ -92,7 +93,7 @@
     } catch (e: unknown) {
       if (e instanceof ServiceReferencedError) {
         toast.show($_('services.deleteBlockedByReferences', {
-          values: { name: e.serviceName, routes: e.routePaths.join(', ') }
+          values: { name: e.serviceName, routes: [...e.routePaths, ...e.serviceNames].join(', ') }
         }), 'error');
       } else {
         toast.show(e instanceof Error ? e.message : $_('services.deleteFailed'), 'error');
@@ -156,8 +157,8 @@
 
 
   let serviceViewModels = $derived(services.map((service) => {
-    const consumers = getServiceConsumers(service.name, routes);
-    const health = getServiceHealthAggregate(service, $runtimeUpstreams);
+    const consumers = getServiceConsumers(service._uid ?? '', routes, services);
+    const health = getServiceHealthAggregate(service, $runtimeUpstreams, services);
     return { service, consumers, health, isUnreferenced: consumers.count === 0 };
   }));
 
@@ -179,6 +180,8 @@
     return (
       vm.service.name.toLowerCase().includes(q) ||
       (vm.service.description?.toLowerCase().includes(q) ?? false) ||
+      (vm.service.service_references ?? []).some(reference => (services.find(service => service._uid === reference.service_id)?.name ?? reference.service_id).toLowerCase().includes(q)) ||
+      vm.consumers.services.some(service => service.name.toLowerCase().includes(q)) ||
       vm.service.endpoints.some((e) => e.target.toLowerCase().includes(q)) ||
       vm.consumers.routePaths.some((p) => p.toLowerCase().includes(q))
     );
@@ -427,7 +430,7 @@
 <div class="flex items-center gap-4 font-mono">
             <div class="flex flex-col items-end leading-none">
               <span class="nx-label-sm">{$_('services.endpointLabel')}</span>
-              <span class="mt-0.5 text-[12px] text-zinc-200">{vm.service.endpoints.length}</span>
+              <span class="mt-0.5 text-[12px] text-zinc-200">EP·{vm.service.endpoints.length} SVC·{vm.service.service_references?.length ?? 0}</span>
             </div>
             <div class="flex flex-col items-end leading-none">
               <span class="nx-label-sm">{$_('services.consumerLabel')}</span>
@@ -457,21 +460,25 @@
                 {/if}
               </div>
               <EndpointQuickPreview
-                stateKey={vm.service.name}
+                stateKey={vm.service._uid ?? ''}
                 endpoints={vm.service.endpoints}
                 limit={3}
                 on:overflowClick={() => openEndpointsDrawer(vm.service)}
               />
             </div>
 
+            {#each vm.service.service_references ?? [] as reference}
+              <div class="font-mono text-xs text-nexus-300">SVC · {services.find(service => service._uid === reference.service_id)?.name ?? reference.service_id}</div>
+            {/each}
             <!-- referenced-by -->
             <div class="pt-3 border-t border-carbon-600">
               <span class="nx-label block mb-1.5">// {$_('services.referencedBy')}</span>
               <div class="flex flex-wrap gap-1.5" data-testid="consumer-tags">
+                {#each vm.consumers.services as consumer}<RelationshipLink type="service" name={consumer.name} />{/each}
                 {#each vm.consumers.routes as route}
                   <RelationshipLink type="route" name={route.path} className="text-[11px]" />
                 {:else}
-                  <span class="font-mono text-[10px] uppercase tracking-command text-zinc-600">— {$_('services.noReferences')}</span>
+                  {#if !vm.consumers.services.length}<span class="font-mono text-[10px] uppercase tracking-command text-zinc-600">— {$_('services.noReferences')}</span>{/if}
                 {/each}
               </div>
             </div>
@@ -530,10 +537,10 @@
             </thead>
             <tbody>
               {#each sortEndpointsForDisplay(selectedServiceForEndpoints.endpoints) as upstream}
-                {@const record = findRuntimeUpstream($runtimeUpstreams, selectedServiceForEndpoints.name, upstream._uid)}
+                {@const record = findRuntimeUpstream($runtimeUpstreams, selectedServiceForEndpoints._uid ?? '', upstream._uid)}
                 <tr class="border-b border-carbon-600/60 hover:bg-carbon-700/40 transition-colors" class:opacity-50={upstream.is_disabled}>
                   <td class="py-2.5 px-4">
-                    <RuntimeStatus stateKey={selectedServiceForEndpoints.name} {upstream} />
+                    <RuntimeStatus stateKey={selectedServiceForEndpoints._uid ?? ''} {upstream} />
                   </td>
                   <td class="py-2.5 px-4">
                     <div class="flex flex-col">
@@ -600,6 +607,7 @@
             <div class="space-y-2">
               <span class="nx-label">// {$_('services.referencedBy')}</span>
               <div class="flex flex-wrap gap-2" data-testid="referenced-routes-container">
+                {#each referencingServices as consumer}<RelationshipLink type="service" name={consumer.name} />{/each}
                 {#each referencingRoutes as route}
                   <RelationshipLink type="route" name={route.path} />
                 {/each}

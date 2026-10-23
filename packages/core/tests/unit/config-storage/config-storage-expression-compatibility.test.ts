@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { parseNormalizeCompile } from '../../../src/config-storage';
+import { parseNormalizeCompile } from '../../../src/config-storage/compiler';
 
 declare global {
   var __expressionCompileProbe: number;

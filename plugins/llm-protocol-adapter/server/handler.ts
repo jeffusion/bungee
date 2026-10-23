@@ -24,7 +24,8 @@ export function responseHandler(input: {
     log?: (data: unknown) => void;
 }): Plugin {
     let context: any, terminal: any, flushed = false;
-    const dispose = () => input.session.dispose();
+    let disposed=false;
+    const dispose = () => {if(disposed)return;disposed=true;input.session.dispose();};
     input.signal?.addEventListener('abort', dispose, { once: true });
     const release = () => { input.signal?.removeEventListener('abort', dispose); dispose(); };
     const check = () => input.signal?.throwIfAborted();
@@ -32,6 +33,7 @@ export function responseHandler(input: {
         if (e.type === 'response.completed')
             terminal = e.response; };
     return { bodyRequirements() { return { request: 'none', response: ['json', 'sse-json'] }; }, register(hooks: PluginHooks) {
+            hooks.onFinally.tap('llm-adapter.dispose',release);
             hooks.onValidateOutbound.tapPromise('llm-adapter.target', async (outbound) => {
                 check();
                 try {

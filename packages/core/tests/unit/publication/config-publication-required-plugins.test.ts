@@ -8,7 +8,7 @@ describe('route-reachable required plugins', () => {
   test('does not require plugins from an orphan service', () => {
     const config: AppConfig = {
       routes: [{ path: '/direct', endpoints: [{ target: 'http://direct.test' }] }],
-      services: [{ name: 'orphan', plugins: [plugin('orphan')], endpoints: [{ target: 'http://orphan.test' }] }],
+      services: [{ id:'orphan', name: 'orphan', plugins: [plugin('orphan')], endpoints: [{ target: 'http://orphan.test' }] }],
     };
 
     expect(requiredPluginNames(config)).toEqual([]);
@@ -16,8 +16,8 @@ describe('route-reachable required plugins', () => {
 
   test('requires a service plugin when a route references that service', () => {
     const config: AppConfig = {
-      routes: [{ path: '/service', service: 'reachable' }],
-      services: [{ name: 'reachable', plugins: [plugin('service')], endpoints: [{ target: 'http://service.test' }] }],
+      routes: [{ path: '/service', service_references:[{id:'ref-'+('reachable'),service_id:'reachable',position:0,weight:100,priority:1,is_disabled:false}] }],
+      services: [{ id:'reachable', name: 'reachable', plugins: [plugin('service')], endpoints: [{ target: 'http://service.test' }] }],
     };
 
     expect(requiredPluginNames(config)).toEqual(['service']);
@@ -25,9 +25,9 @@ describe('route-reachable required plugins', () => {
 
   test('requires service-level and effective endpoint plugins', () => {
     const config: AppConfig = {
-      routes: [{ path: '/service', service: 'reachable' }],
+      routes: [{ path: '/service', service_references:[{id:'ref-'+('reachable'),service_id:'reachable',position:0,weight:100,priority:1,is_disabled:false}] }],
       services: [{
-        name: 'reachable',
+        id:'reachable', name: 'reachable',
         plugins: [plugin('service')],
         endpoints: [{ target: 'http://service.test', plugins: [plugin('endpoint')] }],
       }],

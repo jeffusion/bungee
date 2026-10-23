@@ -59,7 +59,7 @@ export function validateServiceDomain(
   endpointCount: number,
   context: ValidationContext,
 ): void {
-  if (endpointCount === 0) context.add('empty_service', `${path}.endpoints`, 'Service requires at least one upstream');
+  if (endpointCount === 0) context.add('empty_service', `${path}.endpoints`, 'Service requires at least one upstream or service reference');
   validateServicePolicies(object, path, context);
 }
 

@@ -113,7 +113,6 @@ describe('FailoverCoordinator', () => {
     ];
 
     const route = createMockRoute({
-      service: 'sticky-service',
       load_balancing: {
         policy: 'consistent_hash',
         hash_policy: { expression: "{{ headers['x-session-id'] }}" }

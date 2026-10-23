@@ -1,3 +1,4 @@
+import { serviceReference } from '../helpers/service-references';
 import { afterAll,beforeAll,test } from 'bun:test';
 import assert from 'node:assert/strict';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
@@ -38,7 +39,7 @@ async function runRouteScenario(scenario:string){
     routes: [
       { id: routeIds.custom, position: 0, path: '/custom', endpoints: [{ id: '94a4618e-4973-4882-a83e-9543a05f1d34', position: 0, target: 'https://example.test/api', weight: 100, priority: 1, plugins: [] }], plugins: [] },
       { id: routeIds.duplicate, position: 1, path: '/duplicate', endpoints: [bound], plugins: [] },
-      { id: routeIds.service, position: 2, path: '/service-route', service_id: '6f035eda-d9a1-47be-9ff5-c184b39db551', plugins: [] },
+      { id: routeIds.service, position: 2, path: '/service-route', service_references: [serviceReference('6f035eda-d9a1-47be-9ff5-c184b39db551')], plugins: [] },
     ] }, plugin_activations: [] };
   let revision = 1, draftRef = '', resetConsume = 0, rejectNextCreatePut = false;
   await page.route('**/*', async route => {

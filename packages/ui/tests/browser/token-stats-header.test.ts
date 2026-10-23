@@ -1,3 +1,4 @@
+import { serviceReference } from '../helpers/service-references';
 import { test as browserTest } from 'bun:test';
 import { expect } from 'playwright/test';
 import { dashboardSample, historySample } from '../helpers/dashboard/stats';
@@ -19,7 +20,7 @@ const runtime = configurationRuntimeFixture(publicationFixture({ operation: null
 const logical = runtime.config.logical_configuration;
 logical.services = [{ id: 'service-test', position: 0, name: 'test-service',
   endpoints: [{ id: 'endpoint-test', position: 0, target: 'https://example.com', weight: 100, priority: 1, is_disabled: false, plugins: [] }], plugins: [] }];
-logical.routes = [{ id: 'route-test', position: 0, path: '/test', service_id: 'service-test', plugins: [] }];
+logical.routes = [{ id: 'route-test', position: 0, path: '/test', service_references: [serviceReference('service-test')], plugins: [] }];
 const errors: string[] = [];
   observeNetwork(page, errors);
 page.on('pageerror', error => errors.push(error.message));

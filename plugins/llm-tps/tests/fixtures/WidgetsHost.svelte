@@ -23,7 +23,7 @@
     endpoint('fast', 'Fast endpoint with a very long English description that wraps across narrow displays', 0),
     endpoint('slow', '', 1),
     endpoint('eu', '', 2),
-  ] }], routes: [{ id: 'route-1', position: 0, path: '/chat/', service_id: 'service-1', plugins: [] },
+  ] }], routes: [{ id: 'route-1', position: 0, path: '/chat/', service_references: [{ id: crypto.randomUUID(), position: 0, service_id: 'service-1', weight: 100, priority: 1, is_disabled: false }], plugins: [] },
     { id: 'route-2', position: 1, path: '/agents/', endpoints: [endpoint('fast', '第二条路由的同名端点', 0), endpoint('backup', '', 1)], plugins: [] },
     { id: 'route-3', position: 2, path: '/research/', endpoints: [endpoint('api', '', 0)], plugins: [] }], plugins: [] } as LogicalConfiguration);
   async function changeLocale(language: string) { locale.set(language); await waitLocale(language); }

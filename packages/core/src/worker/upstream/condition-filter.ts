@@ -3,7 +3,7 @@
  * Filters upstreams based on condition expressions evaluated against request context
  */
 
-import type { RuntimeUpstream } from '../types';
+import type { RuntimeCandidate } from '../types';
 import type { ExpressionContext } from '../../expression-engine';
 import { processDynamicValue } from '../../expression-engine';
 import { logger } from '../../logger';
@@ -32,10 +32,10 @@ import { logger } from '../../logger';
  * // Returns: [{ target: 'http://openai', ... }, { target: 'http://fallback', ... }]
  * ```
  */
-export function filterByCondition(
-  upstreams: RuntimeUpstream[],
+export function filterByCondition<T extends RuntimeCandidate>(
+  upstreams: T[],
   context: ExpressionContext
-): RuntimeUpstream[] {
+): T[] {
   return upstreams.filter((upstream) => {
     // No condition means always match
     if (!upstream.condition) {

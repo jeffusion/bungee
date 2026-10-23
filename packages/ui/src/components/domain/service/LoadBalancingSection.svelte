@@ -4,11 +4,11 @@
   import { Input } from '$components/ui/input';
   import { _ } from '$i18n';
 
-  export let load_balancing: LoadBalancingConfig | undefined;
+  let { load_balancing = $bindable() }: { load_balancing?: LoadBalancingConfig } = $props();
 
-  let policy: LoadBalancingConfig['policy'] = 'weighted_random';
-  let hashHeader: string = '';
-  let hashExpression: string = '';
+  let policy = $state<LoadBalancingConfig['policy']>('weighted_random');
+  let hashHeader = $state('');
+  let hashExpression = $state('');
   let initialized = false;
 
   function initializeFromProps() {
@@ -27,10 +27,10 @@
     };
   }
 
-  $: if (!initialized) {
+  $effect(() => { if (!initialized) {
     initializeFromProps();
     initialized = true;
-  }
+  } });
 </script>
 
 <div class="space-y-4" data-testid="service-load-balancing-section">

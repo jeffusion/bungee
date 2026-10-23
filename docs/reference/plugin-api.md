@@ -49,7 +49,7 @@ interface Plugin {
 | `PluginBodyRequirementContext` 字段 | 含义 |
 | --- | --- |
 | `requestId`, `method`, `url` | 当前请求身份、HTTP 方法、URL |
-| `routeId?`, `serviceId?`, `upstreamId?` | 已选择的对象；未选中 endpoint 不参与需求计算 |
+| `routeId?`, `serviceId?`, `upstreamId?` | 已选择的对象；只计算实际进入的 Service 栈和已选 Endpoint 的插件需求 |
 | `stage` | route 或 selected |
 
 | 需求 | 效果 |
@@ -81,6 +81,10 @@ interface Plugin {
 
 网关阶段 Hook（`onGateway*`）、准入与 attempt 观察的全部签名见 Hook 定义。平台装配要求必需网关阶段恰好一个 provider；普通 scoped 插件不应重复注册核心阶段提供者。
 
+请求顺序为 Global → Route → 外层 Service → 内层 Service → Endpoint。同层 stage 与同名覆盖保持各自作用域语义。每个响应 Hook 家族按 Endpoint → 内层 Service → 外层 Service → Route → Global → dispatch adapter 运行。Service 请求 Hook 每个调用帧执行一次，Endpoint 请求 Hook 每次物理尝试执行；Service 切换不重跑祖先请求 Hook。
+
+失败分支及时运行自身 `onError`、`onFinally` 并释放请求态，最终响应仅经过当前分支的 Service 栈。共享子 Service 经不同路径串行重入前，前一次调用帧已经结束；`requestId` 保持不变，`attemptId` 标识物理尝试。观察者按当前 Endpoint、由内向外的 Service、Route、Global 保留最具体的同名实例；实际执行的 Hook 实例分别保有租约。
+
 路由或服务阶段 `onInterceptRequest` 返回成功响应时，宿主仍执行当前访问权限的只读检查，再返回本地响应；不连接上游或预留上游预算。拦截响应不执行上游响应 Hook。
 
 URL 可改 pathname、search、hash，不能改 protocol、host 或 port。Headers 在请求上下文中为普通记录，不是 Headers 实例。对冻结 JSON／事件进行转换时创建新对象，不能修改共享视图。
@@ -89,7 +93,7 @@ URL 可改 pathname、search、hash，不能改 protocol、host 或 port。Heade
 
 `MutableRequestContext.annotations?: Record<string, PluginConfigValue>` 为插件拥有的内部 JSON 元数据。核心只负责传递、复制和冻结，不解释键或模型语义。dispatch 到最终 route/service、返回新上下文的请求 hook 和上游 hook 均传递注解。
 
-每个故障切换 attempt 从 route/service 基线深复制注解；`OutboundValidationContext.annotations` 是最终注解的深冻结快照，attempt 之间不共享可变对象。修复重试保存当次最终注解，跳过已完成转换后重新校验。辅助请求和每次 WebSocket generation 都从新上下文开始，不继承父请求或上次生成的注解。
+每层故障切换从其父层已处理的分支基线深复制注解；`OutboundValidationContext.annotations` 是最终注解的深冻结快照，attempt 之间不共享可变对象。修复重试保存当次最终注解，跳过已完成转换后重新校验。辅助请求和每次 WebSocket generation 都从新上下文开始，不继承父请求或上次生成的注解。
 
 注解不从客户端正文或请求头加载，不写入上游请求、历史缓存或持久化数据。业务契约由相应插件的公开 contract 定义，例如[模型目录身份](llm-protocol-adapter.md#最终模型身份校验)。
 
@@ -127,7 +131,7 @@ hooks.onStreamChunk.tap('example', envelope => {
 
 `onDispatchRequest` 只解析编译配置声明的 `gateway_target`，返回最终 target/protocol 及可选一次性 `prepareRequest`。宿主先执行入口和最终目标的只读访问授权，再调用准备回调，随后转换正文并进入正常上游链路。Ingress 插件通过 `authorize(target, policy)` 返回拒绝或 null；此阶段不调用 plan、生成准入票据或提交预算。实际发送前仍执行正式准入，每次最终模型映射和尝试都检查适用权限。
 
-声明 `protocol` 的生成调度使用 `@jeffusion/bungee-llms/plugin-api` 的 `protocolRequestPath`：Responses 为 `/responses`，Chat Completions 为 `/v1/chat/completions`，Anthropic Messages 为 `/v1/messages`，Gemini 为 `/v1beta/models/{model}:generateContent` 或 `:streamGenerateContent`，流式 Gemini 设置 `alt=sse`。函数覆盖上述四种格式，具体插件的可选协议仍由其配置和转换能力限定。端点不继承入口路径。service 目标直接使用端点，不执行入口的 `path_rewrite`；route 目标在端点前加目标 route.path，再执行该目标的路径规则。未声明协议的调度使用入口相对路径，同样只为 route 目标添加路由前缀。附属 Responses 请求使用相同端点规则。
+声明 `protocol` 的生成调度使用 `@jeffusion/bungee-llms/plugin-api` 的 `protocolRequestPath`：Responses 为 `/responses`，Chat Completions 为 `/v1/chat/completions`，Anthropic Messages 为 `/v1/messages`，Gemini 为 `/v1beta/models/{model}:generateContent` 或 `:streamGenerateContent`，流式 Gemini 设置 `alt=sse`。函数覆盖上述四种格式，具体插件的可选协议仍由其配置和转换能力限定。端点不继承入口路径。service 目标进入所选 Service 的正常分层选择，不执行入口的 `path_rewrite`；route 目标在端点前加目标 route.path，再执行该目标的路径规则。未声明协议的调度使用入口相对路径，同样只为 route 目标添加路由前缀。附属 Responses 请求使用相同端点规则。
 
 上游 URL 的路径作为网关基址前缀拼接。Responses 保留宿主及提供商插件的 `/responses` 入口契约：公共 OpenAI API 的上游基址包含 `/v1`；ChatGPT OAuth 上游基址使用 origin，由其插件改写到 `/v1/responses` 或原生 Codex 后端。其他三种端点已包含 API 版本，上游基址不应重复包含 `/v1` 或 `/v1beta`。
 

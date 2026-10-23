@@ -82,7 +82,7 @@ function validateFailover(value: unknown, path: string, context: ValidationConte
   }
 }
 
-function validateLoadBalancing(value: unknown, path: string, context: ValidationContext): void {
+export function validateLoadBalancing(value: unknown, path: string, context: ValidationContext): void {
   const object = objectField(value, path, ['policy', 'hash_policy'], context);
   if (!object) return;
   const policies = new Set(['weighted_random', 'round_robin', 'least_requests', 'consistent_hash']);
@@ -109,4 +109,13 @@ export function validateServicePolicies(object: JsonObject, path: string, contex
   validateHealth(object.health_check, `${path}.health_check`, context);
   validateFailover(object.failover, `${path}.failover`, context);
   validateLoadBalancing(object.load_balancing, `${path}.load_balancing`, context);
+}
+
+export function validateServiceSelectionPolicies(object: JsonObject, path: string, context: ValidationContext): void {
+  validateLoadBalancing(object.load_balancing, `${path}.load_balancing`, context);
+  const failover = objectField(object.failover, `${path}.failover`, ['enabled', 'retry_on', 'retry_on_response'], context);
+  if (!failover) return;
+  booleanField(failover, 'enabled', `${path}.failover`, context);
+  if (failover.retry_on !== undefined) validateRetryOn(failover.retry_on, `${path}.failover.retry_on`, context);
+  if (failover.retry_on_response !== undefined) stringArray(failover.retry_on_response, `${path}.failover.retry_on_response`, context);
 }

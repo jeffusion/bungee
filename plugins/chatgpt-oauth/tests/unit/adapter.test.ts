@@ -845,4 +845,13 @@ describe('ChatGPT OAuth adapter', () => {
     expect(hooks.onStreamChunk.hasCallbacks()).toBe(false);
   });
 
+  test('registered finally ends the request conversion frame before reuse',async()=>{
+    const hooks=createPluginHooks();new ChatgptOauthPlugin().register(hooks);
+    const context=request(CHAT_COMPLETIONS_PATH,false);await hooks.onBeforeRequest.promise(context);
+    await hooks.onFinally.promise({...context,success:false,latencyMs:1});
+    const response=responseStream(completionSse);
+    const result=await hooks.onRawResponse.promise({response,completion:completion()}, {...rawContext(context),upstreamUrl:undefined});
+    expect(result.response).toBe(response);expect(await result.response.text()).toContain('response.completed');
+  });
+
 });

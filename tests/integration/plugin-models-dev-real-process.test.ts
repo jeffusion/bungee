@@ -176,9 +176,9 @@ describe('models-dev catalog real-process integration (explicit chain activation
             }],
           }],
           routes: [{
-            id: ROUTE_ID, position: 1, path: '/v1/chat/completions', service_id: SERVICE_ID, plugins: [],
+            id: ROUTE_ID, position: 1, path: '/v1/chat/completions', service_references: [{ id: crypto.randomUUID(), position: 0, service_id: SERVICE_ID, weight: 100, priority: 1, is_disabled: false }], plugins: [],
           }, {
-            id: ORDINARY_ROUTE_ID, position: 2, path: '/ordinary', service_id: SERVICE_ID, plugins: [],
+            id: ORDINARY_ROUTE_ID, position: 2, path: '/ordinary', service_references: [{ id: crypto.randomUUID(), position: 0, service_id: SERVICE_ID, weight: 100, priority: 1, is_disabled: false }], plugins: [],
           }],
         },
       };

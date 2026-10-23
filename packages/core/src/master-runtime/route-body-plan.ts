@@ -1,4 +1,5 @@
-import type { ConfigurationAggregate, ModificationRules, ResponseModificationRules, ConfigurationUpstream } from '@jeffusion/bungee-types';
+import {resolveReachableServices,resolveReachableEndpoints} from '../utils/endpoint-resolver';
+import type { ConfigurationAggregate, ModificationRules, ResponseModificationRules } from '@jeffusion/bungee-types';
 import { analyzeExpressionDependencies, hasBodyModification } from '../utils/expression-dependencies';
 import { deepMergeRules } from '../worker/rules/deep-merge';
 
@@ -26,20 +27,21 @@ export function buildRouteBodyPlans(aggregate: ConfigurationAggregate) {
   const pluginNames = (...bindings: Array<readonly {name: string; enabled: boolean}[] | undefined>) =>
     [...new Set(bindings.flatMap(values => (values ?? []).filter(value => value.enabled && active.has(value.name)).map(value => value.name)))];
   return logical.routes.map(route => {
-    const service = 'service_id' in route ? logical.services.find(value => value.id === route.service_id) : undefined;
-    const endpoints: readonly ConfigurationUpstream[] = service?.endpoints ?? route.endpoints ?? [];
-    const retry = Boolean(route.retry?.enabled || service?.failover?.enabled);
+    const services=resolveReachableServices(route,logical.services);
+    const endpoints=resolveReachableEndpoints(route,logical.services);
+    const retry=Boolean(route.retry?.enabled || route.failover?.enabled || services.some(service=>service.failover?.enabled));
     return {
       route_id: route.id, path: route.path,
-      ...directionPlan(route.request ?? {}, route.response ?? {}, { rate_limit: route.rate_limit, load_balancing: service?.load_balancing }),
-      replay: retry, dynamic_plugins: pluginNames(logical.plugins, route.plugins, service?.plugins),
-      endpoints: endpoints.filter(endpoint => !endpoint.is_disabled).map(endpoint => {
+      ...directionPlan(route.request ?? {}, route.response ?? {}, { rate_limit: route.rate_limit, load_balancing: route.load_balancing }),
+      replay: retry, dynamic_plugins: pluginNames(logical.plugins,route.plugins,...services.map(service=>service.plugins)),
+      endpoints: endpoints.map(endpoint => {
+        const owners=services.filter(service=>service.endpoints.some(value=>value.id===endpoint.id));
         const request = deepMergeRules(route.request ?? {}, endpoint.request ?? {});
         const response = deepMergeRules(endpoint.response ?? {}, route.response ?? {}) as ResponseModificationRules;
         response.body_formats = route.response?.body_formats ?? endpoint.response?.body_formats;
         return { upstream_id: endpoint.id,
-          ...directionPlan(request, response, { condition: endpoint.condition, rate_limit: route.rate_limit, load_balancing: service?.load_balancing }),
-          replay: retry, dynamic_plugins: pluginNames(logical.plugins, route.plugins, service?.plugins, endpoint.plugins) };
+          ...directionPlan(request, response, { condition: endpoint.condition, rate_limit: route.rate_limit, load_balancing:owners.map(service=>service.load_balancing) }),
+          replay: retry, dynamic_plugins: pluginNames(logical.plugins,route.plugins,...services.map(service=>service.plugins),endpoint.plugins) };
       }),
     };
   });

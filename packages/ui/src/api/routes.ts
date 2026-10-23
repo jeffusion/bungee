@@ -62,14 +62,21 @@ function persistedRoute(route: ConfigurationRoute, logical: Awaited<ReturnType<t
   return toV2Route(toEditorRoute(route, logical.services), logical, route, route.position);
 }
 
+/** Read-only leaf projection for previews and validation; never used as a save payload. */
 export function resolveRouteEndpoints(
-  route: Partial<Pick<Route, 'endpoints' | 'service'>>,
+  route: Partial<Pick<Route, 'endpoints' | 'service_references'>>,
   services: Service[] = [],
 ): Upstream[] {
-  if (route.service) {
-    return services.find((service) => service.name === route.service)?.endpoints ?? [];
-  }
-  return route.endpoints ?? [];
+  const visit = (owner: Partial<Pick<Service, 'endpoints' | 'service_references'>>, seen: Set<string>): Upstream[] => [
+    ...(owner.endpoints ?? []),
+    ...(owner.service_references ?? []).flatMap(reference => {
+      if (seen.has(reference.service_id)) return [];
+      const service = services.find(service => service._uid === reference.service_id);
+      if (!service) return [];
+      return visit(service, new Set([...seen, reference.service_id])).map(endpoint => ({ ...endpoint, is_disabled: reference.is_disabled || endpoint.is_disabled }));
+    }),
+  ];
+  return visit(route, new Set());
 }
 
 export class RoutesAPI {

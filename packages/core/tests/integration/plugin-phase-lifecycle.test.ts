@@ -122,7 +122,7 @@ function createLifecycleConfig(paths: Record<string, string>): AppConfig {
     ],
     services: [
       {
-        name: SERVICE_NAME,
+        id:SERVICE_NAME, name: SERVICE_NAME,
         plugins: [
           pluginConfig(paths.serviceOnly, 'phase-service-only', 'service'),
           pluginConfig(paths.sameName, 'phase-shared', 'shared-service'),
@@ -144,7 +144,7 @@ function createLifecycleConfig(paths: Record<string, string>): AppConfig {
     routes: [
       {
         path: ROUTE_ALPHA,
-        service: SERVICE_NAME,
+        service_references:[{id:'ref-'+(SERVICE_NAME),service_id:SERVICE_NAME,position:0,weight:100,priority:1,is_disabled:false}],
         plugins: [
           pluginConfig(paths.routeOnly, 'phase-route-only', 'route'),
           pluginConfig(paths.sameName, 'phase-shared', 'shared-route'),
@@ -152,7 +152,7 @@ function createLifecycleConfig(paths: Record<string, string>): AppConfig {
       },
       {
         path: ROUTE_BETA,
-        service: SERVICE_NAME,
+        service_references:[{id:'ref-'+(SERVICE_NAME),service_id:SERVICE_NAME,position:0,weight:100,priority:1,is_disabled:false}],
         plugins: [pluginConfig(paths.routeOnly, 'phase-route-only', 'route-beta')],
       },
     ],

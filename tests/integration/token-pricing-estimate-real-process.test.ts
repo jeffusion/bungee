@@ -141,8 +141,8 @@ test('original-lab estimates and context tiers settle protected USD budgets acro
       plugin_activations: ['models-dev', 'token-metering', 'token-stats', 'catalog-version-probe', 'key-access', 'token-budget', 'user-auth'].map(plugin_name => ({ plugin_name })),
       logical_configuration: { plugins: [], services: [{ id: SERVICE, position: 1, name: 'estimate-acceptance', plugins: [],
         endpoints: [{ id: UPSTREAM, position: 1, target: `http://127.0.0.1:${upstream.port}/v1/`, weight: 100, priority: 1, is_disabled: false, plugins: [] }] }],
-      routes: [{ id: ROUTE, position: 1, path: '/pricing-estimate', service_id: SERVICE, plugins: [] },
-        { id: '30000000-0000-4000-8000-0000000000af', position: 2, path: '/catalog-fixture-ready', service_id: SERVICE, plugins: [] }] } };
+      routes: [{ id: ROUTE, position: 1, path: '/pricing-estimate', service_references: [{ id: crypto.randomUUID(), position: 0, service_id: SERVICE, weight: 100, priority: 1, is_disabled: false }], plugins: [] },
+        { id: '30000000-0000-4000-8000-0000000000af', position: 2, path: '/catalog-fixture-ready', service_references: [{ id: crypto.randomUUID(), position: 0, service_id: SERVICE, weight: 100, priority: 1, is_disabled: false }], plugins: [] }] } };
     const mutation = randomUUID();
     await api('/api/config', 'PUT', { expected_revision: initial.revision, mutation_id: mutation, aggregate });
     revision = initial.revision + 1;

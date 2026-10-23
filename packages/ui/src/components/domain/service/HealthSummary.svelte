@@ -39,7 +39,7 @@
   function getStateLabel(state: ServiceHealthAggregate['state']): string {
     switch (state) {
       case 'healthy':   return $_('upstreamsModal.statusHealthy');
-      case 'degraded':  return $_('upstreamsModal.statusHalfOpen');
+      case 'degraded':  return $_('serviceReferences.degraded');
       case 'mixed':     return $_('runtime.mixed');
       case 'unknown':   return $_('upstreamsModal.statusUnknown');
       case 'unhealthy': return $_('upstreamsModal.statusUnhealthy');

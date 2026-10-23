@@ -10,6 +10,9 @@ import {
   type UpstreamRow,
 } from './relation-materialization';
 import {
+  requireBooleanInteger,
+  requirePositiveFinite,
+  requireOneOf,
   requireOptionalGlobalScalar,
   requirePluginName,
   requireSafeInteger,
@@ -26,12 +29,12 @@ type SettingsRow = {
   readonly publication_json: string | null;
 };
 type ServiceRow = { readonly id: string; readonly position: number; readonly name: string; readonly policy_json: string };
-type RouteRow = { readonly id: string; readonly position: number; readonly path: string; readonly service_id: string | null; readonly policy_json: string };
+type RouteRow = { readonly id: string; readonly position: number; readonly path: string; readonly policy_json: string };
 type ActivationRow = { readonly plugin_name: string };
 type JsonObject = PersistedJsonObject;
 
-const SERVICE_RESERVED = new Set(['id', 'position', 'name', 'endpoints', 'plugins']);
-const ROUTE_RESERVED = new Set(['id', 'position', 'path', 'service_id', 'service', 'endpoints', 'plugins']);
+const SERVICE_RESERVED = new Set(['id', 'position', 'name', 'endpoints', 'service_references', 'plugins']);
+const ROUTE_RESERVED = new Set(['id', 'position', 'path', 'service_id', 'service', 'service_references', 'endpoints', 'plugins']);
 
 function readSettings(db: Database): JsonObject {
   const hasPublication = sqliteAll<{ readonly name: string }, []>(db, 'PRAGMA table_info(settings)')
@@ -52,6 +55,25 @@ function readSettings(db: Database): JsonObject {
 }
 
 export function readRawActiveAggregate(db: Database): unknown {
+  const references = new Map<string, JsonObject[]>();
+  for (const row of sqliteAll<{id:string;owner_kind:string;owner_service_id:string|null;route_id:string|null;position:number;service_id:string;weight:number;priority:number;is_disabled:number}, []>(db,
+    'SELECT id,owner_kind,owner_service_id,route_id,position,service_id,weight,priority,is_disabled FROM service_references ORDER BY owner_kind,position')) {
+    const ownerKind = requireOneOf(row.owner_kind, ['service', 'route'], 'service_references.owner_kind');
+    const ownerId = ownerKind === 'service' ? row.owner_service_id : row.route_id;
+    if (ownerId === null || (ownerKind === 'service' ? row.route_id !== null : row.owner_service_id !== null)) {
+      throw new ConfigRepositoryError('schema_corrupt', 'service reference owner is invalid');
+    }
+    const key = `${ownerKind}:${requireUuid(ownerId, 'service_references.owner_id')}`;
+    const values = references.get(key) ?? [];
+    values.push({id:requireUuid(row.id, 'service_references.id'),position:requireSafeInteger(row.position, 'service_references.position'),
+      service_id:requireUuid(row.service_id, 'service_references.service_id'),weight:requirePositiveFinite(row.weight, 'service_references.weight'),
+      priority:requirePositiveFinite(row.priority, 'service_references.priority'),is_disabled:requireBooleanInteger(row.is_disabled, 'service_references.is_disabled')});
+    references.set(key,values);
+  }
+  const takeReferences = (key: string): JsonObject => {
+    const values = references.get(key); references.delete(key);
+    return values?.length ? {service_references: values} : {};
+  };
   const bindings = groupBindings(sqliteAll<BindingRow, []>(db, `SELECT id,scope_kind,scope_owner,service_id,route_id,
     upstream_id,position,plugin_name,options_json,enabled FROM plugin_bindings ORDER BY scope_kind,scope_owner,position`));
   const upstreams = groupUpstreams(sqliteAll<UpstreamRow, []>(db, `SELECT id,owner_kind,service_id,route_id,
@@ -59,20 +81,20 @@ export function readRawActiveAggregate(db: Database): unknown {
   const services = sqliteAll<ServiceRow, []>(db, 'SELECT id,position,name,policy_json FROM services ORDER BY position')
     .map((row) => ({ ...parseCanonicalObject(row.policy_json, 'service policy_json', SERVICE_RESERVED),
       id: requireUuid(row.id, 'services.id'), position: requireSafeInteger(row.position, 'services.position'),
-      name: row.name, endpoints: takeGroup(upstreams, `service:${row.id}`),
+      ...takeReferences(`service:${row.id}`), name: row.name, endpoints: takeGroup(upstreams, `service:${row.id}`),
       plugins: takeGroup(bindings, `service:${row.id}`) }));
-  const routes = sqliteAll<RouteRow, []>(db, 'SELECT id,position,path,service_id,policy_json FROM routes ORDER BY position')
+  const routes = sqliteAll<RouteRow, []>(db, 'SELECT id,position,path,policy_json FROM routes ORDER BY position')
     .map((row) => ({ ...parseCanonicalObject(row.policy_json, 'route policy_json', ROUTE_RESERVED),
       id: requireUuid(row.id, 'routes.id'), position: requireSafeInteger(row.position, 'routes.position'),
-      path: row.path, ...(row.service_id === null ? { endpoints: takeGroup(upstreams, `route:${row.id}`) }
-        : { service_id: requireUuid(row.service_id, 'routes.service_id') }),
+      path: row.path, ...(references.has(`route:${row.id}`) ? takeReferences(`route:${row.id}`)
+        : { endpoints: takeGroup(upstreams, `route:${row.id}`) }),
       plugins: takeGroup(bindings, `route:${row.id}`) }));
   const activations = sqliteAll<ActivationRow, []>(db, 'SELECT plugin_name FROM plugin_activations ORDER BY plugin_name');
   const input = { logical_configuration: { ...readSettings(db), services, routes,
     plugins: takeGroup(bindings, 'global:') }, plugin_activations: activations.map(({ plugin_name }) => ({
       plugin_name: requirePluginName(plugin_name, 'plugin_activations.plugin_name'),
     })) };
-  if (bindings.size !== 0 || upstreams.size !== 0) {
+  if (bindings.size !== 0 || upstreams.size !== 0 || references.size !== 0) {
     throw new ConfigRepositoryError('schema_corrupt', 'normalized relation rows were not consumed');
   }
   return input;

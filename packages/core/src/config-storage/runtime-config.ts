@@ -62,7 +62,7 @@ function compileEndpoint(
   upstream: ConfigurationUpstream,
   activeNames: ReadonlySet<string>,
 ): Endpoint {
-  const { id, position: _position, plugins: bindings, ...policies } = upstream;
+  const { id, plugins: bindings, ...policies } = upstream;
   const plugins = compilePlugins(bindings, activeNames);
   return {
     ...policies,
@@ -80,6 +80,7 @@ function compileService(
     position: _position,
     name,
     endpoints,
+    service_references,
     plugins: bindings,
     ...policies
   } = service;
@@ -88,6 +89,7 @@ function compileService(
     ...policies,
     id,
     name,
+    ...(service_references?.length ? { service_references: [...service_references].sort(comparePosition) } : {}),
     endpoints: [...endpoints]
       .sort(comparePosition)
       .map((endpoint) => compileEndpoint(endpoint, activeNames)),
@@ -108,23 +110,13 @@ function compileRoute(
     ...targetAndPolicies
   } = route;
   const plugins = compilePlugins(bindings, activeNames);
-  if (targetAndPolicies.service_id !== undefined) {
-    const service = servicesById.get(targetAndPolicies.service_id);
-    if (service === undefined) {
-      throw new RuntimeConfigCompileError(
-        'unknown_service',
-        `route ${path} references unknown service ${targetAndPolicies.service_id}`,
-      );
+  if (targetAndPolicies.service_references !== undefined) {
+    for (const reference of targetAndPolicies.service_references) {
+      if (!servicesById.has(reference.service_id)) throw new RuntimeConfigCompileError('unknown_service',
+        `route ${path} references unknown service ${reference.service_id}`);
     }
-    const { service_id: _serviceId, ...policies } = targetAndPolicies;
-    return {
-      ...policies,
-      id,
-      path,
-      service_id: service.id,
-      service: service.name,
-      ...(plugins === undefined ? {} : { plugins }),
-    };
+    return { ...targetAndPolicies, service_references: [...targetAndPolicies.service_references].sort(comparePosition),
+      id, path, ...(plugins === undefined ? {} : { plugins }) };
   }
   const { endpoints, ...policies } = targetAndPolicies;
   return {
@@ -169,6 +161,10 @@ export function compileRuntimeConfigSnapshot(
   const activeNames = activePluginNames(snapshot);
   const logical = structuredClone(snapshot.aggregate.logical_configuration);
   const servicesById = indexServices(logical.services);
+  for (const service of logical.services) for (const reference of service.service_references ?? []) {
+    if (!servicesById.has(reference.service_id)) throw new RuntimeConfigCompileError('unknown_service',
+      `service ${service.name} references unknown service ${reference.service_id}`);
+  }
   const services = [...logical.services]
     .sort(comparePosition)
     .map((service) => compileService(service, activeNames));

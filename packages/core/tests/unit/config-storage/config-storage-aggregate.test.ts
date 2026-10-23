@@ -1,8 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import {
-  type ConfigurationCompileOptions,
-  parseNormalizeCompileAggregate,
-} from '../../../src/config-storage';
+import { type ConfigurationCompileOptions } from '../../../src/config-storage/plugin-schema';
+import { parseNormalizeCompileAggregate } from '../../../src/config-storage/aggregate';
 
 const BINDING_ID = 'abcdefab-cdef-4abc-8def-abcdefabcdef';
 const PLUGINS: ConfigurationCompileOptions = {

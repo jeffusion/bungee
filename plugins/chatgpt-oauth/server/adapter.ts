@@ -66,7 +66,6 @@ type AdaptedRequest = Readonly<{
   includeUsage: boolean;
   allowMissingContentType: boolean;
   siwc?: boolean;
-  attemptId?: string;
   adaptedResponses: WeakSet<Response>;
   preserveModels?: boolean;
   native?: boolean;
@@ -439,6 +438,8 @@ export class ChatgptOauthAdapter {
 
   constructor() {}
 
+  endRequest(requestId:string):void {this.requests.delete(requestId);}
+
   beforeRequest(context: MutableRequestContext): MutableRequestContext {
     assertResponsesEntryPath(context.url.pathname);
     const target = (context.url.pathname === MODELS_PATH || (context.originalUrl.searchParams.has('client_version') && context.url.pathname === '/models'))
@@ -534,14 +535,7 @@ export class ChatgptOauthAdapter {
   }
 
   async rawResponse(result: RawResponseResult, context: RawResponseContext): Promise<RawResponseResult> {
-    if (convertedCompletions.has(result.completion)) {
-      const pending = this.requests.get(context.requestId);
-      const cleanup = () => {
-        if (this.requests.get(context.requestId) === pending) this.requests.delete(context.requestId);
-      };
-      void result.completion.then(cleanup, cleanup);
-      return result;
-    }
+    if (convertedCompletions.has(result.completion)) return result;
     if (this.nativeResponses.has(result.response)) return result;
     const upstreamUrl = context.upstreamUrl ? new URL(context.upstreamUrl) : undefined;
     const current: AdaptedRequest | undefined = this.requests.get(context.requestId) ?? (upstreamUrl?.origin === CHATGPT_ORIGIN
@@ -551,14 +545,9 @@ export class ChatgptOauthAdapter {
     if (current === undefined || current.adaptedResponses.has(result.response)) return result;
     current.adaptedResponses.add(result.response);
     if (current.native) this.nativeResponses.add(result.response);
-    const state = current.attemptId === undefined
-      ? Object.freeze({ ...current, attemptId: context.attemptId })
-      : current;
-    if (state !== current && this.requests.get(context.requestId) === current) this.requests.set(context.requestId, state);
-    const cleanup = () => { if (this.requests.get(context.requestId) === state) this.requests.delete(context.requestId); };
+    const state = current;
     const trackCompletion = (completion: Promise<RawResponseCompletion>) => {
       if (!state.native) convertedCompletions.add(completion);
-      void completion.then(cleanup, cleanup);
     };
     const mark = (response: Response): Response => {
       current.adaptedResponses.add(response);
@@ -578,7 +567,6 @@ export class ChatgptOauthAdapter {
     if (state.native && !result.response.ok) {
       // Native clients consume provider-specific quota/error fields and headers.
       // HTTP failure handling remains with the host; only successful SSE needs terminal proof.
-      void result.completion.then(cleanup, cleanup);
       return result;
     }
 

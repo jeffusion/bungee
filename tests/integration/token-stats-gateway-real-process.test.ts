@@ -205,14 +205,14 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
             }],
           }],
           routes: [{
-            id: ROUTE_ID, position: 1, path: '/v1/chat/completions', service_id: SERVICE_ID,
+            id: ROUTE_ID, position: 1, path: '/v1/chat/completions', service_references: [{ id: crypto.randomUUID(), position: 0, service_id: SERVICE_ID, weight: 100, priority: 1, is_disabled: false }],
             plugins: [],
             retry: { enabled: true, max_retries: 1, retry_on: [429] },
           }, {
-            id: '30000000-0000-4000-8000-000000000002', position: 2, path: '/ordinary', service_id: SERVICE_ID,
+            id: '30000000-0000-4000-8000-000000000002', position: 2, path: '/ordinary', service_references: [{ id: crypto.randomUUID(), position: 0, service_id: SERVICE_ID, weight: 100, priority: 1, is_disabled: false }],
             plugins: [],
           }, {
-            id: '30000000-0000-4000-8000-000000000003', position: 3, path: '/catalog-fixture-ready', service_id: SERVICE_ID, plugins: [],
+            id: '30000000-0000-4000-8000-000000000003', position: 3, path: '/catalog-fixture-ready', service_references: [{ id: crypto.randomUUID(), position: 0, service_id: SERVICE_ID, weight: 100, priority: 1, is_disabled: false }], plugins: [],
           }],
         },
       };

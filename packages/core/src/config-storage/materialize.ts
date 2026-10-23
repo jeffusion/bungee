@@ -1,5 +1,6 @@
 import type {
   ConfigurationAggregate,
+  ServiceReference,
   PluginBinding,
   ConfigurationRoute,
   ConfigurationService,
@@ -63,17 +64,13 @@ function writeUpstreams(
 }
 
 function servicePolicy(service: ConfigurationService): Record<string, unknown> {
-  const { id, position, name, endpoints, plugins, ...policy } = service;
+  const { id, position, name, endpoints, service_references, plugins, ...policy } = service;
   return policy;
 }
 
 function routePolicy(route: ConfigurationRoute): Record<string, unknown> {
   const { id, position, path, plugins, ...remainder } = route;
-  if ('service_id' in remainder) {
-    const { service_id, ...policy } = remainder;
-    return policy;
-  }
-  const { endpoints, ...policy } = remainder;
+  const { endpoints, service_references, ...policy } = remainder;
   return policy;
 }
 
@@ -89,9 +86,8 @@ function writeServices(db: Database, services: readonly ConfigurationService[]):
 
 function writeRoutes(db: Database, routes: readonly ConfigurationRoute[]): void {
   for (const route of routes) {
-    const serviceId = typeof route.service_id === 'string' ? route.service_id : null;
-    db.run('INSERT INTO routes (id,position,path,service_id,policy_json) VALUES (?,?,?,?,?)', [
-      route.id, route.position, route.path, serviceId, canonicalJson(routePolicy(route)),
+    db.run('INSERT INTO routes (id,position,path,policy_json) VALUES (?,?,?,?)', [
+      route.id, route.position, route.path, canonicalJson(routePolicy(route)),
     ]);
     if (route.endpoints !== undefined) writeUpstreams(db, route.endpoints, { kind: 'route', id: route.id });
     writeBindings(db, route.plugins, { kind: 'route', id: route.id });
@@ -99,6 +95,8 @@ function writeRoutes(db: Database, routes: readonly ConfigurationRoute[]): void 
 }
 
 export function replaceActiveMaterialization(db: Database, aggregate: ConfigurationAggregate): void {
+  // The frozen baseline calls this with an empty aggregate before relation migration.
+  if (db.query("SELECT 1 FROM sqlite_schema WHERE name='service_references'").get()) db.run('DELETE FROM service_references');
   db.run('DELETE FROM plugin_bindings');
   db.run('DELETE FROM plugin_activations');
   db.run('DELETE FROM upstreams');
@@ -120,8 +118,17 @@ export function replaceActiveMaterialization(db: Database, aggregate: Configurat
   ]);
   writeServices(db, logical.services);
   writeRoutes(db, logical.routes);
+  for (const service of logical.services) writeReferences(db, service.service_references ?? [], 'service', service.id);
+  for (const route of logical.routes) writeReferences(db, route.service_references ?? [], 'route', route.id);
   writeBindings(db, logical.plugins, { kind: 'global', id: '' });
   for (const activation of aggregate.plugin_activations) {
     db.run('INSERT INTO plugin_activations (plugin_name) VALUES (?)', [activation.plugin_name]);
   }
+}
+
+function writeReferences(db: Database, references: readonly ServiceReference[], ownerKind: 'service' | 'route', ownerId: string): void {
+  for (const ref of references) db.run(`INSERT INTO service_references
+    (id,owner_kind,owner_service_id,route_id,position,service_id,weight,priority,is_disabled) VALUES(?,?,?,?,?,?,?,?,?)`,
+    [ref.id, ownerKind, ownerKind === 'service' ? ownerId : null, ownerKind === 'route' ? ownerId : null,
+      ref.position, ref.service_id, ref.weight, ref.priority, ref.is_disabled ? 1 : 0]);
 }

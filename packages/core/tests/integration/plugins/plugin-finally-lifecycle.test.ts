@@ -307,7 +307,7 @@ describe('plugin onFinally lifecycle', () => {
     const config: AppConfig = {
       services: [
         {
-          name: 'api-service',
+          id:'api-service', name: 'api-service',
           failover: {
             enabled: true,
             retry_on: [503],
@@ -321,7 +321,7 @@ describe('plugin onFinally lifecycle', () => {
       routes: [
         {
           path: '/api',
-          service: 'api-service',
+          service_references:[{id:'ref-'+('api-service'),service_id:'api-service',position:0,weight:100,priority:1,is_disabled:false}],
         },
       ],
     };
@@ -362,7 +362,7 @@ describe('plugin onFinally lifecycle', () => {
     const config: AppConfig = {
       services: [
         {
-          name: 'api-service',
+          id:'api-service', name: 'api-service',
           failover: {
             enabled: true,
           },
@@ -374,7 +374,7 @@ describe('plugin onFinally lifecycle', () => {
       routes: [
         {
           path: '/api',
-          service: 'api-service',
+          service_references:[{id:'ref-'+('api-service'),service_id:'api-service',position:0,weight:100,priority:1,is_disabled:false}],
         },
       ],
     };

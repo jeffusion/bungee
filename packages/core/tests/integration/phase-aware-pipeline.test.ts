@@ -170,15 +170,15 @@ function createFailoverConfig(): AppConfig {
   return {
     services: [
       {
-        name: 'api-service',
+        id:'api-service', name: 'api-service',
         failover: { enabled: true, retry_on: [503] },
         endpoints: [
-          { id: 'primary', target: 'http://primary.test' },
-          { id: 'secondary', target: 'http://secondary.test' },
+          { id: 'primary', target: 'http://primary.test',priority:1 },
+          { id: 'secondary', target: 'http://secondary.test',priority:2 },
         ],
       },
     ],
-    routes: [{ path: '/api', service: 'api-service' }],
+    routes: [{ path: '/api', service_references:[{id:'ref-'+('api-service'),service_id:'api-service',position:0,weight:100,priority:1,is_disabled:false}] }],
   };
 }
 
@@ -266,14 +266,14 @@ describe('phase-aware request pipeline', () => {
     });
     const config: AppConfig = {
       services: [{
-        name: serviceName,
+        id:serviceName, name: serviceName,
         failover: { enabled: true, retry_on: [503] },
         endpoints: [
           { id: 'primary', target: 'http://primary.test' },
           { id: 'secondary', target: 'http://secondary.test' },
         ],
       }],
-      routes: [{ path: routePath, service: serviceName }],
+      routes: [{ path: routePath, service_references:[{id:'ref-'+(serviceName),service_id:serviceName,position:0,weight:100,priority:1,is_disabled:false}] }],
     };
     initializeRuntimeState(config);
     const { entries, logging } = createTestLogging();
@@ -404,14 +404,14 @@ describe('phase-aware request pipeline', () => {
     });
     const config = {
       services: [{
-        name: 'explicit-400-retry',
+        id:'explicit-400-retry', name: 'explicit-400-retry',
         failover: { enabled: true, retry_on: [400] },
         endpoints: [
           { id: 'primary', target: 'http://primary.test', priority: 0 },
           { id: 'secondary', target: 'http://secondary.test', priority: 1 },
         ],
       }],
-      routes: [{ path: '/explicit-400-retry', service: 'explicit-400-retry' }],
+      routes: [{ path: '/explicit-400-retry', service_references:[{id:'ref-'+('explicit-400-retry'),service_id:'explicit-400-retry',position:0,weight:100,priority:1,is_disabled:false}] }],
     } as AppConfig;
     initializeRuntimeState(config);
 
@@ -468,11 +468,11 @@ describe('phase-aware request pipeline', () => {
     });
     const config: AppConfig = {
       services: [{
-        name: 'stream-safe-client-error',
+        id:'stream-safe-client-error', name: 'stream-safe-client-error',
         failover: { enabled: true, retry_on: [503] },
         endpoints: [{ id: 'primary', target: 'http://primary.test' }],
       }],
-      routes: [{ path: '/stream-safe-client-error', service: 'stream-safe-client-error' }],
+      routes: [{ path: '/stream-safe-client-error', service_references:[{id:'ref-'+('stream-safe-client-error'),service_id:'stream-safe-client-error',position:0,weight:100,priority:1,is_disabled:false}] }],
     };
     initializeRuntimeState(config);
 
@@ -513,11 +513,11 @@ describe('phase-aware request pipeline', () => {
     setFetchMock(async () => new Response('secret', { status: originalStatus }));
     const config: AppConfig = {
       services: [{
-        name: 'unsafe-raw-completion',
+        id:'unsafe-raw-completion', name: 'unsafe-raw-completion',
         failover: { enabled: true, retry_on: [503] },
         endpoints: [{ id: 'primary', target: 'http://primary.test' }],
       }],
-      routes: [{ path: '/unsafe-raw-completion', service: 'unsafe-raw-completion' }],
+      routes: [{ path: '/unsafe-raw-completion', service_references:[{id:'ref-'+('unsafe-raw-completion'),service_id:'unsafe-raw-completion',position:0,weight:100,priority:1,is_disabled:false}] }],
     };
     initializeRuntimeState(config);
 
@@ -543,11 +543,11 @@ describe('phase-aware request pipeline', () => {
     setFetchMock(async () => new Response('secret', { status: 400 }));
     const config: AppConfig = {
       services: [{
-        name: 'half-open-neutral',
+        id:'half-open-neutral', name: 'half-open-neutral',
         failover: { enabled: true, retry_on: [503] },
         endpoints: [{ id: 'primary', target: 'http://primary.test' }],
       }],
-      routes: [{ path: '/half-open-neutral', service: 'half-open-neutral' }],
+      routes: [{ path: '/half-open-neutral', service_references:[{id:'ref-'+('half-open-neutral'),service_id:'half-open-neutral',position:0,weight:100,priority:1,is_disabled:false}] }],
     };
     initializeRuntimeState(config);
     const selected = runtimeState.get('half-open-neutral')!.upstreams[0]!;
@@ -590,11 +590,11 @@ describe('phase-aware request pipeline', () => {
     });
     const config: AppConfig = {
       services: [{
-        name: 'neutral-then-success',
+        id:'neutral-then-success', name: 'neutral-then-success',
         failover: { enabled: true, retry_on: [503] },
         endpoints: [{ id: 'primary', target: 'http://primary.test' }],
       }],
-      routes: [{ path: '/neutral-then-success', service: 'neutral-then-success' }],
+      routes: [{ path: '/neutral-then-success', service_references:[{id:'ref-'+('neutral-then-success'),service_id:'neutral-then-success',position:0,weight:100,priority:1,is_disabled:false}] }],
     };
     initializeRuntimeState(config);
 
@@ -623,11 +623,11 @@ describe('phase-aware request pipeline', () => {
     setFetchMock(async () => new Response('legacy-error', { status: 500 }));
     const config: AppConfig = {
       services: [{
-        name: 'legacy-completed-500',
+        id:'legacy-completed-500', name: 'legacy-completed-500',
         failover: { enabled: true, retry_on: [503] },
         endpoints: [{ id: 'primary', target: 'http://primary.test' }],
       }],
-      routes: [{ path: '/legacy-completed-500', service: 'legacy-completed-500' }],
+      routes: [{ path: '/legacy-completed-500', service_references:[{id:'ref-'+('legacy-completed-500'),service_id:'legacy-completed-500',position:0,weight:100,priority:1,is_disabled:false}] }],
     };
     initializeRuntimeState(config);
     const selected = runtimeState.get('legacy-completed-500')!.upstreams[0]!;
@@ -664,14 +664,14 @@ describe('phase-aware request pipeline', () => {
     });
     const config: AppConfig = {
       services: [{
-        name: serviceName,
+        id:serviceName, name: serviceName,
         failover: { enabled: true, retry_on: [status] },
         endpoints: [
           { id: 'primary', target: 'http://primary.test', priority: 0 },
           { id: 'secondary', target: 'http://secondary.test', priority: 1 },
         ],
       }],
-      routes: [{ path: routePath, service: serviceName }],
+      routes: [{ path: routePath, service_references:[{id:'ref-'+(serviceName),service_id:serviceName,position:0,weight:100,priority:1,is_disabled:false}] }],
     };
     initializeRuntimeState(config);
 
@@ -841,7 +841,7 @@ describe('phase-aware request pipeline', () => {
     expect(await response.text()).toBe('origin>endpoint>service>route>global');
   });
 
-  test('onFinally runs request-level once and final-upstream-level only for final upstream', async () => {
+  test('onFinally runs request-level once and closes every attempted Endpoint', async () => {
     const finallyRecords: string[] = [];
     const finalized = Promise.withResolvers<void>();
     installPhaseHooks((upstreamId) => ({
@@ -865,10 +865,10 @@ describe('phase-aware request pipeline', () => {
     expect(response.status).toBe(200);
   await response.text();
   await finalized.promise;
-  expect(finallyRecords).toEqual(['upstream:secondary', 'service', 'route']);
+  expect(finallyRecords).toEqual(['upstream:primary', 'upstream:secondary', 'service', 'route']);
 });
 
-test('onFinally skips endpoint when all upstreams fail but still runs request-level', async () => {
+test('onFinally closes failed Endpoints and request-level frames', async () => {
   const finallyRecords: string[] = [];
   const finalized = Promise.withResolvers<void>();
   installPhaseHooks((upstreamId) => ({
@@ -886,8 +886,7 @@ test('onFinally skips endpoint when all upstreams fail but still runs request-le
   expect(response.status).toBe(503);
   await response.text();
   await finalized.promise;
-  expect(finallyRecords).toEqual(['service', 'route']);
-  expect(finallyRecords).not.toContain(expect.stringContaining('upstream:'));
+  expect(finallyRecords).toEqual(['upstream:primary','upstream:secondary','service','route']);
 });
 });
 

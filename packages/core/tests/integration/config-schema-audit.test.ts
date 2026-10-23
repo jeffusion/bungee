@@ -177,7 +177,7 @@ describe('ConfigRepository initialized schema fingerprint', () => {
        CREATE TABLE services (id TEXT PRIMARY KEY,position INTEGER NOT NULL,name TEXT NOT NULL,policy_json TEXT NOT NULL) STRICT;
        INSERT INTO services SELECT * FROM services_old; DROP TABLE services_old`,
       `PRAGMA foreign_keys=OFF; ALTER TABLE routes RENAME TO routes_old;
-       CREATE TABLE routes (id TEXT PRIMARY KEY, position INTEGER, path TEXT, service_id TEXT, policy_json TEXT) STRICT;
+       CREATE TABLE routes (id TEXT PRIMARY KEY, position INTEGER, path TEXT, policy_json TEXT) STRICT;
        INSERT INTO routes SELECT * FROM routes_old; DROP TABLE routes_old`,
       `PRAGMA foreign_keys=OFF; ALTER TABLE settings RENAME TO settings_old;
        CREATE TABLE settings (id INTEGER PRIMARY KEY,log_level TEXT,body_parser_limit TEXT,auth_json TEXT,logging_json TEXT) STRICT;

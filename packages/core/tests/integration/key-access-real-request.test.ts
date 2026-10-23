@@ -62,9 +62,9 @@ test('real master/ingress/worker enforces model policy and honors Authorization 
             request: { headers:{add:{Authorization:'Bearer upstream-service-secret','x-safe':'service-header'}} }}]},
           {id:passthroughServiceId,name:'passthrough-upstream',position:2,plugins:[],endpoints:[
             {id:crypto.randomUUID(),position:1,target:`http://127.0.0.1:${upstream.port}`,weight:100,priority:1,is_disabled:false,plugins:[]}]}],
-          routes:[{id:routeId,position:1,path:'/v1',service_id:serviceId,plugins:[]},
-            {id:crypto.randomUUID(),position:2,path:'/passthrough',service_id:passthroughServiceId,plugins:[]},
-            {id:stripRouteId,position:3,path:'/strip',service_id:passthroughServiceId,plugins:[],request: { headers:{remove:['Authorization']} }}]},
+          routes:[{id:routeId,position:1,path:'/v1',service_references:[{id:crypto.randomUUID(),position:0,service_id:serviceId,weight:100,priority:1,is_disabled:false}],plugins:[]},
+            {id:crypto.randomUUID(),position:2,path:'/passthrough',service_references:[{id:crypto.randomUUID(),position:0,service_id:passthroughServiceId,weight:100,priority:1,is_disabled:false}],plugins:[]},
+            {id:stripRouteId,position:3,path:'/strip',service_references:[{id:crypto.randomUUID(),position:0,service_id:passthroughServiceId,weight:100,priority:1,is_disabled:false}],plugins:[],request: { headers:{remove:['Authorization']} }}]},
         plugin_activations:[{plugin_name:'key-access'}],
       },
     })});

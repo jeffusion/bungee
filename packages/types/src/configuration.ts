@@ -4,6 +4,7 @@ import type {
   PluginConfigOptions,
   RouteConfig,
   Service,
+  ServiceReference,
 } from './types.js';
 
 export type ConfigurationId = string;
@@ -30,7 +31,7 @@ export interface UpstreamManagedBy {
 
 type ConfigurationUpstreamPolicy = Omit<
   Endpoint,
-  'id' | 'plugins' | 'weight' | 'priority' | 'is_disabled'
+  'id' | 'position' | 'plugins' | 'weight' | 'priority' | 'is_disabled'
 >;
 
 export interface ConfigurationUpstream extends ConfigurationUpstreamPolicy {
@@ -43,17 +44,18 @@ export interface ConfigurationUpstream extends ConfigurationUpstreamPolicy {
   readonly plugins: readonly PluginBinding[];
 }
 
-type ConfigurationServicePolicy = Omit<Service, 'name' | 'endpoints' | 'plugins'>;
+type ConfigurationServicePolicy = Omit<Service, 'name' | 'endpoints' | 'plugins' | 'service_references'>;
 
 export interface ConfigurationService extends ConfigurationServicePolicy {
   readonly id: ConfigurationId;
   readonly position: number;
   readonly name: string;
   readonly endpoints: readonly ConfigurationUpstream[];
+  readonly service_references?: readonly ServiceReference[];
   readonly plugins: readonly PluginBinding[];
 }
 
-type ConfigurationRoutePolicy = Omit<RouteConfig, 'path' | 'service' | 'endpoints' | 'plugins'>;
+type ConfigurationRoutePolicy = Omit<RouteConfig, 'path' | 'service_references' | 'endpoints' | 'plugins'>;
 
 interface ConfigurationRouteBase extends ConfigurationRoutePolicy {
   readonly id: ConfigurationId;
@@ -63,12 +65,12 @@ interface ConfigurationRouteBase extends ConfigurationRoutePolicy {
 }
 
 export interface ConfigurationServiceRoute extends ConfigurationRouteBase {
-  readonly service_id: ConfigurationId;
+  readonly service_references: readonly [ServiceReference, ...ServiceReference[]];
   readonly endpoints?: never;
 }
 
 export interface ConfigurationDirectRoute extends ConfigurationRouteBase {
-  readonly service_id?: never;
+  readonly service_references?: never;
   readonly endpoints: readonly ConfigurationUpstream[];
 }
 

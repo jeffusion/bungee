@@ -1,4 +1,4 @@
-import type { RouteConfig, Endpoint, FailoverConfig, LoadBalancingConfig, ServiceHealthCheckConfig } from '@jeffusion/bungee-types';
+import type { RouteConfig, Endpoint, FailoverConfig, LoadBalancingConfig, ServiceHealthCheckConfig, ServiceReference } from '@jeffusion/bungee-types';
 import type { ExpressionContext } from '../expression-engine';
 
 export interface EffectiveRouteConfig extends RouteConfig {
@@ -9,7 +9,7 @@ export interface EffectiveRouteConfig extends RouteConfig {
   state_key?: string;
 }
 
-export interface RuntimeUpstream extends Endpoint {
+export interface RuntimeTargetState {
   upstream_id: string;
   status: 'HEALTHY' | 'UNHEALTHY' | 'HALF_OPEN';
   last_failure_time?: number;
@@ -22,6 +22,17 @@ export interface RuntimeUpstream extends Endpoint {
   slow_start_recovery_time?: number;
   slow_start_weight_factor?: number;
   active_request_count?: number;
+}
+
+export interface RuntimeUpstream extends Endpoint, RuntimeTargetState {}
+export interface RuntimeServiceReference extends ServiceReference, RuntimeTargetState {
+  readonly kind: 'service';
+  readonly condition?: never;
+  readonly target?: never;
+}
+export type RuntimeCandidate = RuntimeUpstream | RuntimeServiceReference;
+export function isServiceReference(candidate: RuntimeCandidate): candidate is RuntimeServiceReference {
+  return 'kind' in candidate && candidate.kind === 'service';
 }
 
 export interface RequestSnapshot {

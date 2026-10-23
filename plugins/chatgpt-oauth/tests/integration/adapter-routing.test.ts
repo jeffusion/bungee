@@ -58,12 +58,12 @@ async function forwardSearch(options: {
       } });
     }) as unknown as typeof fetch;
     const config = {
-      services: [{ name: serviceName, failover: { enabled: options.failover ?? false, retry_on: [503] }, endpoints: [{
+      services: [{ id:serviceName, name: serviceName, failover: { enabled: options.failover ?? false, retry_on: [503] }, endpoints: [{
         id: endpointId, target: options.target ?? 'https://chatgpt.com', priority: 0,
         managedBy: { plugin: 'chatgpt-oauth', contributionId: options.contributionId ?? 'chatgpt', bindingId },
         plugins: [{ id: bindingId, name: 'chatgpt-oauth', options: { accountRef: 'integration-account' }, enabled: true }],
       }, { id: 'fallback', target: 'https://fallback.example.test', priority: 1 }] }],
-      routes: [{ path: routeId, service: serviceName,
+      routes: [{ path: routeId, service_references:[{id:'ref-'+(serviceName),service_id:serviceName,position:0,weight:100,priority:1,is_disabled:false}],
         ...(options.rewrite === false ? {} : { path_rewrite: { '^/codex/alpha/search$': '/alpha/search' } }) }],
     } as any;
     runtime.initializeRuntimeState(config);
@@ -174,9 +174,9 @@ describe('ChatGPT OAuth request handler integration', () => {
           cancel() { sourceCancelled = true; },
         }), { headers: media ? { 'content-type': media } : {} })) as unknown as typeof fetch;
         const config = {
-          services: [{ name: 'terminal', failover: { enabled: true, retry_on: [503] },
+          services: [{ id:'terminal', name: 'terminal', failover: { enabled: true, retry_on: [503] },
             endpoints: [{ id: 'primary', target: routeId === '/chat/completions' ? 'https://chatgpt.com/v1' : 'https://chatgpt.com' }] }],
-          routes: [{ path: routeId, service: 'terminal', ...(native ? { path_rewrite: { '^/chatgpt/responses$': CODEX_RESPONSES_PATH } } : {}) }],
+          routes: [{ path: routeId, service_references:[{id:'ref-'+('terminal'),service_id:'terminal',position:0,weight:100,priority:1,is_disabled:false}], ...(native ? { path_rewrite: { '^/chatgpt/responses$': CODEX_RESPONSES_PATH } } : {}) }],
         } as any;
         runtime.initializeRuntimeState(config);
         try {
@@ -233,8 +233,8 @@ describe('ChatGPT OAuth request handler integration', () => {
     setScopedPluginRegistry(registry);
     global.fetch = (async () => new Response('data: {"type":"response.completed","response":{"id":"resp_combined","status":"completed","output":[]}}\n\n',
       { headers: { 'content-type': 'text/event-stream' } })) as unknown as typeof fetch;
-    const config = { services: [{ name: 'terminal', endpoints: [{ id: 'primary', target: routeId === '/chat/completions' ? 'https://chatgpt.com/v1' : 'https://chatgpt.com' }] }],
-      routes: [{ path: routeId, service: 'terminal' }] } as any;
+    const config = { services: [{ id:'terminal', name: 'terminal', endpoints: [{ id: 'primary', target: routeId === '/chat/completions' ? 'https://chatgpt.com/v1' : 'https://chatgpt.com' }] }],
+      routes: [{ path: routeId, service_references:[{id:'ref-'+('terminal'),service_id:'terminal',position:0,weight:100,priority:1,is_disabled:false}] }] } as any;
     runtime.initializeRuntimeState(config);
     try {
       const response = await handleRequest(new Request(`http://localhost${routeId}`, { method: 'POST',
@@ -278,14 +278,14 @@ describe('ChatGPT OAuth request handler integration', () => {
 
     const config = {
       services: [{
-        name: 'chatgpt-integration-service',
+        id:'chatgpt-integration-service', name: 'chatgpt-integration-service',
         failover: { enabled: true, retry_on: [503] },
         endpoints: [
           { id: 'primary', target: 'https://chatgpt.com', priority: 0 },
           { id: 'secondary', target: 'https://fallback.example.test', priority: 1 },
         ],
       }],
-      routes: [{ path: routeId, service: 'chatgpt-integration-service' }],
+      routes: [{ path: routeId, service_references:[{id:'ref-'+('chatgpt-integration-service'),service_id:'chatgpt-integration-service',position:0,weight:100,priority:1,is_disabled:false}] }],
     } as any;
     runtime.initializeRuntimeState(config);
 
@@ -369,7 +369,7 @@ describe('ChatGPT OAuth request handler integration', () => {
     }) as unknown as typeof fetch;
     const config = {
       services: [{
-        name: 'managed-chatgpt-401',
+        id:'managed-chatgpt-401', name: 'managed-chatgpt-401',
         failover: { enabled: true, retry_on: [503] },
         endpoints: [{
           id: endpointId,
@@ -381,7 +381,7 @@ describe('ChatGPT OAuth request handler integration', () => {
           id: 'managed-secondary', target: 'https://fallback.example.test', priority: 1,
         }],
       }],
-      routes: [{ path: routeId, service: 'managed-chatgpt-401' }],
+      routes: [{ path: routeId, service_references:[{id:'ref-'+('managed-chatgpt-401'),service_id:'managed-chatgpt-401',position:0,weight:100,priority:1,is_disabled:false}] }],
     } as any;
     runtime.initializeRuntimeState(config);
 

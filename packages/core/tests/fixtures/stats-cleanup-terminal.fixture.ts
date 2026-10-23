@@ -37,14 +37,14 @@ async function main(): Promise<void> {
   if (typeof RequestLogger !== 'function') throw new Error('real RequestLogger was not loaded');
   const config = {
     services: [{
-      name: 'cleanup-terminal',
+      id:'cleanup-terminal', name: 'cleanup-terminal',
       failover: { enabled: true, retry_on: [503] },
       endpoints: [
         { id: 'first', target: 'https://first.example.test', priority: 0 },
         { id: 'fallback', target: 'https://fallback.example.test', priority: 1 },
       ],
     }],
-    routes: [{ path: '/stats-cleanup-terminal', service: 'cleanup-terminal' }],
+    routes: [{ path: '/stats-cleanup-terminal', service_references:[{id:'ref-'+('cleanup-terminal'),service_id:'cleanup-terminal',position:0,weight:100,priority:1,is_disabled:false}] }],
   } as any;
 
   try {

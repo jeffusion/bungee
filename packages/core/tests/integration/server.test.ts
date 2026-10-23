@@ -13,7 +13,7 @@ const mockConfig: AppConfig = {
   config_version: 4,
   services: [
     {
-      name: 'api-service',
+      id:'api-service', name: 'api-service',
       endpoints: [
         {
           target: 'http://mock-target.com',
@@ -35,7 +35,7 @@ const mockConfig: AppConfig = {
       failover: { enabled: false, retry_on: [] },
     },
     {
-      name: 'load-balance-service',
+      id:'load-balance-service', name: 'load-balance-service',
       endpoints: [
         { target: 'http://service-a.com', weight: 20, priority: 1 },
         { target: 'http://service-b.com', weight: 80, priority: 1 },
@@ -43,7 +43,7 @@ const mockConfig: AppConfig = {
       failover: { enabled: true, retry_on: [500] },
     },
     {
-      name: 'failover-path-service',
+      id:'failover-path-service', name: 'failover-path-service',
       endpoints: [
         // 设置高权重以确保 fails.com 总是被优先选择（加权随机算法）
         { target: 'http://fails.com', weight: 99, priority: 1 },
@@ -55,7 +55,7 @@ const mockConfig: AppConfig = {
       },
     },
     {
-      name: 'priority-test-service',
+      id:'priority-test-service', name: 'priority-test-service',
       endpoints: [
         { target: 'http://priority1-a.com', weight: 50, priority: 1 },
         { target: 'http://priority1-b.com', weight: 50, priority: 1 },
@@ -65,7 +65,7 @@ const mockConfig: AppConfig = {
       failover: { enabled: false, retry_on: [] },
     },
     {
-      name: 'default-weight-test-service',
+      id:'default-weight-test-service', name: 'default-weight-test-service',
       endpoints: [
         { target: 'http://no-weight.com', weight: 100, priority: 1 }, // 模拟配置验证后的默认值
         { target: 'http://with-weight.com', weight: 200, priority: 1 },
@@ -76,7 +76,7 @@ const mockConfig: AppConfig = {
   routes: [
     {
       path: '/api',
-      service: 'api-service',
+      service_references:[{id:'ref-'+('api-service'),service_id:'api-service',position:0,weight:100,priority:1,is_disabled:false}],
       // Route-level rules
       request: { headers: {
         add: { 'x-route-header': 'route', 'x-shared-header': 'route' },
@@ -92,19 +92,19 @@ const mockConfig: AppConfig = {
     },
     {
       path: '/load-balance',
-      service: 'load-balance-service',
+      service_references:[{id:'ref-'+('load-balance-service'),service_id:'load-balance-service',position:0,weight:100,priority:1,is_disabled:false}],
     },
     {
       path: '/failover-path',
-      service: 'failover-path-service',
+      service_references:[{id:'ref-'+('failover-path-service'),service_id:'failover-path-service',position:0,weight:100,priority:1,is_disabled:false}],
     },
     {
       path: '/priority-test',
-      service: 'priority-test-service',
+      service_references:[{id:'ref-'+('priority-test-service'),service_id:'priority-test-service',position:0,weight:100,priority:1,is_disabled:false}],
     },
     {
       path: '/default-weight-test',
-      service: 'default-weight-test-service',
+      service_references:[{id:'ref-'+('default-weight-test-service'),service_id:'default-weight-test-service',position:0,weight:100,priority:1,is_disabled:false}],
     },
   ],
 };
@@ -151,7 +151,7 @@ describe('Server Request Handler', () => {
   test('should proxy a configured business /health route through the normal pipeline', async () => {
     const config: AppConfig = {
       ...mockConfig,
-      routes: [...mockConfig.routes, { path: '/health', service: 'api-service' }],
+      routes: [...mockConfig.routes, { path: '/health', service_references:[{id:'ref-'+('api-service'),service_id:'api-service',position:0,weight:100,priority:1,is_disabled:false}] }],
     };
 
     const req = new Request('http://localhost/health');
@@ -320,7 +320,7 @@ describe('Server Request Handler', () => {
 
   test('does not fail over an indeterminate POST network rejection', async () => {
     const service = {
-      name: 'post-safety-service',
+      id:'post-safety-service', name: 'post-safety-service',
       endpoints: [
         { target: 'http://post-first.test', weight: 100, priority: 1 },
         { target: 'http://post-second.test', weight: 100, priority: 2 },
@@ -330,7 +330,7 @@ describe('Server Request Handler', () => {
     const config = {
       ...mockConfig,
       services: [...(mockConfig.services ?? []), service],
-      routes: [...mockConfig.routes, { path: '/post-safety', service: service.name }],
+      routes: [...mockConfig.routes, { path: '/post-safety', service_references:[{id:'ref-'+(service.name),service_id:service.name,position:0,weight:100,priority:1,is_disabled:false}] }],
     } as AppConfig;
     initializeRuntimeState(config);
     let fetchCalls = 0;
@@ -348,7 +348,7 @@ describe('Server Request Handler', () => {
 
   test('does not fail over a timed-out POST', async () => {
     const service = {
-      name: 'post-timeout-service',
+      id:'post-timeout-service', name: 'post-timeout-service',
       endpoints: [
         { target: 'http://timeout-first.test', weight: 100, priority: 1 },
         { target: 'http://timeout-second.test', weight: 100, priority: 2 },
@@ -359,7 +359,7 @@ describe('Server Request Handler', () => {
       ...mockConfig,
       services: [...(mockConfig.services ?? []), service],
       routes: [...mockConfig.routes, {
-        path: '/post-timeout', service: service.name,
+        path: '/post-timeout', service_references:[{id:'ref-'+(service.name),service_id:service.name,position:0,weight:100,priority:1,is_disabled:false}],
         timeouts: { request_ms: 100, first_response_ms: 10 },
       }],
     } as unknown as AppConfig;
@@ -381,7 +381,7 @@ describe('Server Request Handler', () => {
 
   test('a later upstream HTTP 503 stays 503 after an earlier GET timeout', async () => {
     const service = {
-      name: 'get-timeout-service',
+      id:'get-timeout-service', name: 'get-timeout-service',
       endpoints: [
         { target: 'http://get-timeout-first.test', weight: 100, priority: 1 },
         { target: 'http://get-timeout-second.test', weight: 100, priority: 2 },
@@ -392,7 +392,7 @@ describe('Server Request Handler', () => {
       ...mockConfig,
       services: [...(mockConfig.services ?? []), service],
       routes: [...mockConfig.routes, {
-        path: '/get-timeout', service: service.name,
+        path: '/get-timeout', service_references:[{id:'ref-'+(service.name),service_id:service.name,position:0,weight:100,priority:1,is_disabled:false}],
         timeouts: { request_ms: 100, first_response_ms: 10 },
       }],
     } as unknown as AppConfig;

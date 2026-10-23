@@ -205,9 +205,9 @@
     "confirmDelete": "删除服务",
     "confirmDeleteMessage": "确定要删除服务 \"{name}\" 吗？",
     "confirmDeleteReferencedMessage": "Service \"{name}\" 已被以下路由引用：{routes}。请先移除这些引用后再删除。",
-    "deleteBlockedByReferences": "无法删除 Service \"{name}\"，因为它已被以下路由引用：{routes}。",
+    "deleteBlockedByReferences": "无法删除 Service \"{name}\"，因为它已被以下路由或服务引用：{routes}。",
     "deleteReferencedTitle": "删除保护",
-    "deleteReferencedMessage": "服务 \"{name}\" 目前正被以下路由引用。您必须先移除这些引用才能删除该服务。",
+    "deleteReferencedMessage": "服务 \"{name}\" 目前正被以下路由或服务引用。您必须先移除这些引用才能删除该服务。",
     "deleteUnreferencedTitle": "确认删除",
     "deleteUnreferencedMessage": "您确定要删除服务 \"{name}\" 吗？此操作无法撤销。",
     "deleteUnreferencedFriction": "请输入服务名称以确认：",
@@ -257,7 +257,7 @@
       "transport": "流量调度",
       "endpoints": "服务端点",
       "availability": "健康检查与容错",
-      "consumers": "引用路由",
+      "consumers": "直接消费者",
       "review": "配置概览",
       "plugins": "服务插件",
       "loadBalancing": "负载均衡",
@@ -266,7 +266,7 @@
     },
     "loadBalancing": {
       "title": "负载均衡策略",
-      "help": "在此服务的上游实例之间分配请求的算法。",
+      "help": "在当前层同一优先级的目标之间分配请求。",
       "policy": "策略",
       "policies": {
         "weighted_random": "加权随机",
@@ -287,9 +287,9 @@
     "endpointSearch": "搜索端点地址或描述",
     "noMatchingEndpoints": "没有匹配的端点",
     "noEndpoints": "暂无端点，请添加端点",
-    "consumersTitle": "引用路由",
-    "consumersHelp": "引用此服务作为后端池的路由",
-    "consumersRoutesCount": "{count} 个路由引用此服务",
+    "consumersTitle": "直接消费者",
+    "consumersHelp": "直接引用此服务的路由和服务",
+    "consumersRoutesCount": "{count} 个直接消费者引用此服务",
     "noConsumers": "暂无路由引用此服务",
     "consumersNameRequired": "请先填写服务名称，以查看引用路由",
     "reviewTitle": "配置概览",
@@ -944,6 +944,7 @@
     "loadBalancingGroup": "负载均衡组",
     "dragToMerge": "拖拽至此处合并",
     "newPriority1": "新建优先级 1",
+    "insertPriorityGroup": "插入新优先级组",
     "insertNewPriority": "插入新优先级 {priority}",
     "priorityHelp": "故障转移顺序",
     "transformer": "上游转换器",
@@ -1506,8 +1507,6 @@
     "cardRemoved": "已移除卡片，其余卡片已自动补位",
     "mobileHint": "手机端单独排序与设置高度，不影响桌面布局；移除卡片会同时从桌面移除。",
     "mobileHeight": "手机卡片高度",
-    "moveUp": "上移",
-    "moveDown": "下移",
     "emptyTitle": "仪表板还没有卡片",
     "emptyDescription": "从组件库挑选需要关注的卡片，或选择一个布局模板作为起点。",
     "library": "组件库",
@@ -1708,5 +1707,17 @@
       "inFlight": "仍有请求正在使用此插件。请等待请求结束后刷新。",
       "unknown": "操作未完成。请检查连接并刷新实际状态后重试。"
     }
+  },
+  "serviceReferences": {
+    "details": "服务详情",
+    "noMatches": "没有匹配的目标",
+    "noTargets": "暂无目标",
+    "failoverHelp": "匹配失败状态码或响应关键词时，尝试其他服务引用。",
+    "degraded": "部分可用",
+    "enabled": "启用",
+    "add": "引用服务",
+    "positiveInteger": "请输入正整数",
+    "references": "服务引用",
+    "pool": "服务池调度"
   }
 }

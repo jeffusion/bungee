@@ -1,10 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import {
-  type ConfigurationCompileOptions,
-  hashConfigurationContent,
-  parseNormalizeCompile,
-  parseNormalizeCompileAggregate,
-} from '../../../src/config-storage';
+import { type ConfigurationCompileOptions } from '../../../src/config-storage/plugin-schema';
+import { hashConfigurationContent } from '../../../src/config-storage/content-hash';
+import { parseNormalizeCompile } from '../../../src/config-storage/compiler';
+import { parseNormalizeCompileAggregate } from '../../../src/config-storage/aggregate';
 
 const catalog: ConfigurationCompileOptions = {
   pluginSchemas: new Map([['audit', []]]),

@@ -1221,8 +1221,8 @@ function aggregate(upstreamPort: number, path = '/proxy', managed = false, manag
       }, ...(managed ? [{
         id: '10000000-0000-4000-8000-000000000002', position: 2, name: 'canonical-managed-service', plugins: [], endpoints: [managedEndpoint],
       }] : [])],
-      routes: [{ id: '30000000-0000-4000-8000-000000000001', position: 1, path, service_id: '10000000-0000-4000-8000-000000000001', plugins: [] },
-        ...(managed ? [{ id: '30000000-0000-4000-8000-000000000002', position: 2, path: '/managed-proxy', service_id: '10000000-0000-4000-8000-000000000002', plugins: [] }] : [])],
+      routes: [{ id: '30000000-0000-4000-8000-000000000001', position: 1, path, service_references: [{ id: crypto.randomUUID(), position: 0, service_id: '10000000-0000-4000-8000-000000000001', weight: 100, priority: 1, is_disabled: false }], plugins: [] },
+        ...(managed ? [{ id: '30000000-0000-4000-8000-000000000002', position: 2, path: '/managed-proxy', service_references: [{ id: crypto.randomUUID(), position: 0, service_id: '10000000-0000-4000-8000-000000000002', weight: 100, priority: 1, is_disabled: false }] as const, plugins: [] }] : [])],
     },
   };
 }

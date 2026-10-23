@@ -1,3 +1,5 @@
+import { convertServiceReferenceRevision } from '../service-reference-upgrade';
+import type { ConfigRepositoryOptions } from '../repository-types';
 import type { Database } from 'bun:sqlite';
 import { ConfigRepositoryError } from '../repository-types';
 import { verifySchemaFingerprint } from '../schema-fingerprint';
@@ -6,7 +8,7 @@ import { CONFIG_MIGRATIONS, type ConfigMigration } from './plan';
 export { CONFIG_MIGRATIONS, CONFIG_SCHEMA_VERSION } from './plan';
 export { CONFIG_BASELINE_VERSION, CONFIG_BASELINE_NAME } from './baseline';
 
-export function migrateConfigurationDatabase(db: Database, plan: readonly ConfigMigration[] = CONFIG_MIGRATIONS): void {
+export function migrateConfigurationDatabase(db: Database, plan: readonly ConfigMigration[] = CONFIG_MIGRATIONS, options: ConfigRepositoryOptions = {}): void {
   try {
     db.transaction(() => {
       if (!plan.length || plan[0] !== CONFIG_MIGRATIONS[0] || plan.some((m,i) => i > 0 && m.version !== plan[i-1]!.version+1)
@@ -24,6 +26,9 @@ export function migrateConfigurationDatabase(db: Database, plan: readonly Config
         db.run('INSERT INTO schema_migrations(version,name) VALUES(?,?)', [migration.version,migration.name]);
       }
       verifySchemaFingerprint(db, plan.at(-1)!.version, plan);
+      if (plan === CONFIG_MIGRATIONS && applied.length > 0 && applied.at(-1)!.version < 5) {
+        convertServiceReferenceRevision(db, options);
+      }
     }).immediate();
   } catch (error) {
     if (error instanceof ConfigRepositoryError) throw error;

@@ -3,7 +3,7 @@
  * Gradually increases traffic to recovering upstreams to prevent overload
  */
 
-import type { RuntimeUpstream } from '../types';
+import type { RuntimeUpstream, RuntimeCandidate } from '../types';
 import type { EffectiveRouteConfig } from '../types';
 
 /**
@@ -27,7 +27,7 @@ import type { EffectiveRouteConfig } from '../types';
  * ```
  */
 export function calculateSlowStartFactor(
-  upstream: RuntimeUpstream,
+  upstream: RuntimeCandidate,
   route: EffectiveRouteConfig
 ): number {
   // If slow start is not enabled, return 1.0 (full weight)
@@ -72,7 +72,7 @@ export function calculateSlowStartFactor(
  * @returns Effective weight
  */
 export function getEffectiveWeight(
-  upstream: RuntimeUpstream,
+  upstream: RuntimeCandidate,
   route: EffectiveRouteConfig
 ): number {
   const baseWeight = upstream.weight ?? 100;
@@ -89,7 +89,7 @@ export function getEffectiveWeight(
  * @param route - Route configuration
  */
 export function activateSlowStart(
-  upstream: RuntimeUpstream,
+  upstream: RuntimeCandidate,
   route: EffectiveRouteConfig
 ): void {
   if (!route.failover?.slow_start?.enabled) {
@@ -107,7 +107,7 @@ export function activateSlowStart(
  *
  * @param upstream - Runtime upstream to deactivate slow start for
  */
-export function deactivateSlowStart(upstream: RuntimeUpstream): void {
+export function deactivateSlowStart(upstream: RuntimeCandidate): void {
   upstream.slow_start_recovery_time = undefined;
   upstream.slow_start_weight_factor = undefined;
 }
@@ -118,7 +118,7 @@ export function deactivateSlowStart(upstream: RuntimeUpstream): void {
  * @param upstream - Runtime upstream to check
  * @returns True if in slow start period
  */
-export function isInSlowStart(upstream: RuntimeUpstream): boolean {
+export function isInSlowStart(upstream: RuntimeCandidate): boolean {
   return upstream.slow_start_recovery_time !== undefined;
 }
 
@@ -130,7 +130,7 @@ export function isInSlowStart(upstream: RuntimeUpstream): boolean {
  * @returns Progress percentage (0-100)
  */
 export function getSlowStartProgress(
-  upstream: RuntimeUpstream,
+  upstream: RuntimeCandidate,
   route: EffectiveRouteConfig
 ): number {
   if (!upstream.slow_start_recovery_time) {

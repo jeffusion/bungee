@@ -56,8 +56,8 @@ test('Codex large response and durable failure diagnostics survive with bounded 
   const config: AppConfig = {
     body_parser_limit: '25mb',
     logging: { body: { enabled: true, max_size: 5 * 1024 * 1024, retention_days: 1 } },
-    services: [{ name: 'response-replay', endpoints: [{ id: 'primary', target: 'https://chatgpt.com' }] }],
-    routes: [{ path: routeId, service: 'response-replay', path_rewrite: { '^/codex': '' } }],
+    services: [{ id:'response-replay', name: 'response-replay', endpoints: [{ id: 'primary', target: 'https://chatgpt.com' }] }],
+    routes: [{ path: routeId, service_references:[{id:'ref-'+('response-replay'),service_id:'response-replay',position:0,weight:100,priority:1,is_disabled:false}], path_rewrite: { '^/codex': '' } }],
   };
   const worker = Bun.serve({ hostname: '127.0.0.1', port: 0, maxRequestBodySize: Number.MAX_SAFE_INTEGER, fetch(req) {
     const restored = restoreWorkerTransportRequest(req, TEST_WORKER_TRANSPORT_SECRET);

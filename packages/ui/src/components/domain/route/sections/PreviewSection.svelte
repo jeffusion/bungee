@@ -59,8 +59,8 @@
   </PanelCard>
 
   <PanelCard title={$_('routeEditor.upstreams')} tag="UPSTREAMS">
-    {#if route.service}
-      <div class="mb-2"><StatusBadge variant="online">service: {route.service}</StatusBadge></div>
+    {#if route.service_references?.length}
+      <div class="mb-2"><StatusBadge variant="online">service: {route.service_references.map(reference => services.find(service => service._uid === reference.service_id)?.name ?? reference.service_id).join(', ')}</StatusBadge></div>
     {/if}
     <div class="space-y-2">
       {#each endpoints as upstream, index}

@@ -26,8 +26,9 @@ export class ServiceReferencedError extends Error {
   constructor(
     readonly serviceName: string,
     readonly routePaths: readonly string[],
+    readonly serviceNames: readonly string[] = [],
   ) {
-    super(`Service "${serviceName}" is referenced by routes`);
+    super(`Service "${serviceName}" is referenced by routes or services`);
   }
 }
 
@@ -88,9 +89,6 @@ export class ServicesAPI {
     await saveLogicalConfiguration(snapshot, {
       ...logical,
       services: logical.services.map((service) => service.id === existing.id ? replacement : service),
-      routes: logical.routes.map((route) => route.service_id === existing.id
-        ? { ...route, service_id: replacement.id }
-        : route),
     });
     return replacement;
   }
@@ -100,9 +98,10 @@ export class ServicesAPI {
     const logical = snapshot.config.logical_configuration;
     const existing = logical.services.find((service) => service.name === name);
     if (existing === undefined) throw new ServiceNotFoundError(name);
-    const referencingRoutes = logical.routes.filter((route) => route.service_id === existing.id);
-    if (referencingRoutes.length > 0) {
-      throw new ServiceReferencedError(name, referencingRoutes.map((route) => route.path));
+    const referencingRoutes = logical.routes.filter(route => route.service_references?.some(reference => reference.service_id === existing.id));
+    const referencingServices = logical.services.filter(service => service.service_references?.some(reference => reference.service_id === existing.id));
+    if (referencingRoutes.length > 0 || referencingServices.length > 0) {
+      throw new ServiceReferencedError(name, referencingRoutes.map((route) => route.path), referencingServices.map(service => service.name));
     }
     await saveLogicalConfiguration(snapshot, {
       ...logical,

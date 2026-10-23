@@ -8,7 +8,7 @@ Bungee 默认把请求和响应作为不透明字节流。Content-Type、Content
 
 HTTP 核心阶段包括正文服务、HTTP 请求入口、路由、准入、选择、重试、请求规则、转发、响应规则、日志。正文服务 `BodyServicePlugin` 注册 `onGatewayBody`；该同步 Bail Hook 与异步 Hook 共用 BaseHook 的注册、排序和统计机制，拒绝异步注册和 Promise 返回值。它只创建所有者，不提前读取正文。所有生产正文创建经 `createBodySource()` 调用同一 Hook；唯一 `new BodySource()` 在正文提供者中。没有另建正文容器或异步初始化阶段。
 
-`runGatewayRequest()` 通过 AsyncLocalStorage 捕获本请求的核心 Hook 装配。后续重试、后台日志和观察使用该请求的装配，新的配置代际不能替换在途请求的提供者。scoped 插件保持 Global、Route、Service、Upstream 的请求顺序及反向 inbound 顺序；响应瀑布在每个 tap 之后刷新当前正文表示。
+`runGatewayRequest()` 通过 AsyncLocalStorage 捕获本请求的核心 Hook 装配。后续重试、后台日志和观察使用该请求的装配，新的配置代际不能替换在途请求的提供者。scoped 请求先执行 Global、Route，再按实际选择路径逐层进入 Service，最后执行 Endpoint。每个响应 Hook 家族按 Endpoint、最内层 Service、祖先 Service、Route、Global 的顺序运行，最后执行 dispatch adapter；响应瀑布在每个 tap 之后刷新当前正文表示。
 
 实现入口：[运行时装配](../../packages/core/src/gateway/runtime.ts)、[正文插件](../../packages/core/src/gateway/body-plugin.ts)、[正文工厂](../../packages/core/src/gateway/body-factory.ts)、[正文所有者](../../packages/core/src/gateway/body-service.ts)。`worker/request/body-source.ts` 仅转导内部实现。插件唯一公共核心入口是 `@jeffusion/bungee-core/plugin`，正文 SDK 导出类型和受控句柄，不提供自行建立 reader 的工厂，也不会把 node:zlib 引入控制面 SDK bundle。
 
@@ -37,7 +37,11 @@ BodySource 拥有唯一物理 reader，区分 empty、opaque-stream、replayable
 
 请求 body rules 要求 JSON object；空 POST 可由 add/default 建立 object，GET/HEAD 不产生正文。改写按 identity JSON 序列化，全部 Hook、header profile 与凭据注入之后删除旧 Content-Encoding、重算 Content-Length。只读操作恢复编码和长度，保留业务头修改。
 
-重试、failover 或显式 replay 需求才独立保留可重放字节，受正文与 worker 资源约束，不落盘。只读解析保留的 wire 也可重放。未保留的 one-shot stream 消耗后不能再尝试，响应已输出后不再 failover。signature-repair 的一次修复重试经网关重试插件执行，不重跑已完成的请求转换，并保留原错误作为修复失败的回退。
+重试、任一可达层的 failover 或显式 replay 需求才独立保留可重放字节，受正文与 worker 资源约束，不落盘。只读解析保留的 wire 也可重放。未保留的 one-shot stream 消耗后不能再尝试，响应已输出后不再 failover。signature-repair 的一次修复重试经网关重试插件执行，不重跑已完成的请求转换，并保留原错误作为修复失败的回退。
+
+Service 引用保持选择层级；每层独立使用自己的优先级、权重和 failover 配置。进入子 Service 前，从父层已处理视图派生分支快照，复制 URL、headers、可变 JSON 和 annotations；未改写正文继续共用受控 BodySource，改写正文建立新的受控表示。失败子分支结束自身 Hook 帧后，父层才决定是否切换；祖先请求 Hook 不因后代切换而重跑。主动健康检查只探测各 Service 自有 Endpoint，引用仅汇总子图的全局可达性，不持有探测器或断路器。请求条件不修改全局健康状态。
+
+所有层共用入口取消信号和 deadline。每次物理发送前扣减共享预算，上限为 `N * (1 + R) + 1`：`N` 是执行目标可达的启用 Endpoint 实体数，按 ID 去重；`R` 是启用 Route.retry 时的 `max_retries ?? 1`，否则为零。Route.retry 只重试当前 Endpoint，不为每层增加普通重试次数；额外修复资格整请求仅一次。响应已提交或 WebSocket 已连接后，不再透明切换。
 
 failover 关键词检测只保留有界 wire 前缀，命中立即取消唯一源；SSE 在首个完整分隔边界返回，不等待后续 EOF。未命中逐字节回放前缀和余流。完整压缩样本通过已注册正文提供者的 decoded 视图检查，不自建解压器；UTF-8 前缀匹配属于文本检查，不建立额外 JSON parser。
 

@@ -3,7 +3,7 @@
  * Filters upstreams based on health status and recovery intervals
  */
 
-import type { RuntimeUpstream } from '../types';
+import type { RuntimeTargetState } from '../types';
 import { addJitter } from '../utils/jitter';
 
 // Maximum recovery interval cap (24 hours)
@@ -50,7 +50,7 @@ function calculateBackoffInterval(baseIntervalMs: number, attemptCount: number):
  * ```
  */
 export function canAttemptUpstream(
-  upstream: RuntimeUpstream,
+  upstream: RuntimeTargetState,
   recoveryIntervalMs: number
 ): { canAttempt: boolean; shouldTransitionToHalfOpen: boolean } {
   // HEALTHY upstreams can always be attempted

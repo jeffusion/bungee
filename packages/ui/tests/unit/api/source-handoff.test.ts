@@ -1,3 +1,4 @@
+import { serviceReference } from '../../helpers/service-references';
 import { afterEach, expect, test } from 'bun:test';
 import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { consumeRouteSourceHandoff, consumeSourceHandoff, prepareRouteSourceHandoff, prepareSourceHandoff, RouteSourceHandoffError, routeSourceHandoffUrl, sourceHandoffUrl, type RouteSourceHandoff, type SourceHandoff } from '../../../src/api/source-handoff';
@@ -190,7 +191,7 @@ test('route handoff rejects service-backed, direct-response, redirect and mismat
   const api = mockApi();
   const routeHandoff: RouteSourceHandoff = { routeId: id, sourcePlugin: 'test-provider', sourceId: 'source', accountRef: 'account', mode: 'existing' };
   for (const route of [
-    { path: '/service', _uid: id, service: 'existing', endpoints: [] },
+    { path: '/service', _uid: id, service_references: [serviceReference('existing')], endpoints: [] },
     { path: '/response', _uid: id, direct_response: { enabled: true, status: 200 }, endpoints: [] },
     { path: '/redirect', _uid: id, redirect: { enabled: true, url: 'https://example.test' }, endpoints: [] },
     { path: '/wrong-id', _uid: 'wrong-id', endpoints: [] },
@@ -212,7 +213,7 @@ test('route handoff exposes stable safe codes for route/source/account and exter
 
   await assertCode(prepareRouteSourceHandoff(route, { ...existingHandoff, sourceId: '../bad' }), 'invalid_handoff');
   await assertCode(prepareRouteSourceHandoff({ ...route, _uid: 'changed' }, existingHandoff), 'route_changed');
-  await assertCode(prepareRouteSourceHandoff({ ...route, service: 'bound' }, existingHandoff), 'unsupported_target');
+  await assertCode(prepareRouteSourceHandoff({ ...route, service_references: [serviceReference('bound')] }, existingHandoff), 'unsupported_target');
 
   for (const options of [{ enabled: false }, { sourceError: true }, { draftError: true }]) {
     mockApi(options);

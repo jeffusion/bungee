@@ -3,7 +3,7 @@
  * Manages upstreams within the same priority level
  */
 
-import type { EffectiveRouteConfig, RuntimeUpstream } from '../types';
+import type { EffectiveRouteConfig, RuntimeUpstream, RuntimeCandidate } from '../types';
 import type { ExpressionContext } from '../../expression-engine';
 import { selectUpstream } from './selector';
 import { canAttemptUpstream } from './filter';
@@ -16,9 +16,9 @@ import { canAttemptUpstream } from './filter';
  * - Checks upstream availability (status + recovery interval)
  * - Delegates to weighted selector for selection
  */
-export class PriorityGroup {
+export class PriorityGroup<T extends RuntimeCandidate = RuntimeUpstream> {
   private priority: number;
-  private upstreams: RuntimeUpstream[];
+  private upstreams: T[];
   private route: EffectiveRouteConfig;
   private recoveryIntervalMs: number;
   private context?: ExpressionContext;
@@ -36,7 +36,7 @@ export class PriorityGroup {
    *
    * @param upstream - Upstream to add
    */
-  addUpstream(upstream: RuntimeUpstream): void {
+  addUpstream(upstream: T): void {
     this.upstreams.push(upstream);
   }
 
@@ -74,7 +74,7 @@ export class PriorityGroup {
     attempted: Set<string>,
     skipped: Set<string>
   ): {
-    upstream: RuntimeUpstream;
+    upstream: T;
     canAttempt: boolean;
     shouldTransitionToHalfOpen: boolean;
   } | null {
