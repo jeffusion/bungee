@@ -15,6 +15,8 @@ for (const [language, messages] of Object.entries(manifest.translations)) {
   }
   addMessages(language, { plugins: { [manifest.name]: nested } });
 }
+// Let the navigator-selected locale settle before choosing the fixture language.
+await waitLocale();
 locale.set('en');
 await waitLocale('en');
 mount(Fixture, { target: document.getElementById('app')! });

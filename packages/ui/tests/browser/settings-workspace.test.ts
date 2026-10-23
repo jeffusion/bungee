@@ -24,10 +24,11 @@ function operation(id: string, state: 'converged' | 'committed' | 'draining' | '
     target_worker_count:2,drain_recovery_generation:0,last_drain_recovery_previous_generation:null,created_at:1,updated_at:1,
     state, result_status:state === 'converged' ? 200 : null,error_code:null,error_detail:null } as ConfigurationOperationState['operation'], workers:[] };
 }
-async function withSettings(run: (page: Page, model: ReturnType<typeof createModel>) => Promise<void>, width=1440, language='en', route='config') {
+async function withSettings(run: (page: Page, model: ReturnType<typeof createModel>) => Promise<void>, width=1440, language='en', route='config', configureModel?: (model: ReturnType<typeof createModel>) => void) {
   const context = await browser.newContext({viewport:{width,height:900}});
   const model=createModel();
   try {
+  configureModel?.(model);
   const page=await context.newPage();
   const evidence=collectApiEvidence(page),errors=evidence.errors;
   await recordResponseDelivery(page,'/api/config/validate');
@@ -71,8 +72,11 @@ async function withSettings(run: (page: Page, model: ReturnType<typeof createMod
   });
     await page.goto(`${runtime.origin}/#/${route}`);
     if (route === 'config') {
-      await expect(page.getByTestId('logging-max-size')).toHaveValue('50');
-      await expect(page.getByRole('combobox',{name:/^(Log Level|日志级别)$/})).toBeEnabled();
+      if (configureModel) await expect(page.getByRole('combobox',{name:/^(Log Level|日志级别)$/})).toBeEnabled();
+      else {
+        await expect(page.getByTestId('logging-max-size')).toHaveValue('50');
+        await expect(page.getByRole('combobox',{name:/^(Log Level|日志级别)$/})).toBeEnabled();
+      }
     } else await expect(page.getByTestId('logs-maintenance')).toBeVisible();
     await run(page,model);expect(errors).toEqual([]);evidence.verify();
   } finally { await context.close(); }
@@ -110,6 +114,19 @@ test('review, cancellation, publication and export preserve the current draft an
     await page.getByRole('menuitem',{name:'Export snapshot',exact:true}).click();
     const downloaded=page.waitForEvent('download');await page.getByTestId('confirmation-accept').click();await downloaded;expect(model.exports).toBe(1);
   });
+},60_000);
+
+test('a config loaded without logging stays without logging when publishing an unrelated edit',async()=>{
+  await withSettings(async(page,model)=>{
+    await page.getByRole('combobox',{name:/^(Log Level|日志级别)$/}).click();
+    await page.getByRole('option',{name:'Debug',exact:true}).click();
+    await review(page);await page.getByTestId('config-confirm-publish').click();
+    await expect(page.getByTestId('config-review')).toHaveCount(0);
+    expect(model.writes).toHaveLength(1);
+    const saved=model.writes[0]!.body.aggregate.logical_configuration;
+    expect(saved.log_level).toBe('debug');
+    expect(Object.hasOwn(saved,'logging')).toBe(false);
+  },1440,'en','config',model=>{ delete (model.saved.logical_configuration as { logging?: unknown }).logging; });
 },60_000);
 
 test('import review can be cancelled and invalid snapshots are rejected',async()=>{

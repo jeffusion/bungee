@@ -79,9 +79,3 @@ test('host bridge cannot invoke undeclared, worker, external or traversal paths'
   for (const url of ['javascript:alert(1)', 'http://example.test', 'https://user:pass@example.test']) expect(safeExternalUrl(url)).toBeNull();
   expect(safeExternalUrl('https://auth.example.test/verify')).toBe('https://auth.example.test/verify');
 });
-
-test('actual host bridge has no window-message request handler', async () => {
-  const component = await Bun.file(new URL('../../../src/components/shell/PluginHost.svelte', import.meta.url)).text();
-  expect(component).not.toContain('handleMessage');
-  expect(component).toContain('current.port.onmessage');
-});

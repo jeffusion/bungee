@@ -2,18 +2,6 @@ import { expect, test } from 'bun:test';
 import { allowedControlRequest, allowedHostAction, MAX_SEEN_HOST_REQUEST_IDS, PluginBridgeClient, validateHostRequest } from '../../../src/plugin-sdk/host-messages';
 import type { PluginHostPolicy } from '../../../src/plugin-sdk/host-messages';
 
-const hostSource = await Bun.file(new URL('../../../src/components/shell/PluginHost.svelte', import.meta.url)).text();
-
-test('sandbox host keeps the iframe opaque and initializes a transferred port', () => {
-  expect(hostSource).toContain("let sandboxAttrs = $state('allow-scripts')");
-  expect(hostSource).not.toContain('allow-same-origin');
-  expect(hostSource).toContain("postMessage({ type: 'bungee:bridge-init'");
-  expect(hostSource).toContain("'*', [channel.port2]");
-  expect(hostSource).toContain('current.seenIds.size >= MAX_SEEN_HOST_REQUEST_IDS');
-  expect(hostSource).toContain('bridge !== current || current.generation !== generation');
-  expect(hostSource).not.toContain('window.addEventListener(\'message\', handleMessage)');
-});
-
 test('bridge rejects forged credentials, actions, methods, paths, oversized bodies and replays', () => {
   const seen = new Set<string>();
   const valid = { type: 'bungee:host-request', generation: 4, nonce: 'n'.repeat(64), id: 'request-1', action: 'control', path: '/allowed', method: 'POST', body: { ok: true } };

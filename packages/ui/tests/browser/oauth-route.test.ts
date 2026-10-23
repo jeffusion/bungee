@@ -17,7 +17,8 @@ test('route invalid-link',()=>runRouteScenario('invalid-link'),240_000);
 test('route create-cas-retry',()=>runRouteScenario('create-cas-retry'),240_000);
 
 async function runRouteScenario(scenario:string){
- const context=await browser.newContext({viewport:{width:1280,height:850}});
+ // Exercise startup with a browser language different from the fixture's English assertions.
+ const context=await browser.newContext({viewport:{width:1280,height:850},locale:'zh-CN'});
  try{
  const page=await context.newPage();
   page.setDefaultTimeout(15000);
@@ -223,9 +224,13 @@ if(scenario === 'stale-reload'){
 }
 
 if(scenario === 'draft-cancel-template'){
+  await page.clock.install();
   await page.goto(newEditor);
   await page.getByTestId('route-nav-match').waitFor();
   await page.getByRole('textbox').first().fill('/cancel-test');
+  // The editor autosaves the draft on a 30s interval; advance it to assert the persisted side effect.
+  await page.clock.runFor(30_000);
+  assert.equal(JSON.parse(await page.evaluate(() => localStorage.getItem('bungee-route-draft')!)).path, '/cancel-test', 'unsaved route edits persist to the draft slot');
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   await page.getByTestId('confirm-dialog-cancel').click();
   assert.match(await page.getByRole('textbox').first().inputValue(), /cancel-test/, 'cancel preserves unsaved input');
@@ -261,6 +266,19 @@ if(scenario === 'draft-cancel-template'){
   assert.equal(await rows().count(), 1, 'the target section shows the template upstream');
   assert.match(await targetSection().innerText(), /api\.example\.com/, 'chapter navigation displays the selected template target');
   assert.equal(writes.length, 0, 'template and chapter navigation never publish');
+
+  await page.waitForFunction(() => document.querySelector('[data-testid="route-save-button"]')?.hasAttribute('disabled') === false);
+  await page.getByTestId('route-nav-forward').click();
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+  await page.locator('#route-first-response-ms').fill('900', { force: true });
+  await page.locator('#route-request-ms').fill('100', { force: true });
+  await page.evaluate(() => (document.querySelector('[data-testid="route-nav-match"]') as HTMLElement).click());
+  assert.equal(await page.evaluate(() => Boolean(document.querySelector('[data-testid="section-match"]'))), true, 'left the forward section before saving');
+  assert.equal(await page.evaluate(() => !(document.querySelector('[data-testid="route-save-button"]') as HTMLButtonElement).disabled), true, 'frozen debounce has not disabled save yet');
+  await page.evaluate(() => (document.querySelector('[data-testid="route-save-button"]') as HTMLElement).click());
+  await page.clock.resume();
+  await page.getByTestId('section-forward').waitFor();
+  assert.equal(writes.length, 0, 'invalid timeouts return to the forwarding policy without publishing');
 
 }
 

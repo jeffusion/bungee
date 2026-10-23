@@ -11,7 +11,7 @@ const activationOperationId = '10000000-0000-4000-8000-000000000009';
 
 test('management setup gates protected requests, confirms initialization, and joins the ordinary login shell', async () => {
   const {runtime, browser} = await authRuntime();
-  for (const scenario of ['setup', 'unavailable', 'foreign-component', 'activation-uninitialized', 'activation-initialize', 'activation-ready', 'activation-unavailable', 'activation-changed', 'activation-initialized-elsewhere', 'activation-conflict', 'activation-commit-failed', 'activation-recover', 'activation-initialize-recover', 'activation-initialize-draining', 'activation-verify-draining'] as const) {
+  for (const scenario of ['setup', 'unavailable', 'foreign-component', 'activation-uninitialized', 'activation-initialize', 'activation-ready', 'activation-unavailable', 'activation-login-unavailable', 'activation-changed', 'activation-initialized-elsewhere', 'activation-conflict', 'activation-commit-failed', 'activation-recover', 'activation-initialize-recover', 'activation-initialize-draining', 'activation-verify-draining'] as const) {
       const context = await browser.newContext({ viewport: { width: 390, height: 1000 }, locale: 'zh-CN' });
       try {
         await context.addInitScript(() => localStorage.setItem('locale', 'zh-CN'));
@@ -36,7 +36,8 @@ test('management setup gates protected requests, confirms initialization, and jo
         const backgroundPublication = scenario === 'activation-initialize-draining' || scenario === 'activation-verify-draining';
         let publicationConverged = false;
         const initialPassword = ' 😀 甲 ';
-        const provider = { name: manifest.name, ...manifest.management,
+        const loginComponent = scenario === 'activation-login-unavailable' ? 'MissingManagementLogin' : manifest.management.loginComponent;
+        const provider = { name: manifest.name, ...manifest.management, loginComponent,
           ...(scenario === 'foreign-component' ? { setupComponent: 'TokenStatsChart' } : {}) };
         const config = configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null,
           retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 }));
@@ -90,7 +91,7 @@ test('management setup gates protected requests, confirms initialization, and jo
           if (request.method() === 'GET' && url.pathname === '/api/plugin-translations') return json(Object.fromEntries(Object.entries(manifest.translations)
             .map(([language, messages]) => [language, { plugins: { [manifest.name]: messages } }])));
           if (request.method() === 'GET' && url.pathname === '/api/plugins') return json([{ name: manifest.name, enabled: !activation || selected, version: manifest.version,
-            management: manifest.management, metadata: { ...manifest.metadata, contributes: manifest.contributes } }]);
+            management: { ...manifest.management, loginComponent }, metadata: { ...manifest.metadata, contributes: manifest.contributes } }]);
           if (request.method() === 'GET' && url.pathname === '/api/plugins/user-auth/control/identities') return json({identities: []});
           if (request.method() === 'GET' && url.pathname === '/api/plugins/user-auth/control/users') return json({users: []});
           if (request.method() === 'GET' && url.pathname === '/api/plugins/user-auth/control/login-connections') return json({publicOrigin: url.origin, connections: []});
@@ -132,6 +133,31 @@ test('management setup gates protected requests, confirms initialization, and jo
           const username = dialog.getByLabel('管理员账号', {exact: true});
           const password = dialog.getByLabel('管理员密码', {exact: true});
           const confirmation = dialog.getByLabel('确认管理员密码', {exact: true});
+          if (scenario === 'activation-login-unavailable') {
+            // An unregistered login component must block activation before selecting the provider.
+            await expect(dialog.getByRole('alert')).toBeVisible();
+            await expect(username).toBeVisible();
+            await expect(create).toBeDisabled();
+            // Fill required fields so requestSubmit reaches the handler instead of native validation.
+            await username.fill('owner');
+            await password.fill('fixture-password');
+            await confirmation.fill('fixture-password');
+            const formValid = await dialog.locator('form').evaluate(async element => {
+              const form = element as HTMLFormElement;
+              const valid = form.checkValidity();
+              form.requestSubmit();
+              await Promise.resolve();
+              return valid;
+            });
+            expect(formValid).toBe(true);
+            await expect(dialog.locator('form')).toHaveAttribute('aria-busy', 'false');
+            expect(enableAttempts).toBe(0);
+            expect(requests).not.toContain('POST /api/plugins/user-auth/enable');
+            await expect(page.getByTestId('page-plugins').getByRole('switch')).not.toBeChecked();
+            expect(expectedEnableFailure).toBe(0);
+            expect(errors).toEqual([]);
+            continue;
+          }
           if (scenario === 'activation-unavailable') {
             await expect(dialog.getByRole('alert')).toBeVisible();
             await expect(username).toHaveCount(0);
