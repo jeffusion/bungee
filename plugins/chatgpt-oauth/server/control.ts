@@ -387,7 +387,12 @@ class ChatgptControl implements PluginControl {
         const result = await this.usage.consume(accountRef, redeemRequestId, creditId, context.requestSignal, {
           beforeConsume: selected => this.accounts.recordResetAttempt(accountRef, redeemRequestId, selected, this.now()),
         });
-        if (result.outcome !== 'reset_outcome_unknown') await this.accounts.finishAutoReset(accountRef, redeemRequestId);
+        // Only a consumed (or already-consumed) card keeps the durable completion fence. When the provider
+        // reports no consumption, release the attempt so a later scan is not blocked by this call.
+        if (result.outcome !== 'reset_outcome_unknown') {
+          const unused = result.outcome === 'nothing_to_reset' || result.outcome === 'no_credit';
+          await this.accounts.finishAutoReset(accountRef, redeemRequestId, unused);
+        }
         return jsonResponse(result);
       }) },
       { path: '/accounts/auto-reset', methods: ['POST'], handler: 'setAutoResetCredits', invoke: invoke(async context => {
