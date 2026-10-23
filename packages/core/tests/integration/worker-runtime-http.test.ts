@@ -159,6 +159,7 @@ async function realShutdownFixture(options: {
   readonly renewBeforeMs?: number;
   readonly timeoutMs?: number;
   readonly fetcher?: typeof fetch;
+  readonly clock?: () => number;
 } = {}) {
   const kernelBootId = KERNEL_BOOT_ID;
   const credential = deriveWorkerSupervisionCredential(
@@ -196,7 +197,8 @@ async function realShutdownFixture(options: {
     compileSnapshot: (command) => ({ revision: command.revision, content_hash: command.content_hash, config: { config_version: 4, routes: [] } } as any),
   });
   const worker = new WorkerSupervisionHttpServer({ credential, identity: IDENTITY, runtime,
-    masterControlPort: 3011, controlPort: 0, onShutdown: async () => { shutdownCalls += 1; await runtime.failClosed(); } });
+    masterControlPort: 3011, controlPort: 0, clock: options.clock,
+    onShutdown: async () => { shutdownCalls += 1; await runtime.failClosed(); } });
   await worker.listen();
   const client = new WorkerControllerClient({
     baseUrl: `http://127.0.0.1:${worker.port}`, credential, authority: AUTHORITY,
@@ -1143,16 +1145,25 @@ describe('worker runtime signed HTTP integration', () => {
   }, 5_000);
 
   test('permits shutdown with the current authority after the lease expires', async () => {
-    const fixture = await realShutdownFixture({ leaseDurationMs: 25 });
+    let workerNow = Date.now();
+    const fixture = await realShutdownFixture({ clock: () => workerNow });
     try {
       await fixture.client.attach();
-      await fixture.client.start({ ...startCurrentMessage(), ...IDENTITY });
+      const ready = await fixture.client.start({ ...startCurrentMessage(), ...IDENTITY });
+      expect(ready.phase).toBe('serving');
+      expect(fixture.worker.isFrozen()).toBe(false);
       fixture.client.disconnect(false);
-      await Bun.sleep(50);
+      workerNow = Date.now() + 6_000;
+      expect(fixture.worker.isFrozen()).toBe(true);
+      expect(fixture.worker.currentPhase).toBe('serving');
       const status = await withTimeout(fixture.client.shutdown(), 500);
       expect(status.phase).toBe('stopped');
-      await Bun.sleep(20);
+      const observeUntil = performance.now() + 500;
+      while ((fixture.stopCalls === 0 || fixture.shutdownCalls === 0) && performance.now() < observeUntil) {
+        await Bun.sleep(1);
+      }
       expect(fixture.stopCalls).toBe(1);
+      expect(fixture.shutdownCalls).toBe(1);
     } finally {
       fixture.client.disconnect(false);
       await fixture.worker.stop();
