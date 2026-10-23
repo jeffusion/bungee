@@ -58,8 +58,9 @@ invalid layouts return `422`, unavailable storage returns `503`.
 
 Layout nodes are pages (`kind`, `pageId`, `visible`, optional `icon`) or one-level
 groups (`kind`, `id`, `title`, `visible`, optional `icon`, `children`). A null title
-is reserved for the translated default `group:system`. Every page occurs at most
-once. Icon IDs use `collection:name`; unknown new page IDs and unavailable icon
+uses the translated default title for `group:gateway`, `group:usage`,
+`group:access` or `group:system`; other group IDs require a nonempty title.
+Every page occurs at most once. Icon IDs use `collection:name`; unknown new page IDs and unavailable icon
 overrides are rejected. Previously saved pages removed from the catalog remain
 editable. Unseen available contributions append to saved layouts automatically.
 Navigation contributions from one plugin with the same path identify one page;

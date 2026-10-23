@@ -188,7 +188,7 @@
   });
   const menuItems = $derived($isLoading ? [] : effectiveMenu($menus.snapshot.layout, $menus.snapshot.catalog,
     $location === '/login' && $authMode?.mode === 'anonymous' ? '/' : $location,
-    page => page.source === 'plugin' ? getPluginText(page.label, page.pluginName ?? '', $_) : $_(page.label), $_('header.management')));
+    page => page.source === 'plugin' ? getPluginText(page.label, page.pluginName ?? '', $_) : $_(page.label), key => $_(key)));
 
   const isOnLogin = $derived($location === '/login');
 </script>

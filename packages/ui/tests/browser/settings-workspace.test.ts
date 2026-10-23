@@ -240,13 +240,20 @@ test('local tracking storage failures report a warning and corrupted metadata re
 
 test('dirty settings navigation can be cancelled or confirmed without an implicit save',async()=>{
   for (const width of [1440, 320]) await withSettings(async(page,model)=>{
+    const navigateToRoutes = async () => {
+      if (width === 320) {
+        await page.locator('#header-menu-trigger').click();
+        await page.getByTestId('header-menu').getByRole('link',{name:'Routes',exact:true}).click();
+      } else {
+        await page.getByTestId('header-top-menu').getByRole('button',{name:'Gateway',exact:true}).click();
+        await page.getByRole('menuitem',{name:'Routes',exact:true}).click();
+      }
+    };
     await page.getByTestId('logging-max-size').fill('52');
-    if (width === 320) await page.locator('#header-menu-trigger').click();
-    const routes=page.getByRole('link',{name:'Routes',exact:true});await routes.click();
+    await navigateToRoutes();
     await page.getByTestId('confirmation-cancel').click();await expect(page).toHaveURL(/#\/config$/);
     await expect(page.getByTestId('logging-max-size')).toHaveValue('52');
-    if (width === 320) await page.locator('#header-menu-trigger').click();
-    await routes.click();await page.getByTestId('confirmation-accept').click();await expect(page).toHaveURL(/#\/routes$/);
+    await navigateToRoutes();await page.getByTestId('confirmation-accept').click();await expect(page).toHaveURL(/#\/routes$/);
     expect(model.writes).toHaveLength(0);
   }, width);
 },60_000);

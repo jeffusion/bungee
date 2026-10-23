@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
   import type { MenuNode, MenuPage } from '@jeffusion/bungee-types';
-  import { SYSTEM_MENU_GROUP_ID } from '@jeffusion/bungee-types';
+  import { defaultMenuGroup } from '@jeffusion/bungee-types';
   import { _, isLoading } from '$i18n';
   import { IndustrialToggle } from '$components/industrial';
   import * as DropdownMenu from '$components/ui/dropdown-menu';
@@ -64,7 +64,7 @@
   <div class="flex min-h-[52px] min-w-0 items-center gap-1 px-1.5 py-1 hover:bg-carbon-700/20 sm:min-h-[48px] sm:gap-1.5 sm:px-3">
     <button type="button" id={`${rowId}-drag`} data-menu-drag-handle data-keyboard-navigation={keyboardNavigation} aria-label={`${t('drag')} ${label}`} title={t('drag')} class={`${controlBaseClass} ${keyboardNavigation ? focusClass : ''} touch-none cursor-grab active:cursor-grabbing`}><GripVertical class="h-4 w-4" aria-hidden="true" /></button>
     <button type="button" aria-label={`${t('icon')} ${label}`} title={t('chooseIcon')} onclick={onIcon} class={`${controlClass} border border-transparent hover:border-carbon-500`}>
-      <MenuIcon icon={node.icon ?? (node.kind === 'group' ? node.id === SYSTEM_MENU_GROUP_ID ? 'lucide:settings' : 'lucide:folder' : page?.defaultIcon ?? 'lucide:file-question')} />
+      <MenuIcon icon={node.icon ?? (node.kind === 'group' ? defaultMenuGroup(node.id)?.icon ?? 'lucide:folder' : page?.defaultIcon ?? 'lucide:file-question')} />
     </button>
     <div class="min-w-0 flex-1">
       {#if node.kind === 'group' && renaming}

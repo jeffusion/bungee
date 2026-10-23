@@ -66,7 +66,7 @@ browserTest('header navigation and confirmed session logout', async () => {
         await expect(page.locator('#header-menu-trigger')).toBeHidden();
         await expect(page.getByTestId('header-menu')).toHaveCount(0);
         const topKeys = await top.locator('li').evaluateAll(nodes => nodes.map(node => node.querySelector('a')?.getAttribute('href') ?? 'group'));
-        expect(topKeys).toEqual(['/#/', '/#/routes', '/#/services', '/#/logs', 'group', ...pluginLinks.map(page => page.href)]);
+        expect(topKeys).toEqual(['/#/', 'group', '/#/logs', 'group', ...pluginLinks.map(page => page.href)]);
 
       }
 
@@ -92,7 +92,7 @@ browserTest('header navigation and confirmed session logout', async () => {
         source: 'plugin' as const, pluginName: 'overflow', defaultIcon: 'lucide:puzzle', available: true,
       }));
       snapshot.catalog.push(...overflowPages);
-      const systemLayout = snapshot.layout.splice(4, 1)[0]!;
+      const systemLayout = snapshot.layout.splice(snapshot.layout.findIndex(node => node.kind === 'group' && node.id === 'group:system'), 1)[0]!;
       snapshot.layout.push(...overflowPages.map(page => ({ kind: 'page' as const, pageId: page.id, visible: true })), systemLayout);
       await page.evaluate(() => window.dispatchEvent(new Event('focus')));
       const more = page.locator('#header-more-trigger');
@@ -129,7 +129,7 @@ browserTest('header navigation and confirmed session logout', async () => {
       await expect(navigation).toBeVisible();
       await navigation.click();
       const compact = page.getByTestId('header-menu');
-      await expect(compact.getByTestId('header-menu-section')).toHaveCount(2);
+      await expect(compact.getByTestId('header-menu-section')).toHaveCount(3);
       await expect(compact.getByRole('button', { name: '访问工具', exact: true })).toBeVisible();
       const accessGroup = compact.getByTestId('header-menu-section').filter({ has: page.getByRole('button', { name: '访问工具', exact: true }) });
       await expect(accessGroup.getByRole('link', { name: '访问控制', exact: true })).toBeVisible();

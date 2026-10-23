@@ -1,5 +1,10 @@
 {
   "menus": {
+    "groups": {
+      "gateway": "Gateway",
+      "usage": "Usage & Budget",
+      "access": "Access"
+    },
     "groupNameRequired": "Enter a name for each group before saving.",
     "groupNameDuplicate": "Use a different name for each group.",
     "iconUnavailable": "Icon unavailable. Choose another icon or restore the default.",

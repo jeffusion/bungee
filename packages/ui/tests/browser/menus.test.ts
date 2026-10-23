@@ -166,7 +166,8 @@ test('menu editor saves, reloads, preserves conflicted drafts, guards navigation
 
     await page.getByTestId('confirmation-cancel').click();
     await expect(groupTitle).toContainText('Unsaved draft');
-    const routesLink = page.getByTestId('header-top-menu').locator('a[href="/#/routes"]');
+    await page.getByTestId('header-top-menu').getByRole('button', { name: 'Gateway', exact: true }).click();
+    const routesLink = page.getByRole('menuitem', { name: 'Routes', exact: true });
     await routesLink.click();
     await expect(page.getByTestId('confirmation-cancel')).toBeVisible(); await page.getByTestId('confirmation-cancel').click();
     await expect(editor).toBeVisible(); await expect(groupTitle).toContainText('Unsaved draft');
@@ -298,6 +299,8 @@ test('menu actions support reordering, reparenting, validation and read-only pre
     await page.addInitScript(() => localStorage.setItem('locale', 'en'));
     const errors: string[] = []; const network = observeNetwork(page, errors); page.on('pageerror', error => errors.push(error.message));
     const initial = {...menuSnapshot()};
+    // Exercise a saved arrangement with gateway pages at the top level.
+    initial.layout = initial.layout.flatMap<MenuNode>(node => node.kind === 'group' && node.id === 'group:gateway' ? [...node.children] : [node]);
     initial.layout = initial.layout.map(node => node.kind === 'page' && node.pageId === 'builtin:services' ? { ...node, icon: 'tabler:home' } : node);
     const configuration = configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null, retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 }));
     const captured: {layout: MenuLayout | null} = {layout: null};
@@ -412,6 +415,7 @@ test('menu drag reorders groups and preserves disabled plugin preferences', () =
     const inactiveChild = { ...inactiveRoot, pageId: 'plugin:inactive:%2Fchild' };
     const pluginPage = (id: string, available: boolean): MenuPage => ({ id, label: id, href: '/#/extensions/inactive/' + id.split('%2F')[1], source: 'plugin', pluginName: 'inactive', defaultIcon: 'lucide:puzzle', available });
     let snapshot = {...menuSnapshot()};
+    snapshot.layout = snapshot.layout.flatMap<MenuNode>(node => node.kind === 'group' && node.id === 'group:gateway' ? [...node.children] : [node]);
     const captured: {layout: MenuLayout | null} = {layout: null};
     snapshot = { ...snapshot, catalog: [...snapshot.catalog, pluginPage(inactiveRoot.pageId, false), pluginPage(inactiveChild.pageId, false)],
       layout: snapshot.layout.flatMap<MenuNode>(node => node.kind === 'group' ? [{ ...node, children: [node.children[0], inactiveChild, ...node.children.slice(1)] }]

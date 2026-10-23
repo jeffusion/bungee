@@ -53,11 +53,11 @@ test('plugin availability updates survive a failed menu read without replacing s
   expect(state.snapshot.layout).toEqual(saved.layout);
   expect(state.snapshot.revision).toBe(4); expect(state.snapshot.iconRevision).toBe('test');
   expect(state.snapshot.catalog.find(page => page.id === plugin.id)).toEqual({ ...plugin, available: false });
-  expect(effectiveMenu(state.snapshot.layout, state.snapshot.catalog, '/', page => page.label, 'System')).toEqual([]);
+  expect(effectiveMenu(state.snapshot.layout, state.snapshot.catalog, '/', page => page.label, () => 'System')).toEqual([]);
   expect(editableMenuLayout(state.snapshot.layout, state.snapshot.catalog)[0]).toMatchObject({ children: [] });
   updateMenuFallback(catalog);
   expect(get(menus).snapshot.layout).toEqual(saved.layout);
-  expect(effectiveMenu(get(menus).snapshot.layout, get(menus).snapshot.catalog, '/', page => page.label, 'System')[0])
+  expect(effectiveMenu(get(menus).snapshot.layout, get(menus).snapshot.catalog, '/', page => page.label, () => 'System')[0])
     .toMatchObject({ label: 'Operations', children: [{ label: plugin.label, icon: 'tabler:home' }] });
 });
 test('an initial read failure retains reachable defaults without claiming a saved snapshot', async () => {

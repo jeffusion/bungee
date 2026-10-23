@@ -19,7 +19,7 @@ export type MenuPageNode = {
 export type MenuGroupNode = {
   readonly kind: 'group';
   readonly id: string;
-  /** Null is reserved for the translated default system group. */
+  /** Null uses the translated title of a predefined group. */
   readonly title: string | null;
   readonly visible: boolean;
   readonly icon?: string;
@@ -65,6 +65,20 @@ export type MenuIcons = {
 
 export const MENU_MANAGEMENT_ID = 'builtin:menus';
 export const SYSTEM_MENU_GROUP_ID = 'group:system';
+export const DEFAULT_MENU_GROUPS = [
+  { id: 'group:gateway', label: 'menus.groups.gateway', icon: 'lucide:network',
+    pages: ['builtin:routes', 'builtin:services'] },
+  { id: 'group:usage', label: 'menus.groups.usage', icon: 'lucide:chart-no-axes-combined',
+    pages: ['plugin:token-stats:%2Fstatistics', 'plugin:token-budget:%2Fsettings'] },
+  { id: 'group:access', label: 'menus.groups.access', icon: 'lucide:shield-check',
+    pages: ['plugin:key-access:%2Fsettings', 'plugin:user-auth:%2Fusers'] },
+  { id: SYSTEM_MENU_GROUP_ID, label: 'header.management', icon: 'lucide:settings',
+    pages: ['builtin:configuration', 'builtin:plugins', MENU_MANAGEMENT_ID, 'plugin:user-auth:%2Fprofile'] },
+] as const;
+
+export function defaultMenuGroup(id: string) {
+  return DEFAULT_MENU_GROUPS.find(group => group.id === id);
+}
 export const BUILTIN_MENU_PAGES: readonly MenuPage[] = [
   { id: 'builtin:dashboard', label: 'nav.dashboard', href: '/#/', source: 'builtin', defaultIcon: 'lucide:layout-dashboard', available: true },
   { id: 'builtin:routes', label: 'nav.routes', href: '/#/routes', source: 'builtin', defaultIcon: 'lucide:route', available: true },
@@ -77,11 +91,21 @@ export const BUILTIN_MENU_PAGES: readonly MenuPage[] = [
 
 export function createDefaultMenuLayout(catalog: readonly MenuPage[]): MenuLayout {
   const page = (pageId: string): MenuPageNode => ({ kind: 'page', pageId, visible: true });
+  const available = new Set(catalog.filter(item => item.available).map(item => item.id));
+  const group = (id: string): MenuGroupNode => ({ kind: 'group', id, title: null, visible: true,
+    children: defaultMenuGroup(id)!.pages.filter(pageId => available.has(pageId)).map(page) });
+  const layout: MenuLayout = [
+    page('builtin:dashboard'),
+    group('group:gateway'),
+    group('group:usage'),
+    group('group:access'),
+    page('builtin:logs'),
+    group(SYSTEM_MENU_GROUP_ID),
+  ];
+  const seen = new Set(layout.flatMap(node => node.kind === 'page' ? [node.pageId] : node.children.map(child => child.pageId)));
   return [
-    ...BUILTIN_MENU_PAGES.slice(0, 4).map(item => page(item.id)),
-    ...catalog.filter(item => item.source === 'plugin' && item.available).map(item => page(item.id)),
-    { kind: 'group', id: SYSTEM_MENU_GROUP_ID, title: null, visible: true,
-      children: BUILTIN_MENU_PAGES.slice(4).map(item => page(item.id)) },
+    ...layout.filter(node => node.kind === 'group' ? node.children.length > 0 : available.has(node.pageId)),
+    ...catalog.filter(item => item.available && !seen.has(item.id)).map(item => page(item.id)),
   ];
 }
 

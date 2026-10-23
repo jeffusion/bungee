@@ -93,11 +93,13 @@ try {
     await expect(pluginCard).toBeVisible();
     await expect(pluginCard.locator('a[href^="/#/plugins/key-access"]')).toHaveCount(0);
     await expect(pluginCard.locator('a[href^="/#/extensions/"]')).toHaveCount(0);
-    const menuLink = page.getByTestId('app-header').getByRole('link', { name: t('metadata.name'), exact: true });
+    const accessGroup = page.getByTestId('header-top-menu').getByRole('button', { name: '访问管理', exact: true });
+    await accessGroup.click();
+    const menuLink = page.getByRole('menuitem', { name: t('metadata.name'), exact: true });
     await menuLink.click();
     const settings = page.getByTestId('access-control-settings');
     await expect(settings).toContainText(key.name);
-    await expect(menuLink).toHaveAttribute('aria-current', 'page');
+    await expect(accessGroup).toHaveAttribute('data-active', 'true');
     expect(new URL(page.url()).hash).toBe(`#${canonical}`);
     await page.reload(); await expect(settings).toContainText(key.name);
     // The relocated component saves through the same plugin controls.
@@ -125,12 +127,13 @@ try {
       activeBookmark = undefined;
     }
     expect(cancelledBookmarkFrames).toEqual(['/plugins/key-access?from=bookmark']);
-    await page.getByRole('link', { name: language === 'zh-CN' ? '路由管理' : 'Routes', exact: true }).click();
+    await page.getByTestId('header-top-menu').getByRole('button', { name: '网关管理', exact: true }).click();
+    await page.getByRole('menuitem', { name: language === 'zh-CN' ? '路由管理' : 'Routes', exact: true }).click();
     await expect(settings).toHaveCount(0);
     await page.goBack(); await expect(settings).toContainText('updated-app');
     enabled = false;
     await page.reload(); await page.goto(`${base}/#/plugins`);
-    await expect(page.getByTestId('app-header').getByRole('link', { name: t('metadata.name'), exact: true })).toHaveCount(0);
+    await expect(accessGroup).toHaveCount(0);
     await expect(pluginCard.locator('a')).toHaveCount(0);
     await context.close();
   }

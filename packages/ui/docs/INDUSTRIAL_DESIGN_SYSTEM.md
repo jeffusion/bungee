@@ -753,8 +753,13 @@ The page title, KPI strip, controls, and body must share one content axis.
 
 Built-in, plugin and administration pages share one instance-wide menu catalog
 and layout. Top-level pages and one-level groups can be reordered, hidden and
-assigned icons in Menu Management. The initial System group contains Global
-Settings, Plugins and Menu Management; it is editable like other groups.
+assigned icons in Menu Management. The preset orders Dashboard, Gateway
+(Routes, Services), Usage & Budget (Token Statistics, Token Budget), Access
+(Key Access, Users), Request Logs, and System (Global Settings, Plugins,
+Menu Management, Profile). Include only available pages and omit empty groups;
+append other contributions after System. Default groups use translated titles
+and semantic icons until overridden. Apply the preset only without a saved
+layout or when resetting a draft; retain saved arrangements. All groups are editable.
 Language, sign-out and the HUD clock remain separate shell utilities.
 
 At widths of 768px and above, navigation fits whole top-level entries into the

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, tick, untrack } from 'svelte';
-  import { createDefaultMenuLayout, reconcileMenuLayout, SYSTEM_MENU_GROUP_ID, type MenuLayout, type MenuNode, type MenuPage, type MenuSnapshot } from '@jeffusion/bungee-types';
+  import { createDefaultMenuLayout, reconcileMenuLayout, defaultMenuGroup, type MenuLayout, type MenuNode, type MenuPage, type MenuSnapshot } from '@jeffusion/bungee-types';
   import { _, isLoading } from '$i18n';
   import { menus, acceptMenus, refreshMenus, menuSessionGuard } from '$stores/menus';
   import { menuDirty } from '$stores/navigation-guard';
@@ -18,7 +18,7 @@
   import MenuTree from '$components/domain/menu/MenuTree.svelte';
   import IconPicker from '$components/domain/menu/IconPicker.svelte';
   import MenuIcon from '$components/domain/menu/MenuIcon.svelte';
-  import { effectiveMenu, editableMenuLayout, menuNodeKey, moveMenuNode, moveMenuPage, dissolveMenuGroup, reorderMenuNodes, sameMenuLayout } from '$components/domain/menu/menu-model';
+  import { effectiveMenu, menuGroupLabel, editableMenuLayout, menuNodeKey, moveMenuNode, moveMenuPage, dissolveMenuGroup, reorderMenuNodes, sameMenuLayout } from '$components/domain/menu/menu-model';
   const t = (key: string) => $isLoading ? '' : $_('menus.' + key);
   const pageLabel = (page: MenuPage) => $isLoading ? '' : page.source === 'plugin' ? getPluginText(page.label, page.pluginName ?? '', $_) : $_(page.label);
   let base = $state<MenuSnapshot | null>(null), draft = $state<MenuLayout>([]), saving = $state(false), status = $state(''), uncertain = $state(false), conflict = $state(false);
@@ -36,7 +36,7 @@
   const groupErrors = $derived.by(() => {
     const errors = new Map<string, string>();
     if ($isLoading) return errors;
-    const titles = draft.filter(node => node.kind === 'group').map(node => ({ id: node.id, title: node.title?.trim() ?? $_('header.management') }));
+    const titles = draft.filter(node => node.kind === 'group').map(node => ({ id: node.id, title: menuGroupLabel(node, key => $_(key)).trim() }));
     for (const item of titles) {
       if (!item.title) errors.set(item.id, 'groupNameRequired');
       else if (titles.some(other => other.id !== item.id && other.title === item.title)) errors.set(item.id, 'groupNameDuplicate');
@@ -52,10 +52,10 @@
   const dragging = $derived(gesture?.active ? gesture.key : null);
   const editorLayout = $derived(editableMenuLayout(dragLayout ?? draft, catalog));
   const availableCatalog = $derived(catalog.filter(page => page.available));
-  const groups = $derived($isLoading ? [] : draft.filter(node => node.kind === 'group').map(node => ({ id: node.id, label: node.title ?? $_('header.management') })));
-  const preview = $derived($isLoading ? [] : effectiveMenu(draft, catalog, '/menus', pageLabel, $_('header.management')));
+  const groups = $derived($isLoading ? [] : draft.filter(node => node.kind === 'group').map(node => ({ id: node.id, label: menuGroupLabel(node, key => $_(key)) })));
+  const preview = $derived($isLoading ? [] : effectiveMenu(draft, catalog, '/menus', pageLabel, key => $_(key)));
   const targetNode = $derived(draft.flatMap(node => node.kind === 'page' ? [node] : [node, ...node.children]).find(node => menuNodeKey(node) === iconTarget));
-  const targetDefault = $derived(targetNode?.kind === 'page' ? catalog.find(page => page.id === targetNode.pageId)?.defaultIcon ?? 'lucide:file-question' : targetNode?.id === SYSTEM_MENU_GROUP_ID ? 'lucide:settings' : 'lucide:folder');
+  const targetDefault = $derived(targetNode?.kind === 'page' ? catalog.find(page => page.id === targetNode.pageId)?.defaultIcon ?? 'lucide:file-question' : targetNode?.kind === 'group' ? defaultMenuGroup(targetNode.id)?.icon ?? 'lucide:folder' : 'lucide:folder');
   $effect(() => {
     const snapshot = $menus.snapshot, session = $menus.session, draggingNow = dragging !== null;
     untrack(() => {
@@ -74,7 +74,7 @@
     changed(draft.map(node => menuNodeKey(node) === key ? replacement : node.kind === 'group'
       ? { ...node, children: node.children.map(child => child.pageId === key && replacement.kind === 'page' ? replacement : child) } : node));
   }
-  function groupLabel(node: MenuNode) { return node.kind === 'group' ? node.title ?? ($isLoading ? '' : $_('header.management')) : catalog.find(page => page.id === node.pageId) ? pageLabel(catalog.find(page => page.id === node.pageId)!) : node.pageId; }
+  function groupLabel(node: MenuNode) { return node.kind === 'group' ? ($isLoading ? '' : menuGroupLabel(node, key => $_(key))) : catalog.find(page => page.id === node.pageId) ? pageLabel(catalog.find(page => page.id === node.pageId)!) : node.pageId; }
   function addGroup() {
     const id = `group:${crypto.randomUUID()}`;
     changed([...draft, { kind: 'group', id, title: t('untitled'), visible: true, children: [] }]);
@@ -113,7 +113,7 @@
     const bounds = row.getBoundingClientRect();
     gesture = { pointerId: event.pointerId, key, group: node.kind === 'group', startX: event.clientX, startY: event.clientY,
       x: event.clientX, y: event.clientY, offsetX: event.clientX - bounds.left, offsetY: event.clientY - bounds.top,
-      width: bounds.width, label: groupLabel(node), icon: node.icon ?? (node.kind === 'group' ? node.id === SYSTEM_MENU_GROUP_ID ? 'lucide:settings' : 'lucide:folder' : catalog.find(page => page.id === node.pageId)?.defaultIcon ?? 'lucide:file-question'),
+      width: bounds.width, label: groupLabel(node), icon: node.icon ?? (node.kind === 'group' ? defaultMenuGroup(node.id)?.icon ?? 'lucide:folder' : catalog.find(page => page.id === node.pageId)?.defaultIcon ?? 'lucide:file-question'),
       active: false, validDrop: false, collapsed: new Set(collapsedGroups) };
   }
   function previewAtPointer() {

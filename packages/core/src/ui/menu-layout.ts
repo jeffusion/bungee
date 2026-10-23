@@ -1,5 +1,5 @@
 import type { MenuLayout, MenuPageNode, MenuGroupNode } from '@jeffusion/bungee-types';
-import { SYSTEM_MENU_GROUP_ID } from '@jeffusion/bungee-types';
+import { defaultMenuGroup } from '@jeffusion/bungee-types';
 import { isMenuIconId } from './menu-icons';
 
 export const MAX_MENU_PAGES = 512;
@@ -53,7 +53,7 @@ export function validateMenuLayout(value: unknown, allowedPages?: ReadonlySet<st
       || groups.has(node.id) || typeof node.visible !== 'boolean' || !Array.isArray(node.children)
       || node.children.length > MAX_MENU_PAGES) invalid();
     const title = typeof node.title === 'string' ? node.title.trim() : node.title;
-    if (title === null ? node.id !== SYSTEM_MENU_GROUP_ID : typeof title !== 'string' || !title || title.length > 80 || /[\u0000-\u001f\u007f]/.test(title)) invalid();
+    if (title === null ? !defaultMenuGroup(node.id) : typeof title !== 'string' || !title || title.length > 80 || /[\u0000-\u001f\u007f]/.test(title)) invalid();
     if (typeof title === 'string' && titles.has(title)) invalid();
     if (typeof title === 'string') titles.add(title);
     groups.add(node.id);
