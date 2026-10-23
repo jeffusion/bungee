@@ -138,6 +138,13 @@ export class AutoResetScheduler {
               },
             });
             if (result.outcome === 'reset_outcome_unknown') { this.cancelPlan(accountRef, plan); return; }
+            // The provider reported that this redemption did not use the card: release the claim so a later
+            // scheduled scan can re-evaluate the same card, and stop this round instead of trying another card.
+            if (result.outcome === 'nothing_to_reset' || result.outcome === 'no_credit') {
+              await this.accounts.finishAutoReset(accountRef, attempt.redeemRequestId, true);
+              this.cancelPlan(accountRef, plan);
+              return;
+            }
             await this.accounts.finishAutoReset(accountRef, attempt.redeemRequestId);
           } catch (error) {
             // These errors occur before this request's POST. All other failures remain pending across restarts.

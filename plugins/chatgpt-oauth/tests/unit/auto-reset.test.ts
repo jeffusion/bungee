@@ -63,7 +63,7 @@ async function setup(enabled = true) {
     if (init?.method === 'POST') {
       posts.push(JSON.parse(String(init.body)));
       if (onPost) await onPost();
-      return json({ code: outcome, windows_reset: 1 });
+      return json({ code: outcome, windows_reset: outcome === 'nothing_to_reset' || outcome === 'no_credit' ? 0 : 1 });
     }
     if (path.endsWith('/usage')) return json({ rate_limit: { allowed: true, primary_window: {
       used_percent: 50, limit_window_seconds: 18000, reset_after_seconds: 3600,
@@ -311,6 +311,79 @@ describe('automatic reset, simulation only', () => {
       await next.timer.fire();
       expect(s.posts).toHaveLength(1);
     } finally { await s.dispose(); }
+  });
+
+  test('a card the provider reports as not consumed is released and re-evaluated by a later scan', async () => {
+    for (const outcome of ['nothing_to_reset', 'no_credit'] as const) {
+      for (const restart of [false, true] as const) {
+        const s = await setup();
+        const attempts = async () => (await s.accounts.get(s.account.id)).autoResetAttempts?.map(item => item.creditId) ?? [];
+        try {
+          s.setCredits([credit('unchanged'), credit('other')]);
+          s.setOutcome(outcome);
+          await s.timer.fire();
+          // One POST for the due card, no immediate retry of it and no attempt on the second card.
+          expect(s.posts.map(post => post.credit_id)).toEqual(['unchanged']);
+          expect((await s.accounts.list())[0].pendingAutoReset).toBeUndefined();
+          expect(await attempts()).toEqual([]);
+          expect([...s.timer.tasks.values()].map(task => task.delay)).toEqual([AUTO_RESET_INTERVAL_MS]);
+          const next = restart ? await s.restart() : undefined;
+          if (next) expect(await attempts()).toEqual([]);
+          s.setCredits([credit('unchanged')]);
+          s.setOutcome('reset');
+          s.setNow(NOW + AUTO_RESET_INTERVAL_MS);
+          // Without a restart this fires the real five-minute scan; after a restart it fires the fresh startup scan.
+          await (next?.timer ?? s.timer).fire();
+          expect(s.posts.map(post => post.credit_id)).toEqual(['unchanged', 'unchanged']);
+          expect((await s.accounts.list())[0].pendingAutoReset).toBeUndefined();
+        } finally { await s.dispose(); }
+      }
+    }
+  });
+
+  test('reset and already_redeemed keep the completion fence for automatic and manual requests', async () => {
+    for (const outcome of ['reset', 'already_redeemed'] as const) {
+      const s = await setup();
+      try {
+        s.setOutcome(outcome);
+        await s.timer.fire();
+        expect(s.posts).toHaveLength(1);
+        expect((await s.accounts.list())[0].pendingAutoReset).toBeUndefined();
+        const next = await s.restart();
+        s.setNow(NOW + AUTO_RESET_INTERVAL_MS);
+        await next.timer.fire();
+        expect(s.posts).toHaveLength(1);
+      } finally { await s.dispose(); }
+
+      const manual = await setup();
+      try {
+        manual.setOutcome(outcome);
+        const response = await invoke(manual.control, 'resetAccountUsage', { accountRef: manual.account.id,
+          creditId: 'simulation-credit', redeemRequestId: '123e4567-e89b-42d3-a456-426614174000' });
+        expect((await response.json()).outcome).toBe(outcome);
+        expect(manual.posts).toHaveLength(1);
+        expect((await manual.accounts.list())[0].pendingAutoReset).toBeUndefined();
+        await manual.timer.fire();
+        expect(manual.posts).toHaveLength(1);
+      } finally { await manual.dispose(); }
+    }
+  });
+
+  test('a manual not-consumed outcome releases the fence without retrying immediately', async () => {
+    for (const outcome of ['nothing_to_reset', 'no_credit'] as const) {
+      const s = await setup();
+      try {
+        s.setOutcome(outcome);
+        const response = await invoke(s.control, 'resetAccountUsage', { accountRef: s.account.id,
+          creditId: 'simulation-credit', redeemRequestId: '123e4567-e89b-42d3-a456-426614174000' });
+        expect((await response.json()).outcome).toBe(outcome);
+        expect(s.posts).toHaveLength(1);
+        expect((await s.accounts.list())[0].pendingAutoReset).toBeUndefined();
+        s.setOutcome('reset');
+        await s.timer.fire();
+        expect(s.posts.map(post => post.credit_id)).toEqual(['simulation-credit', 'simulation-credit']);
+      } finally { await s.dispose(); }
+    }
   });
 
   test('catches up inside the window; sorts due cards; skips expired, undated and redeemed cards', async () => {
