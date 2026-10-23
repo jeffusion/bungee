@@ -1,4 +1,4 @@
-import { BUILTIN_MENU_PAGES, SYSTEM_MENU_GROUP_ID, type MenuLayout, type MenuNode, type MenuPage, type MenuPageNode } from '@jeffusion/bungee-types';
+import { BUILTIN_MENU_PAGES, defaultMenuGroup, type MenuGroupNode, type MenuLayout, type MenuNode, type MenuPage, type MenuPageNode } from '@jeffusion/bungee-types';
 import type { Plugin } from '$api/plugins';
 export type EffectivePage = { kind: 'page'; id: string; label: string; href: string; icon: string; active: boolean };
 export type EffectiveGroup = { kind: 'group'; id: string; label: string; icon: string; active: boolean; children: EffectivePage[] };
@@ -15,8 +15,11 @@ export function pathMatches(path: string, href: string): boolean {
   const target = href.slice(href.indexOf('#') + 1).split('?')[0].replace(/\/$/, '') || '/';
   return path === target || target !== '/' && path.startsWith(target + '/');
 }
+export function menuGroupLabel(node: MenuGroupNode, translate: (key: string) => string): string {
+  return node.title ?? translate(defaultMenuGroup(node.id)?.label ?? 'header.management');
+}
 export function effectiveMenu(layout: MenuLayout, catalog: readonly MenuPage[], path: string,
-  pageLabel: (page: MenuPage) => string, systemLabel: string): EffectiveMenu[] {
+  pageLabel: (page: MenuPage) => string, translate: (key: string) => string): EffectiveMenu[] {
   const pages = new Map(catalog.map(page => [page.id, page]));
   // Resolve overlapping routes against the complete available catalog, including hidden entries.
   const active = catalog.filter(page => page.available && pathMatches(path, page.href)).sort((a, b) => b.href.length - a.href.length)[0]?.id;
@@ -29,8 +32,8 @@ export function effectiveMenu(layout: MenuLayout, catalog: readonly MenuPage[], 
     if (!node.visible) return [];
     if (node.kind === 'page') { const page = resolve(node); return page ? [page] : []; }
     const children = node.children.map(resolve).filter((page): page is EffectivePage => page !== null);
-    return children.length ? [{ kind: 'group', id: node.id, label: node.title ?? systemLabel,
-      icon: node.icon ?? (node.id === SYSTEM_MENU_GROUP_ID ? 'lucide:settings' : 'lucide:folder'), active: children.some(page => page.active), children } as EffectiveMenu] : [];
+    return children.length ? [{ kind: 'group', id: node.id, label: menuGroupLabel(node, translate),
+      icon: node.icon ?? defaultMenuGroup(node.id)?.icon ?? 'lucide:folder', active: children.some(page => page.active), children } as EffectiveMenu] : [];
   });
 }
 export function menuNodeKey(node: MenuNode): string { return node.kind === 'page' ? node.pageId : node.id; }

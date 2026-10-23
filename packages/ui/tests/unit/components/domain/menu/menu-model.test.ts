@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import type { MenuLayout, MenuPage } from '@jeffusion/bungee-types';
+import { BUILTIN_MENU_PAGES, createDefaultMenuLayout, type MenuLayout, type MenuPage } from '@jeffusion/bungee-types';
 import { dissolveMenuGroup, editableMenuLayout, effectiveMenu, moveMenuNode, fallbackMenuCatalog, moveMenuPage, reorderMenuNodes } from '../../../../../src/components/domain/menu/menu-model';
 const catalog: MenuPage[] = [
   { id: 'routes', label: 'Routes', href: '/#/routes', defaultIcon: 'lucide:route', source: 'builtin', available: true },
@@ -8,15 +8,24 @@ const catalog: MenuPage[] = [
 ];
 const page = (pageId: string, visible = true) => ({ kind: 'page' as const, pageId, visible });
 const group = (visible = true) => ({ kind: 'group' as const, id: 'group:test', title: null, visible, children: [page('detail'), page('plugin')] });
+test('predefined groups resolve translated labels and default icons while custom names and icons win', () => {
+  const layout = createDefaultMenuLayout(BUILTIN_MENU_PAGES);
+  const labels: Record<string, string> = {'menus.groups.gateway': '网关管理', 'header.management': '系统管理'};
+  const result = effectiveMenu(layout, BUILTIN_MENU_PAGES, '/services', page => page.label, key => labels[key]);
+  expect(result.find(item => item.id === 'group:gateway')).toMatchObject({ label: '网关管理', icon: 'lucide:network', active: true });
+  const custom = layout.map(node => node.kind === 'group' && node.id === 'group:gateway' ? {...node, title: 'Team', icon: 'tabler:home'} : node);
+  expect(effectiveMenu(custom, BUILTIN_MENU_PAGES, '/', page => page.label, key => key).find(item => item.id === 'group:gateway'))
+    .toMatchObject({ label: 'Team', icon: 'tabler:home' });
+});
 test('flat and mixed menus preserve order and omit unavailable, hidden and empty entries', () => {
-  const result = effectiveMenu([page('routes'), group(), { ...group(), id: 'empty', title: 'Custom', children: [] }], catalog, '/routes/detail/edit', item => item.label, 'System');
+  const result = effectiveMenu([page('routes'), group(), { ...group(), id: 'empty', title: 'Custom', children: [] }], catalog, '/routes/detail/edit', item => item.label, () => 'System');
   expect(result.map(item => [item.id, item.active])).toEqual([['routes', false], ['group:test', true]]);
   expect(result[1].kind === 'group' && result[1].children.map(item => item.id)).toEqual(['detail']);
-  expect(effectiveMenu([page('routes', false), group(false)], catalog, '/', item => item.label, 'System')).toEqual([]);
+  expect(effectiveMenu([page('routes', false), group(false)], catalog, '/', item => item.label, () => 'System')).toEqual([]);
 });
 test('active route matching respects segment boundaries and longest available catalog match, including hidden pages', () => {
-  expect(effectiveMenu([page('routes')], catalog, '/routes-extra', item => item.label, '')[0].active).toBe(false);
-  expect(effectiveMenu([page('routes'), page('detail', false)], catalog, '/routes/detail/edit', item => item.label, '')[0].active).toBe(false);
+  expect(effectiveMenu([page('routes')], catalog, '/routes-extra', item => item.label, () => '')[0].active).toBe(false);
+  expect(effectiveMenu([page('routes'), page('detail', false)], catalog, '/routes/detail/edit', item => item.label, () => '')[0].active).toBe(false);
 });
 test('move into and out of groups keeps pages unique, preserves page preferences and supports before positions', () => {
   const initial: MenuLayout = [{ ...page('routes', false), icon: 'tabler:route' }, group()];

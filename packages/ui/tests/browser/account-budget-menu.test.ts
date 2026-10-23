@@ -105,7 +105,10 @@ try {
         await expect(card.locator(`a[href^="/#/plugins/${name}"]`)).toHaveCount(0);
         await expect(card.locator('a[href^="/#/extensions/"]')).toHaveCount(0);
       }
-      const menu = page.getByTestId('header-top-menu').getByRole('link', { name: t(name, label), exact: true });
+      const groupName = name === 'token-budget' ? '用量与预算' : path === '/users' ? '访问管理' : '系统管理';
+      const group = page.getByTestId('header-top-menu').getByRole('button', { name: groupName, exact: true });
+      await group.click();
+      const menu = page.getByRole('menuitem', { name: t(name, label), exact: true });
       await menu.click();
       const settings = page.getByTestId(testId);
       await expect(settings).toContainText(name === 'user-auth' ? 'admin' : key.name);
@@ -113,7 +116,9 @@ try {
       {
 
         {
-          const link = page.getByTestId('header-top-menu').getByRole('link', { name: t(name, label), exact: true });
+          await expect(group).toHaveAttribute('data-active', 'true');
+          await group.click();
+          const link = page.getByRole('menuitem', { name: t(name, label), exact: true });
           await expect(link).toHaveAttribute('aria-current', 'page');
           await link.click();
         }
@@ -159,8 +164,9 @@ try {
     await page.reload(); await waitForLoginSettings();
     budgetEnabled = false; await page.reload(); await waitForLoginSettings(); await page.goto(`${base}/#/plugins`);
     await expect(authCard).toBeVisible();
-    await expect(page.getByTestId('app-header').getByRole('link', { name: t('user-auth', 'profile.title'), exact: true })).toBeVisible();
-    await expect(page.getByTestId('app-header').getByRole('link', { name: t('token-budget', 'metadata.name'), exact: true })).toHaveCount(0);
+    await page.getByTestId('header-top-menu').getByRole('button', { name: '系统管理', exact: true }).click();
+    await expect(page.getByRole('menuitem', { name: t('user-auth', 'profile.title'), exact: true })).toBeVisible();
+    await expect(page.getByTestId('header-top-menu').getByRole('button', { name: '用量与预算', exact: true })).toHaveCount(0);
     await context.close();
   }
   expect(errors).toEqual([]);

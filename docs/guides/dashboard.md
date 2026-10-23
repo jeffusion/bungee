@@ -55,13 +55,31 @@ Management surface:
 
 Open **System → Menu management** (`/#/menus`) in the default layout to arrange navigation for
 the entire instance. Built-in pages, plugin pages and administration pages can
-be reordered, hidden, or moved into one-level groups. The default System group
-is editable. Each compact row provides a drag handle, a clickable icon and a
+be reordered, hidden, or moved into one-level groups. All default groups
+are editable. Each compact row provides a drag handle, a clickable icon and a
 visibility switch. Rows reorder immediately while dragging, with no added gaps. Move over a row
 edge to insert before or after it, or over a group center to move inside.
 Release inside the list to keep the draft; Escape or release outside cancels
 the drag. Groups remain one level deep. **Menu actions** contains move/up/down and move-to-group
 controls, plus icon reset and group rename/dissolve. Dissolving a group preserves its pages.
+
+The default order groups pages by task:
+
+| Entry | Pages in order |
+| --- | --- |
+| Dashboard | Direct link |
+| Gateway | Routes, Services |
+| Usage & Budget | Token Statistics, Token Budget |
+| Access | Key Access, Users |
+| Request Logs | Direct link |
+| System | Global Settings, Plugins, Menu Management, Profile |
+
+Plugin pages appear only when their plugin is active. Empty groups are omitted;
+other plugin pages append after System in catalog order. This preset applies
+when no layout is saved and when resetting a draft. Saved layouts keep their
+order, names, icons and visibility; newly available pages append without
+regrouping existing entries. Default group titles follow the selected language
+until renamed.
 
 Click a group name to collapse or expand its children. Rename through its action
 menu; Enter or blur finishes a valid name, Escape cancels, and invalid names are
@@ -73,10 +91,9 @@ default draft; leaving with unsaved changes asks whether to discard it. Another
 editor's newer revision requires reload instead of overwriting their changes.
 Other browser windows refresh when brought to the foreground.
 
-Navigation displays all visible top-level pages and groups in the configured
-order at every screen width. Groups open dropdowns. There is no automatic
-overflow collection or separate mobile panel; use groups, shorter names and
-visibility to control the width. The direct Menu management route remains
+Desktop navigation fits entries in the configured order and collects overflow
+in **More**, preserving group headings and page order. Below 768px, a navigation
+drawer preserves the same order with collapsible groups. The direct Menu management route remains
 `/#/menus` if its entry is hidden.
 Hiding an entry does not revoke page access or disable its plugin. Disabled
 plugin pages are absent from the editor, page catalog and navigation. Their

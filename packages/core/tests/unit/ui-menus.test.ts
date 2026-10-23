@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { BUILTIN_MENU_PAGES, createDefaultMenuLayout, reconcileMenuLayout } from '@jeffusion/bungee-types';
+import { BUILTIN_MENU_PAGES, DEFAULT_MENU_GROUPS, createDefaultMenuLayout, reconcileMenuLayout } from '@jeffusion/bungee-types';
 import { validateMenuLayout } from '../../src/ui/menu-layout';
 import { defaultMenuIcon, isMenuIconId, MATERIAL_MENU_ICONS, menuIconCollections, menuIcons, resolveMenuIcon, searchMenuIcons } from '../../src/ui/menu-icons';
 import { menuCatalog, createMenuApi } from '../../src/master-runtime/menu-api';
@@ -11,9 +11,13 @@ const configuration = {revision:1,content_hash:`sha256:${'0'.repeat(64)}` as con
   aggregate:{logical_configuration:{services:[],routes:[],plugins:[]},plugin_activations:[{plugin_name:'active'}]}};
 
 describe('menu layout contract', () => {
-  test('canonicalizes titles and accepts the default system group', () => {
+  test('canonicalizes titles and accepts translated predefined groups', () => {
     expect(validateMenuLayout([group])[0]).toMatchObject({title:'Custom'});
     expect(validateMenuLayout(createDefaultMenuLayout(BUILTIN_MENU_PAGES))).toEqual(createDefaultMenuLayout(BUILTIN_MENU_PAGES));
+    for (const preset of DEFAULT_MENU_GROUPS) {
+      const predefined = {...group, id:preset.id, title:null};
+      expect(validateMenuLayout([predefined])).toEqual([predefined]);
+    }
   });
   test.each([
     [page,page], [group,{...group,id:'group:another'}], [group,group], [{...group,title:' '}],
@@ -55,7 +59,7 @@ describe('offline icon catalog', () => {
       expect(collection.total).toBeGreaterThan(100);
       expect(collection.version).toBeTruthy(); expect(collection.license.title).toBeTruthy();
     }
-    const ids = [...new Set(['lucide:menu','tabler:home','carbon:home','lucide:activity-square','tabler:123','carbon:app-switcher',...BUILTIN_MENU_PAGES.map(p=>p.defaultIcon),...Object.values(MATERIAL_MENU_ICONS)])];
+    const ids = [...new Set(['lucide:menu','tabler:home','carbon:home','lucide:activity-square','tabler:123','carbon:app-switcher',...BUILTIN_MENU_PAGES.map(p=>p.defaultIcon),...DEFAULT_MENU_GROUPS.map(group=>group.icon),...Object.values(MATERIAL_MENU_ICONS)])];
     const result = menuIcons(ids);
     expect(result.missing).toEqual([]);
     for (const id of ids) { expect(result.icons[id]?.body).toContain('<'); expect(result.icons[id]?.width).toBeGreaterThan(0); }

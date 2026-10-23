@@ -1,5 +1,10 @@
 {
   "menus": {
+    "groups": {
+      "gateway": "网关管理",
+      "usage": "用量与预算",
+      "access": "访问管理"
+    },
     "groupNameRequired": "保存前请为每个分组填写名称。",
     "groupNameDuplicate": "请为每个分组使用不同的名称。",
     "iconUnavailable": "图标不可用，请重新选择或恢复默认。",

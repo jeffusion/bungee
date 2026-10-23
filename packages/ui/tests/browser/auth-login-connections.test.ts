@@ -167,7 +167,8 @@ test('connection deletion only signs out its initiating session when a response 
           await expect(page.getByTestId('page-dashboard')).toBeVisible();
           await expect(page.getByTestId('app-header')).toBeVisible();
           await expect(page.getByTestId('page-login')).toHaveCount(0);
-          await page.getByTestId('app-header').getByRole('link', {name: '用户信息', exact: true}).click();
+          await page.getByTestId('header-top-menu').getByRole('button', {name: '系统管理', exact: true}).click();
+          await page.getByRole('menuitem', {name: '用户信息', exact: true}).click();
           await expect(page.getByTestId('account-details')).toContainText('other');
           await expect(page.getByTestId('account-details')).toContainText('Other user');
 
