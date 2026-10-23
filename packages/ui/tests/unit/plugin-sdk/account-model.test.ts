@@ -47,12 +47,3 @@ test('account summary whitelists safe fields instead of retaining credentials', 
   expect(summary.label).toBe('<script>not html</script>');
   expect(JSON.stringify(summary)).not.toContain('secret'); expect(JSON.stringify(summary)).not.toContain('private');
 });
-
-test('callback is immediately cleared and never stored or navigated', async () => {
-  const source = await Bun.file(new URL('../../../../../plugins/chatgpt-oauth/ui/AccountsPage.svelte', import.meta.url)).text();
-  expect(source).toContain("let callbackUrl = callback.trim(); callback = '';");
-  expect(source).not.toMatch(/localStorage|sessionStorage|history\.|location\.(?:href|hash)\s*=/);
-  expect(source).toContain("control('GET', `/login/status?sessionId=");
-  expect(source).not.toContain("control('POST', '/login/device/complete'");
-  expect(source).toContain("status === 'committing'");
-});

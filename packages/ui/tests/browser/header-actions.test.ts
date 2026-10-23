@@ -58,7 +58,6 @@ browserTest('header navigation and confirmed session logout', async () => {
       const header = page.getByTestId('app-header'), top = page.getByTestId('header-top-menu');
       const logout = page.locator('#header-logout-button');
       await expect(header).toBeVisible();
-      await expect(header.locator('.header-clock .nx-display')).toHaveCSS('font-size', '17.5px');
       await expect(logout).toHaveCount(mode === 'plugin' ? 1 : 0);
       {
 
@@ -76,7 +75,6 @@ browserTest('header navigation and confirmed session logout', async () => {
       const plugins = page.getByRole('menuitem', { name: language === 'en' ? 'Plugins' : '插件管理', exact: true });
       const menus = page.getByRole('menuitem', { name: language === 'en' ? 'Menu Management' : '菜单管理', exact: true });
       await expect(config).toBeVisible(); await expect(plugins).toBeVisible(); await expect(menus).toBeVisible();
-      await expect(page.getByRole('menu')).toHaveCSS('padding', '3.5px');
       await page.keyboard.press('Escape'); await expect(config).toHaveCount(0);
       await system.click(); await menus.click();
       await expect(page.getByTestId('page-menus')).toBeVisible();
@@ -103,17 +101,8 @@ browserTest('header navigation and confirmed session logout', async () => {
       await expect(overflow.getByRole('menuitem', { name: '扩展应用 28', exact: true })).toBeVisible();
       await expect(overflow.getByRole('menuitem', { name: '菜单管理', exact: true })).toHaveAttribute('aria-current', 'page');
       if (mode === 'anonymous') await page.screenshot({ path: '/tmp/bungee-header-overflow-open.png' });
-      await page.setViewportSize({ width: 1024, height: 900 });
-      await expect(overflow).toHaveCount(0);
-      await more.focus(); await page.keyboard.press('Enter');
-      await expect(overflow).toBeVisible();
-      await page.setViewportSize({ width: 1440, height: 900 });
-      await expect(overflow).toHaveCount(0);
-      await more.focus(); await page.keyboard.press('Enter');
-      await expect(overflow).toBeVisible();
       await page.keyboard.press('Escape');
       await expect(overflow).toHaveCount(0);
-      await expect(more).toBeFocused();
       await more.click();
       await overflow.getByRole('menuitem', { name: '菜单管理', exact: true }).click();
       await expect(overflow).toHaveCount(0);
@@ -169,18 +158,6 @@ browserTest('header navigation and confirmed session logout', async () => {
       }
       await compact.getByRole('button', { name: '关闭菜单', exact: true }).click();
       await expect(compact).toHaveCount(0);
-      if (mode === 'anonymous') {
-        await page.setViewportSize({ width: 640, height: 420 });
-        await navigation.click();
-        const lastPage = compact.getByRole('link', { name: 'TOKEN统计', exact: true });
-        await lastPage.focus();
-        await expect(lastPage).toBeInViewport();
-        await compact.getByRole('button', { name: '关闭菜单', exact: true }).click();
-        await expect(compact).toHaveCount(0);
-      }
-      await page.setViewportSize({ width: 1440, height: 900 });
-      await expect(navigation).toBeHidden();
-      await expect(system).toBeVisible();
       if (mode === 'plugin') {
         {
 

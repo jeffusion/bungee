@@ -14,9 +14,8 @@ test('native settings must be a statically registered component owned by this pl
     expect(result.kind).toBe('error');
   }
 });
-test('external sandbox settings retain PluginHost while invalid native declarations cannot fall back to iframe', async () => {
+test('external sandbox settings retain PluginHost and native targets are never dynamically imported', async () => {
   for (const path of ['/', '/unknown', '/settings']) expect(resolveNativeSettings({ name: 'external', enabled: true, metadata: { contributes: { settings: '/settings' } } }, path, {}, {})).toEqual({ kind: 'sandbox' });
-  const layout = await Bun.file(new URL('../../../../src/routes/PluginDetailLayout.svelte', import.meta.url)).text();
-  expect(layout.indexOf("settings?.kind === 'error'")).toBeLessThan(layout.indexOf('<PluginHost'));
-  expect(layout).not.toMatch(/import\s*\(/);
+  // Browser coverage proves invalid declarations fail closed; this keeps the static-loading boundary.
+  expect(await Bun.file(new URL('../../../../src/routes/PluginDetailLayout.svelte', import.meta.url)).text()).not.toMatch(/import\s*\(/);
 });

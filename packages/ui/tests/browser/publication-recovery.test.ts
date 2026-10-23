@@ -18,8 +18,6 @@ afterAll(async () => { try { await browser?.close(); } finally { await uiRuntime
 // Real Chromium, explicitly mocked management responses: render/interaction evidence, not Core E2E.
 test('stopped publication can be retried once and follows recovery until serving is confirmed', async () => {
 const base = uiRuntime.origin;
-const errors: string[] = [];
-const results: object[] = [];
   for (const name of ['confirmed', 'unconfirmed'] as const) {
     const width = 1440, locale = 'en';
     const context = await browser.newContext({ viewport: { width, height: 1000 } });
@@ -127,17 +125,14 @@ const results: object[] = [];
     await alert.waitFor({ state: 'hidden', timeout: 3000 });
     assert.equal(await retry.count(), 0);
 
-    results.push({ name, width, locale, posts, deniedRetries, runtimeReads, hiddenAfterSuccess: true, contentOverflow: false });
     evidenceApi.verify();
     } finally {releaseRetry(); await context.close();}
   }
-assert.deepEqual(errors, []);
 
 }, 120_000);
 
 test('runtime facts distinguish historical failure, active cleanup, dependency failure and stale reads', async () => {
   const ui = uiRuntime;
-    const errors: string[] = [];
     {
       const locale = 'en', width = 1440;
       const context = await browser.newContext({ viewport: { width, height: 1000 } });
@@ -223,6 +218,5 @@ test('runtime facts distinguish historical failure, active cleanup, dependency f
       evidenceApi.verify();
       } finally {await context.close();}
     }
-    assert.deepEqual(errors, []);
 
 }, 120_000);

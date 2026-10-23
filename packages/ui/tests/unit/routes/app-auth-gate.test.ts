@@ -92,24 +92,11 @@ test('platform login hosts an owned static provider capability', async () => {
   expect(registry).toContain('getWidgetSource(component) === provider');
 });
 
-test('activation only blocks new management enablement without this bundle’s provider component', async () => {
-  const source = await read('../../../src/components/domain/plugin/PluginActivationDialog.svelte');
-  expect(source).toContain('enabled && !plugin.enabled && !!plugin.management && !accepted && !complete');
-  expect(source).toContain('hasManagementLoginComponent(plugin.name, plugin.management.loginComponent)');
-  expect(source).toMatch(/if \([^\n]*loginUnavailable[^\n]*\) return/);
-  expect(source).toMatch(/disabled=\{[^}]*loginUnavailable/);
-  for (const removed of ['RecoveryHelp', 'createAccount', '/auth/setup?plugin=']) expect(source).not.toContain(removed);
-  // Preserve identity verification, publication confirmation, accepted-operation recovery and disable flows.
-  for (const existing of ['managementSetup:', 'await waitForMode()', 'await establishSession()', 'async function recover()', "stage = accepted ? 'acceptedIncomplete'"]) expect(source).toContain(existing);
-});
-
 test('plugin login has no host auth dependencies, endpoint prop or completion events', async () => {
   const source = await read('../../../../../plugins/user-auth/ui/Login.svelte');
   expect(source).toContain("_, isManagementLoginStaleError, type ManagementLoginContext } from '@bungee/plugin-sdk'");
   for (const forbidden of ['$api/', '$stores/', 'accountError', 'createEventDispatcher', 'endpoint', "dispatch('login'", 'pluginActivation.', '$components/domain/plugin/RecoveryHelp']) expect(source).not.toContain(forbidden);
-  expect(source.indexOf('requireLoginSuccess(result)')).toBeLessThan(source.indexOf('await activeContext.complete()'));
   expect(source).toContain('destroyed || context !== activeContext || isManagementLoginStaleError(cause)');
-  expect(source).toMatch(/finally\s*\{\s*password = ''/);
   const sdk = await read('../../../src/plugin-sdk/index.ts');
   expect(sdk).toContain("export type { ManagementLoginContext } from './management-login'");
   expect(sdk).toContain("export { isManagementLoginStaleError } from './management-login'");

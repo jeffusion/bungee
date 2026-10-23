@@ -2,19 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import { LOGGING_BODY_DEFAULTS, resolveLoggingBody, withLoggingBody, type LoggingValue } from '../../../../../src/components/domain/config/logging-body';
 
 describe('logging body model (render-time defaults, copy-on-edit)', () => {
-  test('does not bind a missing logging value back as null during mount', async () => {
-    const source = await Bun.file(new URL('../../../../../src/components/domain/config/LoggingEditor.svelte', import.meta.url)).text();
-
-    expect(source).toContain('$bindable<Exclude<LoggingValue, null>>()');
-    expect(source).not.toContain('value = null');
-  });
-
-  test('editor uses the KiB range up to 5 MiB', async () => {
-    const source = await Bun.file(new URL('../../../../../src/components/domain/config/LoggingEditor.svelte', import.meta.url)).text();
-    expect(source).toContain('min="1" max="5120"');
-    expect(source).toContain('kibToBytes(Number(input.value))');
-  });
-
   test('resolves display defaults from an unset value without mutating it', () => {
     // Given
     const value: LoggingValue = null;

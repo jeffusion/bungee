@@ -58,19 +58,28 @@ test('Turnstile uses external explicit rendering, retries failed loads and canno
   } finally { await closeAuthContexts(); }
 }, 60_000);
 
-test('local login remains available with Turnstile off and rejects submission when login options are unavailable', async () => {
+test('local login remains available without Turnstile, rejects unusable options and recovers from an invalid origin', async () => {
   const {runtime, browser} = await authRuntime();
   try {
-    for (const scenario of ['off','unavailable'] as const) {
+    for (const scenario of ['off','unavailable','invalid-origin'] as const) {
       const context=await browser.newContext({viewport:{width:1440,height:1000},locale:'zh-CN'});
       await context.addInitScript(()=>localStorage.setItem('locale','zh-CN'));
-      const page=await context.newPage(),bodies:unknown[]=[],errors:string[]=[];let challengeRequests=0,available=scenario==='off';
+      const page=await context.newPage(),bodies:unknown[]=[],errors:string[]=[];let challengeRequests=0,available=scenario!=='unavailable';
+      let loginRequests=0,verifyRequests=0,signedIn=false;
       page.on('pageerror',error=>errors.push(error.message));
 
       await page.route('https://challenges.cloudflare.com/**',route=>{challengeRequests++;return route.fulfill({body:''});});
       await mockApplication(page,(path,_method,body)=>{
         if(path==='/api/auth/login/options')return available?{local:{enabled:true,turnstile:{enabled:false}},methods:[]} : {};
-        if(path==='/api/auth/login'){bodies.push(body);return {success:false,error:'invalid_credentials'};}
+        if(path==='/api/auth/login'){
+          bodies.push(body);loginRequests++;
+          if(scenario==='invalid-origin'){
+            if(loginRequests===1)return {success:false,error:'invalid_origin'};
+            signedIn=true;return {success:true};
+          }
+          return {success:false,error:'invalid_credentials'};
+        }
+        if(path==='/api/auth/verify'){verifyRequests++;if(signedIn)return {success:true,mode:'plugin',subject:{id:'admin',provider:'user-auth'},csrfToken:'csrf'};}
       },false);
       await page.goto(`${runtime.origin}/#/login`);
       const form=page.getByRole('form',{name:'账号登录',exact:true}),submit=form.getByRole('button',{name:'登录',exact:true});
@@ -79,6 +88,17 @@ test('local login remains available with Turnstile off and rejects submission wh
         await expect(form.getByRole('alert')).toBeVisible();await expect(submit).toBeDisabled();
         await form.evaluate(form=>(form as HTMLFormElement).requestSubmit());expect(bodies).toHaveLength(0);
         available=true;await form.getByRole('button',{name:'重新读取',exact:true}).click();
+      }
+       if(scenario==='invalid-origin'){
+         const verificationsBeforeLogin=verifyRequests;
+         await submit.click();await expect(form.getByRole('alert')).toBeVisible();
+         await expect(page).toHaveURL(/#\/login$/);await expect(form.getByLabel('密码',{exact:true})).toHaveValue('');
+         expect(loginRequests).toBe(1);expect(verifyRequests).toBe(verificationsBeforeLogin);
+        await expect(form.getByRole('link')).toHaveAttribute('href','https://public.example/#/login');
+        await form.getByLabel('密码',{exact:true}).fill('local password');await submit.click();
+        await expect(page.getByTestId('page-dashboard')).toBeVisible();
+         expect(loginRequests).toBe(2);expect(challengeRequests).toBe(0);expect(errors).toEqual([]);
+        await context.close();continue;
       }
       await expect(submit).toBeEnabled();await submit.click();await expect(form.getByRole('alert')).toBeVisible();
       expect(bodies).toEqual([{username:'admin',password:'local password',transport:'cookie'}]);expect(challengeRequests).toBe(0);expect(errors).toEqual([]);

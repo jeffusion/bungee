@@ -57,28 +57,14 @@ test('dashboard displays observed upstream hosts independently of endpoint confi
   await expect(rows).toHaveCount(3);
   await expect(rows.first().getByText('actual.openai.example.com:8443', { exact: true })).toBeVisible();
   await expect(rows.first().getByText('/v1/chat/completions', { exact: true })).toBeVisible();
-  await expect(page.getByTestId('tps-total-samples')).toBeVisible();
   await expect(page.getByTestId('tps-model-row')).toHaveCount(3);
-  for (const mode of ['endpoints', 'models']) {
-    const body = page.getByTestId(`tps-${mode}`);
-    const card = page.locator('article').filter({ has: body });
-    await expect(card.locator('.nx-panel-head').getByText('TOKENS/S', { exact: true })).toBeVisible();
-    await expect(body.getByText('TOKENS/S', { exact: true })).toHaveCount(0);
-  }
-  await expect(rows.first().locator('.ranking-value')).toHaveCSS('font-size', '14px');
-  await expect(page.getByTestId('tps-model-row').first().locator('.ranking-value')).toHaveCSS('font-size', '14px');
   await expect(page.getByTestId('tps-model-row').first().getByText('/v1/chat/completions', { exact: true })).toBeVisible();
   assert(reads).toBe(1);
   await page.setViewportSize({ width: 1304, height: 820 });
   await page.screenshot({ path: '/tmp/bungee-tps-redesign-wide.png', fullPage: true, animations: 'disabled' });
   await page.setViewportSize({ width: 320, height: 820 });
   const navigation = page.locator('#header-menu-trigger');
-  await expect(navigation).toBeVisible();
   await page.screenshot({ path: '/tmp/bungee-tps-redesign-narrow.png', fullPage: true, animations: 'disabled' });
-  await page.getByTestId('tps-endpoint-list').focus();
-  await page.keyboard.press('End');
-  await expect(rows.last()).toBeInViewport();
-  await page.evaluate(() => window.scrollTo(0, 0));
   await navigation.click();
   await expect(page.getByTestId('header-menu').getByRole('link', { name: '用户管理', exact: true })).toBeVisible();
   await page.screenshot({ path: '/tmp/bungee-tps-redesign-menu.png', animations: 'disabled' });

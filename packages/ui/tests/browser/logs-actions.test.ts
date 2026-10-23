@@ -28,6 +28,7 @@ try {
         chainStatus: 200, chainTransportOutcome: 'completed', transportOutcome: 'completed', chainStartTs: now,
         timestamp: now, chainDurationMs: 3800, duration: 3800, chainEndTs: now, chainAttempts: 1, hasRetry: false, success: true };
       await page.addInitScript(language => { localStorage.setItem('locale', language); localStorage.setItem('logsAutoRefresh', 'true'); }, language);
+      await page.route('https://fonts.googleapis.com/**', route => route.fulfill({ contentType: 'text/css', body: '' }));
       await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
         const url = new URL(route.request().url());
         if (route.request().method() !== 'GET') { errors.push(`Unexpected API ${route.request().method()} ${url.pathname}`); return route.fulfill({status: 500, json: {error: 'unexpected_method'}}); }
