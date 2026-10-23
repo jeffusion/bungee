@@ -1,3 +1,10 @@
+## [6.4.1](https://github.com/jeffusion/bungee/compare/v6.4.0...v6.4.1) (2026-10-23)
+
+
+### Bug Fixes
+
+* **chatgpt-oauth:** release explicit unused reset fence ([9f73a10](https://github.com/jeffusion/bungee/commit/9f73a101657ede761b56d2f9559c7bd4b67f46d6))
+
 # [6.4.0](https://github.com/jeffusion/bungee/compare/v6.3.1...v6.4.0) (2026-10-23)
 
 
