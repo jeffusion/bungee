@@ -1,3 +1,10 @@
+# [6.4.0](https://github.com/jeffusion/bungee/compare/v6.3.1...v6.4.0) (2026-10-23)
+
+
+### Features
+
+* **menus:** 按职责分组预置导航菜单 ([7393bfc](https://github.com/jeffusion/bungee/commit/7393bfccc15dd9d39614937c11553ccf2d91cafe))
+
 ## [6.3.1](https://github.com/jeffusion/bungee/compare/v6.3.0...v6.3.1) (2026-10-22)
 
 
