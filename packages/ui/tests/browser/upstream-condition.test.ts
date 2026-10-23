@@ -1,3 +1,4 @@
+import { serviceReference } from '../helpers/service-references';
 import { test as browserTest } from 'bun:test';
 import assert from 'node:assert/strict';
 import {startUiRuntime} from '../../../../tests/helpers/ui-runtime';
@@ -30,7 +31,7 @@ try {
             name: 'chatgpt-oauth', enabled: false, options: { accountRef: 'fixture-account' } }] : [],
         }] }],
       routes: [{ id: '40000000-0000-4000-8000-000000000001', position: 0, path: '/original',
-        service_id: '10000000-0000-4000-8000-000000000001', plugins: [] }], plugins: [],
+        service_references: [serviceReference('10000000-0000-4000-8000-000000000001')], plugins: [] }], plugins: [],
     }, plugin_activations: [] };
     const original = structuredClone(config);
     const errors: string[] = [];

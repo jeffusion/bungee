@@ -1,7 +1,7 @@
 /** Typed extension stages shared by built-in and project plugins. */
 import type { AppConfig, RouteConfig, CorsConfig, LLMProtocol } from '@jeffusion/bungee-types';
 import type { ExpressionContext } from '../expression-engine';
-import type { EffectiveRouteConfig, RuntimeUpstream, RequestSnapshot } from '../worker/types';
+import type { EffectiveRouteConfig, RuntimeUpstream, RuntimeServiceReference, RuntimeCandidate, RequestSnapshot } from '../worker/types';
 import type { HandleRequestRuntimeContext } from './request-plugin';
 import type { PhaseAwareHooks, InboundChain } from '../scoped-plugin-registry';
 import type { MutableRequestContext } from '../worker/request/context';
@@ -93,16 +93,20 @@ export interface GatewayAdmissionPrepareInput {
 export interface GatewaySelectInput {
   readonly upstreams: RuntimeUpstream[]; readonly route: EffectiveRouteConfig; readonly context: ExpressionContext;
   readonly selector?: (upstreams: RuntimeUpstream[], route?: EffectiveRouteConfig, context?: ExpressionContext) => RuntimeUpstream | undefined;
-  readonly coordinator?: FailoverCoordinator;
+  readonly references?: RuntimeServiceReference[];
+  readonly coordinator?: FailoverCoordinator<RuntimeCandidate>;
 }
-export interface GatewaySelectDecision { readonly upstream?: RuntimeUpstream; readonly shouldTransitionToHalfOpen?: boolean }
+export interface GatewaySelectDecision { readonly reference?: RuntimeServiceReference; readonly upstream?: RuntimeUpstream; readonly shouldTransitionToHalfOpen?: boolean }
 export interface GatewayFailoverInput {
+  readonly references?: RuntimeServiceReference[];
   readonly upstreams: RuntimeUpstream[]; readonly route: EffectiveRouteConfig; readonly recoveryIntervalMs: number; readonly context: ExpressionContext;
 }
 export interface GatewayRetryInput {
   readonly snapshot: RequestSnapshot; readonly route: RouteConfig; readonly signal: AbortSignal;
+  /** Caller cancellation stays terminal even when a buffered repair fallback survives the shared deadline. */
+  readonly clientSignal?: AbortSignal;
   readonly runAttempt: (override?: GatewayRequestOverride) => Promise<ProxyRequestResult>;
-  readonly finish: (result: ProxyRequestResult) => Promise<void>;
+  readonly finish: (result: ProxyRequestResult, preserveRequestState?:boolean) => Promise<void>;
   readonly end: (result: ProxyRequestResult, cancelled: boolean) => Promise<void>;
   readonly cleanup: (result: ProxyRequestResult, signal: AbortSignal) => Promise<void>;
   readonly claimRepair?: () => boolean;

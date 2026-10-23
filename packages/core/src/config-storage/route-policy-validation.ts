@@ -1,3 +1,4 @@
+import { validateServiceSelectionPolicies } from './service-policy-validation';
 import { validateAuth } from './domain-validation';
 import { RATE_LIMIT_MAX_BURST, RATE_LIMIT_MAX_RPS } from '@jeffusion/bungee-types';
 import { validateExpressionSyntax } from './expression-syntax';
@@ -128,6 +129,7 @@ function validateRetry(value: unknown, path: string, context: ValidationContext)
 }
 
 export function validateRoutePolicies(object: JsonObject, path: string, context: ValidationContext): void {
+  validateServiceSelectionPolicies(object, path, context);
   validatePathRewrite(object.path_rewrite, `${path}.path_rewrite`, context);
   validateAuth(object.auth, `${path}.auth`, context);
   const websocket = objectField(object.websocket, `${path}.websocket`, ['enabled'], context);

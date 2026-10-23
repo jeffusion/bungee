@@ -31,7 +31,7 @@ const binding = {plugin:'chatgpt-oauth',contributionId:'chatgpt',bindingId:facts
 const attempt = {revision:1,endpointId:facts.endpointId,attemptId:crypto.randomUUID()};
 const signal = new AbortController().signal;
 const plugin = {id:facts.bindingId,name:'chatgpt-oauth',path:new URL('../../plugins/chatgpt-oauth/server/index.ts',import.meta.url).pathname,enabled:true,options:binding.bindingOptions};
-const config = {plugins:[],services:[{name:'shared-oauth',endpoints:[{id:facts.endpointId,target:'https://chatgpt.com',weight:100,priority:1,plugins:[plugin],managedBy:{plugin:binding.plugin,contributionId:binding.contributionId,bindingId:binding.bindingId}}]}],routes:routes.map(path=>({path,service:'shared-oauth',path_rewrite:{'^/oauth-[ab]':''},timeouts:{request_ms:5000}}))} as any;
+const config = {plugins:[],services:[{id:'shared-oauth',name:'shared-oauth',endpoints:[{id:facts.endpointId,target:'https://chatgpt.com',weight:100,priority:1,plugins:[plugin],managedBy:{plugin:binding.plugin,contributionId:binding.contributionId,bindingId:binding.bindingId}}]}],routes:routes.map(path=>({path,service_references:[{id:`reference-${path}`,position:0,service_id:'shared-oauth',weight:100,priority:1,is_disabled:false}],path_rewrite:{'^/oauth-[ab]':''},timeouts:{request_ms:5000}}))} as any;
 const originalFetch = global.fetch;
 let upstream: ReturnType<typeof Bun.serve> | undefined;
 let ingress: ReturnType<typeof Bun.serve> | undefined;

@@ -1,409 +1,92 @@
 <script lang="ts">
-
-  import { createEventDispatcher } from 'svelte';
-  import { sortBy } from 'lodash-es';
-  import type { Route, Service, Upstream } from '$api/routes';
+  import { createEventDispatcher, untrack } from 'svelte';
+  import type { Route, Service } from '$api/routes';
   import type { ValidationError } from '$validation';
   import { ServicesAPI } from '$api/services';
+  import { toEditorService, duplicateEditorUpstream } from '$api/config-adapters';
   import { _ } from '$i18n';
   import { toast } from '$stores/toast';
   import ConfirmDialog from '$components/shell/ConfirmDialog.svelte';
   import UpstreamsSection from './UpstreamsSection.svelte';
-  import RuntimeStatus from '$components/domain/service/RuntimeStatus.svelte';
-import { LoadingIndicator, SystemAlertBar, PanelCard, IconButton, StatusBadge } from '$components/industrial';
+  import UpstreamTargetList from './UpstreamTargetList.svelte';
+  import ServiceReferencePicker from '$components/domain/service/ServiceReferencePicker.svelte';
+  import LoadBalancingSection from '$components/domain/service/LoadBalancingSection.svelte';
+  import FailoverEditor from '$components/domain/service/FailoverEditor.svelte';
+  import { PanelCard, LoadingIndicator } from '$components/industrial';
   import { Input } from '$components/ui/input';
+  import { v4 as uuidv4 } from 'uuid';
 
-  interface Props {
-    route: Route;
-    errors?: ValidationError[];
-    weightErrors?: ValidationError[];
-    services?: Service[];
-  }
-
-  let {
-    route = $bindable(),
-    errors = [],
-    weightErrors = [],
-    services = $bindable([])
-  }: Props = $props();
-
+  let { route = $bindable(), errors = [], weightErrors = [], services = $bindable([]) }: {
+    route: Route; errors?: ValidationError[]; weightErrors?: ValidationError[]; services?: Service[];
+  } = $props();
   type TargetMode = 'service' | 'custom';
-
-  const dispatch = createEventDispatcher<{
-    modechange: { mode: TargetMode },
-    navigatetosection: { section: string }
-  }>();
-
-  let mode: TargetMode = $state(route.service ? 'service' : 'custom');
-  let searchQuery = $state('');
+  const dispatch = createEventDispatcher<{ modechange: {mode: TargetMode}; navigatetosection: {section: string} }>();
+  let mode = $state<TargetMode>(untrack(() => route.service_references?.length ? 'service' : 'custom'));
+  let activeRoute = $state.raw(untrack(() => route));
   let saveServiceName = $state('');
   let savingService = $state(false);
   let showSwitchConfirm = $state(false);
   let showCustomConfirm = $state(false);
-  let pendingServiceName: string | null = null;
-  let activeRoute = $state.raw(route);
-
-
-
-
-  function groupEndpointsByPriority(endpoints: Upstream[]): Array<{ priority: number; endpoints: Upstream[] }> {
-    const eps = endpoints || [];
-    const sorted = sortBy(eps, [(endpoint) => endpoint.priority || 1]);
-    const groups: Array<{ priority: number; endpoints: Upstream[] }> = [];
-
-    for (const endpoint of sorted) {
-      const priority = endpoint.priority || 1;
-      let group = groups.find(item => item.priority === priority);
-      if (!group) {
-        group = { priority, endpoints: [] };
-        groups.push(group);
-      }
-      group.endpoints.push(endpoint);
-    }
-
-    return groups;
+  const references = $derived([...(route.service_references ?? [])].sort((a,b) => a.priority - b.priority || a.position - b.position));
+  function setMode(next: TargetMode) {
+    mode = next;
+    if (next === 'service') route.endpoints = undefined;
+    else { route.service_references = undefined; route.load_balancing = undefined; route.failover = undefined; }
+    dispatch('modechange', {mode: next});
   }
-
-  function formatInterval(intervalMs?: number): string {
-    if (!intervalMs) return '';
-    if (intervalMs % 1000 === 0) return `${intervalMs / 1000}s`;
-    return `${intervalMs}ms`;
-  }
-
-  function emitModeChange(nextMode: TargetMode) {
-    dispatch('modechange', { mode: nextMode });
-  }
-
-  function switchToService() {
-    if (mode === 'service') return;
-
-    if (route.service) {
-      mode = 'service';
-      emitModeChange('service');
-      return;
-    }
-
-    if ((route.endpoints?.length ?? 0) > 0) {
-      showSwitchConfirm = true;
-      return;
-    }
-
-    mode = 'service';
-    route.endpoints = undefined;
-    emitModeChange('service');
-  }
-
-  function confirmSwitchToService() {
-    showSwitchConfirm = false;
-    mode = 'service';
-    route.endpoints = undefined;
-    if (pendingServiceName) {
-      route.service = pendingServiceName;
-      pendingServiceName = null;
-    }
-    emitModeChange('service');
-  }
-
-  function cancelSwitchToService() {
-    showSwitchConfirm = false;
-    pendingServiceName = null;
-  }
-
-  function switchToCustom() {
-    if (mode === 'custom') return;
-
-    if (route.service) {
-      showCustomConfirm = true;
-      return;
-    }
-
-    mode = 'custom';
-    route.service = undefined;
-    emitModeChange('custom');
-  }
-
-  function confirmSwitchToCustom() {
-    showCustomConfirm = false;
-    mode = 'custom';
-    route.service = undefined;
-    emitModeChange('custom');
-  }
-
-  function cancelSwitchToCustom() {
-    showCustomConfirm = false;
-  }
-
-  function selectService(name: string) {
-    if ((route.endpoints?.length ?? 0) > 0) {
-      pendingServiceName = name;
-      showSwitchConfirm = true;
-      return;
-    }
-
-    mode = 'service';
-    route.endpoints = undefined;
-    route.service = name;
-    searchQuery = '';
-    emitModeChange('service');
-
-    if (document.activeElement instanceof HTMLElement) {
-      document.activeElement.blur();
-    }
-  }
-
-  function clearService() {
-    route.service = undefined;
-  }
-
+  function switchToService() { if (mode === 'service') return; if (route.endpoints?.length) showSwitchConfirm = true; else setMode('service'); }
+  function switchToCustom() { if (mode === 'custom') return; if (route.service_references?.length) showCustomConfirm = true; else setMode('custom'); }
   async function saveAsService() {
-    const name = saveServiceName.trim();
-    const endpoints = route.endpoints ?? [];
-
-    if (!name || endpoints.length === 0) return;
-
+    const name = saveServiceName.trim(), endpoints = route.endpoints ?? [];
+    if (!name || !endpoints.length) return;
+    savingService = true;
     try {
-      savingService = true;
-      await ServicesAPI.create({
-        name,
-        endpoints: endpoints.map(({ _uid, ...endpoint }) => endpoint),
-      });
-
-      const createdService: Service = {
-        name,
-        endpoints: endpoints.map(endpoint => ({ ...endpoint })),
-      };
-
-      services = [...services, createdService];
-      route.endpoints = undefined;
-      route.service = name;
-      mode = 'service';
-      saveServiceName = '';
+      const saved = await ServicesAPI.create({ name, endpoints: endpoints.map(duplicateEditorUpstream) });
+      services = [...services, toEditorService(saved)];
+      route.service_references = [{id: uuidv4(), position: 0, service_id: saved.id, weight: 100, priority: 1, is_disabled: false}];
+      setMode('service'); saveServiceName = '';
       toast.show($_('routeEditor.serviceCreated'), 'success');
-      emitModeChange('service');
-    } catch (error) {
-      const message = error instanceof Error ? error.message : $_('common.error');
-      toast.show(message, 'error');
-    } finally {
-      savingService = false;
-    }
+    } catch(error) { toast.show(error instanceof Error ? error.message : $_('common.error'), 'error'); }
+    finally { savingService = false; }
   }
-  $effect(() => {
-    if (route !== activeRoute) {
-      activeRoute = route;
-      mode = route.service ? 'service' : 'custom';
-    }
-  });
-  let filteredServices = $derived(services.filter(service =>
-    service.name.toLowerCase().includes(searchQuery.toLowerCase())
-  ));
-  let selectedService = $derived(services.find(service => service.name === route.service));
-  let isServiceMissing = $derived(route.service && !selectedService);
-  let groupedServiceEndpoints = $derived(selectedService ? groupEndpointsByPriority(selectedService.endpoints) : []);
+  $effect(() => { if (route !== activeRoute) { activeRoute = route; mode = route.service_references?.length ? 'service' : 'custom'; } });
 </script>
-
-<div>
-  <div class="mb-4 inline-flex border border-carbon-600 bg-carbon-900">
-    <button type="button" class="px-4 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-command transition-colors {mode === 'service' ? 'bg-nexus-500 text-black' : 'text-zinc-400 hover:text-nexus-300 hover:bg-carbon-700'}" onclick={switchToService} data-testid="mode-service">
-      {$_('routeEditor.referenceService')}
-    </button>
-    <button type="button" class="px-4 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-command transition-colors {mode === 'custom' ? 'bg-nexus-500 text-black' : 'text-zinc-400 hover:text-nexus-300 hover:bg-carbon-700'}" onclick={switchToCustom} data-testid="mode-custom">
-      {$_('routeEditor.customEndpoints')}
-    </button>
+<div class="space-y-4">
+  <div class="flex flex-wrap items-center justify-between gap-3">
+  <div class="inline-flex border border-carbon-600 bg-carbon-900">
+    <button type="button" class="px-4 py-1.5 font-mono text-[11px] uppercase tracking-command {mode === 'service' ? 'bg-nexus-500 text-black' : 'text-zinc-400 hover:text-nexus-300'}" onclick={switchToService} data-testid="mode-service">{$_('routeEditor.referenceService')}</button>
+    <button type="button" class="px-4 py-1.5 font-mono text-[11px] uppercase tracking-command {mode === 'custom' ? 'bg-nexus-500 text-black' : 'text-zinc-400 hover:text-nexus-300'}" onclick={switchToCustom} data-testid="mode-custom">{$_('routeEditor.customEndpoints')}</button>
   </div>
-
+  {#if mode === 'service'}<ServiceReferencePicker bind:owner={route} {services} />{/if}
+  </div>
   {#if mode === 'service'}
-    <div class="space-y-4">
-      {#if !route.service}
-        <PanelCard title={$_('routeEditor.selectServiceTitle')}>
-          <svelte:fragment slot="actions">
-            <div class="w-48">
-              <Input
-                type="text"
-                placeholder={$_('routeEditor.searchServices')}
-                bind:value={searchQuery}
-                class="h-[28px] text-[12px]"
-              />
-            </div>
-          </svelte:fragment>
-
-          {#if filteredServices.length === 0}
-            <div class="text-center py-12 bg-carbon-950/60/30 rounded-lg border-2 border-dashed border-carbon-600">
-              <p class="text-zinc-500">{$_('routeEditor.noServicesFound')}</p>
-            </div>
-          {:else}
-            <div class="grid grid-cols-1 gap-3 md:grid-cols-[repeat(auto-fit,minmax(min(100%,280px),1fr))]">
-              {#each filteredServices as service}
-                <button
-                  type="button"
-                  class="group border border-carbon-600 bg-carbon-950/60/70 hover:bg-nexus-500/10 hover:border-nexus-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-nexus-500 transition-all text-left p-4"
-                  onclick={() => selectService(service.name)}
-                >
-                  <div class="flex items-start justify-between gap-4">
-                    <div class="min-w-0">
-                      <div class="flex items-center gap-2">
-                        <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-sm shadow-emerald-500/30"></span>
-                        <span class="font-semibold text-zinc-100 group-hover:text-nexus-300 transition-colors truncate">{service.name}</span>
-                      </div>
-                      <div class="text-xs text-zinc-500 mt-2">
-                        {$_('routeEditor.serviceEndpointCount', { values: { count: service.endpoints.length } })}
-                      </div>
-                    </div>
-                    <StatusBadge variant="online">{$_('common.select')}</StatusBadge>
-                  </div>
-                  <div class="flex items-center gap-1.5 mt-3">
-                    {#each service.endpoints.slice(0, 5) as ep}
-                      <RuntimeStatus stateKey={service.name} upstream={ep} />
-                    {/each}
-                    {#if service.endpoints.length > 5}
-                      <span class="text-[10px] opacity-50">+{service.endpoints.length - 5}</span>
-                    {/if}
-                  </div>
-                </button>
-              {/each}
-            </div>
-          {/if}
-        </PanelCard>
-      {:else}
-        {#if isServiceMissing}
-          <div class="mb-4" data-testid="broken-service-warning">
-            <SystemAlertBar
-              title={$_('services.brokenServiceWarning', { values: { name: route.service } })}
-              tone="danger"
-            >
-              <svelte:fragment slot="action">
-                <button class="nx-btn-ghost nx-btn-sm" onclick={clearService}>{$_('common.reset')}</button>
-              </svelte:fragment>
-            </SystemAlertBar>
-          </div>
-        {/if}
-        <PanelCard
-          title={route.service}
-          tag={!isServiceMissing ? `${selectedService?.endpoints.length} EP` : "MISSING"}
-          stripe={isServiceMissing ? "red" : "orange"}
-        >
-          <svelte:fragment slot="actions">
-            <div class="flex gap-2">
-              {#if !isServiceMissing && selectedService}
-                <IconButton
-                  size="sm"
-                  title={$_("breadcrumb.editService")}
-                  on:click={() => window.location.hash = `/services/edit/${encodeURIComponent(selectedService.name)}`}
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
-                  </svg>
-                </IconButton>
-              {/if}
-              <IconButton
-                size="sm"
-                variant="danger"
-                title={$_('routeEditor.removeServiceReference')}
-                on:click={clearService}
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M9 7h6m2 0H7m3-3h4a1 1 0 011 1v2H9V5a1 1 0 011-1z" />
-                </svg>
-              </IconButton>
-            </div>
-          </svelte:fragment>
-
-          <div class="space-y-3">
-            {#if !isServiceMissing}
-              <div class="space-y-2">
-                {#each groupedServiceEndpoints as group}
-                    <div class="border border-carbon-600 overflow-hidden">
-                    <div class="bg-carbon-950/60 px-3 py-2 text-xs font-semibold flex items-center gap-2">
-                      <div class="w-2 h-2 rounded-full bg-nexus-500"></div>
-                      {$_('upstream.priority')} {group.priority}
-                    </div>
-                    <div class="divide-y divide-carbon-600">
-                      {#each group.endpoints as endpoint}
-                        <div class="grid grid-cols-[1fr_auto_auto] gap-3 items-center px-3 py-2 text-sm" class:opacity-50={endpoint.is_disabled}>
-                          <div class="font-mono truncate" title={endpoint.target}>{endpoint.target}</div>
-                          <div class="text-xs text-zinc-500">{$_('upstream.weight')}: {endpoint.weight || 100}</div>
-                          <div class="flex items-center gap-2 text-xs">
-                            <RuntimeStatus stateKey={route.service ?? ''} upstream={endpoint} />
-                          </div>
-                        </div>
-                      {/each}
-                    </div>
-                  </div>
-                {/each}
-              </div>
-
-              <div class="text-sm text-zinc-300 space-y-1">
-                {#if selectedService?.health_check?.enabled}
-                  <div class="flex items-center gap-2">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                    {$_('serviceEditor.healthCheck')}: {selectedService.health_check.path || '/health'}
-                    {#if selectedService.health_check.interval_ms}
-                      · {formatInterval(selectedService.health_check.interval_ms)}
-                    {/if}
-                  </div>
-                {/if}
-                {#if selectedService?.failover?.enabled}
-                  <div class="flex items-center gap-2">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-                    {$_('serviceEditor.failover')}: {$_("routeEditor.review.enabled")}
-                  </div>
-                {/if}
-                {#if selectedService?.load_balancing}
-                  <div class="flex items-center gap-2">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7h16M4 12h10M4 17h7" /></svg>
-                    {$_('serviceEditor.builder.loadBalancing')}: {selectedService.load_balancing.policy}
-                  </div>
-                {/if}
-              </div>
-            {/if}
-          </div>
-        </PanelCard>
-      {/if}
-    </div>
+    <UpstreamTargetList bind:owner={route} {services} />
+    {#each errors.filter(error => error.field === 'service_references') as error}
+      <p role="alert" class="text-sm text-red-300">{error.message}</p>
+    {/each}
+    {#if references.length > 1 || route.load_balancing || route.failover}
+      <PanelCard title={$_('serviceReferences.pool')}>
+        <div class="space-y-5">
+          <LoadBalancingSection bind:load_balancing={route.load_balancing} />
+          <FailoverEditor bind:failover={route.failover} endpointHealth={false} label={$_('routeEditor.failoverTitle')} />
+        </div>
+      </PanelCard>
+    {/if}
   {:else}
     <UpstreamsSection bind:route {errors} {weightErrors} />
-
     <PanelCard>
       <div class="flex flex-col gap-2 md:flex-row md:items-center">
-        <input
-          type="text"
-          class="nx-input flex-1"
-          placeholder={$_('routeEditor.saveAsServiceName')}
-          bind:value={saveServiceName}
-        />
-        <button
-          type="button"
-          class="nx-btn-primary nx-btn-sm shrink-0 whitespace-nowrap"
-          onclick={saveAsService}
-          disabled={savingService || !saveServiceName.trim() || (route.endpoints?.length ?? 0) === 0}
-        >
-          {#if savingService}
-            <LoadingIndicator label="" size="xs" centered={false} />
-          {/if}
-          {$_('routeEditor.saveAsServiceButton')}
+        <Input placeholder={$_('routeEditor.saveAsServiceName')} bind:value={saveServiceName} />
+        <button type="button" class="nx-btn-primary nx-btn-sm shrink-0 whitespace-nowrap" onclick={saveAsService} disabled={savingService || !saveServiceName.trim() || !route.endpoints?.length}>
+          {#if savingService}<LoadingIndicator label="" size="xs" centered={false} />{/if}{$_('routeEditor.saveAsServiceButton')}
         </button>
       </div>
     </PanelCard>
   {/if}
 </div>
-
-<ConfirmDialog
-  bind:open={showSwitchConfirm}
-  title={$_('common.confirm')}
-  message={$_('routeEditor.switchToServiceConfirm')}
-  confirmText={$_('confirmDialog.yes')}
-  cancelText={$_('confirmDialog.no')}
-  confirmClass="nx-btn-primary"
-  on:confirm={confirmSwitchToService}
-  on:cancel={cancelSwitchToService}
-/>
-
-<ConfirmDialog
-  bind:open={showCustomConfirm}
-  title={$_('common.confirm')}
-  message={$_('routeEditor.switchToCustomConfirm')}
-  confirmText={$_('confirmDialog.yes')}
-  cancelText={$_('confirmDialog.no')}
-  confirmClass="nx-btn-primary"
-  on:confirm={confirmSwitchToCustom}
-  on:cancel={cancelSwitchToCustom}
-/>
+<ConfirmDialog bind:open={showSwitchConfirm} title={$_('common.confirm')} message={$_('routeEditor.switchToServiceConfirm')}
+  confirmText={$_('confirmDialog.yes')} cancelText={$_('confirmDialog.no')} confirmClass="nx-btn-primary"
+  on:confirm={() => { showSwitchConfirm = false; setMode('service'); }} on:cancel={() => showSwitchConfirm = false} />
+<ConfirmDialog bind:open={showCustomConfirm} title={$_('common.confirm')} message={$_('routeEditor.switchToCustomConfirm')}
+  confirmText={$_('confirmDialog.yes')} cancelText={$_('confirmDialog.no')} confirmClass="nx-btn-primary"
+  on:confirm={() => { showCustomConfirm = false; setMode('custom'); }} on:cancel={() => showCustomConfirm = false} />

@@ -247,7 +247,7 @@ describe('config worker Bun lifecycle', () => {
     const configWithOrphan: AppConfig = {
       routes: [{ path: '/direct', endpoints: [{ target: 'http://direct.test' }] }],
       services: [{
-        name: 'orphan',
+        id:'orphan', name: 'orphan',
         plugins: [{ name: 'orphan-plugin', enabled: true }],
         endpoints: [{ target: 'http://orphan.test' }],
       }],

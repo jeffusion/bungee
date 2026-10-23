@@ -1,7 +1,7 @@
 import { PluginDependencyGraph } from './plugin-dependencies';
 import type { AppConfig, PluginConfig } from '@jeffusion/bungee-types';
 import type { PluginRegistry } from './plugin-registry';
-import { resolveEffectiveRouteEndpoints } from './utils/endpoint-resolver';
+import { resolveReachableEndpoints } from './utils/endpoint-resolver';
 
 // Host-only identity: persisted configuration cannot opt out of validation.
 const automaticProviders = new WeakSet<PluginConfig>();
@@ -94,7 +94,7 @@ export function collectDeclaredPluginConfigs(config: AppConfig): PluginConfig[] 
   for (const plugin of config.plugins || []) add(plugin);
   for (const route of config.routes || []) {
     for (const plugin of route.plugins || []) add(plugin);
-    for (const endpoint of resolveEffectiveRouteEndpoints(route, config.services)) {
+    for (const endpoint of resolveReachableEndpoints(route, config.services)) {
       for (const plugin of endpoint.plugins || []) add(plugin);
     }
   }

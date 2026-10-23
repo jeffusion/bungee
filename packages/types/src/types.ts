@@ -99,6 +99,8 @@ export interface DirectionalModificationRules {
 
 export interface Endpoint extends DirectionalModificationRules {
   id?: string;
+  /** Ordering shared with Service references in the same selection layer. */
+  position?: number;
   target: string;
   weight?: number;
   priority?: number;
@@ -168,11 +170,23 @@ export interface LoadBalancingConfig {
 
 export type LLMProtocol = 'responses' | 'chat_completions' | 'anthropic_messages';
 
+export interface ServiceReference {
+  id: string;
+  position: number;
+  service_id: string;
+  weight: number;
+  priority: number;
+  is_disabled: boolean;
+}
+
+export type ServiceSelectionFailoverConfig = Pick<FailoverConfig, 'enabled' | 'retry_on' | 'retry_on_response'>;
+
 export interface Service {
   /** Stable identity supplied by the runtime compiler. */
   id?: string;
   name: string;
   endpoints: Endpoint[];
+  service_references?: ServiceReference[];
   plugins?: Array<PluginConfig | string>;
   health_check?: ServiceHealthCheckConfig;
   failover?: FailoverConfig;
@@ -251,8 +265,9 @@ export interface RouteConfig extends DirectionalModificationRules {
   /** Stable logical route identity, present only in compiled runtime config. */
   id?: string;
   path: string;
-  service?: string;
-  service_id?: string;
+  service_references?: ServiceReference[];
+  load_balancing?: LoadBalancingConfig;
+  failover?: ServiceSelectionFailoverConfig;
   endpoints?: Endpoint[];
   path_rewrite?: Record<string, string>;
   auth?: AuthConfig;

@@ -7,10 +7,10 @@
   import ChevronUp from 'lucide-svelte/icons/chevron-up';
   import ChevronDown from 'lucide-svelte/icons/chevron-down';
 
-  let { value = $bindable<number | undefined>(), min, max, required = false, disabled = false,
+  let { value = $bindable<number | undefined>(), min, max, emptyValue, required = false, disabled = false,
     readonly = false, increaseLabel, decreaseLabel, invalidMessage, class: className, ...props }: Omit<HTMLInputAttributes,
       'value' | 'min' | 'max' | 'type' | 'step' | 'inputmode' | 'pattern'> & {
-    value?: number; min: number; max: number;
+    value?: number; min: number; max: number; emptyValue?: number;
     increaseLabel: string; decreaseLabel: string; invalidMessage: string;
   } = $props();
   let root: HTMLDivElement;
@@ -41,8 +41,8 @@
   function accept(node: HTMLInputElement, text: string) {
     accepted = draft = text;
     node.value = text;
-    const next = text === '' ? undefined : Number(text);
-    published = Number.isSafeInteger(next) ? next : undefined;
+    const next = text === '' ? emptyValue : Number(text);
+    published = Number.isSafeInteger(next) ? next : emptyValue;
     value = published;
     validity(node);
   }

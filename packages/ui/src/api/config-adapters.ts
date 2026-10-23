@@ -36,7 +36,6 @@ export type EditorRoute = Omit<RouteConfig, 'endpoints' | 'plugins' | 'timeouts'
   timeouts?: EditorRouteTimeouts;
   _uid?: string;
   _position?: number;
-  _serviceId?: string;
   endpoints?: EditorUpstream[];
   plugins?: Array<EditorPluginBinding | string>;
   transformer?: string | object;
@@ -137,7 +136,8 @@ export function duplicateEditorService(service: EditorService): EditorService {
   const copy: EditorService = JSON.parse(JSON.stringify(service));
   delete copy._uid;
   delete copy._position;
-  copy.endpoints = copy.endpoints.map(duplicateEditorUpstream);
+  copy.endpoints = copy.endpoints.map(endpoint => ({ ...duplicateEditorUpstream(endpoint), _position: endpoint._position }));
+  copy.service_references = copy.service_references?.map(reference => ({ ...reference, id: uuidv4() }));
   copy.plugins = copy.plugins?.map(binding => {
     if (typeof binding === 'string') return binding;
     const { _position, ...policy } = binding;
@@ -149,9 +149,10 @@ export function duplicateEditorService(service: EditorService): EditorService {
 function toV2Upstreams(
   upstreams: readonly EditorUpstream[],
   previous: readonly ConfigurationUpstream[],
+  referencePositions: readonly number[] = [],
 ): readonly ConfigurationUpstream[] {
   const used = new Set<string>();
-  let nextPosition = previous.reduce((maximum, upstream) => Math.max(maximum, upstream.position), -1) + 1;
+  let nextPosition = Math.max(-1, ...previous.map(upstream => upstream.position), ...referencePositions) + 1;
   return upstreams.map((upstream) => {
     const match = previous.find((candidate) => !used.has(candidate.id)
       && (candidate.id === upstream._uid || (upstream._uid === undefined && candidate.target === upstream.target)));
@@ -166,7 +167,7 @@ function toV2Upstreams(
       // A cleared optional condition means unconditional, not an empty expression.
       ...(condition === undefined || condition.trim() === '' ? {} : { condition }),
       id: match?.id ?? _uid ?? uuidv4(),
-      position: match?.position ?? nextPosition++,
+      position: _position ?? match?.position ?? nextPosition++,
       weight: upstream.weight ?? match?.weight ?? 100,
       priority: upstream.priority ?? match?.priority ?? 1,
       is_disabled: upstream.is_disabled ?? match?.is_disabled ?? false,
@@ -176,12 +177,13 @@ function toV2Upstreams(
 }
 
 export function toEditorService(service: ConfigurationService): EditorService {
-  const { id, position, endpoints, plugins, timeouts: _removedTimeouts, ...policy } = service as ConfigurationService & { timeouts?: unknown };
+  const { id, position, endpoints, plugins, service_references, timeouts: _removedTimeouts, ...policy } = service as ConfigurationService & { timeouts?: unknown };
   return {
     ...policy,
     _uid: id,
     _position: position,
     endpoints: endpoints.map(toEditorUpstream),
+    ...(service_references?.length ? { service_references: service_references.map(reference => ({...reference})) } : {}),
     plugins: plugins.map(toEditorPlugin),
   };
 }
@@ -192,47 +194,38 @@ export function toV2Service(
   position: number,
 ): ConfigurationService {
   const {
-    _uid, _position, description, endpoints, plugins = [], timeouts: _removedTimeouts, ...policy
+    _uid, _position, description, endpoints, service_references, plugins = [], timeouts: _removedTimeouts, ...policy
   } = service as EditorService & { timeouts?: unknown };
   return {
     ...policy,
     id: previous?.id ?? uuidv4(),
     position: previous?.position ?? position,
-    endpoints: toV2Upstreams(endpoints, previous?.endpoints ?? []),
+    endpoints: toV2Upstreams(endpoints, previous?.endpoints ?? [], service_references?.map(reference => reference.position)),
+    ...(service_references?.length ? {service_references: service_references.map(reference => ({ ...reference }))} : {}),
     plugins: toV2Plugins(plugins, previous?.plugins ?? []),
   };
 }
 
-export function toEditorRoute(route: ConfigurationRoute, services: readonly ConfigurationService[]): EditorRoute {
-  if (route.service_id !== undefined) {
-    const { id, position, plugins, service_id, ...servicePolicy } = route;
-    return {
-      ...servicePolicy,
-      _uid: id,
-      _position: position,
-      _serviceId: service_id,
-      service: services.find((service) => service.id === service_id)?.name,
-      plugins: plugins.map(toEditorPlugin),
-    };
-  }
-  const { id, position, plugins, endpoints, ...directPolicy } = route;
+export function toEditorRoute(route: ConfigurationRoute, _services: readonly ConfigurationService[]): EditorRoute {
+  const { id, position, plugins, endpoints, service_references, ...policy } = route;
   return {
-    ...directPolicy,
+    ...structuredClone(policy),
     _uid: id,
     _position: position,
-    endpoints: endpoints.map(toEditorUpstream),
+    ...(service_references?.length ? { service_references: service_references.map(reference => ({...reference})) } : {}),
+    ...(endpoints === undefined ? {} : { endpoints: endpoints.map(toEditorUpstream) }),
     plugins: plugins.map(toEditorPlugin),
   };
 }
 
 export function toV2Route(
   route: EditorRoute,
-  logical: LogicalConfiguration,
+  _logical: LogicalConfiguration,
   previous: ConfigurationRoute | undefined,
   position: number,
 ): ConfigurationRoute {
   const {
-    _uid, _position, _serviceId, service, service_id: _runtimeServiceId, endpoints = [], plugins = [], transformer, auth: _legacyAuth, ...policy
+    _uid, _position, service_references, endpoints = [], plugins = [], transformer, auth: _legacyAuth, ...policy
   } = route as EditorRoute & {auth?:unknown};
   const base = {
     ...policy,
@@ -240,21 +233,9 @@ export function toV2Route(
     position: previous?.position ?? position,
     plugins: toV2Plugins(plugins, previous?.plugins ?? []),
   };
-  if (service !== undefined) {
-    const serviceId = logical.services.find((candidate) => candidate.name === service)?.id ?? _serviceId;
-    if (serviceId === undefined) throw new ServiceReferenceNotFoundError(service);
-    return { ...base, service_id: serviceId };
+  if (service_references?.length) {
+    if (endpoints.length) throw new Error('服务引用与自定义端点不能同时保存');
+    return { ...base, service_references: JSON.parse(JSON.stringify(service_references)) };
   }
-  return {
-    ...base,
-    endpoints: toV2Upstreams(
-      endpoints,
-      previous !== undefined && previous.service_id === undefined ? (previous.endpoints ?? []) : [],
-    ),
-  };
-}
-
-export class ServiceReferenceNotFoundError extends Error {
-  readonly name = 'ServiceReferenceNotFoundError';
-  constructor(readonly serviceName: string) { super(`Service "${serviceName}" not found`); }
+  return { ...base, endpoints: toV2Upstreams(endpoints, previous?.endpoints ?? []) };
 }

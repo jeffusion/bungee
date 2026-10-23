@@ -1,3 +1,4 @@
+import { serviceReference } from '../../helpers/service-references';
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { RouteStaleError, RoutesAPI } from '../../../src/api/routes';
@@ -34,7 +35,7 @@ const aggregate: ConfigurationAggregate = {
       id: 'route-id',
       position: 0,
       path: '/alpha',
-      service_id: 'service-id',
+      service_references: [serviceReference('service-id')],
       plugins: [{
         id: 'route-plugin-id', position: 5, name: 'route-plugin', enabled: true,
         options: { tag: 'original' },
@@ -323,7 +324,7 @@ describe('v2 route and service CRUD adapters', () => {
   });
 
   test('getForEdit captures route baseline and update persists managed endpoint identity and binding', async () => {
-    const managedRoute = { ...aggregate.logical_configuration.routes[0]!, service_id: undefined, endpoints: [{
+    const managedRoute = { ...aggregate.logical_configuration.routes[0]!, service_references: undefined, endpoints: [{
       id: 'managed-endpoint', position: 0, target: 'https://managed.example.test', weight: 100, priority: 1, is_disabled: false,
       managedBy: { plugin: 'provider', contributionId: 'chatgpt', bindingId: 'managed-binding' },
       plugins: [{ id: 'managed-binding', position: 0, name: 'provider', enabled: true, options: { accountRef: 'account' } }],
@@ -394,7 +395,7 @@ describe('v2 route and service CRUD adapters', () => {
     expect(logical.services[0].endpoints[0].request.headers).toEqual({ add: { 'x-test': 'yes' } });
     expect(logical.services[0].plugins[0].id).toBe('service-plugin-id');
     expect(logical.services[0].plugins[0]).toMatchObject({ position: 4, options: { sample: 0.5 } });
-    expect(logical.routes[0]).toMatchObject({ id: 'route-id', service_id: 'service-id' });
+    expect(logical.routes[0]).toMatchObject({ id: 'route-id', service_references: [{service_id: 'service-id'}] });
     expect(logical.routes[0].plugins[0]).toMatchObject({
       id: 'route-plugin-id', position: 5, options: { tag: 'original' },
     });
@@ -408,7 +409,7 @@ describe('v2 route and service CRUD adapters', () => {
     // When
     await RoutesAPI.create({
       path: '/new',
-      service: 'alpha',
+      service_references: [serviceReference('service-id')],
       request: { headers: { remove: ['x-remove'] } },
       plugins: [{ name: 'route-plugin' }],
     });
@@ -418,7 +419,7 @@ describe('v2 route and service CRUD adapters', () => {
     const created = body.aggregate.logical_configuration.routes[1];
     expect(created.id).toBeString();
     expect(created.position).toBe(1);
-    expect(created.service_id).toBe('service-id');
+    expect(created.service_references[0].service_id).toBe('service-id');
     expect('service' in created).toBe(false);
     expect(created.request.headers).toEqual({ remove: ['x-remove'] });
     expect(created.plugins[0]).toMatchObject({ position: 0, name: 'route-plugin', enabled: true });
@@ -454,4 +455,42 @@ describe('v2 route and service CRUD adapters', () => {
     });
     expect(endpoint.plugins[0]).toMatchObject({ id: 'endpoint-plugin-id', position: 3 });
   });
+});
+
+test('multi-service route saves and reloads reference IDs, weights and route pool policy', async () => {
+  const base = aggregate.logical_configuration.services[0]!;
+  const second = { ...base, id: 'second-service', name: 'second', position: 1, endpoints: [], plugins: [] };
+  const current = { ...aggregate, logical_configuration: { ...aggregate.logical_configuration, services: [base, second] } };
+  const requests: Request[] = [];
+  mockControlApi(requests, current);
+  const references = [serviceReference(base.id), serviceReference(second.id, {position: 1, priority: 2, weight: 25, is_disabled: true})];
+  await RoutesAPI.create({path: '/pool', service_references: references, load_balancing: {policy: 'round_robin'}, failover: {enabled: true, retry_on: [503]}});
+  const saved = (await requests[1]!.json()).aggregate;
+  expect(saved.logical_configuration.routes.at(-1)).toMatchObject({service_references: references, load_balancing: {policy: 'round_robin'}, failover: {enabled: true, retry_on: [503]}});
+  expect(saved.logical_configuration.routes.at(-1).endpoints).toBeUndefined();
+  mockControlApi([], saved);
+  expect((await RoutesAPI.get('/pool'))?.service_references).toEqual(references);
+});
+
+test('service deletion reports both direct Route and Service consumers before any write', async () => {
+  const base = aggregate.logical_configuration.services[0]!;
+  const pool = { ...base, id: 'pool', name: 'pool', position: 1, endpoints: [], plugins: [], service_references: [serviceReference(base.id)] };
+  const requests: Request[] = [];
+  mockControlApi(requests, { ...aggregate, logical_configuration: { ...aggregate.logical_configuration, services: [base, pool] } });
+  await expect(ServicesAPI.delete(base.name)).rejects.toMatchObject({routePaths: ['/alpha'], serviceNames: ['pool']});
+  expect(requests.map(request => request.method)).toEqual(['GET']);
+});
+
+test('mixed service save preserves endpoint plugins and ordering without expanding references', async () => {
+  const base = aggregate.logical_configuration.services[0]!;
+  const child = { ...base, id: 'child', name: 'child', position: 1, endpoints: [], plugins: [] };
+  const requests: Request[] = [];
+  mockControlApi(requests, { ...aggregate, logical_configuration: {...aggregate.logical_configuration, services: [base, child]} });
+  const draft = toEditorService(base);
+  draft.endpoints[0]!._position = 1;
+  draft.service_references = [serviceReference('child', {position: 0, weight: 30})];
+  await ServicesAPI.update(base.name, draft, base);
+  const saved = (await requests[1]!.json()).aggregate.logical_configuration.services[0];
+  expect(saved.endpoints[0]).toMatchObject({id: 'endpoint-id', position: 1, plugins: base.endpoints[0]!.plugins});
+  expect(saved.service_references).toEqual(draft.service_references);
 });

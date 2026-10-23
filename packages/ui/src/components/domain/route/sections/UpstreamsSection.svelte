@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { groupUpstreams, flattenGroups, type PriorityGroup } from './upstream-groups';
-  import type { Route, Upstream } from '$api/routes';
+  import UpstreamTargetList from './UpstreamTargetList.svelte';
+  import type { Route, Service } from '$api/routes';
   import type { ValidationError } from '$validation';
   import { validateUpstreamSync } from '$validation';
   import UpstreamForm from '../UpstreamForm.svelte';
@@ -9,20 +9,22 @@
   import { v4 as uuidv4 } from 'uuid';
   import { cloneUpstreamDraft, duplicateEditorUpstream, hasInvalidManagedBinding } from '$api/config-adapters';
 
-  let { route = $bindable(), errors = [], weightErrors = [], isService = false }: {
-    route: Pick<Route, 'endpoints'>; errors?: ValidationError[]; weightErrors?: ValidationError[]; isService?: boolean;
+  let { route = $bindable(), errors = [], weightErrors = [], isService = false, services = [], ownerId }: {
+    route: Pick<Route, 'endpoints' | 'service_references'>; errors?: ValidationError[]; weightErrors?: ValidationError[]; isService?: boolean; services?: Service[]; ownerId?: string;
   } = $props();
 
+  import ServiceReferencePicker from '$components/domain/service/ServiceReferencePicker.svelte';
   let upstreamSearchTerm = $state('');
+  function nextPosition() {
+    return Math.max(-1, ...(route.endpoints ?? []).map((endpoint, index) => endpoint._position ?? index),
+      ...(route.service_references ?? []).map(reference => reference.position)) + 1;
+  }
 
   let showUpstreamModal = $state(false);
   let editingUpstreamIndex = $state(-1);
   let editingUpstream: any = $state(null);
 
-  // Grouping Logic
-  // Reactive grouping
   let endpoints = $derived(route.endpoints ?? []);
-  let groupedUpstreams = $derived(groupUpstreams(endpoints, upstreamSearchTerm));
   let editingUpstreamErrors = $derived(!$isLoading && showUpstreamModal && editingUpstream
     ? validateUpstreamSync(editingUpstream, editingUpstreamIndex === -1 ? (route.endpoints?.length ?? 0) : editingUpstreamIndex) : []);
   let isEditingUpstreamValid = $derived(showUpstreamModal && editingUpstream && editingUpstreamErrors.length === 0 && !hasInvalidManagedBinding(editingUpstream));
@@ -34,6 +36,7 @@
     } else {
       editingUpstream = {
         _uid: uuidv4(),
+        _position: nextPosition(),
         target: '',
         weight: 100,
         priority: (route.endpoints?.length ?? 0) + 1,
@@ -62,7 +65,7 @@
   }
 
   function removeUpstream(index: number) {
-    if ((route.endpoints?.length ?? 0) <= 1) {
+    if ((route.endpoints?.length ?? 0) + (route.service_references?.length ?? 0) <= 1) {
       alert($_('routeEditor.upstreamRequired'));
       return;
     }
@@ -77,6 +80,7 @@
       return;
     }
     const duplicatedUpstream = duplicateEditorUpstream(originalUpstream);
+    duplicatedUpstream._position = nextPosition();
 
     if (!duplicatedUpstream.managedBy && duplicatedUpstream.target) {
       const urlMatch = duplicatedUpstream.target.match(/^(.+?)(-\d+)?$/);
@@ -110,115 +114,28 @@
     route.endpoints = route.endpoints; // 触发 Svelte 响应式更新
   }
 
-  import UpstreamPriorityGroup from '../UpstreamPriorityGroup.svelte';
-import { Input } from '$components/ui/input';
-import { Button } from '$components/ui/button';
-import { PanelCard } from '$components/industrial';
-  
-  // Drag & Drop Handlers
-  function handleMerge(event: CustomEvent<{ originalIndex: number }>, targetGroupIndex: number) {
-    const { originalIndex } = event.detail;
-    const movedUpstream = route.endpoints?.[originalIndex];
-    if (!movedUpstream) return;
-    
-    const targetGroup = groupUpstreams(route.endpoints ?? [])[targetGroupIndex];
-    if (!targetGroup) return;
-    const newPriority = targetGroup.priority;
-    
-    // Optimistic update
-    const newUpstreams = [...(route.endpoints ?? [])];
-    newUpstreams[originalIndex] = { ...movedUpstream, priority: newPriority };
-    
-    // Regroup and re-flatten to normalize priorities
-    const groups = groupUpstreams(newUpstreams);
-    route.endpoints = flattenGroups(groups);
-  }
-
-  function handleCreatePriority(event: DragEvent, insertIndex: number) {
-    event.preventDefault();
-    const data = event.dataTransfer?.getData('application/json');
-    if (!data) return;
-    
-    const { originalIndex } = JSON.parse(data);
-    const movedUpstream = route.endpoints?.[originalIndex];
-    if (!movedUpstream) return;
-    
-    // Strategy:
-    // 1. Convert current upstreams to groups
-    // 2. Remove the moved item from its current group
-    // 3. Insert a NEW group at `insertIndex` containing only the moved item
-    // 4. Flatten back to upstreams
-    
-    const currentGroups = groupUpstreams(route.endpoints ?? []);
-    const insertionIndex = currentGroups.slice(0, insertIndex)
-      .filter(group => group.upstreams.some(upstream => upstream.originalIndex !== originalIndex)).length;
-    
-    // Find and remove the item from its source group
-    for (const group of currentGroups) {
-      const idx = group.upstreams.findIndex(u => u.originalIndex === originalIndex);
-      if (idx !== -1) {
-        group.upstreams.splice(idx, 1);
-        // If group becomes empty, remove it (unless it's the only one? No, remove it)
-        if (group.upstreams.length === 0) {
-             // We need to be careful about indices shifting if we remove a group
-             // But we are going to rebuild anyway
-        }
-        break;
-      }
-    }
-    
-    // Filter out empty groups before inserting
-    const cleanGroups = currentGroups.filter(g => g.upstreams.length > 0);
-    
-    // Create new group
-    const newGroup: PriorityGroup = {
-      groupIndex: insertionIndex,
-      priority: 0, // Will be assigned by flattenGroups
-      upstreams: [{ ...movedUpstream, originalIndex: -1 }] // index doesn't matter for flatten
-    };
-    
-    // The drop boundary is in the full list; account for a removed source group.
-    cleanGroups.splice(insertionIndex, 0, newGroup);
-    
-    route.endpoints = flattenGroups(cleanGroups);
-  }
-  
-  // Spacer Drop Zone Logic
-  let dragOverSpacerIndex = $state<number | null>(null);
-  
-  function handleSpacerDragOver(event: DragEvent, index: number) {
-    event.preventDefault();
-    event.dataTransfer!.dropEffect = 'move';
-    dragOverSpacerIndex = index;
-  }
-  
-  function handleSpacerDragLeave() {
-     dragOverSpacerIndex = null;
-  }
-  
-  function handleSpacerDrop(event: DragEvent, index: number) {
-    dragOverSpacerIndex = null;
-    handleCreatePriority(event, index);
-  }
+  import { Input } from '$components/ui/input';
+  import { Button } from '$components/ui/button';
+  import { PanelCard } from '$components/industrial';
 
   // Component Event Proxies
   function onEdit(originalIndex: number) { openUpstreamModal(originalIndex); }
   function onRemove(originalIndex: number) { removeUpstream(originalIndex); }
   function onDuplicate(originalIndex: number) { duplicateUpstream(originalIndex); }
   function onToggleStatus(originalIndex: number) { toggleUpstreamStatus(originalIndex); }
-  function onUpdateWeight(originalIndex: number, weight: number) {
+  function onUpdateWeight(originalIndex: number, weight: number | undefined) {
     if (!route.endpoints?.[originalIndex]) return;
-    route.endpoints[originalIndex].weight = weight;
+    route.endpoints[originalIndex].weight = weight ?? 0;
     route.endpoints = route.endpoints;
   }
 </script>
 
 <PanelCard
   title={isService ? $_('serviceEditor.builder.endpoints') : $_('routeEditor.customEndpoints')}
-  tag={isService ? `EP·${endpoints.length}` : ''}
-  class={isService ? '[&>.nx-panel-head]:flex-wrap [&>.nx-panel-head]:gap-y-2 [&>.nx-panel-head>div:last-child]:w-full sm:[&>.nx-panel-head>div:last-child]:w-auto [&>.nx-panel-head>div:last-child]:min-w-0' : ''}
+  tag={isService ? `EP·${endpoints.length} SVC·${route.service_references?.length ?? 0}` : ''}
+  class={isService ? '[&>.nx-panel-head]:flex-wrap [&>.nx-panel-head]:gap-y-2 [&>.nx-panel-head>div:first-child]:basis-full sm:[&>.nx-panel-head>div:first-child]:basis-auto [&>.nx-panel-head>div:last-child]:w-full sm:[&>.nx-panel-head>div:last-child]:w-auto [&>.nx-panel-head>div:last-child]:min-w-0' : ''}
 >
-  <svelte:fragment slot="actions">
+  {#snippet actions()}
     <div class={isService ? 'flex flex-wrap gap-2 items-center w-full min-w-0' : 'flex gap-2 items-center'}>
       <Input
         type="text"
@@ -239,8 +156,9 @@ import { PanelCard } from '$components/industrial';
         </svg>
         {$_('routeEditor.addUpstream')}
       </Button>
+      {#if isService}<ServiceReferencePicker bind:owner={route} {services} {ownerId} />{/if}
     </div>
-  </svelte:fragment>
+  {/snippet}
 
   {#if errors.some(e => e.field === 'endpoints')}
     <div class="border-l-2 border-l-red-500 bg-red-500/5 px-3 py-2">
@@ -250,66 +168,11 @@ import { PanelCard } from '$components/industrial';
     </div>
   {/if}
 
-  <!-- Priority groups kanban -->
-  <div class="flex flex-col gap-4 p-4 bg-carbon-950 border border-carbon-600 min-h-[120px]">
-
-    {#if groupedUpstreams.length > 0}
-      <div
-        role="group"
-        aria-label="Insert New Priority Group"
-        class="-my-2 transition-all duration-200 flex items-center justify-center border-2 border-dashed {dragOverSpacerIndex === groupedUpstreams[0].groupIndex ? 'h-12 bg-nexus-500/10 border-nexus-500' : 'h-4 border-transparent'}"
-        ondragover={(e) => handleSpacerDragOver(e, groupedUpstreams[0].groupIndex)}
-        ondragleave={handleSpacerDragLeave}
-        ondrop={(e) => handleSpacerDrop(e, groupedUpstreams[0].groupIndex)}
-      >
-        {#if dragOverSpacerIndex === groupedUpstreams[0].groupIndex}
-          <span class="font-mono text-[11px] font-bold uppercase tracking-command text-nexus-300">
-            {$_('upstream.insertNewPriority', { values: { priority: groupedUpstreams[0].groupIndex + 1 } })}
-          </span>
-        {/if}
-      </div>
-    {/if}
-
-    {#each groupedUpstreams as group (group.priority)}
-      <UpstreamPriorityGroup
-        priority={group.priority}
-        upstreams={group.upstreams}
-        on:merge={(e) => handleMerge(e, group.groupIndex)}
-        on:edit={(e) => onEdit(e.detail.originalIndex)}
-        on:remove={(e) => onRemove(e.detail.originalIndex)}
-        on:duplicate={(e) => onDuplicate(e.detail.originalIndex)}
-        on:toggleStatus={(e) => onToggleStatus(e.detail.originalIndex)}
-        on:updateWeight={(e) => onUpdateWeight(e.detail.originalIndex, e.detail.weight)}
-      />
-
-      <div
-        role="group"
-        aria-label="Insert New Priority Group"
-        class="-my-2 transition-all duration-200 flex items-center justify-center border-2 border-dashed z-10 {dragOverSpacerIndex === group.groupIndex + 1 ? 'h-12 bg-nexus-500/10 border-nexus-500' : 'h-4 border-transparent'}"
-        ondragover={(e) => handleSpacerDragOver(e, group.groupIndex + 1)}
-        ondragleave={handleSpacerDragLeave}
-        ondrop={(e) => handleSpacerDrop(e, group.groupIndex + 1)}
-      >
-        {#if dragOverSpacerIndex === group.groupIndex + 1}
-          <span class="font-mono text-[11px] font-bold uppercase tracking-command text-nexus-300">
-            {$_('upstream.insertNewPriority', { values: { priority: group.groupIndex + 2 } })}
-          </span>
-        {/if}
-      </div>
-    {/each}
-
-    {#if groupedUpstreams.length === 0}
-      <div class="flex-1 flex items-center justify-center border border-dashed border-carbon-500">
-        <span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">
-          {#if upstreamSearchTerm.trim()}
-            {$_('serviceEditor.noMatchingEndpoints')}
-          {:else}
-            {$_('serviceEditor.noEndpoints')}
-          {/if}
-        </span>
-      </div>
-    {/if}
-  </div>
+  <UpstreamTargetList bind:owner={route} {services} searchTerm={upstreamSearchTerm}
+    onedit={onEdit} onremove={onRemove} onduplicate={onDuplicate} ontogglestatus={onToggleStatus} onupdateweight={onUpdateWeight} />
+  {#each errors.filter(error => error.field === 'service_references') as error}
+    <p role="alert" class="text-red-300 text-sm">{error.message}</p>
+  {/each}
 
   {#if weightErrors.length > 0}
     <div class="border-l-2 border-l-amber-500 bg-amber-500/5 px-3 py-2">
@@ -323,7 +186,7 @@ import { PanelCard } from '$components/industrial';
 <!-- Upstream Edit Modal -->
 {#if showUpstreamModal && editingUpstream}
   <div
-    class="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-carbon-950/80"
+    class="fixed inset-0 z-[45] flex items-center justify-center p-4 bg-carbon-950/80"
     role="dialog"
     aria-modal="true"
     tabindex="-1"

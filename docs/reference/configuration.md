@@ -77,7 +77,7 @@ private ETag revalidation. Menu settings are excluded from proxy import/export.
 
 ### Aggregate schema
 
-Every write replaces one complete `ConfigurationAggregate`. Entity IDs are stable UUIDs; `position` controls deterministic ordering; routes reference services by `service_id`.
+Every write replaces one complete `ConfigurationAggregate`. Entity IDs are stable UUIDs; `position` controls deterministic ordering; routes and services reference target Services through `service_references` arrays using stable `service_id` values.
 
 Exported snapshots use `format_version: 1` and `schema_version: 1`. Import preview and commit accept only this envelope and the current aggregate schema; unsupported versions or fields are rejected without migration.
 
@@ -108,7 +108,14 @@ Exported snapshots use `format_version: 1` and `schema_version: 1`. Import previ
       "id": "cccccccc-0000-4000-8000-000000000001",
       "position": 1,
       "path": "/v1",
-      "service_id": "aaaaaaaa-0000-4000-8000-000000000001",
+      "service_references": [{
+        "id": "eeeeeeee-0000-4000-8000-000000000001",
+        "position": 0,
+        "service_id": "aaaaaaaa-0000-4000-8000-000000000001",
+        "weight": 100,
+        "priority": 1,
+        "is_disabled": false
+      }],
       "plugins": []
     }],
     "plugins": []
@@ -116,6 +123,14 @@ Exported snapshots use `format_version: 1` and `schema_version: 1`. Import previ
   "plugin_activations": [{ "plugin_name": "llm-protocol-adapter" }]
 }
 ```
+
+A Service keeps its `endpoints` and may also contain `service_references`; an empty reference array is omitted from normalized Services. Endpoints and references share one position group within that Service. A Route either has a nonempty `service_references` array or owns `endpoints`; these targets cannot be combined. The removed Route scalar fields `service` and `service_id` are rejected.
+
+Each reference has a stable lowercase UUID `id`, a non-negative integer `position`, and a target `service_id`. Omitted `weight`, `priority`, and `is_disabled` default to `100`, `1`, and `false`. Weight and priority must be finite positive numbers. A target may occur only once per owner. Unknown targets, Service self-references, and cycles are rejected, including cycles that combine native references with plugin `gateway_target` dispatch. References survive Service renames because names are not identities. Removing a referenced Service without also removing its references rejects the complete write.
+
+Management writes, imports and Worker compilation use the installed plugin catalog to identify schema-declared dispatch targets and reject mixed cycles. Internal storage auditing without a catalog validates native references and stored identities; it does not interpret arbitrary plugin options as dispatch targets or replace catalog-backed validation.
+
+Routes accept `load_balancing` with the same policy and hash-input fields as Services. Route `failover` accepts only `enabled`, `retry_on`, and `retry_on_response`; passive health, recovery, slow start and active health remain Service policies.
 
 Submit it with a unique mutation ID:
 

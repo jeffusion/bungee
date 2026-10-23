@@ -60,6 +60,13 @@ export function accountReferences(logical: LogicalConfiguration, plugin: string,
     bound(endpoint.plugins ?? []));
   const services = logical.services.filter(service => bound(service.plugins) || uses(service.endpoints));
   const ids = new Set(services.map(service => service.id));
-  const routes = logical.routes.filter(route => bound(route.plugins) || (route.service_id ? ids.has(route.service_id) : uses(route.endpoints ?? [])));
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const service of logical.services) if (!ids.has(service.id) && service.service_references?.some(reference => ids.has(reference.service_id))) {
+      ids.add(service.id); services.push(service); expanded = true;
+    }
+  }
+  const routes = logical.routes.filter(route => bound(route.plugins) || (route.service_references?.some(reference => ids.has(reference.service_id)) || uses(route.endpoints ?? [])));
   return { services: services.map(({ id, name }) => ({ id, name })), routes: routes.map(({ id, path }) => ({ id, path })), global: bound(logical.plugins), runtime: 'unknown' as const };
 }

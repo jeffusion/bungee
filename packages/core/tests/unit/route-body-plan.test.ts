@@ -37,3 +37,15 @@ test('route-plan management API authenticates and is read only',async()=>{
     expect(commits).toBe(0);
   } finally {auth.dispose();}
 });
+
+test('route plans include reachable Service bodies and ignore disabled references',()=>{
+  const base=aggregate();
+  const reference={id:'ref-service',service_id:'service',position:0,weight:100,priority:1,is_disabled:false};
+  const value:ConfigurationAggregate={...base,logical_configuration:{...base.logical_configuration,
+    services:[{id:'service',name:'service',position:0,plugins:[],endpoints:base.logical_configuration.routes[0]!.endpoints ?? [],failover:{enabled:true}}],
+    routes:[{id:'r',position:0,path:'/test',plugins:[],service_references:[reference]}]}};
+  const plan=buildRouteBodyPlans(value)[0]!;expect(plan.replay).toBe(true);expect(plan.endpoints.map(endpoint=>endpoint.upstream_id)).toEqual(['e']);
+  const disabled:ConfigurationAggregate={...value,logical_configuration:{...value.logical_configuration,
+    routes:[{id:'r',position:0,path:'/test',plugins:[],service_references:[{...reference,is_disabled:true}]}]}};
+  expect(buildRouteBodyPlans(disabled)[0]!.endpoints).toEqual([]);
+});

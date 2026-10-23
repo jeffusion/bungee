@@ -182,7 +182,7 @@ function richAggregate(): ConfigurationAggregate {
         id: IDS.serviceRoute,
         position: 5,
         path: '/service',
-        service_id: IDS.service,
+        service_references: [{ id: '50000000-0000-4000-8000-000000000011', position: 0, service_id: IDS.service, weight: 100, priority: 1, is_disabled: false }],
         retry: { enabled: true, max_retries: 2 },
         plugins: [{ id: IDS.routeBinding, position: 9, name: 'audit', enabled: false, options: { level: 'info' } }],
       }, {
@@ -1076,14 +1076,16 @@ describe('ConfigRepository schema enforcement and corruption handling', () => {
       WHERE type='table' AND name NOT LIKE 'sqlite_%'`).all();
 
     // When / Then
-    expect(definitions).toHaveLength(22);
+    expect(definitions).toHaveLength(23);
     expect(definitions.every(({ sql }) => sql.includes('STRICT'))).toBe(true);
     expect(() => inspector.run(`INSERT INTO services (id,position,name,policy_json)
       VALUES ('10000000-0000-4000-8000-000000000099','wrong','bad','{}')`)).toThrow();
     expect(() => inspector.run(`INSERT INTO configuration_revisions
       (revision,content_hash,kind,created_at) VALUES (2,'sha256:ABC','config',1)`)).toThrow();
-    expect(() => inspector.run(`INSERT INTO routes (id,position,path,service_id,policy_json)
-      VALUES ('20000000-0000-4000-8000-000000000099',0,'/missing','10000000-0000-4000-8000-000000000099','{}')`)).toThrow();
+    expect(() => inspector.run(`INSERT INTO service_references
+      (id,owner_kind,owner_service_id,route_id,position,service_id,weight,priority,is_disabled)
+      VALUES ('50000000-0000-4000-8000-000000000099','route',NULL,'20000000-0000-4000-8000-000000000099',0,
+        '10000000-0000-4000-8000-000000000099',100,1,0)`)).toThrow();
     expect(() => inspector.run(`INSERT INTO upstreams
       (id,owner_kind,service_id,route_id,position,target,weight,priority,is_disabled,policy_json)
       VALUES ('30000000-0000-4000-8000-000000000099','service',NULL,NULL,0,'https://bad',1,1,0,'{}')`)).toThrow();

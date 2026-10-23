@@ -1,3 +1,4 @@
+import { serviceReference } from '../../helpers/service-references';
 import { afterEach, expect, test } from 'bun:test';
 import { findRuntimeUpstream, getRuntimeUpstreams, runtimeAvailabilityKey } from '../../../src/api/runtime';
 import { runtimeRecord, runtimeResponse, unavailableRuntime } from '../../helpers/runtime';
@@ -6,7 +7,7 @@ import { getDashboardStats, getStatsHistoryV2, getUnifiedUpstreamStats, getUpstr
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
-const service = { name: 'service', endpoints: [{ _uid: 'endpoint-id', target: 'https://example.com' }] };
+const service = { _uid: 'service-id', name: 'service', endpoints: [{ _uid: 'endpoint-id', target: 'https://example.com' }] };
 
 test('Master runtime endpoint preserves complete, mixed, unknown, no admission and nullable counts', async () => {
   for (const response of [runtimeResponse(), runtimeResponse([runtimeRecord('MIXED')]),
@@ -32,10 +33,10 @@ test('runtime identity never falls back to endpoint position, target or another 
 
 test('health requires runtime evidence, including per-upstream unknown in a complete envelope', () => {
   for (const [state, expected] of [['HEALTHY', 'healthy'], ['UNHEALTHY', 'unhealthy'], ['HALF_OPEN', 'degraded'], ['MIXED', 'mixed'], ['UNKNOWN', 'unknown']] as const) {
-    const runtime = runtimeResponse([runtimeRecord(state)]);
+    const runtime = runtimeResponse([runtimeRecord(state,{state_key:service._uid})]);
     expect(getServiceHealthAggregate(service, runtime).state).toBe(expected);
-    expect(getRouteHealthAggregate({ path: '/route', service: 'service' }, [service], runtime).state).toBe(expected);
-    expect(getRouteHealthAggregate({ path: 'service', endpoints: service.endpoints }, [], runtime).state).toBe(expected);
+    expect(getRouteHealthAggregate({ path: '/route', service_references: [serviceReference('service-id')] }, [service], runtime).state).toBe(expected);
+    expect(getRouteHealthAggregate({ _uid:service._uid, path: '/different-path', endpoints: service.endpoints }, [], runtime).state).toBe(expected);
   }
   for (const runtime of [null, unavailableRuntime(), runtimeResponse([])]) {
     expect(getServiceHealthAggregate(service, runtime).state).toBe('unknown');
@@ -75,4 +76,13 @@ test('stats use Master paths with one strict range and type, never arbitrary que
   }
   await expect(getUnifiedUpstreamStats('1h', 'all&type=failure' as 'all')).rejects.toThrow('Invalid stats type');
   expect(urls).toHaveLength(6);
+});
+
+test('nested service availability keeps a healthy leaf usable and unknown distinct from unavailable', () => {
+  const leaf = { ...service, _uid: 'leaf', endpoints: [service.endpoints[0], { _uid: 'down', target: 'https://down.example.test' }] };
+  const pool = { _uid: 'pool', name: 'pool', endpoints: [], service_references: [serviceReference('leaf')] };
+  const runtime = runtimeResponse([runtimeRecord('HEALTHY',{state_key:leaf._uid}), runtimeRecord('UNHEALTHY', { state_key:leaf._uid, upstream_id: 'down' })]);
+  expect(getServiceHealthAggregate(pool, runtime, [leaf, pool])).toMatchObject({state: 'degraded', healthy: 1, unhealthy: 1});
+  expect(getServiceHealthAggregate(pool, null, [leaf, pool]).state).toBe('unknown');
+  expect(getServiceHealthAggregate(pool, runtimeResponse([runtimeRecord('UNHEALTHY',{state_key:leaf._uid}), runtimeRecord('UNHEALTHY', {state_key:leaf._uid,upstream_id: 'down'})]), [leaf, pool]).state).toBe('unhealthy');
 });

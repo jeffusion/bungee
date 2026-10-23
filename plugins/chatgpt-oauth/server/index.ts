@@ -33,6 +33,7 @@ export const ChatgptOauthPlugin = definePlugin(
     }
 
     register(hooks: PluginHooks): void {
+      hooks.onFinally.tap('chatgpt-oauth.request-cleanup',context=>this.adapter.endRequest(context.requestId));
       hooks.onWebSocketHandshake.tap('chatgpt-oauth', context => {
         assertResponsesEntryPath(context.url.pathname);
         if (context.url.origin === 'https://chatgpt.com' && isResponsesRequest(context.url))

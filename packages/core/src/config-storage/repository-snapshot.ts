@@ -1,3 +1,4 @@
+import { auditServingSnapshotHistory } from './serving-snapshot';
 import { readManagementProtection } from './management-protection';
 import type { Database } from 'bun:sqlite';
 import { hashConfigurationContent } from './content-hash';
@@ -15,6 +16,7 @@ function verifyIntegrity(db: Database, allowActiveRecoveryDrift = false, checkDa
   verifySchemaFingerprint(db);
   readManagementProtection(db);
   verifyRecoveryIntegrity(db, allowActiveRecoveryDrift);
+  if (checkDatabasePages) auditServingSnapshotHistory(db);
   // Full page scans include plugin history and must not run on routine config reads:
   // blocking the master here can prevent worker supervision leases from renewing.
   const integrity = checkDatabasePages

@@ -18,15 +18,18 @@ export class RetryPlugin implements Plugin {
         try{
           const bytes=await fallbackSource.buffer('repair-fallback');
           original.response=new Response(bytes as BodyInit,{status:original.response.status,statusText:original.response.statusText,headers:original.response.headers});
-          await original.observationCompletion;await input.finish(original);await input.recordAttempt?.(original);
+          await original.observationCompletion;await input.finish(original,true);await input.recordAttempt?.(original);
           await input.cleanup(original,input.signal);
           const cleanup=original.cleanup;
           const fallback=():ProxyRequestResult=>({...original,repairFallback:true,
             cleanup:async()=>{try{await cleanup?.();}finally{fallbackSource.dispose();}}});
-          if(input.signal.aborted)throw input.signal.reason??new DOMException('Aborted','AbortError');
+          if(input.signal.aborted){
+            if((input.clientSignal ?? input.signal).aborted)throw input.signal.reason??new DOMException('Aborted','AbortError');
+            keepFallback=true;return fallback();
+          }
           let repaired:ProxyRequestResult;
           try{repaired=await input.runAttempt(override);}catch(error){
-            if(input.signal.aborted)throw error;
+            if((input.clientSignal ?? input.signal).aborted)throw error;
             keepFallback=true;return fallback();
           }
           if(repaired.response.ok){fallbackSource.dispose();return repaired;}
@@ -35,7 +38,7 @@ export class RetryPlugin implements Plugin {
             else if(repaired.response.body){const discarded=createBodySource(repaired.response.body,input.snapshot.bodySource?.maxBytes ?? 50*1024*1024,'',input.signal,
               {requestId:'',attemptId:'',direction:'response',stage:'client-response',version:0,contentType:repaired.response.headers.get('content-type')??'',contentEncoding:''});
               try{await discarded.buffer('repair-error-observation');}finally{discarded.dispose();}}
-          }catch(error){if(input.signal.aborted)throw error;}
+          }catch(error){if((input.clientSignal ?? input.signal).aborted)throw error;}
           await input.cleanup(repaired,input.signal);await repaired.observationCompletion;await input.finish(repaired);await input.recordAttempt?.(repaired);
           keepFallback=true;return fallback();
         }finally{if(!keepFallback)fallbackSource.dispose();}
@@ -44,7 +47,7 @@ export class RetryPlugin implements Plugin {
       const retryConfig = input.route.retry;
       const retryOn = retryConfig?.retry_on ?? [];
 
-      if (repairUsed || !input.snapshot.bodySource?.replayable || !retryConfig?.enabled || result.response.ok || !retryOn.includes(result.response.status)) {
+      if (result.upstreamConnected || repairUsed || !input.snapshot.bodySource?.replayable || !retryConfig?.enabled || result.response.ok || !retryOn.includes(result.response.status)) {
         return result;
       }
 

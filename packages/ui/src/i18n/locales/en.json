@@ -205,9 +205,9 @@
     "confirmDelete": "Delete Service",
     "confirmDeleteMessage": "Are you sure you want to delete service \"{name}\"?",
     "confirmDeleteReferencedMessage": "Service \"{name}\" is referenced by routes: {routes}. Remove those references before deleting it.",
-    "deleteBlockedByReferences": "Cannot delete service \"{name}\" because it is referenced by routes: {routes}.",
+    "deleteBlockedByReferences": "Cannot delete service \"{name}\" because it is referenced by routes or services: {routes}.",
     "deleteReferencedTitle": "Delete Protection",
-    "deleteReferencedMessage": "Service \"{name}\" is currently referenced by the following routes. You must remove these references before you can delete the service.",
+    "deleteReferencedMessage": "Service \"{name}\" is currently referenced by the following routes or services. You must remove these references before you can delete the service.",
     "deleteUnreferencedTitle": "Confirm Deletion",
     "deleteUnreferencedMessage": "Are you sure you want to delete service \"{name}\"? This action cannot be undone.",
     "deleteUnreferencedFriction": "Please type the service name to confirm:",
@@ -257,7 +257,7 @@
       "transport": "Traffic Policy",
       "endpoints": "Service Endpoints",
       "availability": "Health Checks & Failover",
-      "consumers": "Referencing Routes",
+      "consumers": "Direct consumers",
       "review": "Configuration Overview",
       "plugins": "Service Plugins",
       "loadBalancing": "Load Balancing",
@@ -266,7 +266,7 @@
     },
     "loadBalancing": {
       "title": "Load Balancing Policy",
-      "help": "Algorithm used to distribute requests across this service's upstreams.",
+      "help": "Distribute requests among targets with the same priority at the current level.",
       "policy": "Policy",
       "policies": {
         "weighted_random": "Weighted Random",
@@ -287,9 +287,9 @@
     "endpointSearch": "Search endpoint address or description",
     "noMatchingEndpoints": "No matching endpoints",
     "noEndpoints": "No endpoints yet. Add an endpoint to get started.",
-    "consumersTitle": "Referencing Routes",
-    "consumersHelp": "Routes that reference this service as their backend pool",
-    "consumersRoutesCount": "{count} route(s) reference this service",
+    "consumersTitle": "Direct consumers",
+    "consumersHelp": "Routes and services that directly reference this service",
+    "consumersRoutesCount": "{count} direct consumer(s) reference this service",
     "noConsumers": "No routes reference this service yet",
     "consumersNameRequired": "Enter a service name to see its referencing routes",
     "reviewTitle": "Configuration Overview",
@@ -925,6 +925,7 @@
     "loadBalancingGroup": "Load Balancing Group",
     "dragToMerge": "Drag items here to merge",
     "newPriority1": "New Priority 1",
+    "insertPriorityGroup": "Insert New Priority Group",
     "insertNewPriority": "Insert New Priority {priority}",
     "priorityHelp": "Failover order",
     "transformer": "Upstream Transformer",
@@ -1477,8 +1478,6 @@
     "cardRemoved": "Card removed; remaining cards filled the gaps",
     "mobileHint": "Mobile order and heights are independent of the desktop layout. Removing a card removes it from both layouts.",
     "mobileHeight": "Mobile card height",
-    "moveUp": "Move up",
-    "moveDown": "Move down",
     "emptyTitle": "Your dashboard has no cards",
     "emptyDescription": "Choose cards from the library, or start with a layout template.",
     "library": "Card library",
@@ -1679,5 +1678,17 @@
       "inFlight": "Requests are still using this plugin. Wait for them to finish, then refresh.",
       "unknown": "The operation did not complete. Check the connection and refresh the actual state before trying again."
     }
+  },
+  "serviceReferences": {
+    "details": "Service details",
+    "noMatches": "No matching targets",
+    "noTargets": "No targets",
+    "failoverHelp": "Try another service reference when the status or response matches a failure condition.",
+    "degraded": "Partially available",
+    "enabled": "Enabled",
+    "add": "Reference service",
+    "positiveInteger": "Enter a positive integer",
+    "references": "Service references",
+    "pool": "Service pool scheduling"
   }
 }

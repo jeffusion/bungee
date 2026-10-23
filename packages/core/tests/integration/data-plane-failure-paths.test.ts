@@ -106,7 +106,7 @@ describe('data-plane final regressions', () => {
     global.fetch = (async () => { fetchCalls++; return new Response('must-not-fetch'); }) as unknown as typeof fetch;
     const config = {
       services: [{
-        name: 'managed-policy-service',
+        id:'managed-policy-service', name: 'managed-policy-service',
         failover: { enabled: true, retry_on: [503] },
         endpoints: [
           {
@@ -117,7 +117,7 @@ describe('data-plane final regressions', () => {
           { id: 'fallback', target: 'https://fallback.example.test', priority: 1 },
         ],
       }],
-      routes: [{ path: '/v1/chat', service: 'managed-policy-service' }],
+      routes: [{ path: '/v1/chat', service_references:[{id:'ref-'+('managed-policy-service'),service_id:'managed-policy-service',position:0,weight:100,priority:1,is_disabled:false}] }],
     } as any;
     initializeRuntimeState(config);
     const response = await handleRequest(new Request('http://proxy.test/v1/chat', {
@@ -153,7 +153,7 @@ describe('data-plane final regressions', () => {
 
     const config = {
       services: [{
-        name: 'managed-service',
+        id:'managed-service', name: 'managed-service',
         failover: { enabled: true, retry_on: [503] },
         endpoints: [
           {
@@ -166,7 +166,7 @@ describe('data-plane final regressions', () => {
           { id: 'non-managed', target: 'https://fallback.example.test', priority: 1 },
         ],
       }],
-      routes: [{ path: '/v1/chat', service: 'managed-service' }],
+      routes: [{ path: '/v1/chat', service_references:[{id:'ref-'+('managed-service'),service_id:'managed-service',position:0,weight:100,priority:1,is_disabled:false}] }],
     } as any;
     initializeRuntimeState(config);
 
@@ -210,14 +210,14 @@ describe('data-plane final regressions', () => {
 
     const config = {
       services: [{
-        name: 'sse-service',
+        id:'sse-service', name: 'sse-service',
         failover: { enabled: true, retry_on: [503] },
         endpoints: [
           { id: 'first', target: 'https://first.example.test', priority: 0 },
           { id: 'second', target: 'https://second.example.test', priority: 1 },
         ],
       }],
-      routes: [{ path: '/stream', service: 'sse-service' }],
+      routes: [{ path: '/stream', service_references:[{id:'ref-'+('sse-service'),service_id:'sse-service',position:0,weight:100,priority:1,is_disabled:false}] }],
     } as any;
     initializeRuntimeState(config);
     const responsePromise = handleRequest(new Request('http://proxy.test/stream', {
@@ -252,14 +252,14 @@ describe('data-plane final regressions', () => {
     }) as unknown as typeof fetch;
     const config = {
       services: [{
-        name: 'stuck-service',
+        id:'stuck-service', name: 'stuck-service',
         failover: { enabled: true, retry_on: [503] },
         endpoints: [
           { id: 'stuck', target: 'https://stuck.example.test', priority: 0, status: 'HALF_OPEN' },
           { id: 'never', target: 'https://never.example.test', priority: 1 },
         ],
       }],
-      routes: [{ path: '/stuck', service: 'stuck-service' }],
+      routes: [{ path: '/stuck', service_references:[{id:'ref-'+('stuck-service'),service_id:'stuck-service',position:0,weight:100,priority:1,is_disabled:false}] }],
     } as any;
     initializeRuntimeState(config);
 
@@ -343,11 +343,11 @@ describe('data-plane final regressions', () => {
     }), { status: 200, headers: { 'content-type': 'text/event-stream' } })) as unknown as typeof fetch;
     const config = {
       services: [{
-        name: 'cancel-service',
+        id:'cancel-service', name: 'cancel-service',
         failover: { enabled: true, retry_on: [503] },
         endpoints: [{ id: 'cancel', target: 'https://cancel.example.test' }],
       }],
-      routes: [{ path: '/cancel', service: 'cancel-service' }],
+      routes: [{ path: '/cancel', service_references:[{id:'ref-'+('cancel-service'),service_id:'cancel-service',position:0,weight:100,priority:1,is_disabled:false}] }],
     } as any;
     initializeRuntimeState(config);
 
@@ -372,8 +372,8 @@ describe('data-plane final regressions', () => {
       },
     }), { headers: { 'content-type': 'text/event-stream' } })) as unknown as typeof fetch;
     const config = {
-      services: [{ name: 'unread', endpoints: [{ id: 'first', target: 'https://unread.example.test' }] }],
-      routes: [{ path, service: 'unread' }],
+      services: [{ id:'unread', name: 'unread', endpoints: [{ id: 'first', target: 'https://unread.example.test' }] }],
+      routes: [{ path, service_references:[{id:'ref-'+('unread'),service_id:'unread',position:0,weight:100,priority:1,is_disabled:false}] }],
     } as any;
     initializeRuntimeState(config);
     const response = await handleRequest(new Request(`http://proxy.test${path}`), config);

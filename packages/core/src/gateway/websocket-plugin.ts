@@ -1,3 +1,8 @@
+import { PhysicalRequestBudget, serviceById, serviceLayer, layerEndpoints, layerReferences } from '../worker/upstream/service-execution';
+import { resolveReachableEndpoints } from '../utils/endpoint-resolver';
+import { createStatusCodeMatcher } from '../worker/utils/status-code-matcher';
+import type { EffectiveRouteConfig } from '../worker/types';
+import type { PrecompiledHooks } from '../scoped-plugin-registry';
 import { randomUUID } from 'node:crypto';
 import type { Plugin, PluginHooks } from '@jeffusion/bungee-core/plugin';
 import type { GatewayWebSocketInput, GatewayWebSocketResult, WebSocketHandshakeContext } from './websocket-contracts';
@@ -5,9 +10,9 @@ import { gatewayHooks, requireGatewayResult } from './runtime';
 import { getScopedPluginRegistry } from '../scoped-plugin-registry';
 import { getTrustedDataIdentity, getTrustedWorkerPeer } from '../config-worker/private-transport';
 import { hasWorkerAdmissionSession, type WorkerRequestAdmission } from '../data-admission/worker';
-import { DataAdmissionError } from '../data-admission/errors';
-import { runtimeState, incrementActiveRequests, decrementActiveRequests, releaseHalfOpenSlot } from '../worker/state/runtime-state';
-import type { RuntimeUpstream } from '../worker/types';
+import { DataAdmissionError, normalizeAdmissionError } from '../data-admission/errors';
+import { isUpstreamNetworkError, isUpstreamTimeoutError } from '../worker/request/proxy';
+import { incrementActiveRequests, decrementActiveRequests, releaseHalfOpenSlot } from '../worker/state/runtime-state';
 import { rebaseToUpstream } from '../worker/request/context';
 import type { ExpressionContext } from '../expression-engine';
 import { analyzeExpressionDependencies, hasBodyModification } from '../utils/expression-dependencies';
@@ -15,7 +20,6 @@ import { deepMergeRules } from '../worker/rules/deep-merge';
 import { WebSocketObservers } from '../websocket/observation';
 import { validateWebSocketRequest } from '../websocket';
 import { websocketCredential } from './websocket-credential';
-import { logger } from '../logger';
 import {ResponsesWebSocketSession} from './responses-websocket-session';
 
 function headerRecord(headers:Headers):Record<string,string> {const result:Record<string,string>={};headers.forEach((value,name)=>{result[name]=value;});return result;}
@@ -41,8 +45,14 @@ export class WebSocketGatewayPlugin implements Plugin {
       if (!leases.has(key) && registry?.serviceHost) leases.set(key,registry.serviceHost.acquireLease(plugin,scope));
     };
     let admission: WorkerRequestAdmission | undefined;
-    let releaseActive: (()=>void) | undefined;
-    let observers: WebSocketObservers | undefined;
+    const frames:Array<{phase:PrecompiledHooks|null;id:string;kind:'service'|'endpoint';release:()=>void;closed:boolean}>=[];
+    const closeFrame=async(frame:typeof frames[number],ok:boolean)=>{
+      if(frame.closed)return;frame.closed=true;
+      const context={requestId:connectionId,method:'GET',originalUrl:new URL(request.url),clientIP:'unknown',
+        success:ok,latencyMs:0,...(frame.kind==='service'?{serviceName:frame.id}:{upstreamId:frame.id}),headers:{},body:undefined,error:new Error('websocket_handshake_failed')};
+      try{if(!ok)await frame.phase?.hooks.onError.promise(context);}
+      finally{try{await frame.phase?.hooks.onFinally.promise(context);}finally{frame.release();}}
+    };
     let settled = false;
     let committed = false;
     let resolveCompletion!:()=>void;
@@ -50,7 +60,7 @@ export class WebSocketGatewayPlugin implements Plugin {
     input.retain(completion);
     const finish = async () => {
       if (settled) return; settled=true;
-      releaseActive?.();
+      for(const frame of [...frames].reverse())await closeFrame(frame,committed);
       try { await admission?.release(); }
       finally { for (const release of leases.values()) release(); resolveCompletion(); }
     };
@@ -69,7 +79,7 @@ export class WebSocketGatewayPlugin implements Plugin {
       }
       const expressionContext = (): ExpressionContext => ({headers:headerRecord(headers),body:undefined,request:{headers:headerRecord(headers)},
         url:{pathname:url.pathname,search:url.search,host:url.host,protocol:url.protocol},method:'GET',env:process.env as Record<string,string>});
-      if (analyzeExpressionDependencies({request:route.request,selection:effective.endpoints.map(e=>e.condition),hash:effective.load_balancing?.hash_policy?.expression,rate:route.rate_limit?.key_expression},'request').requestBody || hasBodyModification(route.request?.body)) return reject(422,'websocket_body_rules_unsupported');
+      if (analyzeExpressionDependencies({request:route.request,selection:resolveReachableEndpoints(effective,config.services).map(e=>e.condition),hash:effective.load_balancing?.hash_policy?.expression,rate:route.rate_limit?.key_expression},'request').requestBody || hasBodyModification(route.request?.body)) return reject(422,'websocket_body_rules_unsupported');
       const rate = requireGatewayResult(await gatewayHooks().onGatewayAdmission.promise({route,trustedPeer:getTrustedWorkerPeer(request),context:expressionContext(),servingRevision,signal}),'onGatewayAdmission');
       if (!rate.allowed) return {response:Response.json({error:rate.retryAfterMs===undefined?'rate_limit_unavailable':'rate_limited'},{status:rate.retryAfterMs===undefined?503:429,
         headers:rate.retryAfterMs===undefined?{}:{'retry-after':String(Math.max(1,Math.ceil(rate.retryAfterMs/1000)))}})};
@@ -80,9 +90,9 @@ export class WebSocketGatewayPlugin implements Plugin {
         if(identity && hasWorkerAdmissionSession()){
           for(const handler of handlers)retain(handler.pluginName);
           admission=requireGatewayResult(await gatewayHooks().onGatewayAdmissionSession.promise({handlers,identity:{requestId:connectionId,principal:identity.principal,routeId:route.id ?? route.path,
-            serviceId:(route as {service_id?:string}).service_id ?? config.services?.find(service=>service.name===route.service)?.id ?? null},
+            serviceId:null},
             invoke:(plugin,method,payload,target)=>registry!.invokeAdmissionRpc(plugin,method,payload,target,leases.get(`${plugin}\0global`)!)}),'onGatewayAdmissionSession');
-          const endpoint=effective.endpoints[0];
+          const endpoint=resolveReachableEndpoints(effective,config.services)[0];
           if(!endpoint)return reject(503,'upstream_unavailable');
           await admission.prepare({attemptId:connectionId,upstreamId:endpoint.id ?? '0',url:endpoint.target,model:null,body:undefined,transport:'websocket'},signal);
         }
@@ -91,57 +101,92 @@ export class WebSocketGatewayPlugin implements Plugin {
         if(response){session.dispose();return {response};}
         committed=true;return {};
       }
-      const upstreams = runtimeState.get(route.service ?? route.path)?.upstreams ?? effective.endpoints.map((endpoint,index)=>({...endpoint,upstream_id:endpoint.id ?? String(index),status:'HEALTHY',consecutive_failures:0,consecutive_successes:0,recovery_attempt_count:0} as RuntimeUpstream));
-      const upstream = requireGatewayResult(await gatewayHooks().onGatewaySelect.promise({upstreams,route:effective,context:expressionContext()}),'onGatewaySelect').upstream;
-      if (!upstream) return reject(503,'upstream_unavailable');
-      const stateKey = route.service ?? route.path;
-      incrementActiveRequests(stateKey,upstream.upstream_id);
-      releaseActive=()=>{decrementActiveRequests(stateKey,upstream.upstream_id);releaseHalfOpenSlot(stateKey,upstream.upstream_id);};
-      const rules = deepMergeRules(route.request ?? {},upstream.request ?? {});
-      if (hasBodyModification(rules.body) || analyzeExpressionDependencies(rules,'request').requestBody) return reject(422,'websocket_body_rules_unsupported');
-      await gatewayHooks().onGatewayHeaderRules.promise(headers,rules.headers,expressionContext());
-      const query = requireGatewayResult(await gatewayHooks().onGatewayQueryRules.promise(url.searchParams,rules.query,expressionContext(),{}),'onGatewayQueryRules');
-      url.search=query.toString();
-      const rebased = {url,method:'GET',headers:headerRecord(headers)};
-      rebaseToUpstream(rebased,upstream);
-      const owners=registry?.getWebSocketOwners(route.path,upstream.upstream_id,route.service) ?? [];
-      for (const owner of [...owners,...(registry?.getWebSocketHandshakeOwners(route.path,upstream.upstream_id,route.service) ?? []),...(registry?.getBoundControlOwners(route.path,upstream.upstream_id) ?? [])]) retain(owner.pluginName,owner.scopeKey);
       const handlers=registry?.getGlobalAdmissionHandlers() ?? [];
-      if (identity && hasWorkerAdmissionSession()) {
-        for (const handler of handlers) retain(handler.pluginName);
-        admission=requireGatewayResult(await gatewayHooks().onGatewayAdmissionSession.promise({handlers,identity:{requestId:connectionId,principal:identity.principal,routeId:route.id ?? route.path,
-          serviceId:(route as {service_id?:string}).service_id ?? (config.services?.find(s=>s.name===route.service) as {id?:string}|undefined)?.id ?? null},
+      if(identity && hasWorkerAdmissionSession()){
+        for(const handler of handlers)retain(handler.pluginName);
+        admission=requireGatewayResult(await gatewayHooks().onGatewayAdmissionSession.promise({handlers,identity:{requestId:connectionId,principal:identity.principal,routeId:route.id ?? route.path,serviceId:null},
           invoke:(plugin,method,payload,target)=>registry!.invokeAdmissionRpc(plugin,method,payload,target,leases.get(`${plugin}\0global`)!)}),'onGatewayAdmissionSession');
       }
-      const phases=registry?.getPrecompiledHooks(route.path,upstream.upstream_id,route.service);
-      let handshake:WebSocketHandshakeContext={connectionId,routeId:route.path,upstreamId:upstream.upstream_id,url,headers,signal};
-      for (const phase of [phases?.routePhase,phases?.servicePhase,phases?.upstreamPhase]) if (phase) {
-        const run=()=>phase.hooks.onWebSocketHandshake.promise(handshake);
-        handshake=registry ? await registry.runWithRequestLeases(leases,run) : await run();
-      }
-      if (admission) await admission.prepare({attemptId:connectionId,upstreamId:upstream.upstream_id,url:handshake.url.href,model:null,body:undefined,transport:'websocket'},signal);
-      const acquire = ()=>websocketCredential(upstream,handshake.url,handshake.headers,servingRevision,connectionId,signal);
-      const outboundHeaders = registry ? await registry.runWithRequestLeases(leases,acquire) : await acquire();
-      const target=new URL(handshake.url);
-      if (!['http:','https:','ws:','wss:'].includes(target.protocol) || target.username || target.password || target.hash) return reject(422,'websocket_target_invalid');
-      target.protocol=target.protocol==='https:'?'wss:':target.protocol==='http:'?'ws:':target.protocol;
-      observers=new WebSocketObservers({connectionId,keyId:identity?.principal.domain==='data'?identity.principal.keyId:null,routeId:route.path,
-        upstreamId:upstream.upstream_id,upstreamUrl:handshake.url.href.replace(/^wss:/,'https:').replace(/^ws:/,'http:'),servingRevision},owners);
-      // Install observation context before dialing; early upstream events are ordered after open below.
-      const result = await bridge.upgrade(nativeRequest,server,{url:target,headers:outboundHeaders,signal,
-        onOpen:()=>observers!.emit({phase:'open'}),
-        onMessage:(direction,message)=>observers!.emit({phase:'message',direction,message}),
-        onClose:async(code,reason,metrics)=>{
-          try {await observers!.close({phase:'close',code,reason,metrics});
-            logger.info({websocket:{connection_id:connectionId,route:route.path,upstream_id:upstream.upstream_id,serving_revision:servingRevision,code,...metrics}},'WebSocket connection closed');}
-          finally {await finish();}
-        },
-      });
-      if (result) return {response:result};
-      committed=true;
-      return {};
+      const budget=new PhysicalRequestBudget(config,effective,signal);
+      let handshake:WebSocketHandshakeContext={connectionId,routeId:route.path,upstreamId:'',url:new URL(url),headers:new Headers(headers),signal};
+      for(const owner of registry?.getRoutePluginOwners(route.path) ?? [])retain(owner.pluginName,owner.scopeKey);
+      const routePhase=registry?.getPrecompiledHooks(route.path).routePhase;
+      if(routePhase){const run=()=>routePhase.hooks.onWebSocketHandshake.promise(handshake);handshake=registry?await registry.runWithRequestLeases(leases,run):await run();}
+      const contextFor=(context:WebSocketHandshakeContext):ExpressionContext=>({headers:headerRecord(context.headers),body:undefined,request:{headers:headerRecord(context.headers)},
+        url:{pathname:context.url.pathname,search:context.url.search,host:context.url.host,protocol:context.url.protocol},method:'GET',env:process.env as Record<string,string>});
+      const dial=async(layer:EffectiveRouteConfig,parent:WebSocketHandshakeContext,ids:string[]):Promise<Response|undefined>=>{
+        const upstreams=layerEndpoints(layer);
+        const coordinator=requireGatewayResult(await gatewayHooks().onGatewayFailover.promise({upstreams,references:layerReferences(config,layer),
+          route:layer,recoveryIntervalMs:layer.failover?.recovery?.backoff_base_ms ?? 5000,context:contextFor(parent)}),'onGatewayFailover');
+        let last:Response|undefined;
+        while(coordinator.hasNext()){
+          signal.throwIfAborted();
+          const selected=requireGatewayResult(await gatewayHooks().onGatewaySelect.promise({upstreams,route:layer,context:contextFor(parent),coordinator}),'onGatewaySelect');
+          if(!selected.upstream && !selected.reference)break;
+          let frame:typeof frames[number]|undefined;
+          let release:()=>void=()=>{};
+          try{
+            let current:WebSocketHandshakeContext={...parent,url:new URL(parent.url),headers:new Headers(parent.headers)};
+            if(selected.reference){
+              const reference=selected.reference;const service=serviceById(config,reference.service_id);
+              if(ids.includes(service.id))throw new DataAdmissionError(422,'service_reference_cycle');
+              const phase=registry?.getPrecompiledHooks(route.path,undefined,service.id).servicePhase ?? null;
+              for(const owner of registry?.getServicePluginOwners?.(route.path,service.id) ?? [])retain(owner.pluginName,owner.scopeKey);
+              const key=layer.state_key ?? layer.path;incrementActiveRequests(key,reference.id);
+              frame={phase,id:service.id,kind:'service',release:()=>decrementActiveRequests(key,reference.id),closed:false};frames.push(frame);
+              if(phase){const run=()=>phase.hooks.onWebSocketHandshake.promise(current);current=registry?await registry.runWithRequestLeases(leases,run):await run();}
+              last=await dial(serviceLayer(layer,service),current,[...ids,service.id]);
+            }else{
+              const upstream=selected.upstream!;
+              if(selected.shouldTransitionToHalfOpen)upstream.status='HALF_OPEN';
+              const stateKey=layer.state_key ?? layer.path;incrementActiveRequests(stateKey,upstream.upstream_id);
+              let released=false;release=()=>{if(released)return;released=true;decrementActiveRequests(stateKey,upstream.upstream_id);releaseHalfOpenSlot(stateKey,upstream.upstream_id);};
+              const rules=deepMergeRules(route.request ?? {},upstream.request ?? {});
+              if(hasBodyModification(rules.body)||analyzeExpressionDependencies(rules,'request').requestBody)throw new DataAdmissionError(422,'websocket_body_rules_unsupported');
+              await gatewayHooks().onGatewayHeaderRules.promise(current.headers,rules.headers,contextFor(current));
+              current.url.search=requireGatewayResult(await gatewayHooks().onGatewayQueryRules.promise(current.url.searchParams,rules.query,contextFor(current),{}),'onGatewayQueryRules').toString();
+              rebaseToUpstream({url:current.url,method:'GET',headers:headerRecord(current.headers)},upstream);
+              current={...current,upstreamId:upstream.upstream_id};
+              const owners=registry?.getWebSocketOwners(route.path,upstream.upstream_id,ids) ?? [];
+              for(const owner of [...owners,...(registry?.getWebSocketHandshakeOwners(route.path,upstream.upstream_id,ids) ?? []),...(registry?.getBoundControlOwners(route.path,upstream.upstream_id) ?? [])])retain(owner.pluginName,owner.scopeKey);
+              const phase=registry?.getPrecompiledHooks(route.path,upstream.upstream_id,ids).upstreamPhase ?? null;
+              frame={phase,id:upstream.upstream_id,kind:'endpoint',release,closed:false};frames.push(frame);
+              if(phase){const run=()=>phase.hooks.onWebSocketHandshake.promise(current);current=registry?await registry.runWithRequestLeases(leases,run):await run();}
+              await admission?.prepare({attemptId:connectionId,upstreamId:upstream.upstream_id,url:current.url.href,model:null,body:undefined,transport:'websocket',serviceId:ids.at(-1) ?? null},signal);
+              const acquire=()=>websocketCredential(upstream,current.url,current.headers,servingRevision,connectionId,signal);
+              const outbound=registry?await registry.runWithRequestLeases(leases,acquire):await acquire();
+              const target=new URL(current.url);
+              if(!['http:','https:','ws:','wss:'].includes(target.protocol)||target.username||target.password||target.hash)throw new DataAdmissionError(422,'websocket_target_invalid');
+              target.protocol=target.protocol==='https:'?'wss:':target.protocol==='http:'?'ws:':target.protocol;
+              const attemptObservers=new WebSocketObservers({connectionId,keyId:identity?.principal.domain==='data'?identity.principal.keyId:null,routeId:route.path,
+                upstreamId:upstream.upstream_id,upstreamUrl:current.url.href.replace(/^wss:/,'https:').replace(/^ws:/,'http:'),servingRevision},owners);
+              budget.take();
+              last=await bridge.upgrade(nativeRequest,server,{url:target,headers:outbound,signal,
+                onOpen:()=>attemptObservers.emit({phase:'open'}),
+                onMessage:(direction,message)=>attemptObservers.emit({phase:'message',direction,message}),
+                onClose:async(code,reason,metrics)=>{try{await attemptObservers.close({phase:'close',code,reason,metrics});}finally{await finish();}}});
+            }
+            if(!last)return undefined;
+            release();if(frame)await closeFrame(frame,false);
+            const retry=layer.failover?.enabled && layer.failover.retry_on && createStatusCodeMatcher(layer.failover.retry_on)(last.status);
+            if(!retry||!coordinator.hasNext())return last;
+            await last.body?.cancel();
+          }catch(error){
+            release();if(frame)await closeFrame(frame,false);
+            const admissionError=normalizeAdmissionError(error);
+            if(admissionError)throw admissionError;
+            if(signal.aborted||!layer.failover?.enabled||!(isUpstreamNetworkError(error)||isUpstreamTimeoutError(error)))throw error;
+            if(!coordinator.hasNext())throw error;
+          }
+        }
+        return last ?? Response.json({error:'upstream_unavailable'},{status:503});
+      };
+      const response=await dial(effective,handshake,[]);
+      if(response)return {response};
+      committed=true;return {};
     } catch (error) {
-      return reject(error instanceof DataAdmissionError ? error.status : 502,error instanceof DataAdmissionError ? error.code : 'websocket_handshake_failed');
+      const admissionError=normalizeAdmissionError(error);
+      return reject(admissionError?.status ?? 502,admissionError?.code ?? 'websocket_handshake_failed');
     } finally {
       // Successful upgrade transfers ownership to native close + observation cleanup.
       if (!committed) await finish();

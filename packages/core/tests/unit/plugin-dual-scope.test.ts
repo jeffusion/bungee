@@ -37,7 +37,7 @@ function runtime(input: AppConfig): AppConfig {return createRuntimeEligibleConfi
 describe('global-and-scoped runtime placement',()=>{
   test('automatic provider precedes consumers and each route/service/upstream application while remaining unique',async()=>{
     const {registry,events,handle}=setup();
-    const config=runtime({plugins:[{name:'consumer'}],services:[{name:'service',plugins:[{name:'adapter',options:{source:'s'}}],endpoints:[{target:'http://test',plugins:[{name:'adapter',options:{source:'u'}}]}]}],routes:[{path:'/bound',service:'service',plugins:[{name:'adapter',options:{source:'r'}}]},{path:'/unbound',endpoints:[{target:'http://test'}]}]});
+    const config=runtime({plugins:[{name:'consumer'}],services:[{id:'service', name:'service',plugins:[{name:'adapter',options:{source:'s'}}],endpoints:[{target:'http://test',plugins:[{name:'adapter',options:{source:'u'}}]}]}],routes:[{path:'/bound',service_references:[{id:'ref-'+('service'),service_id:'service',position:0,weight:100,priority:1,is_disabled:false}],plugins:[{name:'adapter',options:{source:'r'}}]},{path:'/unbound',endpoints:[{target:'http://test'}]}]});
     expect(await registry.initializeFromConfig(config,new PluginDependencyGraph(records))).toEqual({success:5,failed:0});
     expect(events).toEqual(['adapter:global:automatic-provider','consumer:global:configured','adapter:route:configured','adapter:service:configured','adapter:upstream:configured']);
     expect(registry.getGlobalInstances().filter(value=>value.handler.pluginName==='adapter')).toHaveLength(1);

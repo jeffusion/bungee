@@ -20,8 +20,8 @@ const sockets=new Set<WebSocket>();
 const SERVICE='10000000-0000-4000-8000-000000000021';
 const aggregate=(enabled=true)=>({plugin_activations:[{plugin_name:'token-metering'},{plugin_name:'token-stats'}],logical_configuration:{publication:{drain_start_timeout_ms:5000,drain_timeout_ms:10000,worker_exit_timeout_ms:10000},plugins:[],
   services:[{id:SERVICE,position:1,name:'ws-fixture',plugins:[],endpoints:[{id:'20000000-0000-4000-8000-000000000021',position:1,target:`http://127.0.0.1:${upstream.port}`,weight:100,priority:1,is_disabled:false,plugins:[]}]}],
-  routes:[{id:'30000000-0000-4000-8000-000000000021',position:1,path:'/v1/responses',service_id:SERVICE,plugins:[],websocket:{enabled}},
-    {id:'30000000-0000-4000-8000-000000000022',position:2,path:'/disabled',service_id:SERVICE,plugins:[]}],
+  routes:[{id:'30000000-0000-4000-8000-000000000021',position:1,path:'/v1/responses',service_references: [{ id: crypto.randomUUID(), position: 0, service_id: SERVICE, weight: 100, priority: 1, is_disabled: false }],plugins:[],websocket:{enabled}},
+    {id:'30000000-0000-4000-8000-000000000022',position:2,path:'/disabled',service_references: [{ id: crypto.randomUUID(), position: 0, service_id: SERVICE, weight: 100, priority: 1, is_disabled: false }],plugins:[]}],
 }});
 const management=()=>`http://127.0.0.1:${lease.base}`;
 const proxy=()=>`ws://127.0.0.1:${lease.block.ports[1]}`;

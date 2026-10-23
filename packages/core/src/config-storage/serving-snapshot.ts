@@ -120,7 +120,14 @@ export function getServingSnapshot(
     if (canonical !== row.aggregate_json) corrupt('configuration serving snapshot JSON is not canonical');
 
     const normalized = parseNormalizeCompileAggregate(parsed, undefined);
-    if (!normalized.ok) corrupt('configuration serving snapshot aggregate is invalid');
+    if (!normalized.ok) {
+      if (normalized.errors.some(error => error.code === 'unknown_field' &&
+          /^logical_configuration\.routes\[\d+\]\.(service_id|service)$/.test(error.path))) {
+        throw new ConfigRepositoryError('invalid_configuration',
+          'historical serving snapshot does not use the current configuration schema and cannot be loaded');
+      }
+      corrupt('configuration serving snapshot aggregate is invalid');
+    }
     if (canonicalJson(normalized.value) !== row.aggregate_json) {
       corrupt('configuration serving snapshot aggregate normalization drifted');
     }
@@ -137,4 +144,24 @@ export function getServingSnapshot(
     }
     return { revision: row.revision, content_hash: row.content_hash, aggregate: normalized.value };
   });
+}
+
+/** Audit immutable history as bytes and identities; historical formats are never runtime inputs. */
+export function auditServingSnapshotHistory(db: Database): void {
+  const rows = db.query<ServingSnapshotRow & {revision_hash:string|null},[]>(`SELECT s.revision,s.content_hash,s.plugin_catalog_hash,s.aggregate_json,
+    r.content_hash AS revision_hash FROM configuration_serving_snapshots s
+    LEFT JOIN configuration_revisions r ON r.revision=s.revision`).all();
+  for (const row of rows) {
+    if (row.revision_hash !== row.content_hash || !validateDigest(row.content_hash) || !validateDigest(row.plugin_catalog_hash)) {
+      corrupt('historical serving snapshot identity is invalid');
+    }
+    try {
+      const parsed: unknown = JSON.parse(row.aggregate_json);
+      if (new TextEncoder().encode(row.aggregate_json).byteLength > MAX_AGGREGATE_BYTES || canonicalJson(parsed) !== row.aggregate_json ||
+          hashConfigurationContent(parsed) !== row.content_hash) corrupt('historical serving snapshot content is invalid');
+    } catch (error) {
+      if (error instanceof ConfigRepositoryError) throw error;
+      corrupt('historical serving snapshot JSON is invalid');
+    }
+  }
 }

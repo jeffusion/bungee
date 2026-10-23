@@ -3,18 +3,18 @@
  * Tracks health status and failure times for failover functionality
  */
 
-import { forEach, map } from 'lodash-es';
+import { map } from 'lodash-es';
 import { logger } from '../../logger';
-import type { AppConfig, Endpoint, Service, LoadBalancingConfig } from '@jeffusion/bungee-types';
+import type { AppConfig, Endpoint, LoadBalancingConfig } from '@jeffusion/bungee-types';
 import type { EffectiveRouteConfig, RuntimeUpstream } from '../types';
 import { startHealthCheckScheduler, stopAllHealthCheckSchedulers } from '../health/scheduler';
-import { resolveEffectiveRouteEndpoints } from '../../utils/endpoint-resolver';
 
 /**
  * Global runtime state tracking upstream health per route
  * Map key: route path
  * Map value: upstreams with runtime status
  */
+export const roundRobinCursors = new Map<string,number>();
 export const runtimeState = new Map<string, { upstreams: RuntimeUpstream[]; load_balancing?: LoadBalancingConfig }>();
 
 export const MAX_RUNTIME_STATE_SNAPSHOT_RECORDS = 1024;
@@ -85,48 +85,27 @@ export function initializeRuntimeState(config: AppConfig): void {
   stopAllHealthCheckSchedulers();
 
   runtimeState.clear();
+  roundRobinCursors.clear();
 
-  const services = new Map<string, Service>();
-  forEach(config.services ?? [], (service) => {
-    services.set(service.name, service);
-  });
-
-  forEach(config.routes, (route) => {
-    const service = route.service ? services.get(route.service) : undefined;
-    const endpoints = resolveEffectiveRouteEndpoints(route, config.services);
-    const state_key = service?.name ?? route.path;
-    const failover = service?.failover;
-    const load_balancing = service?.load_balancing;
-
-    if ((!failover?.enabled && !load_balancing) || endpoints.length === 0) {
-      return;
+  for (const service of config.services ?? []) {
+    if (!service.id) throw new Error('service_id_required');
+    const stateKey = service.id;
+    const upstreams = createRuntimeUpstreams(service.endpoints);
+    runtimeState.set(stateKey, {upstreams, load_balancing: service.load_balancing});
+    if (service.health_check?.enabled) {
+      const healthRoute: EffectiveRouteConfig = {path: '/', endpoints: service.endpoints, failover: service.failover,
+        service_health_check: service.health_check, load_balancing: service.load_balancing, state_key: stateKey};
+      startHealthCheckScheduler(stateKey, healthRoute, upstreams);
     }
-
-    const existing_state = runtimeState.get(state_key);
-    const upstreams = existing_state?.upstreams ?? createRuntimeUpstreams(endpoints);
-
-    if (!existing_state) {
-      runtimeState.set(state_key, { upstreams, load_balancing });
-    } else if (load_balancing) {
-      existing_state.load_balancing = load_balancing;
-    }
-
-    const health_check = service?.health_check;
-    if (failover && health_check?.enabled) {
-      const health_check_route: EffectiveRouteConfig = {
-        ...route,
-        endpoints,
-        failover,
-      };
-
-      startHealthCheckScheduler(state_key, health_check_route, upstreams);
-    }
-  });
+  }
+  for (const route of config.routes) {
+    runtimeState.set(route.id ?? route.path, {upstreams:createRuntimeUpstreams(route.endpoints ?? []), load_balancing:route.load_balancing});
+  }
 
   logger.info('Runtime state initialized.');
 }
 
-function createRuntimeUpstreams(endpoints: Endpoint[]): RuntimeUpstream[] {
+export function createRuntimeUpstreams(endpoints: Endpoint[]): RuntimeUpstream[] {
   return map(endpoints, (endpoint, index) => ({
     ...endpoint,
     upstream_id: ('id' in endpoint && typeof endpoint.id === 'string' ? endpoint.id : String(index)),
@@ -238,6 +217,7 @@ export function releaseHalfOpenSlot(stateKey: string, upstreamId: string): void 
 export function cleanupRuntimeState(): void {
   stopAllHealthCheckSchedulers();
   runtimeState.clear();
+  roundRobinCursors.clear();
   upstreamActiveCounters.clear();
   halfOpenInFlight.clear();
   logger.info('Runtime state cleaned up.');

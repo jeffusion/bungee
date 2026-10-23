@@ -142,7 +142,7 @@ try {
       plugin_activations: ['models-dev', 'token-metering', 'token-stats', 'model-mapping'].map(plugin_name => ({ plugin_name })),
       logical_configuration: { plugins: [], services: [{ id: serviceId, position: 1, name: 'browser-technical-upstream', plugins: [],
         endpoints: [{ id: upstreamId, position: 1, target: `http://127.0.0.1:${upstream.port}`, weight: 100, priority: 1, is_disabled: false, plugins: [] }] }],
-        routes: [{ id: routeId, position: 1, path: '/v1/chat/completions', service_id: serviceId, plugins: [] }] },
+        routes: [{ id: routeId, position: 1, path: '/v1/chat/completions', service_references: [{ id: crypto.randomUUID(), position: 0, service_id: serviceId, weight: 100, priority: 1, is_disabled: false }], plugins: [] }] },
     },
   }) };
   const configured = await raw('/api/config', configInit);

@@ -189,14 +189,14 @@ describe('worker rate-limit provider', () => {
     const config: AppConfig = {
       config_version: 4,
       services: [{
-        name: 'failover',
+        id:'failover', name: 'failover',
         endpoints: [
           { target: `http://127.0.0.1:${failed.port}`, priority: 1 },
           { target: `http://127.0.0.1:${successful.port}`, priority: 2 },
         ],
         failover: { enabled: true, retry_on: [500] },
       }],
-      routes: [{ id: routeId, path: '/failover', service: 'failover', rate_limit: { enabled: true, requests_per_second: 10, burst: 10 } }],
+      routes: [{ id: routeId, path: '/failover', service_references:[{id:'ref-'+('failover'),service_id:'failover',position:0,weight:100,priority:1,is_disabled:false}], rate_limit: { enabled: true, requests_per_second: 10, burst: 10 } }],
     };
     let debits = 0;
     setWorkerRateLimitClient({

@@ -87,6 +87,12 @@ user-auth 的状态查询只取得 `get/list`，空命名空间返回未初始�
 
 配置库迁移 4（`management_protection`）添加强制认证 guard，记录 required、selected provider 与 generation；它不进入普通配置导入导出。插件状态库继续使用现有表，插件业务记录格式独立于数据库迁移编号。
 
+配置库迁移 5（`service_references`）将 Route 的单一 Service 关联转换为独立关系行，并移除 `routes.service_id` 列。关系表区分 Route 和 Service 所有者，目标使用稳定 Service ID；引用具有独立 ID、position、weight、priority 和 disabled 状态。Service 的 endpoints 与引用共用当前层的 position 分组；Route 的非空引用集合与直接 endpoints 互斥。
+
+已有库首次由配置 Worker 打开时自动升级，包括 Docker 和 CLI 升级后的首次启动。转换改变配置内容时，在结构迁移的同一事务内通过既有 CAS 提交机制创建新 revision 与匹配的 operation/request identity；旧 revision、hash 和 serving snapshot 保持不可变。新库及内容未改变的库不产生转换 revision，重复打开不再次产生 revision。启动审计校验历史快照的原始规范化字节、hash 和 revision 关系；历史格式只能审计，不能作为当前运行配置加载。
+
+存在未完成的发布、未释放的 retirement 或当前 revision 未成功的 recovery 时，升级拒绝继续，并报告类型、对象 ID 和状态。应使用升级前的可执行程序完成该操作后再升级；升级不会重置操作状态或删除历史数据。结构、数据转换、配置 revision 和迁移标记中的任何一步失败，整个事务回滚。
+
 `configuration_state.schema_version=4` 是内部状态记录格式，不是数据库迁移编号。配置 revision、监督 epoch 和插件记录版本分别标识不同对象。
 
 新实例初始化配置库及同目录的插件状态库，日志库随正常启动创建。启动只接受受支持的迁移前缀及结构，不会自动重置不匹配的数据库。初始化不创建核心账户；身份仍归选中的管理插件。
@@ -108,7 +114,7 @@ user-auth 的状态查询只取得 `get/list`，空命名空间返回未初始�
 布局随实例数据库备份保存，不进入代理配置导入和导出。图标只保存集合与名称标识；
 离线图标数据属于发布资源，不写入数据库。
 
-配置库保存当前规范化的 settings、services、routes、upstreams、插件 binding 和 activation，以及 revision、操作、发布、恢复和监督元数据。插件业务状态不能写进配置聚合；会话触碰也不能产生成套配置历史。
+配置库保存当前规范化的 settings、services、routes、upstreams、service references、插件 binding 和 activation，以及 revision、操作、发布、恢复和监督元数据。插件业务状态不能写进配置聚合；会话触碰也不能产生成套配置历史。
 
 完整配置先编译校验，再用 `expected_revision` 在短事务中比较并提交。提交失败不替换投影；提交成功才替换内存快照并启动发布。冲突需重新读取和编辑，不能盲目覆盖。数据库 revision 不等于已经服务的 revision。
 

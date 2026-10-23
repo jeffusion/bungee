@@ -1,3 +1,4 @@
+import { serviceReference } from '../../helpers/service-references';
 import { afterEach, expect, test } from 'bun:test';
 import type { ConfigurationAggregate, ConfigurationService } from '@jeffusion/bungee-types';
 import { parseNormalizeCompileAggregate } from '../../../../core/src/config-storage/aggregate';
@@ -34,7 +35,7 @@ test.each([false, true])('duplicating a service passes real configuration valida
     logical_configuration: {
       services: [service], routes: [{
         id: '50000000-0000-4000-8000-000000000001', position: 0,
-        path: '/alpha', service_id: service.id, plugins: [],
+        path: '/alpha', service_references: [serviceReference(service.id)], plugins: [],
       }], plugins: [],
     },
     plugin_activations: [],

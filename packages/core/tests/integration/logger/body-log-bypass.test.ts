@@ -438,8 +438,8 @@ test('locally generated upstream timeouts capture bodies before immutable file l
       const cfg = config(server.url.origin, { timeouts: { first_response_ms: 10, request_ms: 500 } });
       if (mode === 'blocked-backup') cfg.routes[0]!.endpoints!.push({ id: 'backup', target: 'http://127.0.0.1:1', priority: 1 });
       if (failover) {
-        cfg.services = [{ name: 'timeout-service', failover: { enabled: true }, endpoints: cfg.routes[0]!.endpoints! }];
-        cfg.routes[0]!.service = 'timeout-service'; delete cfg.routes[0]!.endpoints;
+        cfg.services = [{ id:'timeout-service', name: 'timeout-service', failover: { enabled: true }, endpoints: cfg.routes[0]!.endpoints! }];
+        cfg.routes[0]!.service_references = [{id:'timeout-reference',service_id:'timeout-service',position:0,weight:100,priority:1,is_disabled:false}]; delete cfg.routes[0]!.endpoints;
         initializeRuntimeState(cfg);
       }
       if (mode === 'blocked-backup') {

@@ -180,7 +180,7 @@
     const q = searchQuery.toLowerCase();
     const matchesSearch =
       route.path.toLowerCase().includes(q) ||
-      (route.service?.toLowerCase().includes(q) ?? false) ||
+      (getRouteTargetSummary(route, services).serviceName?.toLowerCase().includes(q) ?? false) ||
       endpoints.some((u) => u.target.toLowerCase().includes(q));
     const matchesTargetType = filterTargetType === 'all' || target.kind === filterTargetType;
     const matchesFeature = filterFeature === 'all' || badges.some((b) => b.section === filterFeature);
@@ -188,12 +188,7 @@
     return matchesSearch && matchesTargetType && matchesFeature && matchesHealth;
   }));
 
-  let uniqueServiceRefsCount = $derived(new Set(
-    routes
-      .map((r) => getRouteTargetSummary(r, services))
-      .filter((t) => t.kind === 'service' && t.serviceName)
-      .map((t) => t.serviceName)
-  ).size);
+  let uniqueServiceRefsCount = $derived(new Set(routes.flatMap(route => (route.service_references ?? []).map(reference => reference.service_id))).size);
 
   let healthyRoutesCount = $derived(routes.filter((r) => {
     const s = getRouteHealthAggregate(r, services, $runtimeUpstreams).state;
@@ -256,7 +251,7 @@
   };
   function healthLabel(s: HealthState): string {
     if (s === 'healthy') return $_('upstreamsModal.statusHealthy');
-    if (s === 'degraded') return $_('upstreamsModal.statusHalfOpen');
+    if (s === 'degraded') return $_('serviceReferences.degraded');
     if (s === 'mixed') return $_('runtime.mixed');
     if (s === 'unknown') return $_('upstreamsModal.statusUnknown');
     if (s === 'unhealthy') return $_('upstreamsModal.statusUnhealthy');
@@ -513,15 +508,10 @@
                   {#if target.kind === 'service'}
                     <div class="flex items-center gap-2">
                       <StatusDot status="ok" />
-                      <button
-                        class="font-mono text-[12px] text-zinc-200 hover:text-nexus-300 transition-colors"
-                        onclick={() => push(`/services/edit/${encodeURIComponent(target.serviceName ?? '')}`)}
-                      >
-                        {target.serviceName}
-                      </button>
-                      <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
-                        · {service?.endpoints?.length ?? '?'} EP
-                      </span>
+                      <div class="flex flex-wrap gap-2">
+                        {#each target.serviceNames ?? [] as name}<button class="font-mono text-[12px] text-zinc-200 hover:text-nexus-300" onclick={() => push(`/services/edit/${encodeURIComponent(name)}`)}>{name}</button>{/each}
+                      </div>
+                      <span class="font-mono text-[10px] text-zinc-500">· {target.endpointCount} EP</span>
                     </div>
                   {:else if target.kind === 'missing_service'}
                     <div class="flex items-center gap-2">

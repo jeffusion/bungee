@@ -4,7 +4,7 @@
  */
 
 import { sortBy } from 'lodash-es';
-import type { EffectiveRouteConfig, RuntimeUpstream } from '../types';
+import type { EffectiveRouteConfig, RuntimeUpstream, RuntimeCandidate } from '../types';
 import type { ExpressionContext } from '../../expression-engine';
 import { PriorityGroup } from './priority-group';
 import { filterByCondition } from './condition-filter';
@@ -37,8 +37,8 @@ import { filterByCondition } from './condition-filter';
  * }
  * ```
  */
-export class FailoverCoordinator {
-  private priorityGroups: Map<number, PriorityGroup>;
+export class FailoverCoordinator<T extends RuntimeCandidate = RuntimeUpstream> {
+  private priorityGroups: Map<number, PriorityGroup<T>>;
   private sortedPriorities: number[];
   private currentPriorityIndex: number;
   private attemptedTargets: Set<string>;
@@ -54,7 +54,7 @@ export class FailoverCoordinator {
    * @param context - Expression context for condition evaluation (optional)
    */
   constructor(
-    upstreams: RuntimeUpstream[],
+    upstreams: T[],
     route: EffectiveRouteConfig,
     recoveryIntervalMs: number,
     context?: ExpressionContext
@@ -116,7 +116,7 @@ export class FailoverCoordinator {
    * @returns Selected upstream with transition info, or null if none available
    */
   selectNext(): {
-    upstream: RuntimeUpstream;
+    upstream: T;
     shouldTransitionToHalfOpen: boolean;
   } | null {
     if (!this.hasNext()) {
@@ -185,12 +185,12 @@ export class FailoverCoordinator {
    * @returns Map of priority to PriorityGroup
    */
   private groupByPriority(
-    upstreams: RuntimeUpstream[],
+    upstreams: T[],
     route: EffectiveRouteConfig,
     recoveryIntervalMs: number,
     context?: ExpressionContext
-  ): Map<number, PriorityGroup> {
-    const groups = new Map<number, PriorityGroup>();
+  ): Map<number, PriorityGroup<T>> {
+    const groups = new Map<number, PriorityGroup<T>>();
 
     // Filter out disabled upstreams
     const enabledUpstreams = upstreams.filter(u => !u.is_disabled);
@@ -205,7 +205,7 @@ export class FailoverCoordinator {
       const priority = upstream.priority ?? 1;
 
       if (!groups.has(priority)) {
-        groups.set(priority, new PriorityGroup(priority, route, recoveryIntervalMs, context));
+        groups.set(priority, new PriorityGroup<T>(priority, route, recoveryIntervalMs, context));
       }
 
       groups.get(priority)!.addUpstream(upstream);

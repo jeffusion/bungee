@@ -37,5 +37,5 @@ export function resolveDispatchTarget(config:import('@jeffusion/bungee-types').A
   const service=config.services?.find(service=>service.id===target.id);
   if(!service)throw new DataAdmissionError(422,'dispatch_target_unavailable');
   context.url.pathname=joinPaths('/',suffix);
-  return {...entry,path_rewrite:undefined,service:service.name,service_id:service.id,endpoints:undefined} as RouteConfig;
+  return {...entry,path_rewrite:undefined,service_references:[{id:`dispatch:${service.id}`,position:0,service_id:service.id,weight:100,priority:1,is_disabled:false}],endpoints:undefined} as RouteConfig;
 }

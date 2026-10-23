@@ -172,12 +172,12 @@
     try {
       const endpointsForValidation = route.endpoints && route.endpoints.length > 0 ? route.endpoints : resolvedEndpoints;
       const routeErrors = await validateRoute(route, services);
-      const routeWeightErrors = validateWeights(endpointsForValidation);
+      const routeWeightErrors = route.service_references?.length ? [] : validateWeights(endpointsForValidation);
       errors = routeErrors;
       weightErrors = routeWeightErrors;
       allErrors = [...routeErrors, ...routeWeightErrors];
       const hasGlobalResponseBypass = route.direct_response?.enabled || route.redirect?.enabled;
-      isValid = allErrors.length === 0 && (hasGlobalResponseBypass || Boolean(route.service) || endpointsForValidation.length > 0);
+      isValid = allErrors.length === 0 && (hasGlobalResponseBypass || Boolean(route.service_references?.length) || endpointsForValidation.length > 0);
     } catch (error) {
       console.error('Validation failed:', error);
       isValid = false;
@@ -207,10 +207,10 @@
       const hasDirectResponse = route.direct_response?.enabled || route.redirect?.enabled;
       const sortedRoute = {
         ...route,
-        endpoints: !hasDirectResponse && !route.service && route.endpoints && route.endpoints.length > 0
+        endpoints: !hasDirectResponse && !route.service_references?.length && route.endpoints && route.endpoints.length > 0
           ? sortBy(route.endpoints, [(endpoint: any) => endpoint.priority ?? 1])
           : undefined,
-        service: hasDirectResponse ? undefined : route.service,
+        service_references: hasDirectResponse ? undefined : route.service_references,
       };
       if (!sortedRoute.endpoints) delete sortedRoute.endpoints;
 
@@ -284,6 +284,7 @@
     route = {
       ...route,
       ...template,
+      service_references: template.service_references,
       request: template.request || route.request,
       response: template.response || route.response,
       endpoints: template.endpoints?.map((u) => ({
@@ -392,8 +393,8 @@
       //                                  read as "Target #1"
       badge: (route.direct_response?.enabled || route.redirect?.enabled)
         ? '—'
-        : route.service
-          ? '1'
+        : route.service_references?.length
+          ? String(route.service_references.length)
           : route.endpoints?.length
             ? `EP·${route.endpoints.length}`
             : '',
@@ -507,7 +508,7 @@
         {:else if activeSection === 'target'}
           <PanelCard
             title={$_('routeEditor.builder.target')}
-            tag={route.service ? 'SVC' : `EP=${route.endpoints?.length ?? 0}`}
+            tag={route.service_references?.length ? `SVC=${route.service_references.length}` : `EP=${route.endpoints?.length ?? 0}`}
           >
             <div data-testid="route-target-section" data-testid-section="target" class="space-y-4">
               <UpstreamTargetSection
@@ -665,10 +666,12 @@
             </PanelCard>
 
             <PanelCard title={$_('routeEditor.builder.target')} tag="REVIEW">
-              {#if route.service}
+              {#if route.service_references?.length}
                 <div>
                   <span class="nx-label-sm block mb-1">{$_('routeEditor.review.referencedService')}</span>
-                  <span class="font-mono text-[12px] text-nexus-300">{route.service}</span>
+                  <div class="space-y-2">{#each route.service_references as reference}<div class="flex flex-wrap items-center justify-between gap-3 font-mono text-[12px] border border-carbon-600 px-3 py-2" class:opacity-50={reference.is_disabled}>
+                    <span class="text-nexus-300">{services.find(service => service._uid === reference.service_id)?.name ?? reference.service_id}</span><span class="text-zinc-400">p:{reference.priority} · w:{reference.weight} · {reference.is_disabled ? 'OFF' : 'ON'}</span>
+                  </div>{/each}</div>
                 </div>
               {:else if route.endpoints && route.endpoints.length > 0}
                 <div>

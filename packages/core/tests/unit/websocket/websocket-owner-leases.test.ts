@@ -8,8 +8,8 @@ test('handshake retains route, service and upstream instances while global is ov
   (globalThis as any)[key]=state;
   const path=new URL('../../fixtures/websocket-lease-plugin.ts',import.meta.url).pathname;
   const plugin=(tag:string)=>({name:'websocket-lease-fixture',path,options:{key,tag}});
-  const config:AppConfig={plugins:[plugin('global')],services:[{name:'svc',plugins:[plugin('service')],endpoints:[{id:'up',target:'http://localhost',plugins:[plugin('upstream')]}]}],
-    routes:[{path:'/lease-test',service:'svc',plugins:[plugin('route')],websocket:{enabled:true}}]};
+  const config:AppConfig={plugins:[plugin('global')],services:[{id:'svc', name:'svc',plugins:[plugin('service')],endpoints:[{id:'up',target:'http://localhost',plugins:[plugin('upstream')]}]}],
+    routes:[{path:'/lease-test',service_references:[{id:'ref-'+('svc'),service_id:'svc',position:0,weight:100,priority:1,is_disabled:false}],plugins:[plugin('route')],websocket:{enabled:true}}]};
   const registry=new ScopedPluginRegistry(import.meta.dir);
   const releases:Array<()=>void>=[];
   try{

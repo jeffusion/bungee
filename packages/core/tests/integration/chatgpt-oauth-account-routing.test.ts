@@ -49,7 +49,7 @@ describe('ChatGPT OAuth account routing', () => {
           routes: [{
             id: ids.route, position: 0, path: '/codex/',
             path_rewrite: { '^/codex': '' }, timeouts: { request_ms: 1000 },
-            ...(target === 'service' ? { service_id: ids.service } : { endpoints }),
+            ...(target === 'service' ? { service_references:[{id:'50000000-0000-4000-8000-000000000091',position:0,service_id:ids.service,weight:100,priority:1,is_disabled:false}] } : { endpoints }),
           }],
         },
         plugin_activations: [{ plugin_name: 'chatgpt-oauth' }],

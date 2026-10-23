@@ -1,3 +1,4 @@
+import { serviceReference } from '../service-references';
 import type { Page } from 'playwright';
 import { configurationRuntimeFixture, publicationFixture } from '../publication';
 import { menuSnapshot, fulfillMenuIcons } from '../menus';
@@ -29,7 +30,7 @@ const config = configurationRuntimeFixture(publicationFixture({ operation: null,
 const logical = config.config.logical_configuration as any;
 logical.services = ['openai-pool', 'anthropic-pool', 'gemini-pool', 'billing-api'].map((name, i) => ({ id: `service-${i}`, position: i, name,
   endpoints: Array.from({ length: i === 0 ? 3 : 2 }, (_, j) => ({ id: `ep-${i}-${j}`, position: j, target: `https://${name}.example.com`, weight: 1, priority: 0, is_disabled: false, plugins: [] })), plugins: [] }));
-logical.routes = ['/v1/chat/completions', '/v1/messages', '/v1beta/models', '/api/billing'].map((path, i) => ({ id: `route-${i}`, position: i, path, service_id: `service-${i}`, plugins: [] }));
+logical.routes = ['/v1/chat/completions', '/v1/messages', '/v1beta/models', '/api/billing'].map((path, i) => ({ id: `route-${i}`, position: i, path, service_references: [serviceReference(`service-${i}`)], plugins: [] }));
 const requests = [30,31,32,33,34,35,36,35,34,33,31,25];
 const failed = [0,0,0,1,1,0,0,1,1,1,0,1];
 const responseTimes = [85,88,84,90,94,87,83,79,84,82,85,90];

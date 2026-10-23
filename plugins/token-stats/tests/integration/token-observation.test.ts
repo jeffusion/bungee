@@ -166,10 +166,10 @@ export default class TokenStatsBinding {
   ];
   const rawConfig = {
     plugins: [binding()],
-    services: [{ name: 'token-stats-service', endpoints, plugins: options.multiScope ? [binding()] : [],
+    services: [{ id:'token-stats-service', name: 'token-stats-service', endpoints, plugins: options.multiScope ? [binding()] : [],
       failover: { enabled: options.failover, retry_on: [500] },
     }],
-    routes: [{ id: 'token-stats-route', path: '/token-stats', service: 'token-stats-service', plugins: options.multiScope ? [binding()] : [],
+    routes: [{ id: 'token-stats-route', path: '/token-stats', service_references:[{id:'ref-'+('token-stats-service'),service_id:'token-stats-service',position:0,weight:100,priority:1,is_disabled:false}], plugins: options.multiScope ? [binding()] : [],
       retry: options.retry ? { enabled: true, max_retries: 1, retry_on: [429] } : undefined,
     }],
   };

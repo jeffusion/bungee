@@ -1,7 +1,7 @@
 import { pluginConfigConstraintSatisfied } from '@jeffusion/bungee-types';
 import { validateGatewayTargets } from './gateway-target-validation';
 import type {
-  LogicalConfiguration, PluginBinding, ConfigurationRoute, ConfigurationService, UpstreamManagedBy, ConfigurationUpstream,
+  LogicalConfiguration, ServiceReference, PluginBinding, ConfigurationRoute, ConfigurationService, UpstreamManagedBy, ConfigurationUpstream,
 } from '@jeffusion/bungee-types';
 import {
   validateRouteDomain, validateServiceDomain, validateUpstreamDomain,
@@ -29,7 +29,7 @@ import {
 const GLOBAL_KEYS = ['log_level', 'body_parser_limit', 'auth', 'logging', 'publication'] as const;
 const SERVICE_KEYS = ['health_check', 'failover', 'load_balancing'] as const;
 const ROUTE_KEYS = ['request', 'response', 'path_rewrite', 'auth', 'timeouts', 'rate_limit', 'cors',
-  'response_rules', 'direct_response', 'redirect', 'retry', 'websocket'] as const;
+  'response_rules', 'direct_response', 'redirect', 'retry', 'websocket', 'load_balancing', 'failover'] as const;
 const UPSTREAM_KEYS = ['request', 'response', 'description', 'condition'] as const;
 const ENTITY_KEYS = ['id', 'position', 'plugins'] as const;
 
@@ -38,8 +38,8 @@ function allowed(...groups: readonly (readonly string[])[]): ReadonlySet<string>
 }
 const ROOT_FIELDS = allowed(GLOBAL_KEYS, ['services', 'routes', 'plugins']);
 const PLUGIN_FIELDS = allowed(ENTITY_KEYS, ['name', 'options', 'enabled', 'path']);
-const SERVICE_FIELDS = allowed(ENTITY_KEYS, SERVICE_KEYS, ['name', 'endpoints']);
-const ROUTE_FIELDS = allowed(ENTITY_KEYS, ROUTE_KEYS, ['path', 'service_id', 'service', 'endpoints']);
+const SERVICE_FIELDS = allowed(ENTITY_KEYS, SERVICE_KEYS, ['name', 'endpoints', 'service_references']);
+const ROUTE_FIELDS = allowed(ENTITY_KEYS, ROUTE_KEYS, ['path', 'service_references', 'endpoints']);
 const UPSTREAM_FIELDS = allowed(ENTITY_KEYS, UPSTREAM_KEYS, [
   'target', 'weight', 'priority', 'is_disabled', 'route_id', 'service_id',
   'managedBy',
@@ -145,10 +145,11 @@ function parseUpstreams(
   catalog: PluginSchemaCatalog | undefined,
   context: ValidationContext,
   present = false,
+  sharedPositions?: readonly number[],
 ): ConfigurationUpstream[] {
   const upstreams: ConfigurationUpstream[] = [];
   const candidates = context.array(value, path, present);
-  const positions = normalizePositions(candidates, path, context);
+  const positions = sharedPositions ?? normalizePositions(candidates, path, context);
   candidates.forEach((candidate, index) => {
     const itemPath = `${path}[${index}]`;
     const object = context.object(candidate, itemPath);
@@ -174,6 +175,33 @@ function parseUpstreams(
   });
   return upstreams.sort((left, right) => left.position - right.position);
 }
+const REFERENCE_FIELDS = new Set(['id', 'position', 'service_id', 'weight', 'priority', 'is_disabled']);
+
+function parseReferences(value: unknown, path: string, context: ValidationContext,
+  positions?: readonly number[], present = false): ServiceReference[] {
+  const candidates = context.array(value, path, present);
+  const normalized = positions ?? normalizePositions(candidates, path, context);
+  const targets = new Set<string>();
+  return candidates.flatMap((candidate, index) => {
+    const itemPath = `${path}[${index}]`;
+    const object = context.object(candidate, itemPath);
+    if (!object) return [];
+    rejectUnknownFields(object, REFERENCE_FIELDS, itemPath, context);
+    const serviceId = context.string(object, 'service_id', `${itemPath}.service_id`);
+    if (!isLowercaseUuid(serviceId)) context.add('invalid_uuid', `${itemPath}.service_id`, 'Expected a lowercase UUID');
+    if (targets.has(serviceId)) context.add('invalid_value', `${itemPath}.service_id`, 'Service reference must be unique within its owner');
+    targets.add(serviceId);
+    for (const key of ['weight', 'priority']) if (typeof object[key] === 'number' && object[key] <= 0) {
+      context.add('invalid_positive_number', `${itemPath}.${key}`, 'Expected a positive number');
+    }
+    return [{ id: context.id(object, `${itemPath}.id`),
+      position: context.position(object, normalized[index]!, `${itemPath}.position`),
+      service_id: serviceId, weight: numberDefault(object, 'weight', 100, itemPath, context),
+      priority: numberDefault(object, 'priority', 1, itemPath, context),
+      is_disabled: booleanDefault(object, 'is_disabled', false, itemPath, context) }];
+  }).sort((left, right) => left.position - right.position);
+}
+
 function parseServices(
   value: unknown,
   catalog: PluginSchemaCatalog | undefined,
@@ -192,7 +220,14 @@ function parseServices(
     const name = context.string(object, 'name', `${path}.name`);
     if (names.has(name)) context.add('duplicate_name', `${path}.name`, 'Service name must be unique');
     else names.add(name);
-    const endpointCount = Array.isArray(object.endpoints) ? object.endpoints.length : 0;
+    const endpointCandidates = Array.isArray(object.endpoints) ? object.endpoints : [];
+    const referenceCandidates = Array.isArray(object.service_references) ? object.service_references : [];
+    const sharedPositions = normalizePositions([...endpointCandidates, ...referenceCandidates], path, context,
+      index => index < endpointCandidates.length ? `${path}.endpoints[${index}]`
+        : `${path}.service_references[${index - endpointCandidates.length}]`);
+    const references = parseReferences(object.service_references, `${path}.service_references`, context,
+      sharedPositions.slice(endpointCandidates.length), 'service_references' in object);
+    const endpointCount = endpointCandidates.length + references.length;
     const policies = copyKnown(object, SERVICE_KEYS, path, context);
     validateServiceDomain(object, path, endpointCount, context);
     services.push({
@@ -200,7 +235,8 @@ function parseServices(
       id,
       position: context.position(object, positions[index]!, `${path}.position`),
       name,
-      endpoints: parseUpstreams(object.endpoints, `${path}.endpoints`, catalog, context, 'endpoints' in object),
+      endpoints: parseUpstreams(object.endpoints, `${path}.endpoints`, catalog, context, 'endpoints' in object, sharedPositions),
+      ...(references.length ? { service_references: references } : {}),
       plugins: parsePlugins(object.plugins, `${path}.plugins`, catalog, context, 'plugins' in object),
     });
   });
@@ -208,7 +244,6 @@ function parseServices(
 }
 function parseRoutes(
   value: unknown,
-  serviceIds: ReadonlySet<string>,
   catalog: PluginSchemaCatalog | undefined,
   context: ValidationContext,
 ): ConfigurationRoute[] {
@@ -225,13 +260,12 @@ function parseRoutes(
     const path = context.string(object, 'path', `${itemPath}.path`);
     if (paths.has(path)) context.add('duplicate_path', `${itemPath}.path`, 'Route path must be unique');
     else paths.add(path);
-    const serviceId = object.service_id;
-    const hasService = serviceId !== undefined;
+    const references = parseReferences(object.service_references, `${itemPath}.service_references`, context, undefined, 'service_references' in object);
+    const hasService = references.length > 0;
+    if ('service_references' in object && !hasService) context.add('invalid_value', `${itemPath}.service_references`, 'Service route requires at least one reference');
     const endpointCount = Array.isArray(object.endpoints) ? object.endpoints.length : 0;
     const policies = copyKnown(object, ROUTE_KEYS, itemPath, context);
     validateRouteDomain(object, itemPath, hasService, endpointCount, context);
-    validateServiceReference(serviceId, itemPath, serviceIds, context);
-    if ('service' in object) context.add('invalid_value', `${itemPath}.service`, 'Use service_id');
     if (hasService && object.endpoints !== undefined) {
       context.add('conflicting_owner', `${itemPath}.endpoints`, 'A service route cannot own upstreams');
     }
@@ -242,24 +276,12 @@ function parseRoutes(
       path,
       plugins: parsePlugins(object.plugins, `${itemPath}.plugins`, catalog, context, 'plugins' in object),
     };
-    if (hasService) routes.push({ ...base, service_id: typeof serviceId === 'string' ? serviceId : '' });
+    if (hasService) routes.push({ ...base, service_references: references as [ServiceReference, ...ServiceReference[]] });
     else routes.push({ ...base, endpoints: parseUpstreams(object.endpoints, `${itemPath}.endpoints`, catalog,
       context, 'endpoints' in object) });
   });
   return routes.sort((left, right) => left.position - right.position);
 }
-function validateServiceReference(
-  value: unknown,
-  path: string,
-  serviceIds: ReadonlySet<string>,
-  context: ValidationContext,
-): void {
-  if (value === undefined) return;
-  if (typeof value !== 'string') context.add('invalid_type', `${path}.service_id`, 'Expected a UUID string');
-  else if (!isLowercaseUuid(value)) context.add('invalid_uuid', `${path}.service_id`, 'Expected a lowercase UUID');
-  else if (!serviceIds.has(value)) context.add('unknown_service', `${path}.service_id`, 'Service does not exist');
-}
-
 export function parseNormalizeCompile(
   input: unknown,
   options?: ConfigurationCompileOptions,
@@ -282,11 +304,10 @@ export function parseNormalizeCompile(
     : new Map([...options.pluginSchemas].filter(([name]) => options.availablePlugins?.has(name)));
   const plugins = parsePlugins(root.plugins, 'plugins', catalog, context, 'plugins' in root);
   const services = parseServices(root.services, catalog, context);
-  const serviceIds = new Set(services.map(({ id }) => id));
   const value: LogicalConfiguration = {
     ...policies,
     services,
-    routes: parseRoutes(root.routes, serviceIds, catalog, context),
+    routes: parseRoutes(root.routes, catalog, context),
     plugins,
   };
   validateGatewayTargets(value, catalog, context);

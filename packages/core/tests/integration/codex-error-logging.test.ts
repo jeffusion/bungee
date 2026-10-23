@@ -26,9 +26,9 @@ test('OAuth HTTP and SSE diagnostics reach clients and durable logs with indepen
   const bodyStorage = new BodyStorageManager({ enabled: true, maxSize: 1024 * 1024 }, dataPlaneBodyLogDir);
   const config: AppConfig = {
     logging: { body: { enabled: true, max_size: 1024 * 1024, retention_days: 1 } },
-    services: [{ name: 'diagnostics', failover: { enabled: true, retry_on: [503] },
+    services: [{ id:'diagnostics', name: 'diagnostics', failover: { enabled: true, retry_on: [503] },
       endpoints: [{ id: 'primary', target: 'https://chatgpt.com' }] }],
-    routes: [{ path: routeId, service: 'diagnostics', path_rewrite: { '^/codex-diagnostics': '' } }],
+    routes: [{ path: routeId, service_references:[{id:'ref-'+('diagnostics'),service_id:'diagnostics',position:0,weight:100,priority:1,is_disabled:false}], path_rewrite: { '^/codex-diagnostics': '' } }],
   };
   let httpError = false;
   const upstream = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(req) {

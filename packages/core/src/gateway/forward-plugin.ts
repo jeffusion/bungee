@@ -52,6 +52,7 @@ export interface ProxyRequestResult {
   repairFallback?:boolean;
   attemptLogger?:RequestLogger;
   response: Response;
+  upstreamConnected?:boolean;
   completion: Promise<RawResponseCompletion>;
   protocolCompletion?: Promise<RawResponseCompletion>;
   observationCompletion?: Promise<void>;
@@ -76,6 +77,10 @@ export interface ProxyAttemptOptions {
   readonly beforeReuse?:(identity:import('./contracts').GatewayAuxiliaryIdentity,target:{url:string;model:string|null;body:unknown})=>Promise<boolean>;
   readonly beforeSend?: (target: { url: string; model: string | null; body: unknown }) => Promise<void>;
   readonly onRequestDispatch?: () => void;
+  readonly takePhysicalBudget?: () => void;
+  /** The request orchestrator owns Service/root failure and finally hooks. */
+  readonly managesRequestLifecycle?:boolean;
+  readonly onErrorNotified?:()=>void;
   readonly observeRequest?: (event: AttemptObservationEvent) => Promise<void>;
   readonly shouldObserveResponse?: (protocol: 'json'|'sse') => boolean;
   readonly observeResponse?: (event: AttemptObservationEvent) => Promise<void>;
@@ -88,6 +93,8 @@ export class AttemptCleanupError extends Error {
     this.name = 'AttemptCleanupError';
   }
 }
+
+export class UpstreamResponseValidationError extends Error {}
 
 export class UpstreamPhaseFailoverSignal extends Error {
   readonly reason?: string;
@@ -538,7 +545,7 @@ export async function executeForward(
   new URL(upstream.target); // Validate the configured target before rewriting the request.
   const routeRelativeUrl = new URL(phase1and2Context?.url.toString() ?? requestSnapshot.url);
 
-  if (route.path_rewrite && !requestOverride) {
+  if (route.path_rewrite && !requestOverride && !phase1and2Context) {
     const originalPathname = routeRelativeUrl.pathname;
     for (const [pattern, replacement] of Object.entries(route.path_rewrite)) {
       try {
@@ -570,7 +577,7 @@ export async function executeForward(
   const selectedDemandUrl = new URL(routeRelativeUrl);
   rebaseToUpstream({url:selectedDemandUrl} as MutableRequestContext,upstream);
   const selectedDemand = collectPluginBodyRequirements([phaseAwareHooks?.upstreamPhase], {
-    requestId,method:requestSnapshot.method,url:selectedDemandUrl,routeId,serviceId:route.service,upstreamId:upstream_id,stage:'selected',
+    requestId,method:requestSnapshot.method,url:selectedDemandUrl,routeId,serviceId:phase1and2Context?.serviceId,upstreamId:upstream_id,stage:'selected',
   });
   const requestRules = deepMergeRules(route.request ?? {}, upstream.request ?? {});
   const requestBodyMatches = !['GET','HEAD'].includes(requestSnapshot.method)
@@ -606,7 +613,7 @@ export async function executeForward(
       clientIP,
       requestId,
       routeId,
-      serviceName: route.service,
+      serviceName: undefined,
     };
   if (requestOverride) attemptContext.annotations = requestOverride.annotations !== undefined ? structuredClone(requestOverride.annotations) : undefined;
   if (attemptContext.body === undefined && requestSnapshot.is_json_body) attemptContext.body = structuredClone(requestSnapshot.body);
@@ -801,7 +808,7 @@ export async function executeForward(
     clientIP, requestId, routeId, upstreamId:upstream_id, url:targetUrlForRequest.href,
     model:isObjectBody(finalBody) && typeof finalBody.model==='string' ? finalBody.model : null,
     body:immutableSnapshot(finalBody), annotations:immutableSnapshot(attemptContext.annotations), attemptId:attemptOptions?.attemptId??requestId, signal:requestSignal});
-  for(const phase of [phaseAwareHooks?.routePhase,phaseAwareHooks?.servicePhase,phaseAwareHooks?.upstreamPhase,phaseAwareHooks?.dispatchAdapter]) {
+  for(const phase of [phaseAwareHooks?.routePhase,...(phaseAwareHooks?.servicePhases ?? [phaseAwareHooks?.servicePhase]),phaseAwareHooks?.upstreamPhase,phaseAwareHooks?.dispatchAdapter]) {
     await phase?.hooks.onValidateOutbound.promise(validation);
   }
 
@@ -908,6 +915,7 @@ export async function executeForward(
     if (abortSource) return;
     const elapsedTimeout = elapsedDeadlineReason();
     if (elapsedTimeout) abortWithReason(elapsedTimeout);
+    else if(requestSignal?.reason instanceof DOMException && requestSignal.reason.name==='TimeoutError')abortWithReason('request_timeout');
     else abortSource = 'client_cancelled';
   };
   let cleanupPromise: Promise<void> | null = null;
@@ -1140,6 +1148,7 @@ export async function executeForward(
         void transportCompletion.promise.then(() => observer.finish());
       }
       throwIfAttemptCannotDispatch();
+      attemptOptions?.takePhysicalBudget?.();
       attemptOptions?.onRequestDispatch?.();
       if (attemptOptions?.nativeWebSocket) {
         if (!attemptOptions.websocketBridge || !isObjectBody(finalBody)) throw new DataAdmissionError(422,'websocket_generation_body_required');
@@ -1310,14 +1319,14 @@ export async function executeForward(
       }
     }
 
-    const responseDemand = collectPluginBodyRequirements([phaseAwareHooks?.upstreamPhase,phaseAwareHooks?.servicePhase,phaseAwareHooks?.routePhase,phaseAwareHooks?.dispatchAdapter], {
-      requestId,method:requestSnapshot.method,url:finalTargetUrl,routeId,serviceId:route.service,upstreamId:upstream_id,stage:'selected',
+    const responseDemand = collectPluginBodyRequirements([phaseAwareHooks?.upstreamPhase,...(phaseAwareHooks?.servicePhases ?? [phaseAwareHooks?.servicePhase]),phaseAwareHooks?.routePhase,phaseAwareHooks?.dispatchAdapter], {
+      requestId,method:requestSnapshot.method,url:finalTargetUrl,routeId,serviceId:phase1and2Context?.serviceId,upstreamId:upstream_id,stage:'selected',
     });
     // Strict raw response hooks run before all legacy response processing.
     rawResponse = { response: proxyRes, completion: transportCompletion.promise };
     const hasRawResponseCallbacks = Boolean(phaseAwareHooks && (
       phaseAwareHooks.upstreamPhase.hasRawResponseCallbacks
-      || phaseAwareHooks.servicePhase?.hasRawResponseCallbacks
+      || (phaseAwareHooks.servicePhases ?? [phaseAwareHooks.servicePhase]).some(phase => phase?.hasRawResponseCallbacks)
       || phaseAwareHooks.routePhase.hasRawResponseCallbacks
       || phaseAwareHooks.globalPrecompiled?.hasRawResponseCallbacks
       || phaseAwareHooks.dispatchAdapter?.hasRawResponseCallbacks
@@ -1346,7 +1355,8 @@ export async function executeForward(
         lateResult=>{if(lateResult.response.body)void lateResult.response.body.cancel('request aborted').catch(()=>undefined);});
       if (!(rawResponse.response instanceof Response) || typeof rawResponse.completion?.then !== 'function')
         throw new Error('strict raw response hook returned an invalid result');
-      proxyRes=rawViews.materialize(rawViews.accept(rawResponse.response));
+      try{proxyRes=rawViews.materialize(rawViews.accept(rawResponse.response));}
+      catch(error){if(error instanceof TypeError)throw new UpstreamResponseValidationError('upstream_response_body_unavailable');throw error;}
       rawRepresentationChanged=rawViews.changed;
       finalResponseVersion=rawViews.versionNumber();
       rawResponse={...rawResponse,response:proxyRes};
@@ -1452,7 +1462,7 @@ export async function executeForward(
       && (rawRepresentationChanged || rawResponse.completion !== transportCompletion.promise || rawResponse.response.status !== originalStatus)
       && (rawResponse.response.status < 200 || rawResponse.response.status >= 300)
       && isStreamingResponse(proxyRes)) {
-      throw new Error('streaming raw HTTP error replacement requires strict failure');
+      throw new UpstreamResponseValidationError('streaming raw HTTP error replacement requires strict failure');
     }
 
     // A finite raw error replacement must prove its origin before any headers
@@ -1474,7 +1484,7 @@ export async function executeForward(
           completionStatus:outcome.status,completionCode:'code' in outcome?outcome.code:undefined,hasError:'error' in outcome&&outcome.error!==undefined,
           originalBodyUsed:originalResponse.bodyUsed,originalConsumed,representationChanged:rawRepresentationChanged,
           sameResponse:rawResponse.response===originalResponse,contentType:rawResponse.response.headers.get('content-type')},'Raw response error proof rejected');
-        throw new Error('raw response error replacement failed validation');
+        throw new UpstreamResponseValidationError('raw response error replacement failed validation');
       }
     }
 
@@ -1495,7 +1505,7 @@ export async function executeForward(
         Boolean(phaseAwareHooks && (selectedDemand.response?.includes('sse-json') || phase1and2Context?.bodyRequirements?.response?.includes('sse-json')) && (
           phaseAwareHooks.globalPrecompiled?.hasStreamCallbacks ||
           phaseAwareHooks.upstreamPhase.hasStreamCallbacks ||
-          phaseAwareHooks.servicePhase?.hasStreamCallbacks ||
+          (phaseAwareHooks.servicePhases ?? [phaseAwareHooks.servicePhase]).some(phase => phase?.hasStreamCallbacks) ||
           phaseAwareHooks.routePhase.hasStreamCallbacks || phaseAwareHooks.dispatchAdapter?.hasStreamCallbacks
         )),
         hasRawResponseCallbacks,
@@ -1530,11 +1540,12 @@ export async function executeForward(
         proxyRes,
         outcome,originalConsumed,rawRepresentationChanged,
       ) && !isSafeAdaptedErrorResponse(originalResponse, rawResponse, proxyRes, outcome,originalConsumed,rawRepresentationChanged)) {
-        throw new Error(`raw response completed with ${outcome.status}:${'code' in outcome ? outcome.code : ''}`);
+        throw new UpstreamResponseValidationError(`raw response completed with ${outcome.status}:${'code' in outcome ? outcome.code : ''}`);
       }
     }
     const result: ProxyRequestResult = {
       repairRetry,
+      upstreamConnected:attemptOptions?.nativeWebSocket === true && upstreamResponse?.ok === true,
       response: new Response(responseBody, {
         status: proxyRes.status,
         statusText: proxyRes.statusText,
@@ -1571,6 +1582,7 @@ export async function executeForward(
     }
     return result;
   } catch (error) {
+    if(attemptOptions?.nativeWebSocket && upstreamResponse?.ok && error instanceof UpstreamResponseValidationError)error=new DataAdmissionError(502,'upstream_websocket_response_failed');
     const timeoutReason = abortSource === 'first_response_timeout' || abortSource === 'request_timeout'
       ? abortSource
       : null;
@@ -1578,7 +1590,7 @@ export async function executeForward(
     const clientCancelled = abortSource === 'client_cancelled';
     const safeError = deadlineError
       ?? (clientCancelled ? new Error('Request cancelled')
-        : error instanceof UpstreamNetworkError || error instanceof DataAdmissionError || error instanceof BodyProcessingError ? error : sanitizeError(error, credentialSecrets));
+        : error instanceof UpstreamResponseValidationError || error instanceof UpstreamNetworkError || error instanceof DataAdmissionError || error instanceof BodyProcessingError ? error : sanitizeError(error, credentialSecrets));
     const completionFailure = deadlineError
       ? { status: 'failed' as const, code: timeoutReason! }
       : clientCancelled
@@ -1602,6 +1614,7 @@ export async function executeForward(
       throw safeError;
     }
 
+    attemptOptions?.onErrorNotified?.();
     // ===== 11. Plugin onError (inbound chain) =====
     let errorDuration = 0;
     let hookError: Error | undefined;
@@ -1622,7 +1635,7 @@ export async function executeForward(
       const errorStartTime = performance.now();
       try {
         await bounded(
-          Promise.resolve().then(() => phaseAwareHooks.inbound.onError(ctx)),
+          Promise.resolve().then(() => attemptOptions?.managesRequestLifecycle ? phaseAwareHooks.upstreamPhase.hooks.onError.promise(ctx) : phaseAwareHooks.inbound.onError(ctx)),
           100,
           'plugin onError timed out',
         );

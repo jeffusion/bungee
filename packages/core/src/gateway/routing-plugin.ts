@@ -1,19 +1,8 @@
 import type { AppConfig, RouteConfig, CorsConfig, ResponseRuleConfig } from '@jeffusion/bungee-types';
 import type { EffectiveRouteConfig } from '../worker/types';
-import { resolveEffectiveRouteEndpoints, resolveRouteService } from '../utils/endpoint-resolver';
 import type { Plugin, PluginHooks, GatewayRouteInput, GatewayRouteDecision } from '@jeffusion/bungee-core/plugin';
 export function resolveEffectiveRoute(config: AppConfig, route: RouteConfig): EffectiveRouteConfig {
-  const service = resolveRouteService(config, route);
-  const endpoints = resolveEffectiveRouteEndpoints(route, config.services);
-
-  return {
-    ...route,
-    endpoints,
-    failover: service?.failover,
-    load_balancing: service?.load_balancing,
-    service_health_check: service?.health_check,
-    state_key: service?.name ?? route.path,
-  };
+  return {...route, endpoints: route.endpoints ?? [], state_key: route.id ?? route.path};
 }
 
 function stripRouteWildcard(routePath: string): string {

@@ -1,10 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import {
-  ConfigurationHashError,
-  type ConfigurationCompileOptions,
-  canonicalJson,
-  parseNormalizeCompile,
-} from '../../../src/config-storage';
+import { ConfigurationHashError, canonicalJson } from '../../../src/config-storage/content-hash';
+import { type ConfigurationCompileOptions } from '../../../src/config-storage/plugin-schema';
+import { parseNormalizeCompile } from '../../../src/config-storage/compiler';
 
 const catalog: ConfigurationCompileOptions = {
   pluginSchemas: new Map([['json-data', [

@@ -95,10 +95,10 @@ describe('plugin binding activation aggregation', () => {
     const servicePlugin = 'reachable-service-plugin';
     const endpointPlugin = 'reachable-endpoint-plugin';
     const runtimeConfig: AppConfig = {
-      routes: [{ path: '/reachable', service: 'reachable' }],
+      routes: [{ path: '/reachable', service_references:[{id:'ref-'+('reachable'),service_id:'reachable',position:0,weight:100,priority:1,is_disabled:false}] }],
       services: [
         {
-          name: 'reachable',
+          id:'reachable', name: 'reachable',
           plugins: [{ name: servicePlugin, path: writePlugin(root, servicePlugin), enabled: true }],
           endpoints: [{
             target: 'http://reachable.test',
@@ -106,7 +106,7 @@ describe('plugin binding activation aggregation', () => {
           }],
         },
         {
-          name: 'orphan',
+          id:'orphan', name: 'orphan',
           plugins: [{ name: 'orphan-missing-plugin', enabled: true }],
           endpoints: [{ target: 'http://orphan.test' }],
         },

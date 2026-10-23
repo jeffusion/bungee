@@ -77,6 +77,8 @@
   let routeChoice = $state('new'), routesLoading = $state(false), routeError = $state('');
   let routeGeneration = 0;
   let selectedRoute = $derived(routes.find(route => route.path === routeChoice));
+  let referencedRouteServices = $derived((selectedRoute?.service_references ?? []).map(reference => ({id:reference.service_id,
+    service:services.find(service => service._uid === reference.service_id)})));
   let routeSelection = $derived($isLoading ? undefined : { value: routeChoice, label: routeChoice === 'new' ? t('ui.newRoute') : selectedRoute?.path ?? routeChoice });
   let resetOpen = $state(false), resetAccount = $state<Account | null>(null), resetCredit = $state<Credit | null>(null);
   let resetRequestId = $state(''), resetBusy = $state(false), resetNotice = $state('');
@@ -395,7 +397,7 @@
   async function loadRoutes() {
     const generation = ++routeGeneration;
     routesLoading = true; routeError = '';
-    try { const loaded = await RoutesAPI.list(); if (generation === routeGeneration) routes = loaded; }
+    try { const [loaded,loadedServices] = await Promise.all([RoutesAPI.list(),ServicesAPI.list()]); if (generation === routeGeneration) { routes = loaded; services = loadedServices; } }
     catch { if (generation === routeGeneration) routeError = 'ui.routesFailed'; }
     finally { if (generation === routeGeneration) routesLoading = false; }
   }
@@ -405,7 +407,7 @@
     routeAccount = account; routeChoice = 'new'; routes = []; routeOpen = true; void loadRoutes();
   }
   async function continueToRoute() {
-    if (!routeAccount?.available || routesLoading || routeError || selectedRoute?.service) return;
+    if (!routeAccount?.available || routesLoading || routeError || selectedRoute?.service_references?.length) return;
     if (routeChoice !== 'new' && !selectedRoute?._uid) { routeError = 'ui.routeMissing'; return; }
     const handoff = { sourcePlugin: pluginName, sourceId: accountSourceId(routeAccount), accountRef: routeAccount.id,
       mode: selectedRoute ? 'existing' as const : 'new' as const,
@@ -415,12 +417,12 @@
     if (lifetime.signal.aborted) return;
     void push(routeSourceHandoffUrl(handoff, selectedRoute?.path));
   }
-  async function editReferencedService() {
-    const service = selectedRoute?.service;
+  async function editReferencedService(serviceId:string) {
+    const service = services.find(service => service._uid === serviceId);
     if (!service) return;
     routeOpen = false;
     await tick();
-    if (!lifetime.signal.aborted) void push(`/services/edit/${encodeURIComponent(service)}`);
+    if (!lifetime.signal.aborted) void push(`/services/edit/${encodeURIComponent(service.name)}`);
   }
   function invalidatePolling() { pollGeneration += 1; clearTimeout(timer); timer = undefined; }
   function clearSession() { invalidatePolling(); clearSecrets(); session = null; status = ''; }
@@ -602,16 +604,18 @@
       </Select.Root>
     </div>
     {#if routesLoading}<p role="status" class="text-sm text-zinc-400">{t('ui.routesLoading')}</p>{/if}
-    {#if selectedRoute?.service}
+    {#if referencedRouteServices.length}
       <div role="alert" class="border-l-2 border-amber-500 bg-amber-500/5 px-3 py-2 text-sm text-amber-300 space-y-2">
-        <p>{t('ui.routeUsesService', { name: selectedRoute.service })}</p>
-        <Button variant="outline" size="sm" onclick={editReferencedService}>{@render actionIcon(Server)}{t('ui.editReferencedService')}</Button>
+        <p>{t('ui.routeUsesService', { name: referencedRouteServices.map(reference => reference.service?.name ?? reference.id).join(', ') })}</p>
+        {#each referencedRouteServices as reference (reference.id)}
+          <Button variant="outline" size="sm" disabled={!reference.service} onclick={() => editReferencedService(reference.id)}>{@render actionIcon(Server)}{t('ui.editReferencedService')} · {reference.service?.name ?? reference.id}</Button>
+        {/each}
       </div>
     {:else}<p class="text-sm text-zinc-400">{t('ui.routeHelp')}</p>{/if}
     {#if routeError}<p role="alert" class="text-sm text-red-300">{t(routeError)}</p><Button variant="outline" disabled={routesLoading} aria-busy={routesLoading} onclick={loadRoutes}>{@render actionIcon(RefreshCw, routesLoading)}{t('ui.reloadRoutes')}</Button>{/if}
   {/snippet}
   {#snippet footer()}
-    <Button disabled={routesLoading || !!routeError || !!selectedRoute?.service} aria-busy={routesLoading} onclick={continueToRoute}>{@render actionIcon(ArrowRight, routesLoading)}{t('ui.continueRoute')}</Button>
+    <Button disabled={routesLoading || !!routeError || !!selectedRoute?.service_references?.length} aria-busy={routesLoading} onclick={continueToRoute}>{@render actionIcon(ArrowRight, routesLoading)}{t('ui.continueRoute')}</Button>
   {/snippet}
 </IndustrialDialog>
 

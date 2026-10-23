@@ -158,10 +158,10 @@ async function setup(options: { twoUpstreams?: boolean; retry?: boolean; interce
   const config = {
     body_parser_limit:'1mb',
     plugins: options.multiScope ? [binding('global')] : [],
-    services: [{ name: 'svc', endpoints, plugins: options.multiScope ? [binding('service')] : [],
+    services: [{ id:'svc', name: 'svc', endpoints, plugins: options.multiScope ? [binding('service')] : [],
       failover: { enabled: options.twoUpstreams, retry_on: [500] },
     }],
-      routes: [{ id: 'route-id', path: '/attempt', service: 'svc', plugins: options.noObserver ? [] : [binding('route')],
+      routes: [{ id: 'route-id', path: '/attempt', service_references:[{id:'ref-'+('svc'),service_id:'svc',position:0,weight:100,priority:1,is_disabled:false}], plugins: options.noObserver ? [] : [binding('route')],
       timeouts: options.firstResponseTimeoutMs === undefined ? undefined : { request_ms: 1000, first_response_ms: options.firstResponseTimeoutMs },
       retry: options.retry ? { enabled: true, max_retries: 1, retry_on: [503] } : undefined,
     }],

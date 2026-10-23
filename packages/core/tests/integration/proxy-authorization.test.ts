@@ -8,7 +8,7 @@ const { generateWorkerTransportSecret, restoreWorkerTransportRequest } = await i
 import type { DataPrincipal } from '../../src/plugin-extensions';
 const { ANONYMOUS_PRINCIPAL } = await import('../../src/plugin-extensions');
 const { privateRequestHeaders } = await import('../../src/public-listener/headers');
-const { resolveEffectiveRouteEndpoints } = await import('../../src/utils/endpoint-resolver');
+const { serviceLayer } = await import('../../src/worker/upstream/service-execution');
 const { proxyRequest } = await import('../../src/worker/request/proxy');
 import type { EffectiveRouteConfig, RuntimeUpstream } from '../../src/worker/types';
 
@@ -34,10 +34,10 @@ for (const principal of principals) {
         ? { replace: { aUtHoRiZaTiOn: 'Bearer UPSTREAM_SECRET' } }
         : { add: { aUtHoRiZaTiOn: source === 'expression' ? '{{headers.authorization}}' : 'Bearer UPSTREAM_SECRET' } };
     const config: AppConfig = {
-      services: [{ name: 'provider', endpoints: [{ id: 'endpoint-1', target: 'https://upstream.test', ...(source === 'service' ? { request: { headers: rules } } : {}) }] }],
-      routes: [{ path: '/v1', service: 'provider', ...(source !== 'none' && source !== 'service' ? { request: { headers: rules } } : {}) }],
+      services: [{ id:'provider', name: 'provider', endpoints: [{ id: 'endpoint-1', target: 'https://upstream.test', ...(source === 'service' ? { request: { headers: rules } } : {}) }] }],
+      routes: [{ path: '/v1', service_references:[{id:'ref-'+('provider'),service_id:'provider',position:0,weight:100,priority:1,is_disabled:false}], ...(source !== 'none' && source !== 'service' ? { request: { headers: rules } } : {}) }],
     };
-    const route: EffectiveRouteConfig = { ...config.routes[0], endpoints: resolveEffectiveRouteEndpoints(config.routes[0], config.services) };
+    const route=serviceLayer({...config.routes[0],endpoints:[]},config.services![0]!);
     const upstream: RuntimeUpstream = {
       ...route.endpoints[0], upstream_id: 'endpoint-1', status: 'HEALTHY',
       consecutive_failures: 0, consecutive_successes: 0, recovery_attempt_count: 0,

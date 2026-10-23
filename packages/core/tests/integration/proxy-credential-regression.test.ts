@@ -63,6 +63,7 @@ function phaseHooks(options: {
   stream?: (chunk: any) => any[] | Promise<any[]>;
 } = {}): PhaseAwareHooks {
   const upstream = emptyPrecompiled();
+  if(options.onError)upstream.hooks.onError.tapPromise('regression-error',options.onError);
   if (options.raw) {
     upstream.hooks.onRawResponse.tapPromise({ name: 'regression-raw' }, options.raw);
   }
@@ -438,8 +439,8 @@ describe('proxy credential regressions', () => {
       target: 'https://api.example.test',
     };
     const handlerConfig = {
-      services: [{ name: 'managed-service', endpoints: [managedEndpoint] }],
-      routes: [{ path: '/v1/chat', service: 'managed-service', timeouts: { request_ms: 100, first_response_ms: 10 } }],
+      services: [{ id:'managed-service', name: 'managed-service', endpoints: [managedEndpoint] }],
+      routes: [{ path: '/v1/chat', service_references:[{id:'ref-'+('managed-service'),service_id:'managed-service',position:0,weight:100,priority:1,is_disabled:false}], timeouts: { request_ms: 100, first_response_ms: 10 } }],
     } as unknown as AppConfig;
     initializeRuntimeState(handlerConfig);
     setBoundControlClientProvider(() => ({
@@ -1030,6 +1031,9 @@ describe('proxy credential regressions', () => {
     const read = async (result: Awaited<ReturnType<typeof run>>) => {
       const body = await result.response.text();
       await result.cleanup?.();
+      // This direct forward fixture owns the Endpoint frame outside the request orchestrator.
+      await hooks.upstreamPhase.hooks.onFinally.promise({requestId:stableRequestId,method:'POST',
+        originalUrl:new URL('http://proxy.test/'),clientIP:'unknown',success:result.response.ok,latencyMs:0});
       return body;
     };
     const modelsHeaders = {

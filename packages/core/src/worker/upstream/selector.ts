@@ -7,13 +7,13 @@
 
 import { forEach, sortBy } from 'lodash-es';
 import crypto from 'crypto';
-import type { EffectiveRouteConfig, RuntimeUpstream, UpstreamSelector } from '../types';
+import type { EffectiveRouteConfig, RuntimeCandidate, UpstreamSelector } from '../types';
 import type { LoadBalancingConfig } from '@jeffusion/bungee-types';
 import type { ExpressionContext } from '../../expression-engine';
 import { processDynamicValue } from '../../expression-engine';
 import { getEffectiveWeight } from '../utils/slow-start';
 import { filterByCondition } from './condition-filter';
-import { runtimeState, getActiveRequestCount, tryAcquireHalfOpenSlot } from '../state/runtime-state';
+import { runtimeState, roundRobinCursors, getActiveRequestCount, tryAcquireHalfOpenSlot } from '../state/runtime-state';
 
 function getTrimmedString(value: unknown): string | undefined {
   if (typeof value === 'string') {
@@ -53,25 +53,25 @@ function hashToUnitInterval(input: string): number {
   return (uint32 + 1) / (0x100000000 + 1);
 }
 
-function effectiveWeight(upstream: RuntimeUpstream, route?: EffectiveRouteConfig): number {
+function effectiveWeight(upstream: RuntimeCandidate, route?: EffectiveRouteConfig): number {
   const base = route ? getEffectiveWeight(upstream, route) : (upstream.weight ?? 100);
   if (base <= 0) return 0;
   if (upstream.status === 'HALF_OPEN') return Math.max(1, Math.floor(base / 10));
   return base;
 }
 
-function healthFilter(upstreams: RuntimeUpstream[]): RuntimeUpstream[] {
+function healthFilter<T extends RuntimeCandidate>(upstreams: T[]): T[] {
   return upstreams.filter(u => u.status !== 'UNHEALTHY');
 }
 
-function halfOpenGate(stateKey: string, upstreams: RuntimeUpstream[]): RuntimeUpstream[] {
+function halfOpenGate<T extends RuntimeCandidate>(stateKey: string, upstreams: T[]): T[] {
   return upstreams.filter(u => {
     if (u.status !== 'HALF_OPEN') return true;
     return tryAcquireHalfOpenSlot(stateKey, u.upstream_id);
   });
 }
 
-function selectWeightedRandom(upstreams: RuntimeUpstream[], route?: EffectiveRouteConfig): RuntimeUpstream | undefined {
+function selectWeightedRandom<T extends RuntimeCandidate>(upstreams: T[], route?: EffectiveRouteConfig): T | undefined {
   const totalWeight = upstreams.reduce((sum, u) => sum + effectiveWeight(u, route), 0);
   if (totalWeight === 0) return undefined;
   let random = Math.random() * totalWeight;
@@ -82,21 +82,21 @@ function selectWeightedRandom(upstreams: RuntimeUpstream[], route?: EffectiveRou
   return upstreams[upstreams.length - 1];
 }
 
-const rrCursors = new Map<string, number>();
 
-function selectRoundRobin(stateKey: string, upstreams: RuntimeUpstream[], _route?: EffectiveRouteConfig): RuntimeUpstream | undefined {
+
+function selectRoundRobin<T extends RuntimeCandidate>(stateKey: string, upstreams: T[], _route?: EffectiveRouteConfig): T | undefined {
   const healthy = healthFilter(upstreams);
   if (healthy.length === 0) return undefined;
-  const cursor = rrCursors.get(stateKey) ?? 0;
+  const cursor = roundRobinCursors.get(stateKey) ?? 0;
   const idx = cursor % healthy.length;
-  rrCursors.set(stateKey, cursor + 1);
+  roundRobinCursors.set(stateKey, cursor + 1);
   return healthy[idx];
 }
 
-function selectLeastRequests(stateKey: string, upstreams: RuntimeUpstream[], route?: EffectiveRouteConfig): RuntimeUpstream | undefined {
+function selectLeastRequests<T extends RuntimeCandidate>(stateKey: string, upstreams: T[], route?: EffectiveRouteConfig): T | undefined {
   const healthy = healthFilter(upstreams);
   if (healthy.length === 0) return undefined;
-  let best: RuntimeUpstream | undefined;
+  let best: T | undefined;
   let bestScore = Number.POSITIVE_INFINITY;
   for (const u of healthy) {
     const active = getActiveRequestCount(stateKey, u.upstream_id);
@@ -111,12 +111,12 @@ function selectLeastRequests(stateKey: string, upstreams: RuntimeUpstream[], rou
   return best ?? healthy[0];
 }
 
-function selectConsistentHash(
-  upstreams: RuntimeUpstream[],
+function selectConsistentHash<T extends RuntimeCandidate>(
+  upstreams: T[],
   hashKey: string,
   route?: EffectiveRouteConfig
-): RuntimeUpstream | undefined {
-  let selected: RuntimeUpstream | undefined;
+): T | undefined {
+  let selected: T | undefined;
   let selectedScore = Number.POSITIVE_INFINITY;
   for (const upstream of upstreams) {
     const weight = effectiveWeight(upstream, route);
@@ -132,11 +132,11 @@ function selectConsistentHash(
   return selected;
 }
 
-export function selectUpstream(
-  upstreams: RuntimeUpstream[],
+export function selectUpstream<T extends RuntimeCandidate>(
+  upstreams: T[],
   route?: EffectiveRouteConfig,
   context?: ExpressionContext
-): RuntimeUpstream | undefined {
+): T | undefined {
   if (upstreams.length === 0) return undefined;
 
   let filteredUpstreams = upstreams.filter(u => !u.is_disabled);
@@ -147,7 +147,7 @@ export function selectUpstream(
     if (filteredUpstreams.length === 0) return undefined;
   }
 
-  const priorityGroups = new Map<number, RuntimeUpstream[]>();
+  const priorityGroups = new Map<number, T[]>();
   forEach(filteredUpstreams, (upstream) => {
     const priority = upstream.priority ?? 1;
     if (!priorityGroups.has(priority)) {
@@ -158,9 +158,9 @@ export function selectUpstream(
 
   const sortedPriorities = sortBy(Array.from(priorityGroups.keys()));
   const lb: LoadBalancingConfig | undefined =
-    route?.load_balancing ?? (route ? runtimeState.get(route.service ?? route.path)?.load_balancing : undefined);
+    route?.load_balancing ?? (route ? runtimeState.get(route.state_key ?? route.path)?.load_balancing : undefined);
   const policy = lb?.policy ?? 'weighted_random';
-  const stateKey = route?.state_key ?? route?.service ?? route?.path ?? 'default';
+  const stateKey = route?.state_key ?? route?.path ?? 'default';
 
   for (const priority of sortedPriorities) {
     const priorityUpstreams = priorityGroups.get(priority)!;
@@ -169,7 +169,7 @@ export function selectUpstream(
     const candidates = halfOpenGate(stateKey, healthy);
     if (candidates.length === 0) continue;
 
-    let selected: RuntimeUpstream | undefined;
+    let selected: T | undefined;
 
     switch (policy) {
       case 'round_robin':

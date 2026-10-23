@@ -1,10 +1,13 @@
+import { serviceReference } from '../../helpers/service-references';
 import { describe, expect, test } from 'bun:test';
 import {
   getRouteTargetSummary,
   getServiceConsumers,
   getServiceHealthAggregate,
+  getRouteHealthAggregate,
 } from '../../../src/utils/route-service-view-model';
 import type { Route, Service } from '$api/routes';
+import type { RuntimeUpstreamsResponse } from '../../../src/api/runtime';
 
 function deepFreeze<T>(value: T): T {
   if (!value || typeof value !== 'object') return value;
@@ -21,6 +24,7 @@ function deepFreeze<T>(value: T): T {
 
 function createService(): Service {
   return {
+    _uid: 'shared-service',
     name: 'shared-service',
     endpoints: [
       { target: 'https://healthy.example.com', weight: 100, priority: 1 },
@@ -41,7 +45,7 @@ function createBaseRoute(): Route {
 describe('route-service-view-model', () => {
   test('summarizes service-backed routes without expanding save payload semantics', () => {
     const service = createService();
-    const route: Route = { path: '/service', service: service.name };
+    const route: Route = { path: '/service', service_references: [serviceReference(service._uid!)] };
     const frozenRoute = deepFreeze(structuredClone(route));
     const frozenService = deepFreeze(structuredClone(service));
 
@@ -80,7 +84,7 @@ describe('route-service-view-model', () => {
   });
 
   test('marks missing service and empty targets distinctly', () => {
-    const missingServiceRoute: Route = { path: '/missing', service: 'ghost-service' };
+    const missingServiceRoute: Route = { path: '/missing', service_references: [serviceReference('ghost-service')] };
     const emptyRoute: Route = { path: '/empty' };
 
     expect(getRouteTargetSummary(missingServiceRoute, [createService()]).kind).toBe('missing_service');
@@ -90,8 +94,8 @@ describe('route-service-view-model', () => {
   test('computes service consumers and health aggregate from route/service inputs only', () => {
     const service = createService();
     const routes: Route[] = [
-      { path: '/svc-a', service: 'shared-service' },
-      { path: '/svc-b', service: 'shared-service' },
+      { path: '/svc-a', service_references: [serviceReference('shared-service')] },
+      { path: '/svc-b', service_references: [serviceReference('shared-service')] },
       { path: '/custom', endpoints: [{ target: 'https://custom.example.com', weight: 100, priority: 1 }] },
     ];
 
@@ -111,4 +115,32 @@ describe('route-service-view-model', () => {
       state: 'unknown',
     });
   });
+});
+
+test('direct Route and Service consumers use stable IDs across service rename', () => {
+  const leaf = { ...createService(), name: 'renamed' };
+  const pool: Service = { _uid: 'pool', name: 'pool', endpoints: [], service_references: [serviceReference(leaf._uid!)] };
+  const routes: Route[] = [{ path: '/route', service_references: [serviceReference(leaf._uid!)] }, { path: '/nested', service_references: [serviceReference('pool')] }];
+  const consumers = getServiceConsumers(leaf._uid!, routes, [leaf, pool]);
+  expect(consumers.routePaths).toEqual(['/route']);
+  expect(consumers.services.map(service => service.name)).toEqual(['pool']);
+  expect(consumers.count).toBe(2);
+  expect(getRouteTargetSummary(routes[1], [leaf, pool])).toMatchObject({ kind: 'service', endpointCount: 4 });
+  expect(getServiceHealthAggregate(pool, null, [leaf, pool]).state).toBe('unknown');
+});
+
+test('runtime health resolves renamed Services, nested references and direct Routes by stable owner ID', () => {
+  const leaf: Service = {_uid:'leaf-id',name:'renamed leaf',endpoints:[{_uid:'leaf-endpoint',target:'https://leaf.example'}]};
+  const pool: Service = {_uid:'pool-id',name:'renamed pool',endpoints:[{_uid:'pool-endpoint',target:'https://pool.example'}],service_references:[serviceReference(leaf._uid!)]};
+  const direct: Route = {_uid:'route-id',path:'/renamed-route',endpoints:[{_uid:'route-endpoint',target:'https://route.example'}]};
+  const records = [
+    {state_key:leaf._uid!,upstream_id:'leaf-endpoint',circuit_state:'UNHEALTHY' as const},
+    {state_key:pool._uid!,upstream_id:'pool-endpoint',circuit_state:'HEALTHY' as const},
+    {state_key:direct._uid!,upstream_id:'route-endpoint',circuit_state:'HALF_OPEN' as const},
+  ];
+  const runtime: RuntimeUpstreamsResponse = {schema:'bungee-runtime-upstreams-v1',generated_at:0,availability:'complete',reason:null,admission:null,workers:{observed:[],missing:[]},
+    upstreams:records.map(record=>({...record,active_request_count:0,last_used_time:null,last_used_complete:true,last_failure_time:null,last_failure_complete:true,workers:[]}))};
+  expect(getServiceHealthAggregate(pool,runtime,[leaf,pool])).toMatchObject({healthy:1,unhealthy:1,unknown:0,state:'degraded'});
+  expect(getRouteHealthAggregate(direct,[],runtime)).toMatchObject({halfOpen:1,unknown:0,state:'degraded'});
+  expect(getRouteHealthAggregate({service_references:[serviceReference(pool._uid!)]},[leaf,pool],runtime)).toMatchObject({healthy:1,unhealthy:1,unknown:0,state:'degraded'});
 });

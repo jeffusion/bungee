@@ -27,7 +27,7 @@ export function editorFixture(scenarios: string[]) {
           'fixture-plugin': { name: 'fixture-plugin', configSchema: [{ name: 'visible', type: 'string', label: 'Visible' }] },
         } });
         if (request.method() === 'GET' && path === '/api/plugins') return route.fulfill({ json: [{ name: 'fixture-plugin', enabled: true }] });
-        if (scenario === 'service' && request.method() === 'GET' && path === '/api/runtime/upstreams') return route.fulfill({json:{schema:'bungee-runtime-upstreams-v1',generated_at:Date.now(),availability:'complete',reason:null,admission:{revision:1},workers:{observed:[],missing:[]},upstreams:[]}});
+        if (['service', 'upstreams'].includes(scenario) && request.method() === 'GET' && path === '/api/runtime/upstreams') return route.fulfill({json:{schema:'bungee-runtime-upstreams-v1',generated_at:Date.now(),availability:'complete',reason:null,admission:{revision:1},workers:{observed:[],missing:[]},upstreams:[]}});
         if (request.method() === 'GET' && path === '/api/config') return route.fulfill({ json: { revision: 1, content_hash: `sha256:${'a'.repeat(64)}`,
           config: { plugin_activations: [], logical_configuration: { routes: [], services: [], plugins: [] } } } });
         errors.push(`Unexpected ${request.method()} ${path}`);

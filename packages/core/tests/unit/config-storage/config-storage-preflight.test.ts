@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { parseNormalizeCompile } from '../../../src/config-storage';
+import { parseNormalizeCompile } from '../../../src/config-storage/compiler';
 
 function summary(input: unknown): readonly { code: string; path: string }[] {
   const result = parseNormalizeCompile(input);

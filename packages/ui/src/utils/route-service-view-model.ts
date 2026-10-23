@@ -1,4 +1,4 @@
-import type { Route, Service, Upstream } from '$api/routes';
+import { resolveRouteEndpoints, type Route, type Service, type Upstream } from '$api/routes';
 import { findRuntimeUpstream, type RuntimeUpstreamsResponse } from '$api/runtime';
 import { sortBy } from 'lodash-es';
 
@@ -18,6 +18,7 @@ export interface RouteTargetSummary {
   kind: RouteTargetSummaryKind;
   label: string;
   serviceName?: string;
+  serviceNames?: string[];
   endpointCount: number;
 }
 
@@ -32,6 +33,7 @@ export interface ServiceConsumersViewModel {
   serviceName: string;
   count: number;
   routes: Route[];
+  services: Service[];
   routePaths: string[];
 }
 
@@ -90,23 +92,12 @@ function hasModificationRules(route: Partial<Route>): boolean {
 }
 
 export function getRouteTargetSummary(route: Partial<Route>, services: Service[] = []): RouteTargetSummary {
-  if (route.service) {
-    const service = services.find((item) => item.name === route.service);
-    if (service) {
-      return {
-        kind: 'service',
-        label: `service: ${service.name}`,
-        serviceName: service.name,
-        endpointCount: service.endpoints.length,
-      };
-    }
-
-    return {
-      kind: 'missing_service',
-      label: `missing service: ${route.service}`,
-      serviceName: route.service,
-      endpointCount: 0,
-    };
+  if (route.service_references?.length) {
+    const targets = route.service_references.map(reference => services.find(service => service._uid === reference.service_id));
+    const names = targets.map((service, index) => service?.name ?? route.service_references![index].service_id);
+    const missing = targets.some(service => !service);
+    return { kind: missing ? 'missing_service' : 'service', label: `${missing ? 'missing service' : 'service'}: ${names.join(', ')}`,
+      serviceName: names.join(', '), serviceNames: names, endpointCount: resolveRouteEndpoints(route, services).length };
   }
 
   if (route.endpoints && route.endpoints.length > 0) {
@@ -188,100 +179,52 @@ export function getServiceFeatureBadges(service: Partial<Service>): RouteFeature
   return badges;
 }
 
-export function getServiceConsumers(serviceName: string, routes: Route[] = []): ServiceConsumersViewModel {
-  const matchedRoutes = routes.filter((route) => route.service === serviceName);
-
-  return {
-    serviceName,
-    count: matchedRoutes.length,
-    routes: matchedRoutes,
-    routePaths: matchedRoutes.map((route) => route.path),
-  };
+export function getServiceConsumers(serviceId: string, routes: Route[] = [], services: Service[] = []): ServiceConsumersViewModel {
+  const references = (owner: Partial<Service>) => Boolean(serviceId && owner.service_references?.some(reference => reference.service_id === serviceId));
+  const matchedRoutes = routes.filter(references), matchedServices = services.filter(references);
+  return { serviceName: services.find(service => service._uid === serviceId)?.name ?? serviceId,
+    count: matchedRoutes.length + matchedServices.length, routes: matchedRoutes, services: matchedServices,
+    routePaths: matchedRoutes.map(route => route.path) };
 }
 
-export function getServiceHealthAggregate(service: Partial<Service>, runtime: RuntimeUpstreamsResponse | null = null): ServiceHealthAggregate {
-  const endpoints = service.endpoints ?? [];
-
-  if (endpoints.length === 0) {
-    return {
-      total: 0,
-      healthy: 0,
-      halfOpen: 0,
-      mixed: 0,
-      unknown: 0,
-      unhealthy: 0,
-      disabled: 0,
-      state: 'empty',
-    };
-  }
-
-  const aggregate = endpoints.reduce<ServiceHealthAggregate>(
-    (acc, endpoint) => {
-      if (endpoint.is_disabled) {
-        acc.disabled += 1;
-        return acc;
-      }
-
-      const status = findRuntimeUpstream(runtime, service.name ?? '', endpoint._uid)?.circuit_state ?? 'UNKNOWN';
-      if (status === 'UNHEALTHY') {
-        acc.unhealthy += 1;
-      } else if (status === 'HALF_OPEN') {
-        acc.halfOpen += 1;
-      } else if (status === 'HEALTHY') {
-        acc.healthy += 1;
-      } else if (status === 'MIXED') {
-        acc.mixed += 1;
-      } else {
-        acc.unknown += 1;
-      }
-
-      return acc;
-    },
-    {
-      total: endpoints.length,
-      healthy: 0,
-      halfOpen: 0,
-      mixed: 0,
-      unknown: 0,
-      unhealthy: 0,
-      disabled: 0,
-      state: 'neutral',
+export function getServiceHealthAggregate(service: Partial<Service>, runtime: RuntimeUpstreamsResponse | null = null, services: Service[] = []): ServiceHealthAggregate {
+  const aggregate: ServiceHealthAggregate = { total: 0, healthy: 0, halfOpen: 0, mixed: 0, unknown: 0, unhealthy: 0, disabled: 0, state: 'empty' };
+  const collect = (owner: Partial<Service>, seen: Set<string>, disabled = false) => {
+    for (const endpoint of owner.endpoints ?? []) {
+      aggregate.total++;
+      if (disabled || endpoint.is_disabled) { aggregate.disabled++; continue; }
+      const status = findRuntimeUpstream(runtime, owner._uid ?? '', endpoint._uid)?.circuit_state ?? 'UNKNOWN';
+      if (status === 'HEALTHY') aggregate.healthy++;
+      else if (status === 'HALF_OPEN') aggregate.halfOpen++;
+      else if (status === 'UNHEALTHY') aggregate.unhealthy++;
+      else if (status === 'MIXED') aggregate.mixed++;
+      else aggregate.unknown++;
     }
-  );
-
-  const activeCount = aggregate.total - aggregate.disabled;
-
-  if (activeCount === 0) {
-    aggregate.state = 'neutral';
-  } else if (aggregate.unknown > 0) {
-    aggregate.state = 'unknown';
-  } else if (aggregate.mixed > 0) {
-    aggregate.state = 'mixed';
-  } else if (aggregate.unhealthy > 0) {
-    aggregate.state = 'unhealthy';
-  } else if (aggregate.halfOpen > 0) {
-    aggregate.state = 'degraded';
-  } else {
-    aggregate.state = 'healthy';
-  }
-
+    for (const reference of owner.service_references ?? []) {
+      const target = services.find(service => service._uid === reference.service_id);
+      if (!target || seen.has(reference.service_id)) {
+        aggregate.total++;
+        if (disabled || reference.is_disabled) aggregate.disabled++; else aggregate.unknown++;
+      } else collect(target, new Set([...seen, reference.service_id]), disabled || reference.is_disabled);
+    }
+  };
+  collect(service, new Set(service._uid ? [service._uid] : []));
+  const active = aggregate.total - aggregate.disabled;
+  if (!aggregate.total) aggregate.state = 'empty';
+  else if (!active) aggregate.state = 'neutral';
+  else if (aggregate.healthy > 0) aggregate.state = aggregate.healthy === active ? 'healthy' : 'degraded';
+  else if (aggregate.halfOpen > 0) aggregate.state = 'degraded';
+  else if (aggregate.mixed > 0) aggregate.state = 'mixed';
+  else if (aggregate.unknown > 0) aggregate.state = 'unknown';
+  else aggregate.state = 'unhealthy';
   return aggregate;
 }
 
 export function getRouteHealthAggregate(route: Partial<Route>, services: Service[] = [], runtime: RuntimeUpstreamsResponse | null = null): ServiceHealthAggregate {
-  const target = getRouteTargetSummary(route, services);
-  if (target.kind === 'direct_response') {
+  if (!route.service_references?.length && hasDirectResponseCapability(route) && !route.endpoints?.length) {
     return { total: 0, healthy: 0, halfOpen: 0, mixed: 0, unknown: 0, unhealthy: 0, disabled: 0, state: 'neutral' };
   }
-  if (target.kind === 'service') {
-    const service = services.find((s) => s.name === target.serviceName);
-    if (service) return getServiceHealthAggregate(service, runtime);
-    return { total: 0, healthy: 0, halfOpen: 0, mixed: 0, unknown: 0, unhealthy: 0, disabled: 0, state: 'unhealthy' };
-  }
-  if (target.kind === 'custom_endpoints') {
-    return getServiceHealthAggregate({ name: route.path, endpoints: route.endpoints }, runtime);
-  }
-  return { total: 0, healthy: 0, halfOpen: 0, mixed: 0, unknown: 0, unhealthy: 0, disabled: 0, state: 'empty' };
+  return getServiceHealthAggregate({_uid: route._uid, name: route.path, endpoints: route.endpoints, service_references: route.service_references}, runtime, services);
 }
 
 export function sortEndpointsForDisplay(endpoints: Upstream[]): Upstream[] {
@@ -303,9 +246,7 @@ export function getRouteDisplayViewModel(route: Partial<Route>, services: Servic
   const target = getRouteTargetSummary(route, services);
   const badges = getRouteFeatureBadges(route);
   const preview = getEndpointPreview(
-    target.kind === 'service'
-      ? services.find((service) => service.name === target.serviceName)?.endpoints ?? []
-      : route.endpoints ?? [],
+    resolveRouteEndpoints(route, services),
     previewCount
   );
 

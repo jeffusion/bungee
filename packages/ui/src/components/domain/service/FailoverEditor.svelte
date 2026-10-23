@@ -1,30 +1,30 @@
 <script lang="ts">
   import type { FailoverConfig } from '$api/routes';
   import { _ } from '$i18n';
-  import { BCheckbox } from '$components/industrial';
+  import { BSwitch } from '$components/industrial';
   import { Input } from '$components/ui/input';
 
-  export let failover: FailoverConfig | undefined = undefined;
-  export let label: string = 'Failover';
-  export let showHelp: boolean = true;
+  let { failover = $bindable(), label = 'Failover', showHelp = true, endpointHealth = true }: {
+    failover?: FailoverConfig; label?: string; showHelp?: boolean; endpointHealth?: boolean;
+  } = $props();
 
   let initialized = false;
-  let enabled = false;
+  let enabled = $state(false);
 
-  let retryOnInput = '';
+  let retryOnInput = $state('');
   /** 纯关键字列表，与 retry_on 为 OR 关系 */
-  let responseKeywords: string[] = [];
+  let responseKeywords = $state<string[]>([]);
 
-  let consecutiveFailures: number | undefined;
-  let healthySuccesses: number | undefined;
-  let autoDisableThreshold: number | undefined;
+  let consecutiveFailures = $state<number | undefined>();
+  let healthySuccesses = $state<number | undefined>();
+  let autoDisableThreshold = $state<number | undefined>();
 
-  let backoffBaseMs: number | undefined;
-  let probeTimeoutMs: number | undefined;
+  let backoffBaseMs = $state<number | undefined>();
+  let probeTimeoutMs = $state<number | undefined>();
 
-  let slowStartEnabled = false;
-  let slowStartDurationMs: number | undefined;
-  let slowStartInitialWeightFactor: number | undefined;
+  let slowStartEnabled = $state(false);
+  let slowStartDurationMs = $state<number | undefined>();
+  let slowStartInitialWeightFactor = $state<number | undefined>();
 
   function parseStatusCodes(input: string): (number | string)[] {
     return input
@@ -56,10 +56,6 @@
     if (!raw || !Array.isArray(raw)) return [];
     return raw.map((item) => {
       if (typeof item === 'string') return item;
-      // 兼容旧 { body_contains } 形状（若配置尚未迁移）
-      if (item && typeof item === 'object' && 'body_contains' in item) {
-        return String((item as { body_contains?: string }).body_contains ?? '');
-      }
       return '';
     });
   }
@@ -100,7 +96,7 @@
       enabled: true,
       retry_on: retryOn.length > 0 ? retryOn : [500, 502, 503, 504],
       retry_on_response: cleanedKeywords.length > 0 ? cleanedKeywords : undefined,
-      passive_health: compactObject({
+      ...(endpointHealth ? { passive_health: compactObject({
         consecutive_failures: consecutiveFailures,
         healthy_successes: healthySuccesses,
         auto_disable_threshold: autoDisableThreshold,
@@ -115,7 +111,7 @@
             duration_ms: slowStartDurationMs,
             initial_weight_factor: slowStartInitialWeightFactor,
           })
-        : undefined,
+        : undefined } : {}),
     });
   }
 
@@ -134,24 +130,23 @@
     syncModel();
   }
 
-  $: if (!initialized) {
+  $effect(() => { if (!initialized) {
     initializeFromProps();
     initialized = true;
-    syncModel();
-  }
+  } });
 </script>
 
 <div class="w-full space-y-1">
   <div class="block">
     <span class="nx-label-sm font-semibold">{label}</span>
     {#if showHelp}
-      <span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_('routeEditor.failoverHelp')}</span>
+      <span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">{$_(endpointHealth ? 'routeEditor.failoverHelp' : 'serviceReferences.failoverHelp')}</span>
     {/if}
   </div>
 
   <div class="space-y-4">
     <div class="space-y-1">
-      <BCheckbox
+      <BSwitch
         checked={enabled}
         onchange={(v) => { enabled = v; syncModel(); }}
         label={$_('routeEditor.enableFailover')}
@@ -189,7 +184,7 @@
                     class="inline-flex h-9 w-9 items-center justify-center border-2 border-carbon-500 bg-transparent text-zinc-400 transition-colors hover:border-red-500 hover:text-red-300"
                     title={$_('routeEditor.retryOnResponseRemove')}
                     aria-label={$_('routeEditor.retryOnResponseRemove')}
-                    on:click={() => removeKeyword(idx)}
+                    onclick={() => removeKeyword(idx)}
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5">
                       <path d="M6 6l8 8M14 6l-8 8" stroke-linecap="round" />
@@ -203,13 +198,14 @@
           <button
             type="button"
             class="text-xs text-nexus-300 hover:text-nexus-200 uppercase tracking-command font-mono"
-            on:click={addKeyword}
+            onclick={addKeyword}
           >
             + {$_('routeEditor.retryOnResponseAdd')}
           </button>
         </div>
       </div>
 
+      {#if endpointHealth}
       <div class="border border-carbon-600 bg-carbon-950/60">
         <div class="px-3 py-2 font-mono text-[11px] uppercase tracking-command text-zinc-200 border-b border-carbon-600">{$_('routeEditor.passiveHealthCheck')}</div>
         <div class="p-3 space-y-4">
@@ -254,7 +250,7 @@
         <div class="p-3 space-y-4">
           <div class="text-xs text-zinc-500 bg-carbon-700 rounded p-2">{$_('routeEditor.slowStartTooltip')}</div>
           <div class="space-y-1.5">
-            <BCheckbox
+            <BSwitch
               checked={slowStartEnabled}
               onchange={(v) => { slowStartEnabled = v; syncModel(); }}
               label={$_('routeEditor.enableSlowStart')}
@@ -278,6 +274,7 @@
           {/if}
         </div>
       </div>
+      {/if}
     {/if}
   </div>
 </div>

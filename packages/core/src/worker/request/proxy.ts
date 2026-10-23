@@ -2,7 +2,7 @@
 import { gatewayHooks, requireGatewayResult } from '../../gateway/runtime';
 import type { executeForward } from '../../gateway/forward-plugin';
 export {
-  AttemptCleanupError, UpstreamPhaseFailoverSignal, ManagedUpstreamAccessError,
+  AttemptCleanupError, UpstreamResponseValidationError, UpstreamPhaseFailoverSignal, ManagedUpstreamAccessError,
   UpstreamTimeoutError, UpstreamNetworkError, isUpstreamTimeoutError,
   isUpstreamNetworkError, isManagedUpstreamAccessError, isUpstreamPhaseFailoverSignal,
 } from '../../gateway/forward-plugin';

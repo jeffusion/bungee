@@ -157,7 +157,7 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
             }],
           }],
           routes: [{
-            id: ROUTE_ID, position: 1, path: '/rpc-probe-noop', service_id: SERVICE_ID, plugins: [],
+            id: ROUTE_ID, position: 1, path: '/rpc-probe-noop', service_references: [{ id: crypto.randomUUID(), position: 0, service_id: SERVICE_ID, weight: 100, priority: 1, is_disabled: false }], plugins: [],
           }],
         },
       };
@@ -386,7 +386,7 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
       const initial = await requestJson(`${management}/api/config`, {}, currentFixture);
       const aggregate = {
         plugin_activations: ['token-budget', 'token-metering', 'token-stats', 'models-dev', 'key-access'].map(plugin_name => ({plugin_name})),
-        logical_configuration: {plugins: [], services: [{id: SERVICE_ID, position: 1, name: 'budget-rpc', plugins: [], endpoints: [{id: UPSTREAM_ID, position: 1, target: `http://127.0.0.1:${upstream.port}/v1/`, weight: 100, priority: 1, is_disabled: false, plugins: []}]}], routes: [{id: ROUTE_ID, position: 1, path: '/budget-rpc', service_id: SERVICE_ID, plugins: []}]},
+        logical_configuration: {plugins: [], services: [{id: SERVICE_ID, position: 1, name: 'budget-rpc', plugins: [], endpoints: [{id: UPSTREAM_ID, position: 1, target: `http://127.0.0.1:${upstream.port}/v1/`, weight: 100, priority: 1, is_disabled: false, plugins: []}]}], routes: [{id: ROUTE_ID, position: 1, path: '/budget-rpc', service_references: [{ id: crypto.randomUUID(), position: 0, service_id: SERVICE_ID, weight: 100, priority: 1, is_disabled: false }], plugins: []}]},
       };
       const mutationId = randomUUID();
       const changed = await requestJson(`${management}/api/config`, {method: 'PUT', headers: {'content-type': 'application/json'}, body: JSON.stringify({expected_revision: (initial.body as any).revision, mutation_id: mutationId, aggregate})}, currentFixture);

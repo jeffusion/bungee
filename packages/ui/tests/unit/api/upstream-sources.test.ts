@@ -1,3 +1,4 @@
+import { serviceReference } from '../../helpers/service-references';
 import { afterEach, expect, test } from 'bun:test';
 import { sourceEndpoint, listSourceAccounts, createSourceDraft, applySourceDraft, accountReferences, type UpstreamSource } from '../../../src/api/upstream-sources';
 import { toEditorUpstream, toV2Service } from '../../../src/api/config-adapters';
@@ -55,7 +56,7 @@ test('reference summary includes service consumers and direct routes, retaining 
   const endpoint = { id: 'ep', position: 0, target: 'https://provider.test', weight: 100, priority: 1, is_disabled: true,
     plugins: [{ id: 'binding', position: 0, name: 'generic-provider', enabled: false, options: { accountRef: 'acct' } }] };
   const refs = accountReferences({ plugins: [], services: [{ id: 'service', position: 0, name: 'service', endpoints: [endpoint], plugins: [] }],
-    routes: [{ id: 'consumer', position: 0, path: '/consumer', service_id: 'service', plugins: [] },
+    routes: [{ id: 'consumer', position: 0, path: '/consumer', service_references: [serviceReference('service')], plugins: [] },
       { id: 'direct', position: 1, path: '/direct', endpoints: [endpoint], plugins: [] }] }, 'generic-provider', 'acct');
   expect(refs.services).toEqual([{ id: 'service', name: 'service' }]);
   expect(refs.routes.map(item => item.path)).toEqual(['/consumer', '/direct']);

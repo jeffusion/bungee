@@ -126,12 +126,13 @@ describe('master startup dependency reconciliation', () => {
         logical_configuration: { log_level: 'warn', plugins: [global, present], services: [{
           id: '50000000-0000-4000-8000-000000000001', position: 1, name: 'service', plugins: [service],
           endpoints: [{ id: '60000000-0000-4000-8000-000000000001', position: 1,
-            target: 'https://example.test', plugins: [upstream],
+            target: 'https://example.test', weight: 100, priority: 1, is_disabled: false, plugins: [upstream],
             managedBy: { plugin: 'removed-plugin', contributionId: 'source', bindingId: upstream.id } }],
         }], routes: [{ id: '70000000-0000-4000-8000-000000000001', position: 1, path: '/direct', plugins: [route],
-          endpoints: [{ id: '60000000-0000-4000-8000-000000000002', position: 1, target: 'https://direct.test', plugins: [direct] }] },
+          endpoints: [{ id: '60000000-0000-4000-8000-000000000002', position: 1, target: 'https://direct.test', weight: 100, priority: 1, is_disabled: false, plugins: [direct] }] },
         { id: '70000000-0000-4000-8000-000000000002', position: 2, path: '/service',
-          service_id: '50000000-0000-4000-8000-000000000001', plugins: [] }],
+          service_references: [{ id: '80000000-0000-4000-8000-000000000001', position: 0,
+            service_id: '50000000-0000-4000-8000-000000000001', weight: 100, priority: 1, is_disabled: false }], plugins: [] }],
         },
       } });
     expect(seeded.kind).toBe('committed'); settle(repository); repository.close();
@@ -142,10 +143,11 @@ describe('master startup dependency reconciliation', () => {
       const logical = checked.getSnapshot().aggregate.logical_configuration;
       expect(logical.log_level).toBe('warn');
       expect(logical.plugins).toEqual([present]);
-      expect(logical.services[0]).toMatchObject({ name: 'service', plugins: [], endpoints: [{ target: 'https://example.test', plugins: [] }] });
+      expect(logical.services[0]).toMatchObject({ id:'50000000-0000-4000-8000-000000000001', name: 'service', plugins: [], endpoints: [{ target: 'https://example.test', plugins: [] }] });
       expect(logical.services[0]!.endpoints[0]!.managedBy).toBeUndefined();
       expect(logical.routes[0]).toMatchObject({ path: '/direct', plugins: [], endpoints: [{ target: 'https://direct.test', plugins: [] }] });
-      expect(logical.routes[1]).toMatchObject({ service_id: '50000000-0000-4000-8000-000000000001' });
+      expect(logical.routes[1]).toMatchObject({ service_references: [{ id: '80000000-0000-4000-8000-000000000001',
+        service_id: '50000000-0000-4000-8000-000000000001' }] });
       expect(checked.getSnapshot().aggregate.plugin_activations).toEqual([{ plugin_name: 'present-plugin' }]);
       checked.verify();
     } finally { checked.close(); }

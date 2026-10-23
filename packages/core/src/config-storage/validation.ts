@@ -125,6 +125,7 @@ export function normalizePositions(
   values: readonly unknown[],
   path: string,
   context: ValidationContext,
+  itemPath: (index: number) => string = index => `${path}[${index}]`,
 ): readonly number[] {
   const reserved = new Set<number>();
   const seen = new Set<number>();
@@ -137,7 +138,7 @@ export function normalizePositions(
     if (isObject(value) && typeof value.position === 'number' && Number.isSafeInteger(value.position)
       && value.position >= 0) {
       if (seen.has(value.position)) {
-        context.add('duplicate_position', `${path}[${index}].position`, 'Position must be unique within its owner');
+        context.add('duplicate_position', `${itemPath(index)}.position`, 'Position must be unique within its owner');
       }
       seen.add(value.position);
       return value.position;
