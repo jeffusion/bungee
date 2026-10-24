@@ -1,3 +1,10 @@
+# [6.5.0](https://github.com/jeffusion/bungee/compare/v6.4.1...v6.5.0) (2026-10-24)
+
+
+### Features
+
+* **gateway:** support nested service references and multi-service routes ([31af504](https://github.com/jeffusion/bungee/commit/31af5049210f345c9627eccc7669226d72833e13))
+
 ## [6.4.1](https://github.com/jeffusion/bungee/compare/v6.4.0...v6.4.1) (2026-10-23)
 
 
