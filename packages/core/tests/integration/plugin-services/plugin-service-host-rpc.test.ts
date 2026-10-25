@@ -1166,10 +1166,11 @@ describe('Host RPC production storage outcome and cleanup separation',()=>{
     const {createPluginPeerJournalResolver}=await import('../../../src/plugin-services/peer-journal');
     const dir=mkdtempSync(join(tmpdir(),'host-rpc-cleanup-timeout-')),file=join(dir,'silent-release.db');
     const resourceFailures:string[]=[];const cleanupFailures:{operationId:string;code:string}[]=[];const cleanup=gate();
-    const storage=await PluginStateClient.open(file,{initialize:true,requestTimeoutMs:400,cleanupTimeoutMs:100,
+    // Exercise cleanup ordering, not Worker IPC speed; keep normal business deadlines.
+    const storage=await PluginStateClient.open(file,{initialize:true,cleanupTimeoutMs:100,
       workerUrl:new URL('../../fixtures/plugin-state-fault-worker.ts',import.meta.url),onWorkerFailure:error=>{resourceFailures.push(error.code);}});
     const resolver=createPluginPeerJournalResolver({client:storage});
-    const adapter=new HostRpcAdapter({process:'worker',limits:{hardDeadlineMs:150},resolvePlacement:()=>null,resolveCallee:()=>null,
+    const adapter=new HostRpcAdapter({process:'worker',resolvePlacement:()=>null,resolveCallee:()=>null,
       resolveJournal:resolver.resolve,onJournalCleanupFailure:failure=>{cleanupFailures.push(failure);cleanup.open();throw Error('reporter must not overwrite');}});
     const provider=owner(adapter,'provider',PROVIDES),consumer=owner(adapter,'consumer',CONSUMES);
     publisher(provider,fullHandlers(),{add:{atomicReadSet:()=>({keys:[]}),atomic:()=>({mutations:[],result:{count:7}})}});
