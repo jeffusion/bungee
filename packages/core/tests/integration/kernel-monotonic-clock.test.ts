@@ -53,19 +53,27 @@ test('musl loader fallback keeps nanosecond validation and counts suspend time',
 });
 
 test('older worker accepts a younger controller deadline and preserves the shared exit window', async () => {
+  const trace = (stage: string) => console.error(`[kernel-clock-test] ${stage}`);
   const fake = fakeLifecycle();
+  trace('boot-id');
   const clockId = await readKernelDeadlineClockId();
   const runtime = createConfigWorkerRuntimeController({ pid: 4321, identity: PROCESS_IDENTITY,
     bootNonce: 'c0000000-0000-4000-8000-000000000001', bootId: clockId, lifecycle: fake.lifecycle });
   try {
+    trace('start');
     expect((await runtime.apply(startMessage())).ok).toBe(true);
     // Exceeds C: the former process-relative implementation rejected this takeover.
+    trace('age-gap');
     await Bun.sleep(6_000);
     const entry = fileURLToPath(new URL('../fixtures/kernel-clock-child.ts', import.meta.url));
     const before = kernelMonotonicNowNs();
+    trace('spawn');
     const child = Bun.spawn([process.execPath, entry], { stdout: 'pipe', stderr: 'pipe' });
+    trace(`stdout pid=${child.pid}`);
     const text = await new Response(child.stdout).text();
+    trace('stderr');
     const stderr = await new Response(child.stderr).text();
+    trace('exit');
     expect(await child.exited, stderr).toBe(0);
     const controller = JSON.parse(text) as { now: string; startDeadline: string; exitDeadline: string; clockId: string };
     const after = kernelMonotonicNowNs();
@@ -77,13 +85,17 @@ test('older worker accepts a younger controller deadline and preserves the share
     expect(childExitRemaining).toBeGreaterThan(0n);
     expect(childExitRemaining).toBeLessThanOrEqual(10_000_000_000n);
     // Mixed versions cannot mistake a legacy process-relative value for kernel time.
+    trace('legacy-drain');
     const legacy = await runtime.apply({ ...drainMessage(), start_boot_id: clockId.replace('kernel-monotonic-v1:', ''),
       start_deadline_ns: controller.startDeadline });
     expect(legacy.ok).toBe(false);
+    trace('expired-drain');
     const expired = await runtime.apply({ ...drainMessage(), start_boot_id: clockId, start_deadline_ns: before.toString() });
     expect(expired.ok).toBe(false);
+    trace('valid-drain');
     const accepted = await runtime.apply({ ...drainMessage(), start_boot_id: clockId, start_deadline_ns: controller.startDeadline });
     expect(accepted.ok).toBe(true);
+    trace('terminal-wait');
     await Bun.sleep(20);
     const terminal = runtime.drainStatus();
     expect(terminal?.ok).toBe(true);
@@ -92,10 +104,16 @@ test('older worker accepts a younger controller deadline and preserves the share
     expect(remaining).toBeGreaterThan(0n);
     expect(remaining).toBeLessThanOrEqual(BigInt(terminal.message.policy.worker_exit_timeout_ms) * 1_000_000n);
     const originalDeadline = terminal.message.exit_deadline_ns;
+    trace('fail-closed');
     await runtime.failClosed();
+    trace('finalized');
     const finalized = runtime.drainStatus();
     expect(finalized?.ok && 'exit_deadline_ns' in finalized.message ? finalized.message.exit_deadline_ns : null).toBe(originalDeadline);
-  } finally { await runtime.failClosed(); }
+  } finally {
+    trace('cleanup');
+    await runtime.failClosed();
+    trace('complete');
+  }
 }, 20_000);
 
 
