@@ -84,11 +84,16 @@ export function readRawActiveAggregate(db: Database): unknown {
       ...takeReferences(`service:${row.id}`), name: row.name, endpoints: takeGroup(upstreams, `service:${row.id}`),
       plugins: takeGroup(bindings, `service:${row.id}`) }));
   const routes = sqliteAll<RouteRow, []>(db, 'SELECT id,position,path,policy_json FROM routes ORDER BY position')
-    .map((row) => ({ ...parseCanonicalObject(row.policy_json, 'route policy_json', ROUTE_RESERVED),
-      id: requireUuid(row.id, 'routes.id'), position: requireSafeInteger(row.position, 'routes.position'),
-      path: row.path, ...(references.has(`route:${row.id}`) ? takeReferences(`route:${row.id}`)
-        : { endpoints: takeGroup(upstreams, `route:${row.id}`) }),
-      plugins: takeGroup(bindings, `route:${row.id}`) }));
+    .map((row) => {
+      const key = `route:${row.id}`;
+      const hasReferences = references.has(key);
+      const endpoints = takeGroup(upstreams, key);
+      return { ...parseCanonicalObject(row.policy_json, 'route policy_json', ROUTE_RESERVED),
+        id: requireUuid(row.id, 'routes.id'), position: requireSafeInteger(row.position, 'routes.position'),
+        path: row.path, ...(hasReferences ? takeReferences(key) : {}),
+        ...(!hasReferences || endpoints.length ? { endpoints } : {}),
+        plugins: takeGroup(bindings, key) };
+    });
   const activations = sqliteAll<ActivationRow, []>(db, 'SELECT plugin_name FROM plugin_activations ORDER BY plugin_name');
   const input = { logical_configuration: { ...readSettings(db), services, routes,
     plugins: takeGroup(bindings, 'global:') }, plugin_activations: activations.map(({ plugin_name }) => ({

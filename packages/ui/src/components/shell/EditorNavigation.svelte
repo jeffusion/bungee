@@ -1,14 +1,17 @@
 <!-- Shared editor rail. Pages supply section data and selection; this component owns all navigation DOM and scoped styles. -->
 <script lang="ts" generics="Section extends string">
-  import type { Snippet } from 'svelte';
+  import { onMount, type Snippet } from 'svelte';
   import PanelCard from '$components/industrial/PanelCard.svelte';
+  import * as Select from '$components/ui/select';
   import { getModifierKey } from '$utils/platform';
+
+  type NavigationItem = { id: Section; label: string; icon: string; badge: string };
 
   let {
     items, activeSection, onselect, title, tag = '', testId, itemTestIdPrefix,
     shortcuts, betweenPanels,
   }: {
-    items: Array<{ id: Section; label: string; icon: string; badge: string }>;
+    items: NavigationItem[];
     activeSection: Section;
     onselect: (section: Section) => void;
     title: string;
@@ -18,10 +21,50 @@
     shortcuts: { title: string; tag: string; save: string; switchSection: string; cancel: string };
     betweenPanels?: Snippet;
   } = $props();
+
+  const selectedItem = $derived(items.find(item => item.id === activeSection));
+  let navigationOpen = $state(false);
+
+  onMount(() => {
+    const desktop = window.matchMedia('(min-width: 1024px)');
+    const closeOnDesktop = () => { if (desktop.matches) navigationOpen = false; };
+    desktop.addEventListener('change', closeOnDesktop);
+    return () => desktop.removeEventListener('change', closeOnDesktop);
+  });
 </script>
 
-<aside class="w-full lg:w-56 flex-shrink-0" data-testid={testId}>
-  <div class="lg:sticky lg:top-32 space-y-3">
+{#snippet navigationContent(item: NavigationItem, wrap = false)}
+  <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+    <path stroke-linecap="round" stroke-linejoin="round" d={item.icon} />
+  </svg>
+  <span class="flex-1 min-w-0 text-left {wrap ? 'whitespace-normal break-words' : 'truncate'}" title={item.label}>{item.label}</span>
+  {#if item.badge}
+    <span class="nav-badge" class:is-tick={item.badge === '✓'} title={item.badge}>{item.badge}</span>
+  {/if}
+{/snippet}
+
+<aside class="w-full lg:w-60 flex-shrink-0" data-testid={testId}>
+  <div class="lg:hidden">
+    <Select.Root bind:open={navigationOpen} selected={selectedItem ? { value: selectedItem.id, label: selectedItem.label } : undefined}
+      onSelectedChange={(selection) => {
+        const item = items.find(item => item.id === selection?.value);
+        if (item) onselect(item.id);
+      }}>
+      <Select.Trigger class="min-h-[44px] gap-2" aria-label={selectedItem ? `${title}: ${selectedItem.label}` : title}>
+        {#if selectedItem}{@render navigationContent(selectedItem)}{:else}{title}{/if}
+      </Select.Trigger>
+      <Select.Content class="w-[var(--bits-select-anchor-width)] max-w-[calc(100vw-2rem)]">
+        {#each items as item (item.id)}
+          <Select.Item value={item.id} label={item.label} class="min-h-[44px] gap-2">
+            {@render navigationContent(item, true)}
+          </Select.Item>
+        {/each}
+      </Select.Content>
+    </Select.Root>
+  </div>
+
+  <div class="lg:sticky lg:top-[calc(var(--app-header-height)+var(--editor-breadcrumb-height)+1.5rem)] space-y-3">
+    <div class="hidden lg:block">
     <PanelCard {title} {tag} flush>
       <nav aria-label={title}>
         <ul class="divide-y divide-carbon-600">
@@ -36,22 +79,18 @@
                 data-testid={`${itemTestIdPrefix}-${item.id}`}
               >
                 <span class="marker mr-1.5" class:is-active={activeSection === item.id} aria-hidden="true"></span>
-                <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="1.8">
-                  <path stroke-linecap="round" stroke-linejoin="round" d={item.icon} />
-                </svg>
-                <span class="flex-1 min-w-0 text-left truncate">{item.label}</span>
-                {#if item.badge}
-                  <span class="nav-badge" class:is-tick={item.badge === '✓'}>{item.badge}</span>
-                {/if}
+                {@render navigationContent(item)}
               </button>
             </li>
           {/each}
         </ul>
       </nav>
     </PanelCard>
+    </div>
 
     {#if betweenPanels}{@render betweenPanels()}{/if}
 
+    <div class="hidden lg:block">
     <PanelCard title={shortcuts.title} tag={shortcuts.tag}>
       <ul class="space-y-1.5 font-mono text-[11px]">
         <li class="flex items-center gap-1.5">
@@ -68,6 +107,7 @@
         </li>
       </ul>
     </PanelCard>
+    </div>
   </div>
 </aside>
 
@@ -109,7 +149,7 @@
     @apply ml-auto inline-flex items-center px-1.5 py-0.5;
     @apply font-mono text-[10px] uppercase tracking-command;
     @apply border border-carbon-500 bg-carbon-950 text-zinc-300;
-    @apply truncate max-w-[10ch];
+    @apply shrink-0 whitespace-nowrap;
   }
   .nav-badge.is-tick {
     @apply text-emerald-300 border-emerald-500/40 bg-emerald-500/10;

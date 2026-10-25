@@ -5,6 +5,7 @@ import {
   getServiceConsumers,
   getServiceHealthAggregate,
   getRouteHealthAggregate,
+  getRouteDisplayViewModel,
 } from '../../../src/utils/route-service-view-model';
 import type { Route, Service } from '$api/routes';
 import type { RuntimeUpstreamsResponse } from '../../../src/api/runtime';
@@ -54,7 +55,7 @@ describe('route-service-view-model', () => {
     expect(summary).toMatchObject({
       kind: 'service',
       serviceName: 'shared-service',
-      endpointCount: 4,
+      endpointCount: 0,
     });
     expect(frozenRoute).toEqual(route);
     expect(frozenService).toEqual(service);
@@ -125,8 +126,21 @@ test('direct Route and Service consumers use stable IDs across service rename', 
   expect(consumers.routePaths).toEqual(['/route']);
   expect(consumers.services.map(service => service.name)).toEqual(['pool']);
   expect(consumers.count).toBe(2);
-  expect(getRouteTargetSummary(routes[1], [leaf, pool])).toMatchObject({ kind: 'service', endpointCount: 4 });
+  expect(getRouteTargetSummary(routes[1], [leaf, pool])).toMatchObject({ kind: 'service', endpointCount: 0 });
   expect(getServiceHealthAggregate(pool, null, [leaf, pool]).state).toBe('unknown');
+});
+
+test('mixed Route summaries and endpoint previews keep direct endpoints separate from referenced leaves', () => {
+  const service = createService();
+  const route: Route = { ...createBaseRoute(), service_references: [serviceReference(service._uid!)] };
+  const before = structuredClone(route);
+  const view = getRouteDisplayViewModel(route, [service]);
+  expect(view.target).toMatchObject({ kind: 'mixed', endpointCount: 1, serviceNames: [service.name] });
+  expect(view.preview.items).toEqual(route.endpoints!);
+  expect(view.preview.total).toBe(1);
+  expect(route).toEqual(before);
+  expect(getRouteTargetSummary({ ...route, service_references: [serviceReference('missing')] }, [service]))
+    .toMatchObject({ kind: 'missing_service', endpointCount: 1, serviceNames: ['missing'] });
 });
 
 test('runtime health resolves renamed Services, nested references and direct Routes by stable owner ID', () => {
@@ -142,5 +156,7 @@ test('runtime health resolves renamed Services, nested references and direct Rou
     upstreams:records.map(record=>({...record,active_request_count:0,last_used_time:null,last_used_complete:true,last_failure_time:null,last_failure_complete:true,workers:[]}))};
   expect(getServiceHealthAggregate(pool,runtime,[leaf,pool])).toMatchObject({healthy:1,unhealthy:1,unknown:0,state:'degraded'});
   expect(getRouteHealthAggregate(direct,[],runtime)).toMatchObject({halfOpen:1,unknown:0,state:'degraded'});
+  expect(getRouteHealthAggregate({...direct,service_references:[serviceReference(pool._uid!)]},[leaf,pool],runtime))
+    .toMatchObject({total:3,healthy:1,unhealthy:1,halfOpen:1,unknown:0,state:'degraded'});
   expect(getRouteHealthAggregate({service_references:[serviceReference(pool._uid!)]},[leaf,pool],runtime)).toMatchObject({healthy:1,unhealthy:1,unknown:0,state:'degraded'});
 });

@@ -171,7 +171,7 @@ test('route handoff URL and query enforce the isolated route allowlist', () => {
 test('route handoff appends authoritative managed endpoint to unsaved draft and preserves existing bindings', async () => {
   const api = mockApi();
   const routeHandoff: RouteSourceHandoff = { routeId: id, sourcePlugin: 'test-provider', sourceId: 'source', accountRef: 'account', mode: 'existing' };
-  const route: any = { path: '/custom', _uid: id, endpoints: [{ _uid: 'manual', target: 'https://manual.test', weight: 100, priority: 1,
+  const route: any = { path: '/custom', _uid: id, service_references: [serviceReference('existing', { position: 3, priority: 2, weight: 45 })], endpoints: [{ _uid: 'manual', _position: 1, target: 'https://manual.test', weight: 100, priority: 1,
     plugins: [{ _uid: 'keep', name: 'other-plugin', enabled: true, options: { retained: true } }] }] };
   const before = structuredClone(route);
   const result = await prepareRouteSourceHandoff(route, routeHandoff);
@@ -179,6 +179,8 @@ test('route handoff appends authoritative managed endpoint to unsaved draft and 
   expect(result.route.endpoints).toHaveLength(2);
   expect(result.route.endpoints![0]).toEqual(route.endpoints[0]);
   expect(result.route.endpoints![1].target).toBe('https://authoritative.test/responses');
+  expect(result.route.endpoints![1]._position).toBe(4);
+  expect(result.route.service_references).toEqual(before.service_references);
   const managedEndpoint = result.route.endpoints![1]!;
   const managedBinding = managedEndpoint.plugins?.[0];
   if (!managedEndpoint.managedBy || typeof managedBinding === 'string' || !managedBinding?._uid) throw new Error('Expected managed endpoint binding');
@@ -187,11 +189,10 @@ test('route handoff appends authoritative managed endpoint to unsaved draft and 
   expect(api.requests.some(request => request.method === 'PUT')).toBe(false);
 });
 
-test('route handoff rejects service-backed, direct-response, redirect and mismatched-id routes unchanged', async () => {
+test('route handoff rejects direct-response, redirect and mismatched-id routes unchanged', async () => {
   const api = mockApi();
   const routeHandoff: RouteSourceHandoff = { routeId: id, sourcePlugin: 'test-provider', sourceId: 'source', accountRef: 'account', mode: 'existing' };
   for (const route of [
-    { path: '/service', _uid: id, service_references: [serviceReference('existing')], endpoints: [] },
     { path: '/response', _uid: id, direct_response: { enabled: true, status: 200 }, endpoints: [] },
     { path: '/redirect', _uid: id, redirect: { enabled: true, url: 'https://example.test' }, endpoints: [] },
     { path: '/wrong-id', _uid: 'wrong-id', endpoints: [] },
@@ -213,7 +214,7 @@ test('route handoff exposes stable safe codes for route/source/account and exter
 
   await assertCode(prepareRouteSourceHandoff(route, { ...existingHandoff, sourceId: '../bad' }), 'invalid_handoff');
   await assertCode(prepareRouteSourceHandoff({ ...route, _uid: 'changed' }, existingHandoff), 'route_changed');
-  await assertCode(prepareRouteSourceHandoff({ ...route, service_references: [serviceReference('bound')] }, existingHandoff), 'unsupported_target');
+  await assertCode(prepareRouteSourceHandoff({ ...route, direct_response: { enabled: true, status: 200 } }, existingHandoff), 'unsupported_target');
 
   for (const options of [{ enabled: false }, { sourceError: true }, { draftError: true }]) {
     mockApi(options);

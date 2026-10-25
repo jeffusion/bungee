@@ -407,7 +407,7 @@
     routeAccount = account; routeChoice = 'new'; routes = []; routeOpen = true; void loadRoutes();
   }
   async function continueToRoute() {
-    if (!routeAccount?.available || routesLoading || routeError || selectedRoute?.service_references?.length) return;
+    if (!routeAccount?.available || routesLoading || routeError) return;
     if (routeChoice !== 'new' && !selectedRoute?._uid) { routeError = 'ui.routeMissing'; return; }
     const handoff = { sourcePlugin: pluginName, sourceId: accountSourceId(routeAccount), accountRef: routeAccount.id,
       mode: selectedRoute ? 'existing' as const : 'new' as const,
@@ -605,7 +605,7 @@
     </div>
     {#if routesLoading}<p role="status" class="text-sm text-zinc-400">{t('ui.routesLoading')}</p>{/if}
     {#if referencedRouteServices.length}
-      <div role="alert" class="border-l-2 border-amber-500 bg-amber-500/5 px-3 py-2 text-sm text-amber-300 space-y-2">
+      <div class="border-l-2 border-carbon-600 bg-carbon-900 px-3 py-2 text-sm text-zinc-400 space-y-2">
         <p>{t('ui.routeUsesService', { name: referencedRouteServices.map(reference => reference.service?.name ?? reference.id).join(', ') })}</p>
         {#each referencedRouteServices as reference (reference.id)}
           <Button variant="outline" size="sm" disabled={!reference.service} onclick={() => editReferencedService(reference.id)}>{@render actionIcon(Server)}{t('ui.editReferencedService')} · {reference.service?.name ?? reference.id}</Button>
@@ -615,7 +615,7 @@
     {#if routeError}<p role="alert" class="text-sm text-red-300">{t(routeError)}</p><Button variant="outline" disabled={routesLoading} aria-busy={routesLoading} onclick={loadRoutes}>{@render actionIcon(RefreshCw, routesLoading)}{t('ui.reloadRoutes')}</Button>{/if}
   {/snippet}
   {#snippet footer()}
-    <Button disabled={routesLoading || !!routeError || !!selectedRoute?.service_references?.length} aria-busy={routesLoading} onclick={continueToRoute}>{@render actionIcon(ArrowRight, routesLoading)}{t('ui.continueRoute')}</Button>
+    <Button disabled={!routeAccount?.available || routesLoading || !!routeError} aria-busy={routesLoading} onclick={continueToRoute}>{@render actionIcon(ArrowRight, routesLoading)}{t('ui.continueRoute')}</Button>
   {/snippet}
 </IndustrialDialog>
 

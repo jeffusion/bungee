@@ -23,7 +23,6 @@ export async function validateRoute(route: Partial<Route>, services: Service[] =
   }
 
   errors.push(...validateServiceReferences(route.service_references, services));
-  if (route.service_references?.length && route.endpoints?.length) errors.push({ field: 'service_references', message: '服务引用与自定义端点不能同时使用' });
 
   const hasGlobalResponseBypass = route.direct_response?.enabled || route.redirect?.enabled;
 
@@ -39,8 +38,8 @@ export async function validateRoute(route: Partial<Route>, services: Service[] =
 
   if (!hasGlobalResponseBypass && !route.service_references?.length && endpoints.length === 0) {
     errors.push({ field: 'endpoints', message: get(_)('validation.upstreamRequired') });
-  } else if (!hasGlobalResponseBypass && !route.service_references?.length) {
-    const upstreamValidations = endpoints.map((upstream, index) =>
+  } else if (!hasGlobalResponseBypass && route.endpoints?.length) {
+    const upstreamValidations = route.endpoints.map((upstream, index) =>
       validateUpstream(upstream, index)
     );
     const upstreamErrors = await Promise.all(upstreamValidations);

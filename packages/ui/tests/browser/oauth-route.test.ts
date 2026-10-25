@@ -4,13 +4,14 @@ import assert from 'node:assert/strict';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 import { chromium,type Browser } from 'playwright';
 import { collectApiEvidence } from '../helpers/editors/api-evidence';
+import type { RuntimeUpstreamsResponse } from '../../src/api/runtime';
 import manifest from '../../../../plugins/chatgpt-oauth/manifest.json';
 let uiRuntime:Awaited<ReturnType<typeof startUiRuntime>>,browser:Browser;
 beforeAll(async()=>{uiRuntime=await startUiRuntime({mode:'component-fixture',entries:['tests/fixtures/oauth.html']});try{browser=await chromium.launch();}catch(error){await uiRuntime.close();throw error;}},120_000);
 afterAll(async()=>{try{await browser?.close();}finally{await uiRuntime?.close();}});
 test('route handoff-save',()=>runRouteScenario('handoff-save'),240_000);
 test('route duplicate-binding',()=>runRouteScenario('duplicate-binding'),240_000);
-test('route service-rejection',()=>runRouteScenario('service-rejection'),240_000);
+test('route service-account-addition',()=>runRouteScenario('service-account-addition'),240_000);
 test('route stale-reload',()=>runRouteScenario('stale-reload'),240_000);
 test('route draft-cancel-template',()=>runRouteScenario('draft-cancel-template'),240_000);
 test('route handoff-cancel',()=>runRouteScenario('handoff-cancel'),240_000);
@@ -52,11 +53,15 @@ async function runRouteScenario(scenario:string){
       return route.fulfill({status,json:value});
     };
     const path=url.pathname, method=req.method();
-    const reads=['/api/config','/api/plugins','/api/plugins/schemas','/api/plugins/chatgpt-oauth/control/accounts/usage','/api/plugins/chatgpt-oauth/control/accounts/siwc','/api/plugins/chatgpt-oauth/control/accounts','/api/plugins/chatgpt-oauth/control/accounts/codex'];
+    const reads=['/api/config','/api/runtime/upstreams','/api/plugins','/api/plugins/schemas','/api/plugins/chatgpt-oauth/control/accounts/usage','/api/plugins/chatgpt-oauth/control/accounts/siwc','/api/plugins/chatgpt-oauth/control/accounts','/api/plugins/chatgpt-oauth/control/accounts/codex'];
     if (!(method === 'GET' && reads.includes(path)) && !(method === 'PUT' && path === '/api/config') && !(method === 'POST' && path === '/api/plugins/chatgpt-oauth/control/accounts/draft')) {
       errors.push(`Unexpected ${method} ${path}`);return route.fulfill({status:500,json:{error:'unexpected_request'}});
     }
     if (url.pathname === '/api/config' && req.method() === 'GET') return respond({ config, revision, content_hash: 'sha256:fixture' });
+    if (path === '/api/runtime/upstreams') return respond({
+      schema: 'bungee-runtime-upstreams-v1', generated_at: Date.now(), admission: null,
+      workers: { observed: [], missing: [] }, availability: 'unknown', reason: 'no_fresh_active_admission', upstreams: [],
+    } satisfies RuntimeUpstreamsResponse);
     if (url.pathname === '/api/config' && req.method() === 'PUT') {
       const body = req.postDataJSON(); writes.push(body);
       assert.equal(body.expected_revision,revision,'configuration writes carry the current CAS revision');
@@ -177,15 +182,22 @@ if(scenario === 'duplicate-binding'){
 
 }
 
-if(scenario === 'service-rejection'){
-  await goAccounts();
-  await selectRoute('Primary', '/service-route');
-
-  assert(await routeDialog.getByRole('button', { name: 'Continue to route editor' }).isDisabled());
-  assert.equal(writes.length, 0);
-  await routeDialog.getByRole('button', { name: 'Edit referenced service' }).click();
-  await page.waitForFunction(() => location.hash.startsWith('#/services/edit/service-a'));
-  await routeDialog.waitFor({ state: 'hidden' });
+if(scenario === 'service-account-addition'){
+   await goAccounts();
+   await selectRoute('Primary', '/service-route');
+   const originalReferences = structuredClone(config.logical_configuration.routes[2].service_references);
+   const originalServiceCount = config.logical_configuration.services.length;
+   await continueRoute();
+   await targetSection().waitFor();
+   assert.equal(await rows().count(), 2, 'managed endpoint and existing Service reference coexist in one Route');
+   assert.equal(writes.length, 0);
+   await Promise.all([page.waitForResponse(response => response.request().method() === 'PUT' && new URL(response.url()).pathname === '/api/config'), page.getByTestId('route-save-button').click()]);
+   const saved = config.logical_configuration.routes[2];
+   assert.deepEqual(saved.service_references, originalReferences);
+   assert.equal(saved.endpoints.length, 1);
+   assert.equal(saved.endpoints[0].position, 1);
+   assert.equal(saved.endpoints[0].managedBy.bindingId, saved.endpoints[0].plugins[0].id);
+   assert.equal(config.logical_configuration.services.length, originalServiceCount, 'adding an account creates no hidden Service');
 
 }
 

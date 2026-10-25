@@ -1,13 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { push } from 'svelte-spa-router';
-  import { _ } from '$i18n';
+  import { _, isLoading } from '$i18n';
   import { resolveRouteEndpoints, RoutesAPI } from '$api/routes';
   import type { Route, Service } from '$api/routes';
   import { ServicesAPI } from '$api/services';
   import { runtimeUpstreams } from '$stores/runtime';
   import ConfirmDialog from '$components/shell/ConfirmDialog.svelte';
   import FeatureBadge from '$components/domain/route/FeatureBadge.svelte';
+  import ServiceTargets from '$components/domain/service/ServiceTargets.svelte';
   import { toast } from '$stores/toast';
   import {
     getRouteTargetSummary,
@@ -23,7 +24,6 @@
 		PanelCard,
 		KpiCard,
 		StatusDot,
-		StatusBadge,
 		IconButton,
 		LoadingIndicator,
 		BSelect,
@@ -203,6 +203,41 @@
     filterFeature !== 'all' ||
     filterHealth !== 'all');
 
+  const targetFilterOptions = $derived($isLoading ? [] : [
+    { value: 'all', label: $_('routes.filters.targetType.all') },
+    { value: 'service', label: $_('routes.filters.targetType.service') },
+    { value: 'mixed', label: $_('routes.filters.targetType.mixed') },
+    { value: 'custom_endpoints', label: $_('routes.filters.targetType.custom') },
+    { value: 'direct_response', label: $_('routes.filters.targetType.direct') },
+    { value: 'missing_service', label: $_('routes.filters.targetType.missing') },
+    { value: 'empty', label: $_('routes.filters.targetType.empty') },
+  ]);
+  const featureFilterOptions = $derived($isLoading ? [] : [
+    { value: 'all', label: $_('routes.filters.feature.all') },
+    { value: 'websocket', label: $_('routeFeatures.websocket') },
+    { value: 'cors', label: $_('routeFeatures.cors') },
+    { value: 'rateLimit', label: $_('routeFeatures.rateLimit') },
+    { value: 'retry', label: $_('routeFeatures.retry') },
+    { value: 'directResponse', label: $_('routeFeatures.directResponse') },
+    { value: 'plugins', label: $_('routeFeatures.plugins') },
+    { value: 'modification', label: $_('routeFeatures.modification') },
+  ]);
+  const healthFilterOptions = $derived($isLoading ? [] : [
+    { value: 'all', label: $_('routes.filters.health.all') },
+    { value: 'healthy', label: $_('routes.filters.health.healthy') },
+    { value: 'degraded', label: $_('routes.filters.health.degraded') },
+    { value: 'mixed', label: $_('runtime.mixed') },
+    { value: 'unknown', label: $_('upstreamsModal.statusUnknown') },
+    { value: 'unhealthy', label: $_('routes.filters.health.unhealthy') },
+    { value: 'neutral', label: $_('routes.filters.health.neutral') },
+    { value: 'empty', label: $_('routes.filters.health.empty') },
+  ]);
+  const activeFacetLabels = $derived($isLoading ? [] : [
+    filterTargetType !== 'all' ? `${$_('routes.tableHeaders.target')}: ${targetFilterOptions.find(option => option.value === filterTargetType)?.label}` : '',
+    filterFeature !== 'all' ? `${$_('routes.tableHeaders.features')}: ${featureFilterOptions.find(option => option.value === filterFeature)?.label}` : '',
+    filterHealth !== 'all' ? `${$_('routes.tableHeaders.health')}: ${healthFilterOptions.find(option => option.value === filterHealth)?.label}` : '',
+  ].filter(Boolean));
+
   function clearFilters() {
     searchQuery = '';
     filterTargetType = 'all';
@@ -265,6 +300,35 @@
     return () => clearInterval(refreshInterval);
   });
 </script>
+
+{#snippet routeSearch(id: string)}
+  <div class="relative">
+    <svg class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-500 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+    </svg>
+    <Input {id} type="text" placeholder={$_('routes.searchPlaceholder')} class="pl-9" bind:value={searchQuery} />
+  </div>
+{/snippet}
+
+{#snippet targetFilter(autoWidth: boolean, label: string)}
+  <BSelect options={targetFilterOptions} bind:value={filterTargetType} placeholder={$_('routes.filters.targetType.all')}
+    ariaLabel={label} {autoWidth} class={autoWidth ? '' : `min-w-0 ${filterTargetType !== 'all' ? 'ring-1 ring-nexus-500' : ''}`} />
+{/snippet}
+
+{#snippet featureFilter(autoWidth: boolean, label: string)}
+  <BSelect options={featureFilterOptions} bind:value={filterFeature} placeholder={$_('routes.filters.feature.all')}
+    ariaLabel={label} {autoWidth} class={autoWidth ? '' : `min-w-0 ${filterFeature !== 'all' ? 'ring-1 ring-nexus-500' : ''}`} />
+{/snippet}
+
+{#snippet healthFilter(autoWidth: boolean, label: string)}
+  <BSelect options={healthFilterOptions} bind:value={filterHealth} placeholder={$_('routes.filters.health.all')}
+    ariaLabel={label} {autoWidth} class={autoWidth ? '' : `min-w-0 ${filterHealth !== 'all' ? 'ring-1 ring-nexus-500' : ''}`} />
+{/snippet}
+
+{#snippet targetPreview(route: Route)}
+  <p class="mb-1 font-mono text-xs text-zinc-400">{$_('services.targetsCount', { values: { endpoints: route.endpoints?.length ?? 0, services: route.service_references?.length ?? 0 } })}</p>
+  <ServiceTargets service={route} {services} compact inline onshowall={() => push(`/routes/edit/${encodeURIComponent(route.path)}?section=target`)} />
+{/snippet}
 
 <div class="nx-page py-5 space-y-5" data-testid="page-routes">
   <!-- ===== Page header ============================================= -->
@@ -337,84 +401,31 @@
   </section>
 
 	<!-- ===== Filters panel ========================================== -->
+	<div class="hidden lg:block">
 	<PanelCard title={$_('routes.filters.label')} tag="FILTER" flush>
 	<div class="px-4 py-3 grid grid-cols-1 lg:grid-cols-[1fr_auto_auto_auto_auto] gap-3 items-end">
 	<!-- Search -->
 	<div class="block">
 		<label for="routes-search" class="nx-field-label mb-1.5 block">// {$_('routes.searchPlaceholder')}</label>
-		<div class="relative">
-			<svg class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-500 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-				<path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-			</svg>
-			<Input
-				id="routes-search"
-				type="text"
-				placeholder={$_('routes.searchPlaceholder')}
-				class="pl-9"
-				bind:value={searchQuery}
-			/>
-		</div>
+		{@render routeSearch('routes-search')}
 	</div>
 
 	<!-- Target type -->
 	<div class="block">
 		<span class="nx-field-label mb-1.5 block">// TARGET</span>
-		<BSelect
-			options={[
-				{ value: 'all', label: $_('routes.filters.targetType.all') },
-				{ value: 'service', label: $_('routes.filters.targetType.service') },
-				{ value: 'custom_endpoints', label: $_('routes.filters.targetType.custom') },
-				{ value: 'direct_response', label: $_('routes.filters.targetType.direct') },
-				{ value: 'missing_service', label: $_('routes.filters.targetType.missing') },
-				{ value: 'empty', label: $_('routes.filters.targetType.empty') },
-			]}
-			bind:value={filterTargetType}
-			placeholder={$_('routes.filters.targetType.all')}
-			ariaLabel="Filter by target type"
-			autoWidth={true}
-		/>
+		{@render targetFilter(true, 'Filter by target type')}
 	</div>
 
 	<!-- Feature -->
 	<div class="block">
 		<span class="nx-field-label mb-1.5 block">// FEATURE</span>
-		<BSelect
-			options={[
-				{ value: 'all', label: $_('routes.filters.feature.all') },
-				{ value: 'websocket', label: $_('routeFeatures.websocket') },
-				{ value: 'cors', label: $_('routeFeatures.cors') },
-				{ value: 'rateLimit', label: $_('routeFeatures.rateLimit') },
-				{ value: 'retry', label: $_('routeFeatures.retry') },
-				{ value: 'directResponse', label: $_('routeFeatures.directResponse') },
-				{ value: 'plugins', label: $_('routeFeatures.plugins') },
-				{ value: 'modification', label: $_('routeFeatures.modification') },
-			]}
-			bind:value={filterFeature}
-			placeholder={$_('routes.filters.feature.all')}
-			ariaLabel="Filter by feature"
-			autoWidth={true}
-		/>
+		{@render featureFilter(true, 'Filter by feature')}
 	</div>
 
 	<!-- Health -->
 	<div class="block">
 		<span class="nx-field-label mb-1.5 block">// HEALTH</span>
-		<BSelect
-			options={[
-				{ value: 'all', label: $_('routes.filters.health.all') },
-				{ value: 'healthy', label: $_('routes.filters.health.healthy') },
-				{ value: 'degraded', label: $_('routes.filters.health.degraded') },
-				{ value: 'mixed', label: $_('runtime.mixed') },
-				{ value: 'unknown', label: $_('upstreamsModal.statusUnknown') },
-				{ value: 'unhealthy', label: $_('routes.filters.health.unhealthy') },
-				{ value: 'neutral', label: $_('routes.filters.health.neutral') },
-				{ value: 'empty', label: $_('routes.filters.health.empty') },
-			]}
-			bind:value={filterHealth}
-			placeholder={$_('routes.filters.health.all')}
-			ariaLabel="Filter by health"
-			autoWidth={true}
-		/>
+		{@render healthFilter(true, 'Filter by health')}
 	</div>
 
 	<!-- Reset -->
@@ -431,6 +442,30 @@
 	</Button>
 	</div>
 	</PanelCard>
+	</div>
+
+  <section class="space-y-2 lg:hidden" aria-label={$_('routes.filters.label')}>
+    <div class="flex items-center gap-2">
+      <div class="min-w-0 flex-1">
+        <label for="routes-mobile-search" class="sr-only">{$_('routes.searchPlaceholder')}</label>
+        {@render routeSearch('routes-mobile-search')}
+      </div>
+      <Button size="icon" variant={anyFiltersActive ? 'default' : 'ghost'} onclick={clearFilters}
+        disabled={!anyFiltersActive} aria-label={$_('common.reset')} title={$_('common.reset')} class="shrink-0">
+        <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M3 11a9 9 0 119 10M3 4v7h7" />
+        </svg>
+      </Button>
+    </div>
+    <div class="grid grid-cols-3 gap-2">
+      {@render targetFilter(false, $_('routes.tableHeaders.target'))}
+      {@render featureFilter(false, $_('routes.tableHeaders.features'))}
+      {@render healthFilter(false, $_('routes.tableHeaders.health'))}
+    </div>
+    {#if activeFacetLabels.length > 0}
+      <p class="text-sm text-zinc-400 break-words" aria-live="polite">{activeFacetLabels.join(' · ')}</p>
+    {/if}
+  </section>
 
   <!-- ===== Inventory table ======================================== -->
   {#if loading}
@@ -470,15 +505,22 @@
       flush
     >
       <!-- ===== Desktop table ========================== -->
-      <div class="hidden md:block">
-        <table class="w-full" data-testid="route-rules-table">
+      <div class="hidden overflow-x-auto xl:block">
+        <table class="w-full min-w-[72rem] table-fixed" data-testid="route-rules-table">
+          <colgroup>
+            <col class="w-[24%]" />
+            <col />
+            <col class="w-40" />
+            <col class="w-44" />
+            <col class="w-36" />
+          </colgroup>
           <thead class="border-b border-carbon-600 bg-carbon-900/60">
             <tr>
-              <th class="text-left nx-label font-bold py-2.5 px-4 first:pl-6">{$_('routes.tableHeaders.route')}</th>
-              <th class="text-left nx-label font-bold py-2.5 px-4">{$_('routes.tableHeaders.target')}</th>
-              <th class="text-left nx-label font-bold py-2.5 px-4">{$_('routes.tableHeaders.features')}</th>
-              <th class="text-left nx-label font-bold py-2.5 px-4">{$_('routes.tableHeaders.health')}</th>
-              <th class="text-right nx-label font-bold py-2.5 px-4 last:pr-6">{$_('routes.tableHeaders.actions')}</th>
+              <th class="text-left nx-label font-bold py-2.5 px-4 first:pl-6 whitespace-nowrap">{$_('routes.tableHeaders.route')}</th>
+              <th class="text-left nx-label font-bold py-2.5 px-4 whitespace-nowrap">{$_('routes.tableHeaders.target')}</th>
+              <th class="text-left nx-label font-bold py-2.5 px-4 whitespace-nowrap">{$_('routes.tableHeaders.features')}</th>
+              <th class="text-left nx-label font-bold py-2.5 px-4 whitespace-nowrap">{$_('routes.tableHeaders.health')}</th>
+              <th class="text-right nx-label font-bold py-2.5 px-4 last:pr-6 whitespace-nowrap">{$_('routes.tableHeaders.actions')}</th>
             </tr>
           </thead>
           <tbody>
@@ -486,49 +528,27 @@
               {@const target = getRouteTargetSummary(route, services)}
               {@const badges = getRouteFeatureBadges(route)}
               {@const healthAgg = getRouteHealthAggregate(route, services, $runtimeUpstreams)}
-              {@const service = target.kind === 'service' ? services.find((s) => s.name === target.serviceName) : null}
               <tr
                 class="group border-b border-carbon-600/70 hover:bg-carbon-700/40 transition-colors"
                 data-testid="route-row"
               >
                 <!-- Path -->
-                <td class="py-3 px-4 first:pl-6">
+                <td class="py-3 px-4 first:pl-6 align-middle">
                   <button
-                    class="inline-flex items-center gap-1.5 font-mono text-[12px] text-nexus-300 hover:text-nexus-200 hover:underline tracking-tight focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-nexus-500"
+                    class="inline-flex min-w-0 max-w-full items-center gap-1.5 font-mono text-[12px] text-nexus-300 hover:text-nexus-200 hover:underline tracking-tight focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-nexus-500"
                     onclick={() => push(`/routes/edit/${encodeURIComponent(route.path)}`)}
+                    title={route.path}
                     data-testid="route-path-link"
                   >
-                    <span class="nx-caret-left" aria-hidden="true"></span>
-                    <span class="truncate max-w-[260px]">{route.path}</span>
+                    <span class="nx-caret-left shrink-0" aria-hidden="true"></span>
+                    <span class="truncate">{route.path}</span>
                   </button>
                 </td>
 
                 <!-- Target -->
-                <td class="py-3 px-4" data-testid="target-cell">
-                  {#if target.kind === 'service'}
-                    <div class="flex items-center gap-2">
-                      <StatusDot status="ok" />
-                      <div class="flex flex-wrap gap-2">
-                        {#each target.serviceNames ?? [] as name}<button class="font-mono text-[12px] text-zinc-200 hover:text-nexus-300" onclick={() => push(`/services/edit/${encodeURIComponent(name)}`)}>{name}</button>{/each}
-                      </div>
-                      <span class="font-mono text-[10px] text-zinc-500">· {target.endpointCount} EP</span>
-                    </div>
-                  {:else if target.kind === 'missing_service'}
-                    <div class="flex items-center gap-2">
-                      <StatusDot status="danger" />
-                      <span class="font-mono text-[12px] text-red-300">{target.serviceName}</span>
-                      <StatusBadge variant="fault">MISSING</StatusBadge>
-                    </div>
-                  {:else if target.kind === 'custom_endpoints'}
-                    <div class="flex items-center gap-2">
-                      <StatusDot status="idle" />
-                      <span class="font-mono text-[12px] uppercase tracking-command text-zinc-300">
-                        {$_('routes.targetTypes.customEndpoints')}
-                      </span>
-                      <span class="font-mono text-[10px] uppercase tracking-command text-zinc-500">
-                        · {route.endpoints?.length ?? 0} EP
-                      </span>
-                    </div>
+                <td class="py-3 px-4 align-middle" data-testid="target-cell">
+                  {#if route.endpoints?.length || route.service_references?.length}
+                    {@render targetPreview(route)}
                   {:else if target.kind === 'direct_response'}
                     <div class="flex items-center gap-2">
                       <StatusDot status="accent" />
@@ -542,12 +562,13 @@
                 </td>
 
                 <!-- Features -->
-                <td class="py-3 px-4" data-testid="feature-cell">
+                <td class="py-3 px-4 align-middle" data-testid="feature-cell">
                   {#if badges.length > 0}
-                    <div class="flex flex-wrap gap-1 max-w-xs">
+                    <div class="flex flex-wrap gap-1">
                       {#each badges as badge}
                         <FeatureBadge
                           {badge}
+                          className="shrink-0 whitespace-nowrap"
                           on:click={() => gotoFeature(route.path, badge.section)}
                         />
                       {/each}
@@ -558,14 +579,14 @@
                 </td>
 
                 <!-- Health -->
-                <td class="py-3 px-4" data-testid="health-cell">
+                <td class="py-3 px-4 align-middle whitespace-nowrap" data-testid="health-cell">
                   {#if target.kind === 'direct_response'}
-                    <div class="flex items-center gap-2">
+                    <div class="inline-flex items-center gap-2 whitespace-nowrap">
                       <StatusDot status="idle" />
                       <span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">N/A</span>
                     </div>
                   {:else}
-                    <div class="flex items-center gap-2">
+                    <div class="inline-flex items-center gap-2 whitespace-nowrap">
                       <StatusDot status={healthDotStatus[healthAgg.state]} />
                       <span class="font-mono text-[11px] uppercase tracking-command {healthTextClass[healthAgg.state]}">
                         {healthLabel(healthAgg.state)}
@@ -580,9 +601,9 @@
                 </td>
 
                 <!-- Actions -->
-                <td class="py-3 px-4 last:pr-6 text-right">
+                <td class="py-3 px-4 last:pr-6 text-right align-middle whitespace-nowrap">
                   <div
-                    class="inline-flex gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity"
+                    class="inline-flex flex-nowrap gap-1"
                     data-testid="action-controls"
                   >
                     <IconButton
@@ -632,7 +653,7 @@
       </div>
 
       <!-- ===== Mobile cards ============================ -->
-      <div class="md:hidden divide-y divide-carbon-600" data-testid="route-rules-list">
+      <div class="xl:hidden divide-y divide-carbon-600" data-testid="route-rules-list">
         {#each filteredRoutes as route}
           {@const target = getRouteTargetSummary(route, services)}
           {@const badges = getRouteFeatureBadges(route)}
@@ -640,14 +661,15 @@
           <div class="px-4 py-3 space-y-3" data-testid="route-row">
             <div class="flex items-start justify-between gap-3">
               <button
-                class="inline-flex items-center gap-1.5 font-mono text-[12px] text-nexus-300 hover:text-nexus-200 hover:underline tracking-tight"
+                class="inline-flex min-w-0 flex-1 items-center gap-1.5 font-mono text-[12px] text-nexus-300 hover:text-nexus-200 hover:underline tracking-tight"
                 onclick={() => push(`/routes/edit/${encodeURIComponent(route.path)}`)}
+                title={route.path}
                 data-testid="route-path-link"
               >
-                <span class="nx-caret-left"></span>
-                <span class="truncate max-w-[200px]">{route.path}</span>
+                <span class="nx-caret-left shrink-0"></span>
+                <span class="truncate">{route.path}</span>
               </button>
-              <div class="inline-flex gap-1" data-testid="action-controls">
+              <div class="inline-flex shrink-0 gap-1" data-testid="action-controls">
                 <IconButton size="sm" title={$_('common.edit')}  on:click={() => push(`/routes/edit/${encodeURIComponent(route.path)}`)}>
                   <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
                 </IconButton>
@@ -660,23 +682,19 @@
               </div>
             </div>
 
-            <div class="grid grid-cols-2 gap-3 text-[11px]">
-              <div data-testid="target-cell">
+            <div class="grid min-w-0 grid-cols-1 gap-2 text-[11px]">
+              <div class="min-w-0" data-testid="target-cell">
                 <span class="nx-label block mb-1">// {$_('routes.tableHeaders.target')}</span>
-                {#if target.kind === 'service'}
-                  <div class="flex items-center gap-1.5"><StatusDot status="ok" /><span class="font-mono text-zinc-200">{target.serviceName}</span></div>
-                {:else if target.kind === 'missing_service'}
-                  <div class="flex items-center gap-1.5"><StatusDot status="danger" /><span class="font-mono text-red-300">{target.serviceName} · MISSING</span></div>
-                {:else if target.kind === 'custom_endpoints'}
-                  <div class="flex items-center gap-1.5"><StatusDot status="idle" /><span class="font-mono uppercase tracking-command text-zinc-300">{$_('routes.targetTypes.customEndpoints')}</span></div>
+                {#if route.endpoints?.length || route.service_references?.length}
+                  {@render targetPreview(route)}
                 {:else if target.kind === 'direct_response'}
                   <div class="flex items-center gap-1.5"><StatusDot status="accent" /><span class="font-mono uppercase tracking-command text-nexus-300">{$_('routes.targetTypes.directResponse')}</span></div>
                 {:else}
                   <span class="font-mono text-zinc-600">—</span>
                 {/if}
               </div>
-              <div data-testid="health-cell">
-                <span class="nx-label block mb-1">// {$_('routes.tableHeaders.health')}</span>
+              <div class="flex items-center justify-between gap-2 whitespace-nowrap" data-testid="health-cell">
+                <span class="nx-label">// {$_('routes.tableHeaders.health')}</span>
                 {#if target.kind === 'direct_response'}
                   <div class="flex items-center gap-1.5"><StatusDot status="idle" /><span class="font-mono uppercase tracking-command text-zinc-500">N/A</span></div>
                 {:else}
@@ -695,6 +713,7 @@
                   {#each badges as badge}
                     <FeatureBadge
                       {badge}
+                      className="shrink-0 whitespace-nowrap"
                       on:click={() => gotoFeature(route.path, badge.section)}
                     />
                   {/each}

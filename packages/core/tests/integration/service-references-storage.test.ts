@@ -162,6 +162,33 @@ describe('service reference SQLite migration',()=>{
     expect(db.query<{count:number},[]>('SELECT count(*) AS count FROM configuration_serving_snapshots').get()!.count).toBe(2);
   }, {timeout:30_000});
 
+  test('round-trips a Route that owns both upstreams and service references across reopen',async()=>{
+    const root=mkdtempSync(join(tmpdir(),'bungee-mixed-route-'));roots.push(root);
+    const path=join(root,'bungee.db');
+    const aggregate=parseNormalizeCompileAggregate({plugin_activations:[],logical_configuration:{
+      services:[{id:id(1),position:0,name:'leaf',endpoints:[{id:id(2),position:0,target:'https://example.com'}],plugins:[]}],
+      routes:[{id:id(3),position:0,path:'/mixed',
+        service_references:[{id:id(4),position:3,service_id:id(1),weight:100,priority:1,is_disabled:false}],
+        endpoints:[{id:id(5),position:0,target:'https://direct.example'}],plugins:[]}],
+      plugins:[]}});
+    expect(aggregate.ok).toBe(true);if(!aggregate.ok)return;
+    const repository=await AsyncConfigRepository.open(path);
+    try{
+      const committed=await repository.commit({mutation_id:id(20),expected_revision:1,kind:'config',created_at:1,target_worker_slots:[],aggregate:aggregate.value});
+      expect(committed.kind).toBe('committed');
+      const route=repository.getSnapshot().aggregate.logical_configuration.routes[0]!;
+      expect(route.service_references?.[0]?.service_id).toBe(id(1));
+      expect(route.endpoints?.[0]?.target).toBe('https://direct.example');
+    }finally{await repository.close();}
+    const reopened=await AsyncConfigRepository.open(path);
+    try{
+      const snapshot=reopened.getSnapshot();
+      const route=snapshot.aggregate.logical_configuration.routes[0]!;
+      expect(route.service_references?.[0]?.service_id).toBe(id(1));
+      expect(route.endpoints?.[0]?.target).toBe('https://direct.example');
+      expect(snapshot.content_hash).toBe(hashConfigurationContent(aggregate.value));
+    }finally{await reopened.close();}
+  },{timeout:30_000});
   test('preserves hash across JSON export/import and enforces CAS after nested references are materialized',()=>{
     const {db}=fixture();migrateConfigurationDatabase(db);const before=readRepositorySnapshot(db);
     const parsed=parseNormalizeCompileAggregate({...before.aggregate,logical_configuration:{...before.aggregate.logical_configuration,

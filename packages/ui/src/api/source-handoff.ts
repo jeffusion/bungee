@@ -119,7 +119,7 @@ export async function prepareRouteSourceHandoff(
     || (handoff.mode === 'new' && route._uid)) {
     throw new RouteSourceHandoffError('route_changed');
   }
-  if ((route.service_references?.length ?? 0) > 0 || route.direct_response?.enabled || route.redirect?.enabled) {
+  if (route.direct_response?.enabled || route.redirect?.enabled) {
     throw new RouteSourceHandoffError('unsupported_target');
   }
   let availableSources: Awaited<ReturnType<typeof listUpstreamSources>>;
@@ -156,6 +156,7 @@ export async function prepareRouteSourceHandoff(
   const first = endpoints[0];
   const reuse = handoff.mode === 'new' && endpoints.length === 1 && !first.target && !first.managedBy && !first.plugins?.length;
   const endpoint = applySourceDraft(reuse ? first : { target: '', weight: 100, priority: 1 }, source, draft);
+  endpoint._position = reuse ? first._position ?? 0 : Math.max(-1, ...endpoints.map((item, index) => item._position ?? index), ...(route.service_references ?? []).map(reference => reference.position)) + 1;
   const nextEndpoints = reuse ? [endpoint] : [...endpoints, endpoint];
   return { route: { ...route, endpoints: nextEndpoints }, index: nextEndpoints.length - 1, duplicate: false };
 }

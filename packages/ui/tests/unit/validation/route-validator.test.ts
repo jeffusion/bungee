@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, describe, test, expect, mock, spyOn } from 'bun:test';
-import type { Route } from '$api/routes';
+import type { Route, Service } from '$api/routes';
 import { PluginsAPI } from '../../../src/api/plugins';
 import { validateRoute } from '../../../src/validation/route-validator';
 import { clearTransformersCache, validateUpstream } from '../../../src/validation/upstream-validator';
@@ -36,6 +36,22 @@ describe('validateRoute response_rules upstream requirements', () => {
     );
 
     expect(upstreamErrors.length).toBeGreaterThan(0);
+  });
+});
+
+describe('validateRoute mixed targets', () => {
+  const service: Service = { _uid: 'svc', name: 'svc', endpoints: [] };
+  const reference = { id: 'reference', position: 1, service_id: 'svc', weight: 100, priority: 1, is_disabled: false };
+
+  test('accepts upstreams and references on the same route', async () => {
+    expect(await validateRoute({ path: '/mixed', service_references: [reference],
+      endpoints: [{ target: 'https://example.com' }] }, [service])).toEqual([]);
+  });
+
+  test('still validates endpoints owned by a mixed route', async () => {
+    const errors = await validateRoute({ path: '/mixed', service_references: [reference],
+      endpoints: [{ target: 'not-a-url' }] }, [service]);
+    expect(errors.some(({ field }) => field === 'endpoints[0].target')).toBe(true);
   });
 });
 

@@ -2,11 +2,10 @@
   import type { Service } from '$api/routes';
   import { groupTargets, moveTarget, type TargetOwner, type DropDestination } from './upstream-groups';
   import UpstreamPriorityGroup from '../UpstreamPriorityGroup.svelte';
-  import DraggableUpstreamItem from '../DraggableUpstreamItem.svelte';
-  import ServiceReferenceRow from '$components/domain/service/ServiceReferenceRow.svelte';
+  import UpstreamTargetRow from '../UpstreamTargetRow.svelte';
   import { _ } from '$i18n';
-  let { owner = $bindable(), services = [], searchTerm = '', onedit, onremove, onduplicate, ontogglestatus, onupdateweight }: {
-    owner: TargetOwner; services?: Service[]; searchTerm?: string;
+  let { owner = $bindable(), services = [], stateKey = '', searchTerm = '', onedit, onremove, onduplicate, ontogglestatus, onupdateweight }: {
+    owner: TargetOwner; services?: Service[]; stateKey?: string; searchTerm?: string;
     onedit?: (index: number) => void; onremove?: (index: number) => void; onduplicate?: (index: number) => void;
     ontogglestatus?: (index: number) => void; onupdateweight?: (index: number, weight: number | undefined) => void;
   } = $props();
@@ -21,7 +20,6 @@
     if (!payload || typeof payload !== 'object' || !('key' in payload) || typeof payload.key !== 'string') return;
     const next = moveTarget(owner, payload.key, destination);
     if (next === owner) return;
-    // Route service mode must keep endpoints absent for mutually exclusive target validation.
     if (owner.endpoints !== undefined) owner.endpoints = next.endpoints;
     if (owner.service_references !== undefined) owner.service_references = next.service_references;
   }
@@ -34,21 +32,18 @@
     {#if spacer === index}<span class="font-mono text-[11px] font-bold uppercase tracking-command text-nexus-300">{$_('upstream.insertNewPriority', { values: { priority: index + 1 } })}</span>{/if}
   </div>
 {/snippet}
-<div class="flex flex-col gap-4 p-3 bg-carbon-950 border border-carbon-600 min-h-[120px]" data-testid="service-mixed-targets">
+<div class="flex min-w-0 flex-col gap-4 min-h-[120px]" data-testid="service-mixed-targets">
   {#if groups.length > 0}{@render boundary(groups[0].groupIndex)}{/if}
   {#each groups as group (group.priority)}
     <UpstreamPriorityGroup {group} ondrop={drop}>
       {#snippet row(target)}
-        {#if target.kind === 'endpoint'}
-          <DraggableUpstreamItem upstream={target.endpoint}
-            onedit={() => onedit?.(target.originalIndex)} onremove={() => onremove?.(target.originalIndex)}
-            onduplicate={() => onduplicate?.(target.originalIndex)} ontogglestatus={() => ontogglestatus?.(target.originalIndex)}
-            onupdateweight={weight => onupdateweight?.(target.originalIndex, weight)} />
-        {:else}
-          <ServiceReferenceRow reference={target.reference} {services}
-            onupdate={next => owner.service_references = owner.service_references?.map(reference => reference.id === next.id ? next : reference)}
-            onremove={() => owner.service_references = owner.service_references?.filter(reference => reference.id !== target.reference.id)} />
-        {/if}
+        <UpstreamTargetRow {target} {services} {stateKey}
+          onedit={() => { if (target.kind === 'endpoint') onedit?.(target.originalIndex); }}
+          onremove={() => { if (target.kind === 'endpoint') onremove?.(target.originalIndex); else owner.service_references = owner.service_references?.filter(reference => reference.id !== target.reference.id); }}
+          onduplicate={() => { if (target.kind === 'endpoint') onduplicate?.(target.originalIndex); }}
+          ontogglestatus={() => { if (target.kind === 'endpoint') ontogglestatus?.(target.originalIndex); }}
+          onupdateweight={weight => { if (target.kind === 'endpoint') onupdateweight?.(target.originalIndex, weight); }}
+          onreferenceupdate={next => owner.service_references = owner.service_references?.map(reference => reference.id === next.id ? next : reference)} />
       {/snippet}
     </UpstreamPriorityGroup>
     {@render boundary(group.groupIndex + 1)}

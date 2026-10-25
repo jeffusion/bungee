@@ -350,9 +350,9 @@
 
     routesData.forEach((route) => {
       const target = getRouteTargetSummary(route, servicesData);
-      if (target.kind === 'service') serviceBound++;
-      else if (target.kind === 'custom_endpoints') customEp++;
-      else if (target.kind === 'direct_response') directResp++;
+      if (target.kind === 'service' || target.kind === 'mixed') serviceBound++;
+      if (target.kind === 'custom_endpoints' || target.kind === 'mixed') customEp++;
+      if (target.kind === 'direct_response') directResp++;
       else if (target.kind === 'missing_service') missing++;
 
       const health = getRouteHealthAggregate(route, servicesData, $runtimeUpstreams);
@@ -639,7 +639,10 @@
               <div class="dashboard-health-row" data-testid={measuring ? undefined : 'route-overview-row'}><StatusDot status={row.target.kind === 'direct_response' ? 'accent' : healthDotStatus[row.healthAgg.state]} />
                 <a href="/#/routes/edit/{encodeURIComponent(row.route.path)}" class="truncate font-mono text-xs font-semibold text-nexus-300 hover:text-nexus-200 hover:underline" title={row.route.path}>{row.route.path}</a>
                 <span class="font-mono text-[10px] tracking-industrial {healthTextClass[row.healthAgg.state]}">{#if row.target.kind === 'direct_response'}{$_('dashboardLayout.directResponse')}{:else}<HealthSummary aggregate={row.healthAgg} showDot={false} />{/if}</span>
-                <div class="col-start-2 col-end-4 flex min-w-0 flex-wrap items-center gap-1.5"><span class="truncate font-mono text-[10px] tracking-industrial text-zinc-400">→ {row.target.kind === 'service' || row.target.kind === 'missing_service' ? row.target.serviceName : row.target.kind === 'direct_response' ? 'DIRECT' : row.target.kind === 'custom_endpoints' ? 'CUSTOM EP' : '—'}</span>
+                <div class="col-start-2 col-end-4 flex min-w-0 flex-wrap items-center gap-1.5">
+                  <span class="truncate font-mono text-[10px] tracking-industrial {row.target.kind === 'missing_service' ? 'text-red-300' : 'text-zinc-400'}" title={row.target.serviceName}>
+                    → {#if row.target.endpointCount}{row.target.endpointCount} EP{/if}{#if row.target.serviceNames?.length}{row.target.endpointCount ? ' + ' : ''}SVC {row.target.serviceName}{:else if row.target.kind === 'direct_response'}{$_('dashboardLayout.directResponse')}{:else if !row.target.endpointCount}—{/if}
+                  </span>
                   {#each row.featureTags as tag}<span class="dashboard-feature-tag border border-carbon-600 bg-carbon-900/60 px-1.5 font-mono text-[9px] leading-4 tracking-command text-zinc-400">{tag}</span>{/each}
                 </div>
               </div>

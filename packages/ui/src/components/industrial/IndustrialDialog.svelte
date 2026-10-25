@@ -13,6 +13,7 @@
     body: Snippet; footer?: Snippet; returnFocus?: HTMLElement | null;
   } = $props();
   let opener: HTMLElement | null = null;
+  let content = $state<HTMLElement>();
   // Programmatic openers do not register a Dialog.Trigger in Bits UI 0.22.
   // Supply its supported focus destination; the primitive still owns focus handling.
   $effect.pre(() => { if (open) opener = document.activeElement instanceof HTMLElement ? document.activeElement : null; });
@@ -22,9 +23,9 @@
   }
 </script>
 
-<Dialog.Root bind:open closeOnEscape={!busy} closeOnOutsideClick={!busy} closeFocus={() => returnFocus ?? opener}
+<Dialog.Root bind:open closeOnEscape={!busy} closeOnOutsideClick={!busy} openFocus={() => content} closeFocus={() => returnFocus ?? opener}
   onOutsideClick={(event) => { if (busy) event.preventDefault(); }} {onOpenChange}>
-  <Dialog.Content onClosed={closed} class="nx-panel-raised nx-bracketed flex max-h-[calc(100dvh-2rem)] flex-col gap-0 rounded-none border-carbon-600 bg-carbon-800 p-0 shadow-industrial overflow-visible"
+  <Dialog.Content bind:el={content} onClosed={closed} class="nx-panel-raised nx-bracketed flex max-h-[calc(100dvh-2rem)] flex-col gap-0 rounded-none border-carbon-600 bg-carbon-800 p-0 shadow-industrial overflow-visible"
     style={`width: min(${width}, calc(100vw - 2rem)); max-width: calc(100vw - 2rem)`}
     closeDisabled={busy} {closeLabel} closeClass="right-4 top-3 inline-flex h-7 w-7 items-center justify-center border-2 border-carbon-500 bg-transparent text-zinc-400 opacity-100 !ring-0 !ring-offset-0 ![box-shadow:none] !outline-0 focus:!outline-0 hover:border-nexus-500 hover:text-nexus-300 focus:border-nexus-500 focus:text-nexus-300 focus:bg-nexus-500/10">
     <CornerBrackets />

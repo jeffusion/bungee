@@ -25,7 +25,7 @@
   import { _ } from '$i18n';
   import { isLoading } from 'svelte-i18n';
   import { v4 as uuidv4 } from 'uuid';
-import { isModifierPressed } from '$utils/platform';
+import { isEditorShortcutBlocked, isModifierPressed } from '$utils/platform';
 import { LoadingIndicator, PanelCard, StatusBadge, StatusDot } from '$components/industrial';
 import { Input } from '$components/ui/input';
 import { Textarea } from '$components/ui/textarea';
@@ -37,6 +37,8 @@ import PluginEditor from '$components/domain/plugin/PluginEditor.svelte';
   let isEditMode = $state(false);
   let originalName = $state('');
   let loading = $state(true);
+  let breadcrumbHeight = $state(0);
+  let actionsHeight = $state(0);
   let upstreamSection: UpstreamsSection | undefined = $state();
   const lifetime = new AbortController();
   let saving = $state(false);
@@ -94,7 +96,7 @@ let service = $state<Service>({
   }
 
   function handleKeydown(event: KeyboardEvent) {
-    if (event.defaultPrevented || (event.target as HTMLElement | null)?.closest('[role="dialog"]')) return;
+    if (isEditorShortcutBlocked(event)) return;
     if ((event.metaKey || event.ctrlKey) && event.key === 's') {
       event.preventDefault();
       if (isValid && !saving) handleSave();
@@ -342,23 +344,23 @@ let service = $state<Service>({
   ]));
 </script>
 
-<div class="min-h-screen flex flex-col">
+<div class="min-h-0 flex-1 flex flex-col" style:--editor-breadcrumb-height={`${breadcrumbHeight}px`} style:--editor-actions-height={`${actionsHeight}px`}>
   <!-- ===== Breadcrumb header ======================================= -->
-  <div class="border-b border-carbon-600 bg-carbon-900/70 backdrop-blur sticky top-16 z-30">
+  <div class="border-b border-carbon-600 bg-carbon-900/70 backdrop-blur sticky top-[var(--app-header-height)] z-30" bind:offsetHeight={breadcrumbHeight}>
     <div class="nx-page py-3">
-      <nav class="flex items-center gap-2 font-mono text-[11px] uppercase tracking-command">
-        <button type="button" class="text-zinc-500 hover:text-nexus-300 transition-colors" onclick={() => (window.location.hash = '/')}>
+      <nav class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px] uppercase tracking-command sm:flex-nowrap">
+        <button type="button" class="hidden shrink-0 text-zinc-500 hover:text-nexus-300 transition-colors sm:inline-flex" onclick={() => (window.location.hash = '/')}>
           {$_('breadcrumb.home')}
         </button>
-        <span class="text-zinc-700">/</span>
-        <button type="button" class="text-zinc-500 hover:text-nexus-300 transition-colors" onclick={() => (window.location.hash = '/services')}>
+        <span class="hidden text-zinc-700 sm:inline">/</span>
+        <button type="button" class="shrink-0 text-zinc-500 hover:text-nexus-300 transition-colors" onclick={() => (window.location.hash = '/services')}>
           {$_('breadcrumb.services')}
         </button>
         <span class="text-zinc-700">/</span>
-        <span class="text-nexus-300 flex items-center gap-2">
-          <span>{isEditMode ? $_('breadcrumb.editService') : $_('breadcrumb.newService')}</span>
+        <span class="contents text-nexus-300 sm:flex sm:min-w-0 sm:items-center sm:gap-2">
+          <span class="shrink-0">{isEditMode ? $_('breadcrumb.editService') : $_('breadcrumb.newService')}</span>
           {#if isEditMode}
-            <code class="px-1.5 py-0.5 border border-carbon-500 bg-carbon-900 text-zinc-300 normal-case">{originalName}</code>
+            <code class="w-full min-w-0 select-all break-all whitespace-normal px-1.5 py-0.5 border border-carbon-500 bg-carbon-900 text-zinc-300 normal-case sm:w-auto sm:truncate" title={originalName}>{originalName}</code>
           {/if}
         </span>
       </nav>
@@ -368,7 +370,7 @@ let service = $state<Service>({
   {#if loading}
     <LoadingIndicator label="LOADING SERVICE" class="flex-1" height="none" />
   {:else}
-    <div class="nx-page flex flex-col lg:flex-row gap-4 py-4 sm:py-6">
+    <div class="nx-page flex flex-col lg:flex-row gap-4 pt-4 sm:pt-6 pb-[calc(var(--editor-actions-height)+1rem)] sm:pb-[calc(var(--editor-actions-height)+1.5rem)]">
       <!-- ===== Side nav ============================================== -->
       <EditorNavigation
         items={navItems}
@@ -384,7 +386,7 @@ let service = $state<Service>({
       />
 
       <!-- ===== Content panel ======================================= -->
-      <section class="flex-1 min-w-0 space-y-4 pb-16">
+      <section class="flex-1 min-w-0 space-y-4">
         {#if conflictMessage}
           <div role="alert" data-testid="service-edit-conflict">
             <PanelCard title="服务保存冲突" stripe="amber">
@@ -581,7 +583,7 @@ let service = $state<Service>({
   {/if}
 
   <!-- ===== Bottom action bar ===================================== -->
-  <div class="fixed bottom-0 left-0 right-0 bg-carbon-950 border-t border-carbon-600 shadow-industrial-lg z-40">
+  <div class="fixed bottom-0 left-0 right-0 bg-carbon-950 border-t border-carbon-600 shadow-industrial-lg z-40" bind:offsetHeight={actionsHeight}>
     <div class="nx-page py-3">
       <div class="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
         <div class="flex items-center gap-4 min-w-0">
@@ -615,7 +617,7 @@ let service = $state<Service>({
           {/if}
         </div>
 
-        <div class="flex items-center gap-2">
+        <div class="flex items-center justify-end gap-2">
           <Button variant="ghost" onclick={handleCancel} disabled={saving}>
             {$_('common.cancel')}
           </Button>

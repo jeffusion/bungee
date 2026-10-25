@@ -8,7 +8,7 @@ for (const mixed of [false, true]) test(`filtered endpoint actions edit only the
     const output = page.getByTestId('endpoints');
     const before = JSON.parse((await output.textContent())!);
     const referencesBefore = await page.getByTestId('service-references').textContent();
-    const search = page.getByRole('textbox', { name: 'Search endpoint address or description' });
+    const search = page.getByRole('textbox', { name: 'Search target address, description or service' });
     await search.fill(' ALPHA ');
     await expect(page.getByRole('listitem')).toHaveCount(1);
     const row = page.getByRole('listitem');
@@ -39,7 +39,7 @@ for (const mixed of [false, true]) test(`filtered endpoint actions edit only the
 
 test('filtered drag targets use full-list group boundaries and keep hidden group members', async () => {
   for (const action of ['merge', 'before', 'after']) await withPage('scenario=upstreams', async page => {
-    await page.getByRole('textbox', { name: 'Search endpoint address or description' }).fill('backup');
+    await page.getByRole('textbox', { name: 'Search target address, description or service' }).fill('backup');
     const transfer = await page.evaluateHandle(() => {
       const data = new DataTransfer();
       data.setData('application/json', JSON.stringify({ key: 'endpoint:visible' }));
@@ -79,7 +79,7 @@ test('mixed rows reorder by actual drop position and move between priority group
 
 test('filtered mixed drops preserve hidden targets and use stable identity', async () => {
   await withPage('scenario=upstreams&mixed=1', async page => {
-    await page.getByRole('textbox', {name: 'Search endpoint address or description'}).fill(' CHILD-SERVICE ');
+    await page.getByRole('textbox', {name: 'Search target address, description or service'}).fill(' CHILD-SERVICE ');
     await expect(page.getByRole('listitem')).toHaveCount(1);
     const transfer = await page.evaluateHandle(() => {
       const data = new DataTransfer(); data.setData('application/json', JSON.stringify({key: 'endpoint:visible'})); return data;
@@ -93,7 +93,7 @@ test('filtered mixed drops preserve hidden targets and use stable identity', asy
       await page.getByRole('listitem').getByRole('spinbutton').fill('55');
       expect(JSON.parse((await page.getByTestId('endpoints').textContent())!)).toEqual(endpoints);
       expect(JSON.parse((await page.getByTestId('service-references').textContent())!)[0].weight).toBe(55);
-      await page.getByRole('textbox', {name: 'Search endpoint address or description'}).fill('');
+      await page.getByRole('textbox', {name: 'Search target address, description or service'}).fill('');
       await expect(page.getByRole('listitem')).toHaveCount(4);
     } finally { await transfer.dispose(); }
   });

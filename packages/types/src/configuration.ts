@@ -57,24 +57,14 @@ export interface ConfigurationService extends ConfigurationServicePolicy {
 
 type ConfigurationRoutePolicy = Omit<RouteConfig, 'path' | 'service_references' | 'endpoints' | 'plugins'>;
 
-interface ConfigurationRouteBase extends ConfigurationRoutePolicy {
+export interface ConfigurationRoute extends ConfigurationRoutePolicy {
   readonly id: ConfigurationId;
   readonly position: number;
   readonly path: string;
   readonly plugins: readonly PluginBinding[];
+  readonly service_references?: readonly [ServiceReference, ...ServiceReference[]];
+  readonly endpoints?: readonly ConfigurationUpstream[];
 }
-
-export interface ConfigurationServiceRoute extends ConfigurationRouteBase {
-  readonly service_references: readonly [ServiceReference, ...ServiceReference[]];
-  readonly endpoints?: never;
-}
-
-export interface ConfigurationDirectRoute extends ConfigurationRouteBase {
-  readonly service_references?: never;
-  readonly endpoints: readonly ConfigurationUpstream[];
-}
-
-export type ConfigurationRoute = ConfigurationServiceRoute | ConfigurationDirectRoute;
 
 type ConfigurationGlobalPolicy = Omit<AppConfig, 'config_version' | 'plugins' | 'services' | 'routes'>;
 

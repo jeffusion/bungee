@@ -2,7 +2,7 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import { pop, querystring } from 'svelte-spa-router';
   import { sortBy } from 'lodash-es';
-  import { resolveRouteEndpoints, RoutesAPI, RouteStaleError } from '$api/routes';
+  import { RoutesAPI, RouteStaleError } from '$api/routes';
   import { ConfigurationStaleError, ConfigurationOperationTimeoutError } from '$api/config';
   import { consumeRouteSourceHandoff, prepareRouteSourceHandoff, RouteSourceHandoffError, type RouteSourceHandoffErrorCode } from '$api/source-handoff';
   import type { ConfigurationRoute } from '@jeffusion/bungee-types';
@@ -14,6 +14,7 @@
   import EditorNavigation from '$components/shell/EditorNavigation.svelte';
   import BasicInfoSection from '$components/domain/route/sections/BasicInfoSection.svelte';
   import UpstreamTargetSection from '$components/domain/route/sections/UpstreamTargetSection.svelte';
+  import ServiceTargets from '$components/domain/service/ServiceTargets.svelte';
   import ModificationSection from '$components/domain/route/sections/ModificationSection.svelte';
   import RouteBodyPlan from '$components/domain/route/RouteBodyPlan.svelte';
   import CorsSection from '$components/domain/route/sections/CorsSection.svelte';
@@ -25,7 +26,7 @@
   import { isLoading } from 'svelte-i18n';
   import { getPluginText } from '$utils/plugin-i18n';
   import { v4 as uuidv4 } from 'uuid';
-  import { isModifierPressed } from '$utils/platform';
+  import { isEditorShortcutBlocked, isModifierPressed } from '$utils/platform';
   import { DEFAULT_REQUEST_MS } from '$utils/route-timeouts';
   import { BSwitch, LoadingIndicator, PanelCard, StatusBadge, StatusDot } from '$components/industrial';
 
@@ -56,6 +57,8 @@
   let loading = $state(true);
   let saving = $state(false);
   let showTemplates = $state(false);
+  let breadcrumbHeight = $state(0);
+  let actionsHeight = $state(0);
   type RouteEditorSection = 'match' | 'target' | 'forward' | 'processing' | 'policy' | 'response' | 'plugins' | 'review';
   let activeSection = $state<RouteEditorSection>('match');
   let showValidationDetails = $state(false);
@@ -73,13 +76,13 @@
     }
   });
 
-  let route = $state<Route>({
+  let route = $state<Route>(normalizeRoute({
     path: '',
     endpoints: [{ _uid: uuidv4(), target: '', weight: 100, priority: 1 }],
     request: {},
     response: {},
     plugins: [],
-  });
+  }));
   let pendingRestore = $state.raw<{ draft: Route; initialRoute: string } | null>(null);
 
   $effect(() => {
@@ -103,7 +106,6 @@
   });
 
   let services = $state<Service[]>([]);
-  let resolvedEndpoints = $derived(resolveRouteEndpoints(route, services));
 
   let errors = $state<ValidationError[]>([]);
   let weightErrors = $state<ValidationError[]>([]);
@@ -135,7 +137,7 @@
   }
 
   function handleKeydown(event: KeyboardEvent) {
-    if (event.defaultPrevented || (event.target as HTMLElement | null)?.closest('[role="dialog"]')) return;
+    if (isEditorShortcutBlocked(event)) return;
     if ((event.metaKey || event.ctrlKey) && event.key === 's') {
       event.preventDefault();
       if (isValid && !saving && !loading && !reloading && !conflictMessage) void handleSave();
@@ -170,14 +172,12 @@
 
   async function performValidation() {
     try {
-      const endpointsForValidation = route.endpoints && route.endpoints.length > 0 ? route.endpoints : resolvedEndpoints;
       const routeErrors = await validateRoute(route, services);
-      const routeWeightErrors = route.service_references?.length ? [] : validateWeights(endpointsForValidation);
+      const routeWeightErrors = validateWeights([...(route.endpoints ?? []), ...(route.service_references ?? []).map(reference => ({ ...reference, target: reference.service_id }))]);
       errors = routeErrors;
       weightErrors = routeWeightErrors;
       allErrors = [...routeErrors, ...routeWeightErrors];
-      const hasGlobalResponseBypass = route.direct_response?.enabled || route.redirect?.enabled;
-      isValid = allErrors.length === 0 && (hasGlobalResponseBypass || Boolean(route.service_references?.length) || endpointsForValidation.length > 0);
+      isValid = allErrors.every(error => error.level === 'warning');
     } catch (error) {
       console.error('Validation failed:', error);
       isValid = false;
@@ -207,8 +207,8 @@
       const hasDirectResponse = route.direct_response?.enabled || route.redirect?.enabled;
       const sortedRoute = {
         ...route,
-        endpoints: !hasDirectResponse && !route.service_references?.length && route.endpoints && route.endpoints.length > 0
-          ? sortBy(route.endpoints, [(endpoint: any) => endpoint.priority ?? 1])
+        endpoints: !hasDirectResponse && route.endpoints && route.endpoints.length > 0
+          ? sortBy(route.endpoints, [(endpoint: any) => endpoint.priority ?? 1, (endpoint: any) => endpoint._position ?? 0])
           : undefined,
         service_references: hasDirectResponse ? undefined : route.service_references,
       };
@@ -252,8 +252,8 @@
       request: loaded.request || {},
       response: loaded.response || {},
       plugins: loaded.plugins || [],
-      endpoints: loaded.endpoints?.map(u => ({
-        ...u, _uid: u._uid ?? uuidv4(),
+      endpoints: loaded.endpoints?.map((u, index) => ({
+        ...u, _uid: u._uid ?? uuidv4(), _position: u._position ?? index,
         request: u.request || {},
         response: u.response || {},
       })),
@@ -281,7 +281,7 @@
 
   function handleTemplateSelect(event: CustomEvent<Partial<Route>>) {
     const template = event.detail;
-    route = {
+    route = normalizeRoute({
       ...route,
       ...template,
       service_references: template.service_references,
@@ -293,7 +293,7 @@
         request: u.request || {},
         response: u.response || {},
       })) || route.endpoints,
-    };
+    });
     toast.show($_('routeEditor.templateApplied'), 'success');
   }
 
@@ -386,18 +386,9 @@
       id: 'target'     as RouteEditorSection,
       label: $_('routeEditor.builder.target'),
       icon: 'M13 10V3L4 14h7v7l9-11h-7z',
-      // Badge:
-      //  · direct_response / redirect → "—" (no upstream)
-      //  · service-backed             → service count, not service name
-      //  · custom endpoints           → "EP·N" so "Target" + "1" doesn't
-      //                                  read as "Target #1"
       badge: (route.direct_response?.enabled || route.redirect?.enabled)
         ? '—'
-        : route.service_references?.length
-          ? String(route.service_references.length)
-          : route.endpoints?.length
-            ? `EP·${route.endpoints.length}`
-            : '',
+        : [`EP·${route.endpoints?.length ?? 0}`, `SVC·${route.service_references?.length ?? 0}`].join(' '),
     },
     {
       id: 'forward'    as RouteEditorSection,
@@ -439,23 +430,23 @@
   ]));
 </script>
 
-<div class="min-h-screen flex flex-col">
+<div class="min-h-0 flex-1 flex flex-col" style:--editor-breadcrumb-height={`${breadcrumbHeight}px`} style:--editor-actions-height={`${actionsHeight}px`}>
   <!-- ===== Breadcrumb ============================================ -->
-  <div class="border-b border-carbon-600 bg-carbon-900/70 backdrop-blur sticky top-16 z-30">
+  <div class="border-b border-carbon-600 bg-carbon-900/70 backdrop-blur sticky top-[var(--app-header-height)] z-30" bind:offsetHeight={breadcrumbHeight}>
     <div class="nx-page py-3">
-      <nav class="flex items-center gap-2 font-mono text-[11px] uppercase tracking-command">
-        <button type="button" class="text-zinc-500 hover:text-nexus-300 transition-colors" onclick={() => (window.location.hash = '/')}>
+      <nav class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px] uppercase tracking-command sm:flex-nowrap">
+        <button type="button" class="hidden shrink-0 text-zinc-500 hover:text-nexus-300 transition-colors sm:inline-flex" onclick={() => (window.location.hash = '/')}>
           {$_('breadcrumb.home')}
         </button>
-        <span class="text-zinc-700">/</span>
-        <button type="button" class="text-zinc-500 hover:text-nexus-300 transition-colors" onclick={() => (window.location.hash = '/routes')}>
+        <span class="hidden text-zinc-700 sm:inline">/</span>
+        <button type="button" class="shrink-0 text-zinc-500 hover:text-nexus-300 transition-colors" onclick={() => (window.location.hash = '/routes')}>
           {$_('breadcrumb.routes')}
         </button>
         <span class="text-zinc-700">/</span>
-        <span class="text-nexus-300 flex items-center gap-2">
-          <span>{isEditMode ? $_('breadcrumb.editRoute') : $_('breadcrumb.newRoute')}</span>
+        <span class="contents text-nexus-300 sm:flex sm:min-w-0 sm:items-center sm:gap-2">
+          <span class="shrink-0">{isEditMode ? $_('breadcrumb.editRoute') : $_('breadcrumb.newRoute')}</span>
           {#if isEditMode}
-            <code class="px-1.5 py-0.5 border border-carbon-500 bg-carbon-900 text-zinc-300 normal-case">{originalPath}</code>
+            <code class="w-full min-w-0 select-all break-all whitespace-normal px-1.5 py-0.5 border border-carbon-500 bg-carbon-900 text-zinc-300 normal-case sm:w-auto sm:truncate" title={originalPath}>{originalPath}</code>
           {/if}
         </span>
       </nav>
@@ -465,7 +456,7 @@
   {#if loading}
     <LoadingIndicator label="LOADING ROUTE" class="flex-1" height="none" />
   {:else}
-    <div class="nx-page flex flex-col lg:flex-row gap-4 py-4 sm:py-6">
+    <div class="nx-page flex flex-col lg:flex-row gap-4 pt-4 sm:pt-6 pb-[calc(var(--editor-actions-height)+1rem)] sm:pb-[calc(var(--editor-actions-height)+1.5rem)]">
       <!-- ===== Side nav =========================================== -->
       <EditorNavigation
         items={navItems}
@@ -493,7 +484,7 @@
       </EditorNavigation>
 
       <!-- ===== Content panel ===================================== -->
-      <section class="flex-1 min-w-0 space-y-4 pb-16">
+      <section class="flex-1 min-w-0 space-y-4">
         {#if handoffMessage}<div role="status" class="border-l-2 border-nexus-500 bg-carbon-800 px-3 py-2 text-sm text-zinc-200" data-testid="route-handoff-notice">{handoffMessage}</div>{/if}
         {#if handoffError && !$isLoading}<div role="alert" class="border-l-2 border-amber-500 bg-carbon-800 px-3 py-2 text-sm text-amber-300" data-testid="route-handoff-error">{handoffErrorText(handoffError)}</div>{/if}
         {#if conflictMessage}<div role="alert" class="flex flex-wrap items-center gap-3 border-l-2 border-amber-500 bg-carbon-800 px-3 py-2 text-sm text-amber-300" data-testid="route-stale-warning"><span class="flex-1">{conflictMessage}</span><button type="button" class="nx-btn-ghost nx-btn-sm" disabled={reloading} onclick={requestReload}>{handoffText('ui.routeReload')}</button></div>{/if}
@@ -508,7 +499,7 @@
         {:else if activeSection === 'target'}
           <PanelCard
             title={$_('routeEditor.builder.target')}
-            tag={route.service_references?.length ? `SVC=${route.service_references.length}` : `EP=${route.endpoints?.length ?? 0}`}
+            tag={`EP·${route.endpoints?.length ?? 0} SVC·${route.service_references?.length ?? 0}`}
           >
             <div data-testid="route-target-section" data-testid-section="target" class="space-y-4">
               <UpstreamTargetSection
@@ -516,7 +507,6 @@
                 {errors}
                 {weightErrors}
                 bind:services
-                on:navigatetosection={(e) => (activeSection = e.detail.section as RouteEditorSection)}
               />
             </div>
           </PanelCard>
@@ -666,28 +656,7 @@
             </PanelCard>
 
             <PanelCard title={$_('routeEditor.builder.target')} tag="REVIEW">
-              {#if route.service_references?.length}
-                <div>
-                  <span class="nx-label-sm block mb-1">{$_('routeEditor.review.referencedService')}</span>
-                  <div class="space-y-2">{#each route.service_references as reference}<div class="flex flex-wrap items-center justify-between gap-3 font-mono text-[12px] border border-carbon-600 px-3 py-2" class:opacity-50={reference.is_disabled}>
-                    <span class="text-nexus-300">{services.find(service => service._uid === reference.service_id)?.name ?? reference.service_id}</span><span class="text-zinc-400">p:{reference.priority} · w:{reference.weight} · {reference.is_disabled ? 'OFF' : 'ON'}</span>
-                  </div>{/each}</div>
-                </div>
-              {:else if route.endpoints && route.endpoints.length > 0}
-                <div>
-                  <span class="nx-label-sm block mb-2">{$_('routeEditor.review.customEndpoints')} ({route.endpoints.length})</span>
-                  <div class="space-y-1">
-                    {#each route.endpoints as endpoint}
-                      <div class="font-mono text-[11px] border border-carbon-600 bg-carbon-900/60 px-2 py-1 flex justify-between items-center gap-3">
-                        <span class="text-zinc-200 truncate">{endpoint.target}</span>
-                        <span class="text-zinc-500 shrink-0">w:{endpoint.weight ?? 100} · p:{endpoint.priority ?? 1}</span>
-                      </div>
-                    {/each}
-                  </div>
-                </div>
-              {:else}
-                <span class="font-mono text-[11px] uppercase tracking-command text-zinc-500">— {$_('routeEditor.review.noTarget')}</span>
-              {/if}
+              <div class="overflow-x-auto"><ServiceTargets service={route} {services} /></div>
             </PanelCard>
 
             <PanelCard title={$_('routeEditor.builder.response')} tag="REVIEW">
@@ -729,7 +698,7 @@
   {/if}
 
   <!-- ===== Bottom action bar ==================================== -->
-  <div class="fixed bottom-0 left-0 right-0 bg-carbon-950 border-t border-carbon-600 shadow-industrial-lg z-40">
+  <div class="fixed bottom-0 left-0 right-0 bg-carbon-950 border-t border-carbon-600 shadow-industrial-lg z-40" bind:offsetHeight={actionsHeight}>
     <div class="nx-page py-3">
       <div class="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
         <div class="flex items-center gap-4 min-w-0">
@@ -758,7 +727,7 @@
           {/if}
         </div>
 
-        <div class="flex items-center gap-2">
+        <div class="flex items-center justify-end gap-2">
           <button class="nx-btn-ghost" onclick={handleCancel} disabled={saving}>
             {$_('common.cancel')}
           </button>

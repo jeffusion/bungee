@@ -8,9 +8,12 @@
   import { isLoading } from 'svelte-i18n';
   import { v4 as uuidv4 } from 'uuid';
   import { cloneUpstreamDraft, duplicateEditorUpstream, hasInvalidManagedBinding } from '$api/config-adapters';
+  import { Input } from '$components/ui/input';
+  import { Button } from '$components/ui/button';
+  import { IndustrialDialog, PanelCard, SegmentedControl } from '$components/industrial';
 
   let { route = $bindable(), errors = [], weightErrors = [], isService = false, services = [], ownerId }: {
-    route: Pick<Route, 'endpoints' | 'service_references'>; errors?: ValidationError[]; weightErrors?: ValidationError[]; isService?: boolean; services?: Service[]; ownerId?: string;
+    route: Pick<Route, 'endpoints' | 'service_references' | '_uid'>; errors?: ValidationError[]; weightErrors?: ValidationError[]; isService?: boolean; services?: Service[]; ownerId?: string;
   } = $props();
 
   import ServiceReferencePicker from '$components/domain/service/ServiceReferencePicker.svelte';
@@ -23,6 +26,10 @@
   let showUpstreamModal = $state(false);
   let editingUpstreamIndex = $state(-1);
   let editingUpstream: any = $state(null);
+  let dialogKind = $state<'custom' | 'service'>('custom');
+  let selectedServiceId = $state('');
+  const selectedService = $derived(services.find(service => service._uid === selectedServiceId && service._uid !== ownerId && !route.service_references?.some(reference => reference.service_id === service._uid)));
+  const dialogTitle = $derived(!$isLoading ? (editingUpstreamIndex >= 0 ? $_('upstream.title', { values: { index: editingUpstreamIndex + 1 } }) : `${$_('routeEditor.addTarget')} · ${dialogKind === 'custom' ? 'EP' : 'SVC'}`) : '');
 
   let endpoints = $derived(route.endpoints ?? []);
   let editingUpstreamErrors = $derived(!$isLoading && showUpstreamModal && editingUpstream
@@ -30,6 +37,7 @@
   let isEditingUpstreamValid = $derived(showUpstreamModal && editingUpstream && editingUpstreamErrors.length === 0 && !hasInvalidManagedBinding(editingUpstream));
 
   export function openUpstreamModal(index: number = -1) {
+    dialogKind = 'custom';
     editingUpstreamIndex = index;
     if (index >= 0) {
       editingUpstream = cloneUpstreamDraft(route.endpoints![index]);
@@ -45,6 +53,22 @@
       };
     }
     showUpstreamModal = true;
+  }
+
+  function openServicePicker() {
+    dialogKind = 'service';
+    editingUpstreamIndex = -1;
+    editingUpstream = null;
+    selectedServiceId = '';
+    showUpstreamModal = true;
+  }
+
+  function addService() {
+    if (!selectedService?._uid) return;
+    route.service_references = [...(route.service_references ?? []), {
+      id: uuidv4(), service_id: selectedService._uid, position: nextPosition(), priority: 1, weight: 100, is_disabled: false,
+    }];
+    closeUpstreamModal();
   }
 
   function closeUpstreamModal() {
@@ -65,10 +89,6 @@
   }
 
   function removeUpstream(index: number) {
-    if ((route.endpoints?.length ?? 0) + (route.service_references?.length ?? 0) <= 1) {
-      alert($_('routeEditor.upstreamRequired'));
-      return;
-    }
     route.endpoints = (route.endpoints ?? []).filter((_, i) => i !== index);
   }
 
@@ -114,10 +134,6 @@
     route.endpoints = route.endpoints; // 触发 Svelte 响应式更新
   }
 
-  import { Input } from '$components/ui/input';
-  import { Button } from '$components/ui/button';
-  import { PanelCard } from '$components/industrial';
-
   // Component Event Proxies
   function onEdit(originalIndex: number) { openUpstreamModal(originalIndex); }
   function onRemove(originalIndex: number) { removeUpstream(originalIndex); }
@@ -130,36 +146,33 @@
   }
 </script>
 
-<PanelCard
-  title={isService ? $_('serviceEditor.builder.endpoints') : $_('routeEditor.customEndpoints')}
-  tag={isService ? `EP·${endpoints.length} SVC·${route.service_references?.length ?? 0}` : ''}
-  class={isService ? '[&>.nx-panel-head]:flex-wrap [&>.nx-panel-head]:gap-y-2 [&>.nx-panel-head>div:first-child]:basis-full sm:[&>.nx-panel-head>div:first-child]:basis-auto [&>.nx-panel-head>div:last-child]:w-full sm:[&>.nx-panel-head>div:last-child]:w-auto [&>.nx-panel-head>div:last-child]:min-w-0' : ''}
->
-  {#snippet actions()}
-    <div class={isService ? 'flex flex-wrap gap-2 items-center w-full min-w-0' : 'flex gap-2 items-center'}>
+{#snippet toolbar()}
+  <div class="flex w-full min-w-0 flex-wrap items-center gap-3">
+    <div class="ml-auto flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto">
       <Input
         type="text"
         placeholder={$_('common.search')}
-        aria-label={$_('serviceEditor.endpointSearch')}
+        aria-label={$_('routeEditor.targetSearch')}
         bind:value={upstreamSearchTerm}
-        class={isService ? 'h-[28px] text-[12px] w-full sm:w-40 min-w-0' : 'h-[28px] text-[12px] w-40'}
+        class="h-7 flex-1 min-w-0 text-xs sm:w-40"
       />
       <Button
         variant="default"
         size="sm"
         class="shrink-0 whitespace-nowrap h-[28px]"
-        onclick={() => openUpstreamModal(-1)}
+        onclick={() => openUpstreamModal()}
         data-testid="route-upstream-add-button"
       >
         <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.4">
           <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
         </svg>
-        {$_('routeEditor.addUpstream')}
+        {$_('routeEditor.addTarget')}
       </Button>
-      {#if isService}<ServiceReferencePicker bind:owner={route} {services} {ownerId} />{/if}
     </div>
-  {/snippet}
+  </div>
+{/snippet}
 
+{#snippet contents()}
   {#if errors.some(e => e.field === 'endpoints')}
     <div class="border-l-2 border-l-red-500 bg-red-500/5 px-3 py-2">
       <span class="font-mono text-[11px] uppercase tracking-command text-red-300">
@@ -168,7 +181,7 @@
     </div>
   {/if}
 
-  <UpstreamTargetList bind:owner={route} {services} searchTerm={upstreamSearchTerm}
+  <UpstreamTargetList bind:owner={route} {services} stateKey={ownerId ?? route._uid ?? ''} searchTerm={upstreamSearchTerm}
     onedit={onEdit} onremove={onRemove} onduplicate={onDuplicate} ontogglestatus={onToggleStatus} onupdateweight={onUpdateWeight} />
   {#each errors.filter(error => error.field === 'service_references') as error}
     <p role="alert" class="text-red-300 text-sm">{error.message}</p>
@@ -181,36 +194,28 @@
       </span>
     </div>
   {/if}
-</PanelCard>
+{/snippet}
 
-<!-- Upstream Edit Modal -->
-{#if showUpstreamModal && editingUpstream}
-  <div
-    class="fixed inset-0 z-[45] flex items-center justify-center p-4 bg-carbon-950/80"
-    role="dialog"
-    aria-modal="true"
-    tabindex="-1"
-    onclick={(e) => { if (e.target === e.currentTarget) closeUpstreamModal(); }}
-    onkeydown={(e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeUpstreamModal(); } }}
-  >
-    <div class="nx-panel-raised nx-bracketed relative w-11/12 max-w-3xl flex flex-col max-h-[90vh]">
-      <span class="nx-corner nx-corner-tl" aria-hidden="true"></span>
-      <span class="nx-corner nx-corner-tr" aria-hidden="true"></span>
-      <span class="nx-corner nx-corner-bl" aria-hidden="true"></span>
-      <span class="nx-corner nx-corner-br" aria-hidden="true"></span>
+{#if isService}
+  <PanelCard title={$_('serviceEditor.builder.endpoints')} tag={`EP·${endpoints.length} SVC·${route.service_references?.length ?? 0}`}
+    class="[&>.nx-panel-head]:flex-wrap [&>.nx-panel-head]:gap-y-2 [&>.nx-panel-head>div:first-child]:basis-full sm:[&>.nx-panel-head>div:first-child]:basis-auto [&>.nx-panel-head>div:last-child]:w-full sm:[&>.nx-panel-head>div:last-child]:w-auto [&>.nx-panel-head>div:last-child]:min-w-0">
+    {#snippet actions()}{@render toolbar()}{/snippet}
+    {@render contents()}
+  </PanelCard>
+{:else}
+  <div class="space-y-4">{@render toolbar()}{@render contents()}</div>
+{/if}
 
-      <header class="nx-panel-head">
-        <div class="nx-panel-head-title">
-          <span class="nx-stripe" aria-hidden="true"></span>
-          <span>
-            {editingUpstreamIndex >= 0
-              ? $_('upstream.title', { values: { index: editingUpstreamIndex + 1 } })
-              : $_('routeEditor.addUpstream')}
-          </span>
-        </div>
-      </header>
-
-      <div class="flex-1 overflow-y-auto p-4">
+<IndustrialDialog bind:open={showUpstreamModal} title={dialogTitle} description="" closeLabel={$_('common.close')} width="48rem" scrollBody>
+  {#snippet body()}
+    {#if editingUpstreamIndex < 0}
+      <SegmentedControl value={dialogKind} ariaLabel={$_('routeEditor.targetType')}
+        options={[{ value: 'custom', label: `EP ${$_('services.endpointLabel')}` }, { value: 'service', label: `SVC ${$_('services.serviceLabel')}` }]}
+        onchange={kind => kind === 'service' ? openServicePicker() : openUpstreamModal()} />
+    {/if}
+    {#if dialogKind === 'service'}
+      <ServiceReferencePicker bind:value={selectedServiceId} {services} {ownerId} excludedIds={(route.service_references ?? []).map(reference => reference.service_id)} />
+    {:else if editingUpstream}
         <UpstreamForm
           bind:upstream={editingUpstream}
           index={editingUpstreamIndex}
@@ -219,14 +224,14 @@
           onDuplicate={() => {}}
           {isService}
         />
-      </div>
-
-      <footer class="border-t border-carbon-600 px-4 py-3 flex justify-end gap-2 bg-carbon-900/60">
-        <Button variant="ghost" onclick={closeUpstreamModal}>{$_('common.cancel')}</Button>
-        <Button variant="default" onclick={saveUpstream} disabled={!isEditingUpstreamValid} data-testid="upstream-modal-save">
-          {$_('common.save')}
-        </Button>
-      </footer>
-    </div>
-  </div>
-{/if}
+    {/if}
+  {/snippet}
+  {#snippet footer()}
+    <Button variant="ghost" onclick={closeUpstreamModal}>{$_('common.cancel')}</Button>
+    <Button variant="default" onclick={dialogKind === 'service' ? addService : saveUpstream}
+      disabled={dialogKind === 'service' ? !selectedService : !isEditingUpstreamValid}
+      data-testid={dialogKind === 'service' ? 'service-reference-confirm' : 'upstream-modal-save'}>
+      {editingUpstreamIndex >= 0 ? $_('common.save') : $_('common.add')}
+    </Button>
+  {/snippet}
+</IndustrialDialog>

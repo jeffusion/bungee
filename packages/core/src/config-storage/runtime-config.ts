@@ -110,22 +110,20 @@ function compileRoute(
     ...targetAndPolicies
   } = route;
   const plugins = compilePlugins(bindings, activeNames);
-  if (targetAndPolicies.service_references !== undefined) {
-    for (const reference of targetAndPolicies.service_references) {
-      if (!servicesById.has(reference.service_id)) throw new RuntimeConfigCompileError('unknown_service',
-        `route ${path} references unknown service ${reference.service_id}`);
-    }
-    return { ...targetAndPolicies, service_references: [...targetAndPolicies.service_references].sort(comparePosition),
-      id, path, ...(plugins === undefined ? {} : { plugins }) };
+  const { endpoints, service_references, ...policies } = targetAndPolicies;
+  for (const reference of service_references ?? []) {
+    if (!servicesById.has(reference.service_id)) throw new RuntimeConfigCompileError('unknown_service',
+      `route ${path} references unknown service ${reference.service_id}`);
   }
-  const { endpoints, ...policies } = targetAndPolicies;
   return {
     ...policies,
     id,
     path,
-    endpoints: [...endpoints]
-      .sort(comparePosition)
-      .map((endpoint) => compileEndpoint(endpoint, activeNames)),
+    ...(service_references === undefined ? {}
+      : { service_references: [...service_references].sort(comparePosition) }),
+    ...(endpoints === undefined ? {} : {
+      endpoints: [...endpoints].sort(comparePosition).map((endpoint) => compileEndpoint(endpoint, activeNames)),
+    }),
     ...(plugins === undefined ? {} : { plugins }),
   };
 }

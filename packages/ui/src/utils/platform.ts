@@ -84,3 +84,10 @@ export function formatShortcut(key: string, useModifier: boolean = true): string
 export function isModifierPressed(event: KeyboardEvent): boolean {
   return isMac() ? event.metaKey : event.ctrlKey;
 }
+
+export function isEditorShortcutBlocked(event: KeyboardEvent): boolean {
+  return event.defaultPrevented
+    || event.composedPath().some(node => node instanceof Element && node.matches('[role="dialog"], [role="alertdialog"]'))
+    // Programmatic modals can open before their focus transfer completes.
+    || document.querySelector('[aria-modal="true"]') !== null;
+}

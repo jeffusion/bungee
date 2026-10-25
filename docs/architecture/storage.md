@@ -87,7 +87,7 @@ user-auth 的状态查询只取得 `get/list`，空命名空间返回未初始�
 
 配置库迁移 4（`management_protection`）添加强制认证 guard，记录 required、selected provider 与 generation；它不进入普通配置导入导出。插件状态库继续使用现有表，插件业务记录格式独立于数据库迁移编号。
 
-配置库迁移 5（`service_references`）将 Route 的单一 Service 关联转换为独立关系行，并移除 `routes.service_id` 列。关系表区分 Route 和 Service 所有者，目标使用稳定 Service ID；引用具有独立 ID、position、weight、priority 和 disabled 状态。Service 的 endpoints 与引用共用当前层的 position 分组；Route 的非空引用集合与直接 endpoints 互斥。
+配置库迁移 5（`service_references`）将 Route 的单一 Service 关联转换为独立关系行，并移除 `routes.service_id` 列。关系表区分 Route 和 Service 所有者，目标使用稳定 Service ID；引用具有独立 ID、position、weight、priority 和 disabled 状态。Route 和 Service 均可同时拥有 endpoints 与服务引用，两类目标共用所属对象当前层的 position 分组；关系读取、配置校验与运行时编译均保留完整的混合目标集合。
 
 已有库首次由配置 Worker 打开时自动升级，包括 Docker 和 CLI 升级后的首次启动。转换改变配置内容时，在结构迁移的同一事务内通过既有 CAS 提交机制创建新 revision 与匹配的 operation/request identity；旧 revision、hash 和 serving snapshot 保持不可变。新库及内容未改变的库不产生转换 revision，重复打开不再次产生 revision。启动审计校验历史快照的原始规范化字节、hash 和 revision 关系；历史格式只能审计，不能作为当前运行配置加载。
 

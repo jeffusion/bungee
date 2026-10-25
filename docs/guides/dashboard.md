@@ -36,6 +36,27 @@ Management surface:
 - Plugin management and plugin API integration
 - Log query/stream/export and cleanup operations
 
+### Route and Service targets
+
+Open **Gateway → Routes** and edit **Target configuration**. Use **Add target** to
+choose an endpoint (EP) or an existing Service (SVC). Both kinds can coexist in
+the same list; choosing a kind for the next addition does not replace existing
+targets. Confirm the dialog to add the target to the draft, or cancel without
+adding it. Save the Route to publish the draft.
+
+Targets share priority groups, ordering and the current layer's selection
+policy. A selected Service then uses its own pool and policies; its endpoints
+are not flattened into the Route's list. Service editors use the same target
+list and support the same combinations.
+
+**Save as Service** explicitly creates a named Service from the complete target
+pool, including both target kinds and its load-balancing and failover policies.
+If the Route identity and its target pool are unchanged when creation finishes,
+the draft targets are replaced with a reference to that Service; save the Route
+to persist that reference. If either changed during creation, the current
+targets are preserved and the created Service remains available to add
+explicitly. Adding a direct endpoint does not create a Service.
+
 ---
 
 ## Management And Access Plugins
