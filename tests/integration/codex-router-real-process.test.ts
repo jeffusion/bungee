@@ -10,7 +10,7 @@ import {Database} from 'bun:sqlite';
 import {randomUUID} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
-import {createCodexRouterGatewayFixture, seedCodexRouterCatalog, registerCodexProbeTargets, CODEX_PROCESS_PROBE, CODEX_MODELS, CODEX_CHAT_MODEL, CODEX_ANTHROPIC_MODEL} from '../helpers/codex-router-gateway-fixture';
+import {createCodexRouterGatewayFixture, seedCodexRouterCatalog, registerCodexProbeTargets, CODEX_PROCESS_PROBE, CODEX_MODELS, CODEX_CHAT_MODEL, CODEX_ANTHROPIC_MODEL, CODEX_DEEPSEEK_MODEL} from '../helpers/codex-router-gateway-fixture';
 import {
   cleanupGatewayFixture, quarantinePortBlock, recordOwnedWorkers, releasePortBlock, requestJson,
   reservePortBlock, safeGatewayError, startTrackedGatewayMaster, stopOwnedMaster, waitForHealth, waitUntil,
@@ -61,9 +61,16 @@ type Socket = {client: WebSocket; events: any[]; create(body: any, allowError?: 
 const message = (text: string) => ({type: 'message', role: 'assistant', content: [{type: 'output_text', text}]});
 function response(id: string, model: string) {return {id, object: 'response', status: 'completed', model,
   output: [message('fixture answer')], usage: {input_tokens: 4, output_tokens: 2, total_tokens: 6}};}
-function sse(events: any[]) {return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(''),
+function sse(events: any[], done = false) {return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('') + (done ? 'data: [DONE]\n\n' : ''),
   {headers: {'content-type': 'text/event-stream', 'x-models-etag': 'W/"fixture-upstream-directory"', 'x-fixture-response': 'keep'}});}
-function chatEvents(text='chat answer') {return [
+// Public Chat Completions usage shape; the vendor aux is intentionally unknown to a fixed field list.
+const richChatUsage = {prompt_tokens: 4, completion_tokens: 2, total_tokens: 6,
+  prompt_tokens_details: {cached_tokens: 1, audio_tokens: 0, vendor_aux: {cache_read_tokens: 0}},
+  completion_tokens_details: {reasoning_tokens: 1, audio_tokens: 0, accepted_prediction_tokens: 0, rejected_prediction_tokens: 0}};
+function chatEvents(text='chat answer', rich=false) {return rich ? [
+  {choices: [{index: 0, delta: {content: text}, finish_reason: null}]},
+  {choices: [{index: 0, delta: {}, finish_reason: 'stop'}], usage: richChatUsage},
+] : [
   {choices: [{index: 0, delta: {content: text}, finish_reason: null}]},
   {choices: [{index: 0, delta: {}, finish_reason: 'stop'}]},
   {choices: [], usage: {prompt_tokens: 4, completion_tokens: 2, total_tokens: 6}},
@@ -105,7 +112,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         const path = new URL(request.url).pathname;
         if (path.endsWith('/accounts/check')) {
           accountQueries.push(path);
-          return Response.json({accounts: [{id: 'fixture-account', workspace_backend_origin: 'https://chatgpt.com', account_routing_override: 'NO_CONSTRAINT'}]});
+          return Response.json({accounts: [{id: request.headers.get('chatgpt-account-id') ?? 'fixture-account', workspace_backend_origin: 'https://chatgpt.com', account_routing_override: 'NO_CONSTRAINT'}]});
         }
         if (path.endsWith('/config/bundle')) return Response.json({config_toml: {enterprise_managed: []}});
         if (path.startsWith('/backend-api/')) return Response.json({error: 'fixture_not_found'}, {status: 404});
@@ -123,6 +130,11 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         // This fixture implements only accounts/config and model inference.
         if (request.method !== 'POST') return Response.json({error: 'fixture_not_found'}, {status: 404});
         const body: any = await request.json(); const call = capture(request.headers, path, body, 'http');
+        // The real DeepSeek Chat API accepts only its documented roles; other providers keep their fixtures.
+        if (body.model === CODEX_DEEPSEEK_MODEL && path.endsWith('/chat/completions')) {
+          const unsupported = Array.isArray(body.messages) && body.messages.find((message: any) => !['system', 'user', 'assistant', 'tool'].includes(message.role));
+          if (unsupported) return Response.json({error: 'fixture_deepseek_unsupported_role', role: unsupported.role}, {status: 422});
+        }
         if (body.tools?.[0]?.name === 'relay_external_agent_payload') {
           if (path !== '/v1/responses') return Response.json({error:'unsupported_relay_path'}, {status:404});
           expect(body.tools).toHaveLength(1);
@@ -304,11 +316,15 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
           }
           return sse(anthropic?anthropicEvents():chatEvents());
         }
-        if (path.endsWith('/chat/completions')) return body.stream ? sse(chatEvents(body.response_format?.type==='json_schema'?'{"title":"fixture","description":"fixture"}':'chat answer')) : Response.json({
-          id: `chat-${calls.length}`, object: 'chat.completion', model: body.model,
-          choices: [{index: 0, message: {role: 'assistant', content: 'chat answer'}, finish_reason: 'stop'}],
-          usage: {prompt_tokens: 4, completion_tokens: 2, total_tokens: 6},
-        });
+        if (path.endsWith('/chat/completions')) {
+          const deepseek = body.model === CODEX_DEEPSEEK_MODEL;
+          const text = body.response_format?.type === 'json_schema' ? '{"title":"fixture","description":"fixture"}' : 'chat answer';
+          return body.stream ? sse(chatEvents(text, deepseek), deepseek) : Response.json({
+            id: `chat-${calls.length}`, object: 'chat.completion', model: body.model,
+            choices: [{index: 0, message: {role: 'assistant', content: text}, finish_reason: 'stop'}],
+            usage: deepseek ? richChatUsage : {prompt_tokens: 4, completion_tokens: 2, total_tokens: 6},
+          });
+        }
         if (path.endsWith('/messages')) return body.stream ? sse(anthropicEvents()) : Response.json({
           id: `msg-${calls.length}`, type: 'message', role: 'assistant', model: body.model,
           content: [{type: 'text', text: 'anthropic answer'}], stop_reason: 'end_turn', usage: {input_tokens: 4, output_tokens: 2},
@@ -354,6 +370,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
               {provider: 'zai', source: CODEX_MODELS[1], model: CODEX_CHAT_MODEL, target: {type: 'service', id: CHAT, protocol: 'chat_completions'}},
               {provider: 'anthropic', source: CODEX_MODELS[2], model: CODEX_ANTHROPIC_MODEL, target: {type: 'route', id: ANTHROPIC, protocol: 'anthropic_messages'}},
               {provider: 'lab', model: CODEX_MODELS[3], target: {type: 'route', id: NATIVE_WS, protocol: 'responses'}},
+              {provider: 'deepseek', source: CODEX_MODELS[4], model: CODEX_DEEPSEEK_MODEL, target: {type: 'service', id: CHAT, protocol: 'chat_completions'}},
             ]})]},
           {id: NATIVE, position: 2, path: '/native-target/', endpoints: [endpoint(12)], path_rewrite: {'^/native-target': ''}, plugins: []},
           {id: ANTHROPIC, position: 3, path: '/anthropic-target/', endpoints: [endpoint(14)], path_rewrite: {'^/anthropic-target': ''}, plugins: []},
@@ -453,16 +470,24 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
   });
 
   test.skipIf(process.env.BUNGEE_CODEX_CLI_PROBE !== '1')('isolated CLI lists and explicitly selects each advertised reasoning level',async()=>{
-    for(const [model,levels,defaultEffort] of [['org/chat',['low','high','max'],'max'],['org/anthropic',['low','medium','high','max'],'high']] as const){
+    for(const [model,levels] of [['org/chat',['low','high','max']],['org/anthropic',['low','medium','high','max']],['org/deepseek-flash',['low','high','max']]] as const){
       for(const effort of levels){
         const before=calls.length;
         const result=await probeCodexChatgptModels({root:fixture!.root,baseUrl:`${proxy}/codex`,mockUrl:`http://127.0.0.1:${upstream!.port}`,token,model,effort});
-        expect(result.reasoningModels).toEqual([{model,levels:[...levels],defaultEffort}]);
+        // The catalog default is null; Codex app-server exposes that absence as the client value "none".
+        expect(result.reasoningModels).toEqual([{model,levels:[...levels],defaultEffort:'none'}]);
         expect(result.notifications.some((event:any)=>event.method==='turn/completed'&&event.status==='completed')).toBe(true);
         const outgoing=calls.slice(before);expect(outgoing).toHaveLength(1);
-        if(model==='org/chat')expect(outgoing[0]!.body).toMatchObject({model:CODEX_CHAT_MODEL,reasoning_effort:effort,thinking:{type:'enabled'}});
-        else expect(outgoing[0]!.body).toMatchObject({model:CODEX_ANTHROPIC_MODEL,output_config:{effort},thinking:{type:'adaptive'}});
-        console.info(`codex_router_cli_effort ${JSON.stringify({model,effort,levels,defaultEffort,requestId:outgoing[0]!.requestId,transport:outgoing[0]!.transport})}`);
+        if(model==='org/chat')expect(outgoing[0]!.body).toMatchObject({model:CODEX_CHAT_MODEL,reasoning_effort:effort});
+        else if(model==='org/deepseek-flash'){
+          expect(outgoing[0]!.path).toBe('/v1/chat/completions');
+          expect(outgoing[0]!.body).toMatchObject({model:CODEX_DEEPSEEK_MODEL,reasoning_effort:effort,stream:true});
+          expect(outgoing[0]!.body.messages.some((message:any)=>message.role==='developer')).toBe(false);
+          expect(outgoing[0]!.body.messages.some((message:any)=>message.role==='system')).toBe(true);
+          expect(result.notifications.some((event:any)=>event.itemType==='agentMessage'&&event.text==='chat answer')).toBe(true);
+        } else expect(outgoing[0]!.body).toMatchObject({model:CODEX_ANTHROPIC_MODEL,output_config:{effort}});
+        expect(outgoing[0]!.body).not.toHaveProperty('thinking');
+        console.info(`codex_router_cli_effort ${JSON.stringify({model,effort,levels,defaultEffort:'none',requestId:outgoing[0]!.requestId,transport:outgoing[0]!.transport})}`);
         await assertMetered(outgoing);
       }
     }
@@ -561,7 +586,10 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
 
   test('production-size model snapshots suppress upstream fetches, restore 304 and notify alpha clients', async () => {
     const original = nativeCatalogModel;
-    nativeCatalogModel = {...original, base_instructions: '中'.repeat(190_000)};
+    // Fill only the instructions to the asserted directory size so the installed CLI's real metadata is preserved.
+    const overhead = Buffer.byteLength(JSON.stringify({models: [{...original, base_instructions: ''}]}), 'utf8');
+    expect(overhead).toBeLessThan(580_000);
+    nativeCatalogModel = {...original, base_instructions: '中'.repeat(Math.floor((580_000 - overhead) / 3))};
     const headers = {authorization: `Bearer ${token}`, 'chatgpt-account-id': 'snapshot-cache-account', version: '0.162.0-alpha.17.2'};
     try {
       const bytes = Buffer.byteLength(JSON.stringify({models: [nativeCatalogModel]}), 'utf8');
@@ -626,6 +654,89 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     expect(denied.status).toBe(422); expect(JSON.stringify(denied.body)).toContain('history_missing'); expect(calls).toHaveLength(before);
     await assertMetered(calls.slice(start));
     console.info(`codex_router_cross_worker ${JSON.stringify({masterPid: master!.child.pid, workerPids: workers.map(w => w.pid), originPid: firstPid, continuationPids: calls.slice(start + 1).map(c => c.pid), historyBytes: Buffer.byteLength(JSON.stringify(history)), canonicalService: 'llm-protocol-adapter.history.v1'})}`);
+  }, 60000);
+
+  test('catalog metadata alone drives advertised efforts and each converted HTTP protocol carries only the selected effort', async () => {
+    const catalog = await fetch(`${proxy}/codex/models?client_version=0.162.1`, {headers: {authorization: `Bearer ${token}`}});
+    expect(catalog.status).toBe(200);
+    const body: any = await catalog.json();
+    expect(body.models.find((model: any) => model.slug === 'org/deepseek-flash')).toMatchObject({
+      context_window: 1048576, input_modalities: ['text', 'image'],
+      supported_reasoning_levels: [{effort: 'low', description: 'low'}, {effort: 'high', description: 'high'}, {effort: 'max', description: 'max'}],
+      supports_reasoning_effort_updates: true, default_reasoning_level: null,
+    });
+    const before = calls.length;
+    const generate = (model: string, effort?: string) => post({model, input: 'catalog effort evidence', ...(effort ? {reasoning: {effort}} : {})});
+    // Production Codex history carries several developer messages and no instructions.
+    const deepseekHistory = [
+      {role: 'developer', content: 'fixture developer one'},
+      {role: 'user', content: 'fixture user one'},
+      {role: 'developer', content: 'fixture developer two'},
+      {role: 'user', content: 'fixture user two'},
+      {role: 'developer', content: 'fixture developer three'},
+      {role: 'user', content: 'fixture user three'},
+      {type: 'function_call', call_id: 'deepseek_lookup', name: 'lookup', arguments: '{}'},
+      {type: 'function_call_output', call_id: 'deepseek_lookup', output: 'fixture tool result'},
+    ];
+    const nonstream = await post({model: 'org/deepseek-flash', input: deepseekHistory, tools, reasoning: {effort: 'high'}});
+    expect(nonstream.status).toBe(200);
+    expect(nonstream.body).toMatchObject({status: 'completed',
+      output: [{type: 'message', role: 'assistant', content: [{type: 'output_text', text: 'chat answer'}]}],
+      usage: {input_tokens: 4, output_tokens: 2, total_tokens: 6,
+        input_tokens_details: {cached_tokens: 1}, output_tokens_details: {reasoning_tokens: 1}}});
+    let call = calls.at(-1)!;
+    expect(call.path).toBe('/v1/chat/completions');
+    expect(call.body).toMatchObject({model: CODEX_DEEPSEEK_MODEL, reasoning_effort: 'high'});
+    expect(call.body).not.toHaveProperty('thinking');
+    expect(call.body.messages.map((message: any) => [message.role, message.content ?? null])).toEqual([
+      ['system', 'fixture developer one'], ['user', 'fixture user one'], ['system', 'fixture developer two'], ['user', 'fixture user two'],
+      ['system', 'fixture developer three'], ['user', 'fixture user three'], ['assistant', null], ['tool', 'fixture tool result'],
+    ]);
+    expect(call.body.tools[0].function.name).toEqual(expect.any(String));
+    expect(call.body.messages[6]).toMatchObject({tool_calls: [{id: 'deepseek_lookup', type: 'function', function: {name: call.body.tools[0].function.name, arguments: '{}'}}]});
+    expect(call.body.messages[7]).toMatchObject({tool_call_id: 'deepseek_lookup'});
+    const streamed = await fetch(`${proxy}/codex/responses`, {method: 'POST', headers: {'content-type': 'application/json', authorization: `Bearer ${token}`},
+      body: JSON.stringify({model: 'org/deepseek-flash', input: deepseekHistory, tools, reasoning: {effort: 'high'}, stream: true}), signal: AbortSignal.timeout(20000)});
+    expect(streamed.status).toBe(200);
+    expect(streamed.headers.get('content-type')).toContain('text/event-stream');
+    const streamText = await streamed.text();
+    expect(streamText).not.toContain('stream_read_failed');
+    const streamEvents = streamText.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()).filter(data => data && data !== '[DONE]').map(data => JSON.parse(data));
+    expect(streamEvents.filter(event => ['response.failed', 'response.incomplete', 'error'].includes(event.type))).toEqual([]);
+    const completed = streamEvents.filter(event => event.type === 'response.completed');
+    expect(completed).toHaveLength(1);
+    expect(completed[0]!.response).toMatchObject({status: 'completed',
+      output: [{type: 'message', role: 'assistant', content: [{type: 'output_text', text: 'chat answer'}]}],
+      usage: {input_tokens: 4, output_tokens: 2, total_tokens: 6,
+        input_tokens_details: {cached_tokens: 1}, output_tokens_details: {reasoning_tokens: 1}}});
+    call = calls.at(-1)!;
+    expect(call.path).toBe('/v1/chat/completions');
+    expect(call.body).toMatchObject({model: CODEX_DEEPSEEK_MODEL, reasoning_effort: 'high'});
+    expect(call.body.messages.some((message: any) => message.role === 'developer')).toBe(false);
+    expect(call.body.messages.some((message: any) => message.role === 'system')).toBe(true);
+    expect((await generate('org/anthropic', 'medium')).status).toBe(200);
+    call = calls.at(-1)!;
+    expect(call.path).toBe('/v1/messages');
+    expect(call.body).toMatchObject({model: CODEX_ANTHROPIC_MODEL, output_config: {effort: 'medium'}});
+    expect(call.body).not.toHaveProperty('thinking');
+    for (const [model, path] of [['org/deepseek-flash', '/v1/chat/completions'], ['org/anthropic', '/v1/messages']] as const) {
+      expect((await generate(model)).status).toBe(200);
+      call = calls.at(-1)!;
+      expect(call.path).toBe(path);
+      expect(call.body).not.toHaveProperty('thinking');
+      if (path === '/v1/chat/completions') expect(call.body).not.toHaveProperty('reasoning_effort');
+      else expect(call.body.output_config).toBeUndefined();
+    }
+    await assertMetered(calls.slice(before));
+    const rejected = calls.length;
+    const unsupported = await generate('org/deepseek-flash', 'medium');
+    expect(unsupported.status).toBe(422);
+    expect(unsupported.body).toMatchObject({error: 'llm_adapter_unsupported_reasoning', param: 'reasoning.effort'});
+    expect(calls).toHaveLength(rejected);
+    expect(calls.slice(before)).toHaveLength(5);
+    console.info(`codex_router_catalog_effort ${JSON.stringify({model: 'org/deepseek-flash', levels: ['low', 'high', 'max'], defaultEffort: null,
+      protocols: ['chat_completions', 'anthropic_messages'], unmappedEffortRejected: true,
+      nonstreamUsage: nonstream.body.usage, streamUsage: completed[0]!.response.usage})}`);
   }, 60000);
 
   async function openSocket(credential = token): Promise<Socket> {
@@ -771,7 +882,8 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         expect(cli.stdout).toContain('"type":"agent_message"'); expect(cli.stdout).toContain('fixture answer');
         expect(actual.length).toBeGreaterThan(0); expect(actual.every(call => call.model === 'org/native')).toBe(true);
         const beforeDiscovery = calls.length, beforeDiscoveryQueries = modelQueries.length;
-        const discovery = await probeCodexChatgptModels({root: fixture!.root, baseUrl: `${proxy}/codex`, mockUrl: `http://127.0.0.1:${upstream!.port}`, token, model: 'org/native'});
+        // A fresh account partitions the directory snapshot; the shared fixture account may already be warm.
+        const discovery = await probeCodexChatgptModels({root: fixture!.root, baseUrl: `${proxy}/codex`, mockUrl: `http://127.0.0.1:${upstream!.port}`, token, model: 'org/native', accountId: `fixture-cold-${randomUUID()}`});
         const discoveredActual = calls.slice(beforeDiscovery).map(call => ({pid: call.pid, path: call.path, transport: call.transport, model: call.body.model}));
         const discoveredQueries = modelQueries.slice(beforeDiscoveryQueries);
         console.info(`codex_router_cli_discovery ${JSON.stringify({...discovery, modelQueries: discoveredQueries, accountQueries, upstream: discoveredActual})}`);
@@ -829,8 +941,8 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         expect(toolDiscovery.patchedContent).toBe(`${CLI_PATCH_MARKER}\n`);
         expect(toolCalls).toHaveLength(2);
         for(const call of toolCalls){
-          if(toolModel==='org/chat')expect(call.body).toMatchObject({reasoning_effort:'max',thinking:{type:'enabled'}});
-          else expect(call.body).toMatchObject({output_config:{effort:'high'},thinking:{type:'adaptive'}});
+          expect(call.body).not.toHaveProperty('thinking');
+          expect(call.body).not.toHaveProperty('budget_tokens');
         }
         expect(cliToolRoundTrip.firstRequestId).toBe(toolCalls[0]!.requestId);
         expect(cliToolRoundTrip.followupRequestId).toBe(toolCalls[1]!.requestId);
@@ -1055,11 +1167,13 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       for (const effort of ['low','high','max']) {
         const result = await post({model:'org/chat',input:smallHistory,tools,reasoning:{effort}});
         expect(result.status).toBe(200);
-        expect(calls.at(-1)!.body).toMatchObject({model:'GLM-5.3-Flash',reasoning_effort:effort,thinking:{type:'enabled'}});
+        expect(calls.at(-1)!.body).toMatchObject({model:'GLM-5.3-Flash',reasoning_effort:effort});
+        expect(calls.at(-1)!.body).not.toHaveProperty('thinking');
         expect(JSON.stringify(calls.at(-1)!.body.messages)).toContain('custom result');
         const events = await socket.create({model:'org/chat',input:smallHistory,tools,reasoning:{effort}});
         expect(events.at(-1).type).toBe('response.completed');
-        expect(calls.at(-1)!.body).toMatchObject({model:'GLM-5.3-Flash',reasoning_effort:effort,thinking:{type:'enabled'}});
+        expect(calls.at(-1)!.body).toMatchObject({model:'GLM-5.3-Flash',reasoning_effort:effort});
+        expect(calls.at(-1)!.body).not.toHaveProperty('thinking');
       }
       for(let i=0;i<16 && new Set(calls.slice(before).map(call=>call.pid)).size<2;i++) {
         expect((await post({model:'org/chat',input:'second worker positive control',reasoning:{effort:'max'}})).status).toBe(200);
@@ -1069,7 +1183,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         const start=calls.length;
         const cli=await probeCodexChatgptModels({root:fixture!.root,baseUrl:`${proxy}/codex`,mockUrl:`http://127.0.0.1:${upstream!.port}`,token,
           model:'org/chat',effort:'max',toolRoundTrip:true});
-        expect(cli.reasoningModels).toEqual([{model:'org/chat',levels:['low','high','max'],defaultEffort:'max'}]);
+        expect(cli.reasoningModels).toEqual([{model:'org/chat',levels:['low','high','max'],defaultEffort:'none'}]);
         expect(cli.notifications.some((e:any)=>e.method==='turn/completed'&&e.status==='completed')).toBe(true);
         expect(cli.patchedContent).toBe(`${CLI_PATCH_MARKER}\n`);
         expect(cli.notifications.some((e:any)=>e.itemType==='commandExecution'&&e.exitCode===0&&e.output?.includes(CLI_EXEC_MARKER))).toBe(true);
@@ -1079,7 +1193,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         expect(roundTrip.outputs?.map(output=>output.callId).sort()).toEqual(['call_fixture_exec','call_fixture_mcp','call_fixture_patch']);
       }
       const outgoing=calls.slice(before);
-      for(const call of outgoing)expect(call.body).toMatchObject({model:'GLM-5.3-Flash',thinking:{type:'enabled'}});
+      for(const call of outgoing){expect(call.body).toMatchObject({model:'GLM-5.3-Flash'});expect(call.body).not.toHaveProperty('thinking');}
       await assertMetered(outgoing);
       console.info(`codex_router_wire_alias ${JSON.stringify({workerPids:workers.map(w=>w.pid),refusedGenerations:10,
         upstreamCalls:outgoing.length,wireModel:'GLM-5.3-Flash',efforts:['low','high','max']})}`);

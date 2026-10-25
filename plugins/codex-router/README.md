@@ -79,7 +79,7 @@ OpenAI 主 Agent 已返回真实密文时，可在入口插件中配置独立的
 | tools 与 additional_tools.tools | 合并注册；namespace function/custom 使用无碰撞名称并恢复逻辑名称 |
 | 重复工具 | 同身份同定义去重，冲突拒绝；重复项仍计入工具预算 |
 | custom 工具 | 包装单个字符串 input，回程恢复原文；不承诺目标原生执行 grammar |
-| reasoning.effort | 仅目录和显式能力修正支持时映射；不猜 thinking budget |
+| reasoning.effort | 按 models.dev 的有效档位和目标协议映射，无型号白名单；未知默认值不补 none，不猜 thinking budget |
 | reasoning_summary_delivery=sequential_cutoff | 验证后省略交付偏好 |
 | reasoning.summary、context=all_turns、text.verbosity | 验证后省略目标不可表示的生成偏好 |
 | prompt_cache_key、client_metadata | 校验后不转发转换目标，不作为身份或路由依据 |

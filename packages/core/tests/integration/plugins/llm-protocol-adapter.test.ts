@@ -22,7 +22,7 @@ test('real local host enforces version/dependency, own session functions, immuta
   const consumer=h.createContext('consumer','global',{[ADAPTER_PLUGIN]:'^1.0.0'});expect(()=>consumer.consume(ADAPTER_PLUGIN,CONVERSION_SERVICE_ID,2)).toThrow();
   const service=consumer.consume<ConversionService>(ADAPTER_PLUGIN,CONVERSION_SERVICE_ID,CONVERSION_VERSION);h.markReady('consumer');
   const profile=service.resolveCapabilities({provider:'zai',model:'glm-5.3-flash',targetProtocol:'chat_completions'})!;
-  expect(Object.isFrozen(profile)).toBe(true);expect(profile.supportedEfforts).toEqual(['low','high','max']);expect(profile.defaultEffort).toBe('max');
+  expect(Object.isFrozen(profile)).toBe(true);expect(profile.supportedEfforts).toEqual(['low','high','max']);expect(profile.defaultEffort).toBeNull();
   const session=service.createSession({sourceProtocol:'responses',targetProtocol:'chat_completions',model:'glm-5.3-flash',provider:'zai',profile,selectedEffort:'high'});
   for(const name of ['convertRequest','convertResponse','push','finish','dispose','validateAttempt'])expect(Object.hasOwn(session,name)).toBe(true);
   const converted=session.convertRequest({model:'glm-5.3-flash',input:'hello',reasoning:{effort:'high'}});
