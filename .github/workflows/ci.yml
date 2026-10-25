@@ -34,6 +34,7 @@ jobs:
       mode: ${{ steps.plan.outputs.mode }}
       integration: ${{ steps.plan.outputs.integration }}
       browser: ${{ steps.plan.outputs.browser }}
+      integration_shards: ${{ steps.plan.outputs.integration_shards }}
       shards: ${{ steps.plan.outputs.shards }}
     steps:
       - uses: actions/checkout@v4
@@ -55,7 +56,7 @@ jobs:
           args=(--base "$BASE" --committed --head "$PR_HEAD_SHA" --output "$RUNNER_TEMP/plan.json")
           if [ "$FULL" = true ]; then args+=(--full); fi
           bun scripts/checks/select-tests.ts "${args[@]}"
-          jq -r '"mode=" + .mode, "integration=" + (.files.integration | length | tostring), "browser=" + (.files.browser | length | tostring), "shards=" + (if (.files.browser | length) > 1 then "[1,2]" else "[1]" end)' "$RUNNER_TEMP/plan.json" >> "$GITHUB_OUTPUT"
+          jq -r '"mode=" + .mode, "integration=" + (.files.integration | length | tostring), "browser=" + (.files.browser | length | tostring), "integration_shards=" + (if (.files.integration | length) > 1 then "[1,2]" else "[1]" end), "shards=" + (if (.files.browser | length) > 1 then "[1,2]" else "[1]" end)' "$RUNNER_TEMP/plan.json" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: test-plan
@@ -116,6 +117,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        shard: ${{ fromJSON(needs.plan.outputs.integration_shards) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -137,13 +139,19 @@ jobs:
           set -euo pipefail
           jq -e --slurpfile plan "$RUNNER_TEMP/plan/plan.json" '.commit == $plan[0].testCommit and .tree == $plan[0].tree' "$RUNNER_TEMP/build/build.json"
           tar -xzf "$RUNNER_TEMP/build/build.tgz"
-      - name: Selected integration regression
-        run: bun scripts/checks/select-tests.ts --plan "$RUNNER_TEMP/plan/plan.json" --phase integration --record "$RUNNER_TEMP/integration.json"
+      - name: Selected integration regression with native sharding
+        env:
+          SHARD: ${{ matrix.shard }}
+          COUNT: ${{ needs.plan.outputs.integration }}
+        run: |
+          count=1
+          if [ "$COUNT" -gt 1 ]; then count=2; fi
+          bun scripts/checks/select-tests.ts --plan "$RUNNER_TEMP/plan/plan.json" --phase integration --shard "$SHARD/$count" --record "$RUNNER_TEMP/integration-$SHARD.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: execution-${{ matrix.os }}-integration
-          path: ${{ runner.temp }}/integration.json*
+          name: execution-${{ matrix.os }}-integration-${{ matrix.shard }}
+          path: ${{ runner.temp }}/integration-${{ matrix.shard }}.json*
           if-no-files-found: error
           retention-days: 14
 
@@ -208,12 +216,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - name: Require all planned jobs to succeed
-        env:
-          NEEDS: ${{ toJSON(needs) }}
-        run: |
-          set -euo pipefail
-          jq -e '.plan.result == "success" and (if .plan.outputs.mode == "none" then .build.result == "skipped" else .build.result == "success" end) and (if .plan.outputs.integration == "0" then .integration.result == "skipped" else .integration.result == "success" end) and (if .plan.outputs.browser == "0" then .browser.result == "skipped" else .browser.result == "success" end)' <<< "$NEEDS"
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.sha }}
@@ -230,10 +232,13 @@ jobs:
           pattern: execution-${{ matrix.os }}-*
           path: ${{ runner.temp }}/execution
           merge-multiple: true
-      - name: Verify executed-file coverage and platform evidence
+      - name: Require planned jobs and exact executed-file union
         env:
+          NEEDS: ${{ toJSON(needs) }}
           PLATFORM: ${{ matrix.os }}
         run: |
+          set -euo pipefail
+          jq -e '.plan.result == "success" and (if .plan.outputs.mode == "none" then .build.result == "skipped" else .build.result == "success" end) and (if .plan.outputs.integration == "0" then .integration.result == "skipped" else .integration.result == "success" end) and (if .plan.outputs.browser == "0" then .browser.result == "skipped" else .browser.result == "success" end)' <<< "$NEEDS"
           mkdir -p "$RUNNER_TEMP/execution"
           bun -e 'import {verifyRecords} from "./scripts/checks/test-proof.ts";
           const plan=await Bun.file(`${process.env.RUNNER_TEMP}/plan/plan.json`).json();

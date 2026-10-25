@@ -172,12 +172,17 @@ describe('Git test planning and execution contract', () => {
     const dir=await mkdtemp(join(tmpdir(),'bungee-native-shards-')); roots.push(dir);
     const planFile=join(dir,'plan.json'); await writeFile(planFile,JSON.stringify(value));
     const records: PhaseRecord[]=[];
-    for (const [phase,shard] of [['unit',undefined],['integration',undefined],['browser','1/2'],['browser','2/2']] as const) {
+    for (const [phase,shard] of [['unit',undefined],['integration','1/2'],['integration','2/2'],['browser','1/2'],['browser','2/2']] as const) {
       const record=join(dir,`${phase}-${shard?.replace('/','-') ?? 'all'}.json`);
       expect(await main(['--plan',planFile,'--phase',phase,...(shard?['--shard',shard]:[]),'--record',record],root)).toBe(0);
       records.push(JSON.parse(await readFile(record,'utf8')));
     }
     expect(verifyRecords(value,records,'ubuntu-latest').success).toBe(true);
-    expect(records.filter(record=>record.phase==='browser').every(record=>record.executed.length<value.files.browser.length)).toBe(true);
+    for (const phase of ['integration','browser'] as const) {
+      const shards=records.filter(record=>record.phase===phase);
+      expect(shards.map(record=>record.shard).sort()).toEqual(['1/2','2/2']);
+      expect(shards.flatMap(record=>record.executed).sort()).toEqual([...value.files[phase]].sort());
+      expect(shards.every(record=>record.executed.length<value.files[phase].length)).toBe(true);
+    }
   });
 });

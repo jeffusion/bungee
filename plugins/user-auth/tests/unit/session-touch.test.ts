@@ -1,18 +1,24 @@
-import {expect, test} from 'bun:test';
+import {beforeAll, expect, test} from 'bun:test';
 import type {ControlHostContext} from '../../../../packages/core/src/plugin-control/contracts';
-import type {DurableMutation, PluginDurableState} from '../../../../packages/core/src/plugin-durable-state';
+import type {DurableMutation, DurableRecord, PluginDurableState} from '../../../../packages/core/src/plugin-durable-state';
 import {createControl, recoverIdentity} from '../../server/control';
 import {AsyncFakeState} from '../helpers/fake-durable-state';
 
 const password = 'session-touch-test-password';
 const initialTime = 1_000_000;
+let seed: readonly DurableRecord[];
+beforeAll(async () => {
+  const state = new AsyncFakeState();
+  await recoverIdentity({operation: 'reset', username: 'owner', password, passwordConfirmation: password, reason: 'test fixture'}, {durableState: state, now: () => initialTime});
+  seed = await state.list(); expect(seed.some(record => record.key.startsWith('session:'))).toBe(false);
+});
 const request = (token: string, method = 'GET') => new Request('https://example.com/self', {method, headers: {authorization: 'Bearer ' + token}});
 function touchPhase(changes: readonly DurableMutation[]): 'prepare' | 'confirm' | undefined {
   const session = changes.find(change => change.key.startsWith('session:'))?.value as {session?: {pendingTouch?: number}} | undefined;
   return session?.session ? session.session.pendingTouch === undefined ? 'confirm' : 'prepare' : undefined;
 }
 async function fixture(policy?: {idleTimeoutMinutes: number; absoluteTimeoutMinutes: number}) {
-  const state = new AsyncFakeState(); let now = initialTime;
+  const state = new AsyncFakeState(seed); let now = initialTime;
   const hooks: {read?: (key: string) => Promise<void>; before?: (phase: ReturnType<typeof touchPhase>) => Promise<void>; after?: (phase: ReturnType<typeof touchPhase>) => Promise<void>} = {};
   const durableState: PluginDurableState = {
     get: async key => {const record = await state.get(key); await hooks.read?.(key); return record;},
@@ -20,7 +26,6 @@ async function fixture(policy?: {idleTimeoutMinutes: number; absoluteTimeoutMinu
     transact: async changes => {const phase = touchPhase(changes); await hooks.before?.(phase); const saved = await state.transact(changes); await hooks.after?.(phase); return saved;},
   };
   const host: ControlHostContext = {signal: new AbortController().signal, durableState, secretStore: {} as never, storage: {} as never};
-  await recoverIdentity({operation: 'reset', username: 'owner', password, passwordConfirmation: password, reason: 'test fixture'}, {durableState, now: () => now});
   if (policy) await state.transact([{key: 'session-policy', expectedVersion: 0, value: {schema: 3, policy}}]);
   const control = createControl(host, {now: () => now}); await control.start();
   const response = await control.login(new Request('https://example.com/login', {method: 'POST', body: JSON.stringify({username: 'owner', password, transport: 'bearer'})}));

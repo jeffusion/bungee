@@ -1,10 +1,23 @@
-import {pluginStateFixturePath} from '../helpers/plugin-state-fixture';
+/**
+ * models-dev catalog integration through a controlled local HTTP directory.
+ *
+ * The real built control/worker artifacts, the real downloader + JSON parsing and the
+ * real snapshot publication are exercised, but the configured catalog source is a
+ * local HTTP server owned by this file: no request may leave to the public models.dev
+ * endpoint. The existing manual entry `tests/manual/plugin-business-browser-acceptance.ts`
+ * remains the public real-source acceptance; controlled data here does not prove it.
+ */
+
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { randomUUID } from 'node:crypto';
 import { Database } from 'bun:sqlite';
+import { randomUUID } from 'node:crypto';
+import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { SQLitePluginStorage } from '../../packages/core/src/plugin-storage';
 import { MODELS_DEV_SOURCE_URL } from '../../plugins/models-dev/contract';
 import { MODELS_DEV_SETTINGS_KEY } from '../../plugins/models-dev/server/store';
+import { pluginStateFixturePath } from '../helpers/plugin-state-fixture';
+import { prepareCatalogVersionProbe } from '../helpers/token-stats-fixture';
 import {
   cleanupGatewayFixture,
   createGatewayFixture,
@@ -29,7 +42,7 @@ import { ensureTestPortBlockClosed } from '../helpers/test-port-block-broker';
 const SERVICE_ID = '10000000-0000-4000-8000-0000000000aa';
 const UPSTREAM_ID = '20000000-0000-4000-8000-0000000000aa';
 const ROUTE_ID = '30000000-0000-4000-8000-0000000000aa';
-const ORDINARY_ROUTE_ID = '30000000-0000-4000-8000-0000000000ab';
+const CATALOG_READY_ROUTE_ID = '30000000-0000-4000-8000-0000000000ac';
 
 /** Explicit activation of the whole chain; each required dependency is activated too. */
 const ACTIVATIONS = [
@@ -37,13 +50,41 @@ const ACTIVATIONS = [
   { plugin_name: 'token-metering' },
   { plugin_name: 'token-stats' },
   { plugin_name: 'model-mapping' },
+  { plugin_name: 'catalog-version-probe' },
 ];
 
-/** Explicit client-model alias source; the target is chosen from the REAL catalog. */
 const ALIAS_SOURCE = 'fixture-client-model';
-/** Canonical real example (zai/glm-5.3): input 1.4, output 4.4, cache_read 0.26 (USD / 1M). */
+/** Controlled catalog example with input 1.4, output 4.4, cache_read 0.26 (USD / 1M). */
 const CANONICAL_TARGET = { provider: 'zai', model: 'glm-5.3' };
 const EXPECTED_CANONICAL_COST = 4.89e-5;
+/** Model absent from the catalog: no alias and no automatic price may exist. */
+const UNKNOWN_MODEL = 'unlisted-acceptance-model';
+const CONTROLLED_PROVIDER_COUNT = 3;
+const CONTROLLED_MODEL_COUNT = 4;
+
+/** Controlled catalog: a priced provider, one without `api`, and a second priced provider. */
+const CONTROLLED_CATALOG = {
+  zai: {
+    id: 'zai', name: 'Z.AI', api: 'https://api.z.ai/api/paas/v4',
+    models: {
+      'glm-5.3': { id: 'glm-5.3', name: 'GLM-5.3', cost: { input: 1.4, output: 4.4, cache_read: 0.26 } },
+      'glm-5.3-air': { id: 'glm-5.3-air', name: 'GLM-5.3 Air', cost: { input: 0.7, output: 2.2 } },
+    },
+  },
+  'local-gateway': {
+    // No `api`: the catalog must keep this provider instead of trimming it.
+    id: 'local-gateway', name: 'Local Gateway',
+    models: {
+      'local-model': { id: 'local-model', name: 'Local Model' },
+    },
+  },
+  anthropic: {
+    id: 'anthropic', name: 'Anthropic', api: 'https://api.anthropic.com',
+    models: {
+      'claude-fixture': { id: 'claude-fixture', name: 'Claude Fixture', cost: { input: 3, output: 15, cache_read: 0.3 } },
+    },
+  },
+};
 
 type CatalogStatus = {
   source: string;
@@ -61,11 +102,77 @@ type ClientModels = { models: string[]; total: number; page: number; pageSize: n
 type MappingsPayload = { mappings: Array<{ source: string; provider: string; model: string }> };
 type RuntimeWorker = { pid: number; worker_instance_id: string; boot_nonce: string };
 
-describe('models-dev catalog real-process integration (explicit chain activation)', () => {
+let localCatalogUrl: string | undefined;
+let catalogRequests = 0;
+
+/** Real local HTTP source; every unexpected request is rejected, never answered. */
+function startControlledCatalogSource(): ReturnType<typeof Bun.serve> {
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch: (request) => {
+      const url = new URL(request.url);
+      if (request.method !== 'GET' || url.pathname !== '/api.json' || url.search !== '') {
+        return new Response('unexpected catalog request', { status: 404 });
+      }
+      if (request.headers.get('accept') !== 'application/json') {
+        return new Response('unexpected accept header', { status: 406 });
+      }
+      catalogRequests += 1;
+      return Response.json(CONTROLLED_CATALOG);
+    },
+  });
+  if (server.port === undefined) throw new Error('controlled catalog source did not bind');
+  localCatalogUrl = `http://127.0.0.1:${server.port}/api.json`;
+  return server;
+}
+
+/** Generated control entry: delegates to the REAL createControl and only injects fetch. */
+function controlledControlEntry(localUrl: string): string {
+  return `import { createControl as createRealControl } from './control.js';
+const CATALOG_SOURCE = ${JSON.stringify(MODELS_DEV_SOURCE_URL)};
+const LOCAL_CATALOG = ${JSON.stringify(localUrl)};
+const realFetch = globalThis.fetch;
+export function createControl(context, options) {
+  return createRealControl(context, {
+    ...options,
+    fetch: async (input, init) => {
+      if (typeof input !== 'string') throw new Error('unexpected models-dev fetch input');
+      const method = (init && init.method ? init.method : 'GET').toUpperCase();
+      const headers = new Headers(init && init.headers);
+      if (input !== CATALOG_SOURCE || method !== 'GET' || headers.get('accept') !== 'application/json') {
+        throw new Error('unexpected models-dev catalog request: ' + method + ' ' + input);
+      }
+      return realFetch(LOCAL_CATALOG, {
+        ...(init && init.signal ? { signal: init.signal } : {}),
+        headers: { accept: 'application/json' },
+      });
+    },
+  });
+}
+export default { createControl };
+`;
+}
+
+/** Point the copied built plugin's control entry at the generated wrapper. */
+async function prepareControlledPlugin(pluginsPath: string): Promise<void> {
+  if (localCatalogUrl === undefined) throw new Error('controlled catalog source did not start');
+  const pluginPath = join(pluginsPath, 'models-dev');
+  const manifestPath = join(pluginPath, 'manifest.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as { control?: { entry?: string } };
+  if (manifest.control === undefined) throw new Error('built models-dev manifest has no control entry');
+  await writeFile(join(pluginPath, 'control-fixture.js'), controlledControlEntry(localCatalogUrl));
+  manifest.control.entry = 'control-fixture.js';
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  await prepareCatalogVersionProbe(pluginsPath);
+}
+
+describe('models-dev catalog real-process integration (controlled local HTTP source)', () => {
   let fixture: GatewayFixture | undefined;
   let lease: PortLease | undefined;
   let master: OwnedMaster | undefined;
   const masterStartup: GatewayMasterStartupState = { attempted: false, errors: [] };
+  let catalogSource: ReturnType<typeof Bun.serve> | undefined;
   let upstream: ReturnType<typeof Bun.serve> | undefined;
 
   async function startGatewayMaster(currentFixture: GatewayFixture, currentLease: PortLease): Promise<OwnedMaster> {
@@ -79,28 +186,49 @@ describe('models-dev catalog real-process integration (explicit chain activation
   }
 
   beforeAll(async () => {
-    fixture = await createGatewayFixture({ prefix: 'models-dev-gateway', plugins: ['models-dev', 'token-metering', 'token-stats', 'model-mapping'] });
-    lease = await reservePortBlock();
-    // Technical upstream fixture: it exists only to prove the real proxy+metering
-    // chain. It is NOT a commerce credential and its responses are NOT real billing.
-    upstream = Bun.serve({
-      hostname: '127.0.0.1',
-      port: 0,
-      fetch: async (request) => {
-        if (new URL(request.url).pathname !== '/v1/chat/completions' || request.method !== 'POST') {
-          return Response.json({ error: 'fixture_not_found' }, { status: 404 });
-        }
-        await request.json();
-        return Response.json({
-          id: 'chain-fixture', object: 'chat.completion', model: 'chain-fixture',
-          choices: [{ index: 0, message: { role: 'assistant', content: 'chain fixture' }, finish_reason: 'stop' }],
-          usage: { prompt_tokens: 17, completion_tokens: 7, total_tokens: 24, prompt_tokens_details: { cached_tokens: 5 } },
-        }, { status: 200, headers: { 'content-type': 'application/json' } });
-      },
-    });
-    if (upstream.port === undefined) throw new Error('local chain fixture did not bind');
-    master = await startGatewayMaster(fixture, lease);
-    await waitForHealth(master, lease.base, fixture);
+    catalogSource = startControlledCatalogSource();
+    try {
+      fixture = await createGatewayFixture({
+        prefix: 'models-dev-gateway',
+        plugins: ['models-dev', 'token-metering', 'token-stats', 'model-mapping'],
+        preparePlugins: prepareControlledPlugin,
+      });
+      // Disable automatic refresh before the control process starts: no source request
+      // may race the initial empty observation, and the explicit refresh below is the
+      // only download. The setting survives the restart.
+      const db = new Database(pluginStateFixturePath(fixture.configDbPath));
+      try {
+        const settings = new SQLitePluginStorage(db, 'models-dev');
+        await settings.set(MODELS_DEV_SETTINGS_KEY, { autoRefresh: false, intervalHours: 24, timeoutSeconds: 30 });
+      } finally { db.close(); }
+      // Technical upstream fixture: it exists only to prove the real proxy+metering
+      // chain. It is NOT a commerce credential and its responses are NOT real billing.
+      upstream = Bun.serve({
+        hostname: '127.0.0.1',
+        port: 0,
+        fetch: async (request) => {
+          if (new URL(request.url).pathname !== '/v1/chat/completions' || request.method !== 'POST') {
+            return Response.json({ error: 'fixture_not_found' }, { status: 404 });
+          }
+          await request.json();
+          return Response.json({
+            id: 'chain-fixture', object: 'chat.completion', model: 'chain-fixture',
+            choices: [{ index: 0, message: { role: 'assistant', content: 'chain fixture' }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 17, completion_tokens: 7, total_tokens: 24, prompt_tokens_details: { cached_tokens: 5 } },
+          }, { status: 200, headers: { 'content-type': 'application/json' } });
+        },
+      });
+      if (upstream.port === undefined) throw new Error('local chain fixture did not bind');
+      // Bind the upstream first so port-block probing excludes its live port; otherwise
+      // port:0 can reuse a just-released gateway supervision port.
+      lease = await reservePortBlock();
+      master = await startGatewayMaster(fixture, lease);
+      await waitForHealth(master, lease.base, fixture);
+    } catch (error) {
+      try { await catalogSource.stop(true); } catch { /* startup error below is the primary evidence */ }
+      catalogSource = undefined;
+      throw error;
+    }
   }, 90_000);
 
   afterAll(async () => {
@@ -131,6 +259,9 @@ describe('models-dev catalog real-process integration (explicit chain activation
       } catch (error) { cleanupErrors.push(error); }
       fixture = undefined;
     }
+    try { if (catalogSource !== undefined) { await catalogSource.stop(true); } }
+    catch (error) { cleanupErrors.push(error); }
+    catalogSource = undefined;
     if (cleanupErrors.length) {
       const summaries = cleanupErrors.map((error) => evidenceFixture === undefined
         ? error instanceof Error ? error.message : 'unknown cleanup error'
@@ -139,7 +270,7 @@ describe('models-dev catalog real-process integration (explicit chain activation
     }
   }, 45_000);
 
-  test('empty catalog keeps the proxy metering best-effort with unknown price, then the real catalog prices aliases in both workers', async () => {
+  test('empty catalog keeps the proxy metering best-effort with unknown price; after both workers apply the refreshed catalog the alias prices proxied attempts', async () => {
     if (fixture === undefined || lease === undefined || upstream?.port === undefined || master === undefined) {
       throw new Error('real-process fixture did not initialize');
     }
@@ -155,15 +286,6 @@ describe('models-dev catalog real-process integration (explicit chain activation
       const baseRevision = (initial.body as { revision: number }).revision;
       expect(Number.isSafeInteger(baseRevision)).toBe(true);
 
-      // Persist models-dev settings (no auto download) through a separate connection,
-      // exactly as the control owner would. No alias yet: the first attempt must be
-      // metered best-effort with an UNKNOWN price.
-      const db = new Database(pluginStateFixturePath(currentFixture.configDbPath));
-      try {
-        const settings = new SQLitePluginStorage(db, 'models-dev');
-        await settings.set(MODELS_DEV_SETTINGS_KEY, { autoRefresh: false, intervalHours: 24, timeoutSeconds: 30 });
-      } finally { db.close(); }
-
       const aggregate = {
         plugin_activations: ACTIVATIONS,
         logical_configuration: {
@@ -178,7 +300,7 @@ describe('models-dev catalog real-process integration (explicit chain activation
           routes: [{
             id: ROUTE_ID, position: 1, path: '/v1/chat/completions', service_references: [{ id: crypto.randomUUID(), position: 0, service_id: SERVICE_ID, weight: 100, priority: 1, is_disabled: false }], plugins: [],
           }, {
-            id: ORDINARY_ROUTE_ID, position: 2, path: '/ordinary', service_references: [{ id: crypto.randomUUID(), position: 0, service_id: SERVICE_ID, weight: 100, priority: 1, is_disabled: false }], plugins: [],
+            id: CATALOG_READY_ROUTE_ID, position: 2, path: '/catalog-fixture-ready', service_references: [{ id: crypto.randomUUID(), position: 0, service_id: SERVICE_ID, weight: 100, priority: 1, is_disabled: false }], plugins: [],
           }],
         },
       };
@@ -201,7 +323,7 @@ describe('models-dev catalog real-process integration (explicit chain activation
       expect(mappingEmpty).toMatchObject({ source: 'catalog', modelCount: 0 });
 
       // Proxy still serves and meters best-effort; price is unknown, never 0.
-      await postChat(proxy, currentFixture, 'fixture-client-model');
+      await postChat(proxy, currentFixture, ALIAS_SOURCE);
       await waitUntil(async () => (await getStats(management, currentFixture)).upstreamAttempts >= 1,
         'the observation worker did not commit the first metered attempt', 10_000);
       const emptyStats = await getStats(management, currentFixture);
@@ -211,47 +333,59 @@ describe('models-dev catalog real-process integration (explicit chain activation
       // No aliases yet; the shared catalog is empty and nothing may fabricate a price.
       expect((await getMappings(management, currentFixture)).mappings).toEqual([]);
 
-      // Refresh from the REAL models.dev source exactly once, through the plugin API.
+      // Refresh from the configured source exactly once, through the plugin API.
       const accepted = await requestJson(`${management}/api/plugins/models-dev/control/catalog/refresh`, { method: 'POST' }, currentFixture);
       expect(accepted.response.status).toBe(202);
       const ready = await waitForReadyCatalog(management, currentFixture);
       expect(ready.state).toBe('ready');
       expect(ready.version).toBe(1);
-      expect(ready.providerCount).toBeGreaterThan(150);
-      expect(ready.modelCount).toBeGreaterThan(5_000);
+      expect(ready.source).toBe(MODELS_DEV_SOURCE_URL);
       expect(ready.lastError).toBeNull();
+      expect(ready.providerCount).toBe(CONTROLLED_PROVIDER_COUNT);
+      expect(ready.modelCount).toBe(CONTROLLED_MODEL_COUNT);
+      // Automatic refresh is disabled, so the single explicit refresh above is the only
+      // download of this run; a local shortcut payload never counts.
+      expect(catalogRequests).toBe(1);
 
-      // Real catalog preserves `provider.api` and keeps providers without one; it is
-      // never trimmed to a price whitelist.
+      // `provider.api` is preserved and providers without one survive; nothing is
+      // trimmed to a price whitelist.
       const providers = await getProviders(management, currentFixture);
-      expect(providers.providers.filter(provider => typeof provider.api === 'string' && provider.api.startsWith('https://')).length).toBeGreaterThan(100);
-      expect(providers.providers.some(provider => provider.api === null)).toBe(true);
+      expect(providers.providers.map(({ provider, api, modelCount }) => ({ provider, api, modelCount }))).toEqual([
+        { provider: 'anthropic', api: 'https://api.anthropic.com', modelCount: 1 },
+        { provider: 'local-gateway', api: null, modelCount: 1 },
+        { provider: 'zai', api: 'https://api.z.ai/api/paas/v4', modelCount: 2 },
+      ]);
+      const models = await getCatalogModels(management, currentFixture, 'glm-5.3', 'zai');
+      expect(models.total).toBe(2);
+      expect(models.models).toContainEqual(expect.objectContaining({ provider: 'zai', model: 'glm-5.3', name: 'GLM-5.3' }));
       const mappingReady = await getMappingCatalog(management, currentFixture);
-      expect(mappingReady.modelCount).toBeGreaterThan(5_000);
+      expect(mappingReady).toMatchObject({ source: 'catalog', modelCount: CONTROLLED_MODEL_COUNT, matchedCount: CONTROLLED_MODEL_COUNT });
 
-      // Choose a REAL alias target from the fetched catalog and write the alias through
-      // the control API (validated against the shared catalog, explicit priority).
-      const target = await chooseAliasTarget(management, currentFixture);
-      const alias = { source: ALIAS_SOURCE, provider: target.provider, model: target.model };
+      // Control readiness alone does not prove either worker consumed the snapshot.
+      // Each serving PID must report its own catalog view ready at this version
+      // before the alias is written.
+      await waitForBothWorkersCatalogReady(proxy, currentFixture, workers, ready.version!);
+
+      // Write the alias through the control API (validated against the shared
+      // catalog, explicit priority).
+      const alias = { source: ALIAS_SOURCE, ...CANONICAL_TARGET };
       const putMapping = await requestJson(`${management}/api/plugins/token-stats/control/pricing/mappings`, {
         method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify([alias]),
       }, currentFixture);
       expect(putMapping.response.status, scrub(putMapping.text, currentFixture)).toBe(200);
       expect((await getMappings(management, currentFixture)).mappings).toEqual([alias]);
 
-      // Both workers reconcile their own private catalog view; the explicit alias then
+      // Both workers already applied this catalog version; the explicit alias then
       // prices real proxied attempts (bounded polling with real traffic).
       const pricedStats = await postUntilPriced(management, proxy, currentFixture, ALIAS_SOURCE);
       expect(pricedStats.estimatedCostUsd).not.toBeNull();
       expect(pricedStats.estimatedCostUsd!).toBeGreaterThan(0);
-      if (target.provider === CANONICAL_TARGET.provider && target.model === CANONICAL_TARGET.model) {
-        expect(pricedStats.estimatedCostUsd).toBeCloseTo(EXPECTED_CANONICAL_COST, 9);
-      }
+      expect(pricedStats.estimatedCostUsd).toBeCloseTo(EXPECTED_CANONICAL_COST, 9);
       expect(pricedStats.upstreamAttempts).toBeGreaterThanOrEqual(2);
 
-      // An unaliased model on an unprovable localhost URL stays unknown and never adds
-      // a guessed or zero cost.
-      await postChat(proxy, currentFixture, 'glm-5.3');
+      // An unaliased model that the catalog cannot resolve stays unknown and never
+      // adds a guessed or zero cost.
+      await postChat(proxy, currentFixture, UNKNOWN_MODEL);
       await waitUntil(async () => (await getStats(management, currentFixture)).upstreamAttempts >= pricedStats.upstreamAttempts + 1,
         'the observation worker did not commit the unknown-price attempt', 10_000);
       const afterUnknown = await getStats(management, currentFixture);
@@ -260,12 +394,12 @@ describe('models-dev catalog real-process integration (explicit chain activation
 
       // Client model search path: real distinct attempt records, original case kept,
       // no synthetic rows, independent of any stats range/Top-N.
-      const searched = await getClientModels(management, currentFixture, 'fixture-client-model');
-      expect(searched).toMatchObject({ total: 1, models: ['fixture-client-model'] });
-      const upper = await getClientModels(management, currentFixture, 'FIXTURE-CLIENT-MODEL');
-      expect(upper.models).toEqual(['fixture-client-model']);
+      const searched = await getClientModels(management, currentFixture, ALIAS_SOURCE);
+      expect(searched).toMatchObject({ total: 1, models: [ALIAS_SOURCE] });
+      const upper = await getClientModels(management, currentFixture, ALIAS_SOURCE.toUpperCase());
+      expect(upper.models).toEqual([ALIAS_SOURCE]);
       const all = await getClientModels(management, currentFixture, '');
-      expect(all.models).toEqual(expect.arrayContaining(['fixture-client-model', 'glm-5.3']));
+      expect(all.models).toEqual(expect.arrayContaining([ALIAS_SOURCE, UNKNOWN_MODEL]));
       expect(all.total).toBe(new Set(all.models).size);
 
       // Restart: the catalog is readable from durable persistence at the same version,
@@ -280,8 +414,10 @@ describe('models-dev catalog real-process integration (explicit chain activation
       const afterRestart = await waitForWorkers(management, baseRevision + 1, currentFixture);
       await recordOwnedWorkers(master, afterRestart);
       const restored = await getCatalogStatus(management, currentFixture);
-      expect(restored).toMatchObject({ state: 'ready', version: 1, source: MODELS_DEV_SOURCE_URL, lastError: null });
-      expect(restored.providerCount).toBeGreaterThan(150);
+      expect(restored).toMatchObject({ state: 'ready', version: ready.version, source: MODELS_DEV_SOURCE_URL, lastError: null });
+      expect(restored.providerCount).toBe(ready.providerCount);
+      // Restart restores the durable snapshot; it must not download the source again.
+      expect(catalogRequests).toBe(1);
       expect((await getMappings(management, currentFixture)).mappings).toEqual([alias]);
       const restoredStats = await getStats(management, currentFixture);
       expect(restoredStats.upstreamAttempts).toBeGreaterThanOrEqual(afterUnknown.upstreamAttempts);
@@ -332,9 +468,27 @@ async function waitForReadyCatalog(management: string, fixture: GatewayFixture):
   await waitUntil(async () => {
     last = await getCatalogStatus(management, fixture);
     return last.state === 'ready' && typeof last.version === 'number' && last.version >= 1
-      && last.providerCount > 150 && last.modelCount > 5_000;
-  }, 'models-dev catalog did not become ready from the real source', 60_000);
+      && last.providerCount > 0 && last.modelCount > 0;
+  }, 'models-dev catalog did not become ready from the controlled source', 60_000);
   return last!;
+}
+
+/** Read-only probe: every serving PID must report its own catalog view ready at version. */
+async function waitForBothWorkersCatalogReady(
+  proxy: string,
+  fixture: GatewayFixture,
+  workers: readonly RuntimeWorker[],
+  version: number,
+): Promise<void> {
+  const observed = new Set<number>();
+  await waitUntil(async () => {
+    const result = await requestJson(`${proxy}/catalog-fixture-ready`, {}, fixture);
+    if (!result.response.ok) return false;
+    const body = result.body as { pid?: number; version?: number; state?: string };
+    if (body.version === version && body.state === 'ready' && Number.isSafeInteger(body.pid)
+      && workers.some(worker => worker.pid === body.pid)) observed.add(body.pid!);
+    return workers.every(worker => observed.has(worker.pid));
+  }, `both workers did not apply catalog version ${version}`, 30_000);
 }
 
 async function getCatalogModels(management: string, fixture: GatewayFixture, search: string, provider?: string): Promise<CatalogModels> {
@@ -345,20 +499,6 @@ async function getCatalogModels(management: string, fixture: GatewayFixture, sea
   const result = await requestJson(`${management}/api/plugins/models-dev/control/catalog/models${query}`, { signal: AbortSignal.timeout(10_000) }, fixture);
   if (!result.response.ok) throw new Error(`models-dev models returned ${result.response.status}`);
   return result.body as CatalogModels;
-}
-
-/** Prefer the canonical real example; otherwise the first model of an https-api provider. */
-async function chooseAliasTarget(management: string, fixture: GatewayFixture): Promise<{ provider: string; model: string }> {
-  const canonical = await getCatalogModels(management, fixture, CANONICAL_TARGET.model, CANONICAL_TARGET.provider);
-  const hit = canonical.models.find(model => model.provider === CANONICAL_TARGET.provider && model.model === CANONICAL_TARGET.model);
-  if (hit !== undefined) return { provider: hit.provider, model: hit.model };
-  const providers = await getProviders(management, fixture);
-  for (const provider of providers.providers) {
-    if (typeof provider.api !== 'string' || !provider.api.startsWith('https://')) continue;
-    const page = await getCatalogModels(management, fixture, '', provider.provider);
-    if (page.models.length > 0) return { provider: page.models[0]!.provider, model: page.models[0]!.model };
-  }
-  throw new Error('the real catalog exposed no usable alias target');
 }
 
 async function getProviders(management: string, fixture: GatewayFixture): Promise<ProvidersPayload> {

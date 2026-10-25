@@ -45,13 +45,17 @@ export function verifyRecords(plan: TestPlan, records: PhaseRecord[], platform: 
   }
   for (const phase of phases) {
     const selected = plan.files[phase], found = records.filter(record => record.phase === phase);
-    const count = selected.length ? (phase === 'browser' ? Math.min(2, selected.length) : 1) : 0;
+    const count = selected.length ? (phase === 'unit' ? 1 : Math.min(2, selected.length)) : 0;
     if (found.length !== count) throw new Error(`Missing or extra ${phase} task`);
     const executed = found.flatMap(record => record.executed);
     if (new Set(executed).size !== executed.length || !same(executed, selected)) throw new Error(`Incomplete or duplicate ${phase} execution`);
-    if (phase === 'browser') {
-      if (new Set(found.map(record => record.shard)).size !== count || found.some(record => !Array.from({ length: count }, (_, i) => `${i + 1}/${count}`).includes(record.shard!))) throw new Error('Invalid browser shard evidence');
-    } else if (found.some(record => record.shard)) throw new Error('Unexpected non-browser shard');
+    if (phase === 'unit') {
+      if (found.some(record => record.shard)) throw new Error('Unexpected unit shard');
+      continue;
+    }
+    if (!count) continue;
+    const expected = Array.from({ length: count }, (_, i) => `${i + 1}/${count}`);
+    if (new Set(found.map(record => record.shard)).size !== count || found.some(record => !expected.includes(record.shard!))) throw new Error(`Invalid ${phase} shard evidence`);
   }
   return { platform, commit: plan.testCommit, tree: plan.tree, scope: plan.mode, success: true };
 }

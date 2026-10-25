@@ -3,6 +3,7 @@ import type {DurableMutation, DurableRecord, PluginDurableState} from '../../../
 export class AsyncFakeState implements PluginDurableState {
   private records = new Map<string, DurableRecord>();
   readonly writes: string[][] = [];
+  constructor(records: readonly DurableRecord[] = []) { for (const record of records) this.records.set(record.key, structuredClone(record)); }
   beforeTransact?: (mutations: readonly DurableMutation[]) => Promise<void>;
   rejectNext?: unknown;
   async get(key: string): Promise<DurableRecord | null> { await Promise.resolve(); return structuredClone(this.records.get(key) ?? null); }

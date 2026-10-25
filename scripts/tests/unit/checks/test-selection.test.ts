@@ -127,6 +127,20 @@ describe('test scope selection', () => {
       'plugins/a/tests/browser/a.ts': "const path = new URL('../../../../packages/ui/tests/fixtures', import.meta.url);" });
     expect(plan(['packages/ui/tests/helpers/changed.ts'], { relations }).files.browser).toEqual(['packages/ui','plugins/a'].map(m => entry(m,'browser')).sort());
   });
+  test('logs route keeps only its maintained browser entries and falls back when one is missing', () => {
+    const route = 'packages/ui/src/routes/Logs.svelte';
+    const logs = ['packages/ui/tests/browser/header-actions.test.ts', 'packages/ui/tests/browser/routes/logs-outcomes.test.ts'];
+    const value = plan([route], { paths: [...paths, ...logs] });
+    expect(value.mode).toBe('affected');
+    expect(value.files.integration).toEqual([entry('packages/ui', 'integration')]);
+    expect(value.files.browser).toEqual([...logs, entry('root', 'browser'), entry('plugins/a', 'browser'), entry('plugins/b', 'browser'), entry('plugins/c', 'browser')].sort());
+    expect(value.files.browser).not.toContain(entry('packages/ui', 'browser'));
+    const fallback = plan([route], { paths: [...paths, ...logs.slice(0, 1)] });
+    expect(fallback.files.browser).toContain(entry('packages/ui', 'browser'));
+    expect(plan(['packages/ui/src/App.svelte']).files.browser).toContain(entry('packages/ui', 'browser'));
+    expect(plan(['packages/ui/src/App.svelte', route], { paths: [...paths, ...logs] }).files.browser)
+      .toEqual(plan(['packages/ui/src/App.svelte'], { paths: [...paths, ...logs] }).files.browser);
+  });
   test('modules without tests broaden to full and explain why', () => {
     for (const file of ['plugins/missing/server/a.ts','plugins/missing/ui/index.svelte']) {
       const value = plan([file]); expect(value.mode).toBe('full');

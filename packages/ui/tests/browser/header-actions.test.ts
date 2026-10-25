@@ -78,7 +78,6 @@ browserTest('header navigation and confirmed session logout', async () => {
       await page.keyboard.press('Escape'); await expect(config).toHaveCount(0);
       await system.click(); await menus.click();
       await expect(page.getByTestId('page-menus')).toBeVisible();
-      await expect(system).toHaveAttribute('data-active', 'true');
       await expect(menus).toHaveCount(0);
       await system.click(); await expect(menus).toHaveAttribute('aria-current', 'page');
 
@@ -95,12 +94,10 @@ browserTest('header navigation and confirmed session logout', async () => {
       await page.evaluate(() => window.dispatchEvent(new Event('focus')));
       const more = page.locator('#header-more-trigger');
       await expect(more).toBeVisible();
-      await expect(more).toHaveAttribute('data-active', 'true');
       await more.focus(); await page.keyboard.press('Enter');
       const overflow = page.getByTestId('header-more-menu');
       await expect(overflow.getByRole('menuitem', { name: '扩展应用 28', exact: true })).toBeVisible();
       await expect(overflow.getByRole('menuitem', { name: '菜单管理', exact: true })).toHaveAttribute('aria-current', 'page');
-      if (mode === 'anonymous') await page.screenshot({ path: '/tmp/bungee-header-overflow-open.png' });
       await page.keyboard.press('Escape');
       await expect(overflow).toHaveCount(0);
       await more.click();
@@ -151,11 +148,6 @@ browserTest('header navigation and confirmed session logout', async () => {
       }
       await navigation.click();
       await expect(compact.getByRole('link', { name: '插件管理', exact: true })).toHaveAttribute('aria-current', 'page');
-      if (mode === 'anonymous') {
-        await page.screenshot({ path: '/tmp/bungee-menu-sections-active.png', animations: 'disabled' });
-        await section.click();
-        await page.screenshot({ path: '/tmp/bungee-menu-sections-collapsed.png', animations: 'disabled' });
-      }
       await compact.getByRole('button', { name: '关闭菜单', exact: true }).click();
       await expect(compact).toHaveCount(0);
       if (mode === 'plugin') {

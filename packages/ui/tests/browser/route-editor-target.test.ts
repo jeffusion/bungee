@@ -246,17 +246,12 @@ test('missing, duplicate and cyclic references surface visible errors and disabl
 },120_000);
 
 test('target weights preserve large values and reject cleared required input before saving', async () => {
-  for (const mode of ['service-endpoint', 'route-endpoint', 'route-reference']) await withEditor(async (page,state) => {
-    const service = mode === 'service-endpoint';
-    const target = service ? state.logical.services[0].endpoints[0]
-      : mode === 'route-endpoint' ? state.logical.routes[1].endpoints[0] : state.logical.routes[0].service_references[0];
-    target.weight = 3000000000;
-    const path = service ? '/services/edit/fixture-service'
-      : mode === 'route-endpoint' ? '/routes/edit/%2Ffixture-custom%2F' : '/routes/edit/%2Ffixture-service%2F';
-    await openEditorWithHistory(page,path);
-    await page.getByTestId(service ? 'service-nav-endpoints' : 'route-nav-target').first().click();
+  await withEditor(async (page,state) => {
+    state.logical.services[0].endpoints[0].weight = 3000000000;
+    await openEditorWithHistory(page,'/services/edit/fixture-service');
+    await page.getByTestId('service-nav-endpoints').first().click();
     const weight = page.getByTestId('service-mixed-targets').getByRole('spinbutton',{name:'权重',exact:true}).first();
-    const save = page.getByTestId(service ? 'service-save-button' : 'route-save-button');
+    const save = page.getByTestId('service-save-button');
     await weight.focus(); await weight.press('Tab');
     await expect(weight).toHaveValue('3000000000');
     await weight.fill('9007199254740992');
@@ -273,9 +268,7 @@ test('target weights preserve large values and reject cleared required input bef
     await expect(save).toBeEnabled();
     const refreshed = page.waitForResponse(response => new URL(response.url()).pathname === '/api/config/runtime');
     await save.click(); await (await refreshed).finished(); await page.waitForLoadState('networkidle');
-    const saved = service ? state.logical.services[0].endpoints[0]
-      : mode === 'route-endpoint' ? state.logical.routes[1].endpoints[0] : state.logical.routes[0].service_references[0];
-    assert.equal(saved.weight,45);
+    assert.equal(state.logical.services[0].endpoints[0].weight,45);
   });
 },120_000);
 

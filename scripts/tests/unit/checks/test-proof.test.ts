@@ -5,13 +5,13 @@ import type { TestPlan } from '../../../checks/test-selection';
 
 const sha = 'a'.repeat(40), tree = 'b'.repeat(40), source = 'c'.repeat(40), releaseCommit = 'd'.repeat(40);
 const plan: TestPlan = { version: 1, base: sha, testCommit: sha, tree, head: source, mode: 'full', build: true, reasons: ['explicit-full'],
-  files: { unit: ['tests/unit/a.test.ts'], integration: ['tests/integration/a.test.ts'], browser: ['tests/browser/a.test.ts','tests/browser/b.test.ts'] } };
+  files: { unit: ['tests/unit/a.test.ts','tests/unit/b.test.ts'], integration: ['tests/integration/a.test.ts','tests/integration/b.test.ts'], browser: ['tests/browser/a.test.ts','tests/browser/b.test.ts'] } };
 const metadata = { pr: 12, runId: '123', runAttempt: 1, now: new Date('2026-10-11T00:00:00Z') };
 const expected = { ...metadata, head: source, tree };
 function records(): PhaseRecord[] {
   return [
     { phase: 'unit', files: plan.files.unit, executed: plan.files.unit, commit: sha, tree, elapsed: 1, status: 0 },
-    { phase: 'integration', files: plan.files.integration, executed: plan.files.integration, commit: sha, tree, elapsed: 2, status: 0 },
+    ...plan.files.integration.map((file, index) => ({ phase: 'integration' as const, files: plan.files.integration, executed: [file], commit: sha, tree, elapsed: 2, status: 0, shard: `${index+1}/2` })),
     ...plan.files.browser.map((file, index) => ({ phase: 'browser' as const, files: plan.files.browser, executed: [file], commit: sha, tree, elapsed: 3, status: 0, shard: `${index+1}/2` })),
   ];
 }
@@ -38,22 +38,33 @@ test('native shards cover each selected file once and use identical candidate li
   expect(verifyRecords(plan, records(), 'ubuntu-latest').success).toBe(true);
   for (const mutate of [
     (rs: PhaseRecord[]) => rs.pop(),
+    (rs: PhaseRecord[]) => rs.splice(0, 1),
+    (rs: PhaseRecord[]) => rs.splice(1, 1),
+    (rs: PhaseRecord[]) => rs.push({ ...rs[1]! }),
     (rs: PhaseRecord[]) => { rs[0]!.status = 1; },
     (rs: PhaseRecord[]) => { rs[0]!.tree = 'c'.repeat(40); },
     (rs: PhaseRecord[]) => { rs[0]!.commit = 'c'.repeat(40); },
     (rs: PhaseRecord[]) => { rs[0]!.executed = []; },
-    (rs: PhaseRecord[]) => { rs[3]!.executed = rs[2]!.executed; },
-    (rs: PhaseRecord[]) => { rs[3]!.shard = '1/2'; },
-    (rs: PhaseRecord[]) => { rs[3]!.files = [plan.files.browser[1]!]; },
+    (rs: PhaseRecord[]) => { rs[0]!.shard = '1/1'; },
+    (rs: PhaseRecord[]) => { rs[1]!.shard = undefined; },
+    (rs: PhaseRecord[]) => { rs[1]!.shard = '1/1'; },
+    (rs: PhaseRecord[]) => { rs[2]!.shard = '1/2'; },
+    (rs: PhaseRecord[]) => { rs[4]!.executed = rs[3]!.executed; },
+    (rs: PhaseRecord[]) => { rs[4]!.shard = '1/2'; },
+    (rs: PhaseRecord[]) => { rs[4]!.shard = '1/3'; },
+    (rs: PhaseRecord[]) => { rs[4]!.files = [plan.files.browser[1]!]; },
     (rs: PhaseRecord[]) => { rs[0]!.elapsed = NaN; },
   ]) { const rs = records(); mutate(rs); expect(() => verifyRecords(plan, rs, 'macos-latest')).toThrow(); }
 });
 
-test('document-only proof requires no execution; one browser file requires one native shard', () => {
+test('document-only proof requires no execution; single integration and browser files each require one native 1/1 shard', () => {
   expect(verifyRecords({ ...plan, mode: 'none', build: false, files: { unit: [], integration: [], browser: [] } }, [], 'macos-latest').scope).toBe('none');
-  const single = { ...plan, files: { ...plan.files, browser: [plan.files.browser[0]!] } };
-  const rs = records().slice(0,3); rs[2] = { ...rs[2]!, files: single.files.browser, shard: '1/1' };
+  const single = { ...plan, files: { unit: plan.files.unit, integration: [plan.files.integration[0]!], browser: [plan.files.browser[0]!] } };
+  const rs = [records()[0]!, { ...records()[1]!, files: single.files.integration, executed: single.files.integration, shard: '1/1' },
+    { ...records()[3]!, files: single.files.browser, executed: single.files.browser, shard: '1/1' }];
   expect(verifyRecords(single, rs, 'ubuntu-latest').success).toBe(true);
+  rs[1] = { ...rs[1]!, shard: '1/2' };
+  expect(() => verifyRecords(single, rs, 'ubuntu-latest')).toThrow();
 });
 
 test.each(['affected','none'] as const)('%s proof never satisfies full release validation', scope => {

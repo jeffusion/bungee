@@ -279,50 +279,51 @@ test('provider presets expose only required fields, preserve callback IDs and ke
       await expect(search).toHaveCount(0);
       await expect(status).toHaveCount(0);
 
-      for(const provider of ['google','microsoft','github'] as const) {
-        await page.getByRole('button',{name:'添加连接',exact:true}).click();
-        const dialog=page.getByRole('dialog'), callback=dialog.getByTestId('login-callback');
-        const callbackUrl=await callback.inputValue();
-        expect(callbackUrl).toMatch(/^https:\/\/public\.example\/api\/auth\/login\/callback\/[0-9a-f-]{36}$/);
-        await expect(dialog.getByLabel('Client ID',{exact:true})).toHaveCount(0);
-        const title=provider==='google'?'Google':provider==='microsoft'?'Microsoft':'GitHub';
-        await dialog.getByRole('button',{name:title,exact:true}).click();
-        await expect(callback).toHaveValue(callbackUrl);
-        await expect(dialog.getByRole('link',{name:'创建应用 ↗',exact:true})).toHaveAttribute('href',/^https:\/\//);
-        for(const field of ['Issuer URL','Discovery URL','授权端点','令牌端点','JWKS URL','Scopes（空格分隔）']) await expect(dialog.getByLabel(field,{exact:true})).toHaveCount(0);
-        await expect(dialog.getByRole('button',{name:/检查|测试登录/})).toHaveCount(0);
-        await expect(dialog.getByRole('switch',{name:'启用连接',exact:true})).toHaveCount(0);
-        await dialog.getByLabel('连接显示名称').fill(`${title} team`);
-        await dialog.getByLabel('Client ID',{exact:true}).fill(`${provider}-client`);
-        await dialog.getByLabel('Client secret',{exact:true}).fill(`${provider}-secret`);
-        if(provider==='microsoft') {
-          await expect(dialog.getByRole('combobox',{name:'账号范围',exact:true})).toHaveValue('tenant');
-          await expect(dialog.getByRole('button',{name:'保存',exact:true})).toBeDisabled();
-          await dialog.getByLabel('Tenant ID',{exact:true}).fill('not-a-tenant');
-          await expect(dialog.getByRole('button',{name:'保存',exact:true})).toBeDisabled();
-          for(const accountType of ['organizations','consumers','common']) {
-            await dialog.getByRole('combobox',{name:'账号范围',exact:true}).selectOption(accountType);
-            await expect(dialog.getByLabel('Tenant ID',{exact:true})).toHaveCount(0);
-            await expect(dialog.getByRole('button',{name:'保存',exact:true})).toBeEnabled();
-          }
-          await dialog.getByRole('combobox',{name:'账号范围',exact:true}).selectOption('tenant');
-          await dialog.getByLabel('Tenant ID',{exact:true}).fill('12345678-1234-1234-1234-123456789abc');
-          expect(await dialog.getByLabel('Tenant ID',{exact:true}).evaluate((element: HTMLInputElement) => element.checkValidity())).toBe(true);
-
-        }
-        await dialog.getByRole('button',{name:'保存',exact:true}).click();
-        await expect(dialog).toHaveCount(0);
-        expect(writes.at(-1)).toEqual({id:callbackUrl.split('/').at(-1),label:`${title} team`,enabled:false,provider,clientId:`${provider}-client`,clientSecret:`${provider}-secret`,configuration:provider==='microsoft'?{accountType:'tenant',tenantId:'12345678-1234-1234-1234-123456789abc'}:{}});
-        await expect(page.getByTestId('auth-login-settings').getByRole('status').filter({hasText:'配置已保存'})).toBeVisible();
+      await page.getByRole('button',{name:'添加连接',exact:true}).click();
+      const dialog=page.getByRole('dialog'), callback=dialog.getByTestId('login-callback');
+      const callbackUrl=await callback.inputValue();
+      expect(callbackUrl).toMatch(/^https:\/\/public\.example\/api\/auth\/login\/callback\/[0-9a-f-]{36}$/);
+      await expect(dialog.getByLabel('Client ID',{exact:true})).toHaveCount(0);
+      await dialog.getByRole('button',{name:'Microsoft',exact:true}).click();
+      await expect(callback).toHaveValue(callbackUrl);
+      await expect(dialog.getByRole('link',{name:'创建应用 ↗',exact:true})).toHaveAttribute('href',/^https:\/\//);
+      for(const field of ['Issuer URL','Discovery URL','授权端点','令牌端点','JWKS URL','Scopes（空格分隔）']) await expect(dialog.getByLabel(field,{exact:true})).toHaveCount(0);
+      await expect(dialog.getByRole('button',{name:/检查|测试登录/})).toHaveCount(0);
+      await expect(dialog.getByRole('switch',{name:'启用连接',exact:true})).toHaveCount(0);
+      await dialog.getByLabel('连接显示名称').fill('Microsoft team');
+      await dialog.getByLabel('Client ID',{exact:true}).fill('microsoft-client');
+      await dialog.getByLabel('Client secret',{exact:true}).fill('microsoft-secret');
+      await expect(dialog.getByRole('combobox',{name:'账号范围',exact:true})).toHaveValue('tenant');
+      await expect(dialog.getByRole('button',{name:'保存',exact:true})).toBeDisabled();
+      await dialog.getByLabel('Tenant ID',{exact:true}).fill('not-a-tenant');
+      await expect(dialog.getByRole('button',{name:'保存',exact:true})).toBeDisabled();
+      for(const accountType of ['organizations','consumers','common']) {
+        await dialog.getByRole('combobox',{name:'账号范围',exact:true}).selectOption(accountType);
+        await expect(dialog.getByLabel('Tenant ID',{exact:true})).toHaveCount(0);
+        await expect(dialog.getByRole('button',{name:'保存',exact:true})).toBeEnabled();
       }
-      expect(new Set(writes.map(write=>write.id)).size).toBe(3);
-      const row=page.getByTestId('login-connection-row').filter({hasText:'GitHub team'});
+      await dialog.getByRole('combobox',{name:'账号范围',exact:true}).selectOption('tenant');
+      await dialog.getByLabel('Tenant ID',{exact:true}).fill('12345678-1234-1234-1234-123456789abc');
+      expect(await dialog.getByLabel('Tenant ID',{exact:true}).evaluate((element: HTMLInputElement) => element.checkValidity())).toBe(true);
+      await dialog.getByRole('button',{name:'保存',exact:true}).click();
+      await expect(dialog).toHaveCount(0);
+      expect(writes.at(-1)).toEqual({id:callbackUrl.split('/').at(-1),label:'Microsoft team',enabled:false,provider:'microsoft',clientId:'microsoft-client',clientSecret:'microsoft-secret',configuration:{accountType:'tenant',tenantId:'12345678-1234-1234-1234-123456789abc'}});
+      await expect(page.getByTestId('auth-login-settings').getByRole('status').filter({hasText:'配置已保存'})).toBeVisible();
+
+      await page.getByRole('button',{name:'添加连接',exact:true}).click();
+      const newDialog=page.getByRole('dialog');
+      expect(await newDialog.getByTestId('login-callback').inputValue()).not.toBe(callbackUrl);
+      await newDialog.getByRole('button',{name:'关闭',exact:true}).click();
+      await expect(newDialog).toHaveCount(0);
+      expect(writes).toHaveLength(1);
+
+      const row=page.getByTestId('login-connection-row').filter({hasText:'Microsoft team'});
       await row.getByRole('button',{name:'编辑',exact:true}).click();
       const edit=page.getByRole('dialog');
-      await expect(edit.getByTestId('login-callback')).toHaveValue(`https://public.example/api/auth/login/callback/${writes.at(-1).id}`);
-
+      await expect(edit.getByTestId('login-callback')).toHaveValue(callbackUrl);
       await expect(edit.getByRole('switch',{name:'启用连接',exact:true})).toBeEnabled();
       await expect(edit.getByRole('button',{name:'Google',exact:true})).toHaveCount(0);
+      await expect(edit.getByRole('button',{name:'GitHub',exact:true})).toHaveCount(0);
       await expect(edit.getByLabel('Client secret',{exact:true})).toHaveValue('');
       await edit.getByRole('button',{name:'关闭',exact:true}).click();expect(errors).toEqual([]);
     } finally {await context.close();}

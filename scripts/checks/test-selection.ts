@@ -127,9 +127,14 @@ export function selectTests(input: {
     for (const phase of layers) for (const file of all[phase]) if (moduleOf(file) === module) selected[phase].add(file);
     return entries.length > 0;
   };
-  const ui = (): void => {
+  const ui = (entries = all.browser): void => {
     include('packages/ui', ['integration']);
-    for (const file of all.browser) if (moduleOf(file) === 'root' || moduleOf(file) === 'packages/ui' || moduleOf(file).startsWith('plugins/')) selected.browser.add(file);
+    for (const file of all.browser) if (moduleOf(file) === 'root' || moduleOf(file).startsWith('plugins/')) selected.browser.add(file);
+    for (const file of entries) if (moduleOf(file) === 'packages/ui') selected.browser.add(file);
+  };
+  const logs = (): void => {
+    const entries = ['packages/ui/tests/browser/header-actions.test.ts', 'packages/ui/tests/browser/routes/logs-outcomes.test.ts'];
+    ui(entries.every(file => all.browser.includes(file)) ? entries : all.browser);
   };
   const server = (modules: Iterable<string>): void => {
     for (const module of reverseClosure(modules, input.relations)) include(module, module === 'plugins/llm-tps' ? ['integration', 'browser'] : ['integration']);
@@ -157,7 +162,7 @@ export function selectTests(input: {
       continue;
     }
     if (/(?:^|\/)(?:package\.json|bun\.lockb?|[^/]*lock\.yaml|tsconfig[^/]*\.json|(?:vite|svelte|tailwind|postcss)\.config\.[^/]+|tailwind\.theme\.[^/]+)$/.test(file)) { full = true; reasons.add(`configuration:${file}`); continue; }
-    if (module === 'packages/ui') { reasons.add(`ui:${file}`); ui(); continue; }
+    if (module === 'packages/ui') { reasons.add(`ui:${file}`); if (file === 'packages/ui/src/routes/Logs.svelte') logs(); else ui(); continue; }
     if (module === 'packages/cli') { reasons.add(`cli:${file}`); include(module, ['integration']); server([]); continue; }
     if (module === 'packages/llms') { reasons.add(`llms:${file}`); include(module, ['integration']); server(input.relations.llmsConsumers); continue; }
     if (module.startsWith('plugins/')) {

@@ -10,9 +10,10 @@ export default class CatalogVersionProbe {
   register(hooks: any): void {
     hooks.onInterceptRequest.tapPromise('catalog-version-probe', async (context: any) => {
       if (context.originalUrl.pathname !== '/catalog-fixture-ready') return;
+      const status = this.catalog.status();
       const match = this.catalog.resolveModel({ model: 'gpt-4o-mini', pricingProvider: 'openai' });
       return { action: 'respond', response: Response.json({ pid: process.pid,
-        version: this.catalog.status().version, inputPrice: match?.input ?? null }) };
+        version: status.version, inputPrice: match?.input ?? null, state: status.state, error: status.error }) };
     });
   }
 }

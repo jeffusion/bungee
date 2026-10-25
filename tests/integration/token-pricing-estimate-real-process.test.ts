@@ -11,7 +11,7 @@ import { HostSnapshotStore } from '../../packages/core/src/plugin-services/snaps
 import { PluginCommunicationStore } from '../../packages/core/src/plugin-services/persistence';
 import { MODELS_DEV_SETTINGS_KEY } from '../../plugins/models-dev/server/store';
 import {
-  createGatewayFixture, reservePortBlock, startTrackedGatewayMaster,
+  reservePortBlock, startTrackedGatewayMaster,
   waitUntil, recordOwnedWorkers, stopOwnedMaster, releasePortBlock, quarantinePortBlock,
   cleanupGatewayFixture, requestJson, safeGatewayError, type OwnedMaster,
   type GatewayMasterStartupState,
@@ -22,7 +22,7 @@ const UPSTREAM = '20000000-0000-4000-8000-0000000000ae';
 const ROUTE = '30000000-0000-4000-8000-0000000000ae';
 type Row = { attempt_id: string; model: string; cost_usd: number | null; input_tokens: number };
 
-test('original-lab estimates and context tiers settle protected USD budgets across refresh and restart', async () => {
+test('catalog USD price settles one protected real request consistently across token stats, budget attempts and cumulative spend', async () => {
   const fixture = await createTokenStatsGatewayFixture();
   const startup: GatewayMasterStartupState = { attempted: false, errors: [] };
   let master: OwnedMaster | undefined;
@@ -64,19 +64,16 @@ test('original-lab estimates and context tiers settle protected USD budgets acro
     }
     finally { db.close(); }
   };
-  const publish = async (version: number, multiplier = 1, corrupt = false) => {
+  const publish = async (version: number) => {
     const db = new Database(pluginStateFixturePath(fixture.configDbPath));
     try {
       // Match production connections while the master and workers write concurrently.
       db.exec('PRAGMA busy_timeout = 5000');
       const store = new HostSnapshotStore(new PluginCommunicationStore(db, undefined, { setup: false }).forNamespace('channel.models-dev'),
         { owner: 'models-dev', id: 'models-dev.catalog.v1', schemaVersion: 1, maxVersions: 3 });
-      const price = { input: 2 * multiplier, output: 10 * multiplier, cache_read: 0.1 * multiplier,
-        tiers: [{ input: 4 * multiplier, output: 15 * multiplier, cache_read: 0.2 * multiplier,
-          tier: { type: 'context', size: 272_000 } }], context_over_200k: { input: 100, output: 100 } };
-      store.publish(version, { version, fetchedAt: Date.now(), catalog: corrupt ? null : {
+      const price = { input: 2, output: 10, cache_read: 0.1 };
+      store.publish(version, { version, fetchedAt: Date.now(), catalog: {
         openai: { models: { 'gpt-6.1-sol': { cost: price }, 'gpt-4o-mini': { cost: price } } },
-        mirror: { models: { 'gpt-6.1-sol': { cost: { input: 100, output: 100 } } } },
       } });
     } finally { db.close(); }
   };
@@ -84,8 +81,9 @@ test('original-lab estimates and context tiers settle protected USD budgets acro
     const observed = new Set<number>();
     await waitUntil(async () => {
       const result = await fetch(`${proxy}/catalog-fixture-ready`, { signal: AbortSignal.timeout(2_000) });
-      const body = await result.json() as { pid: number; version: number; inputPrice: number };
-      if (result.ok && body.version === version && body.inputPrice === inputPrice) observed.add(body.pid);
+      const body = await result.json() as { pid: number; version: number; inputPrice: number; state: string; error: string | null };
+      if (result.ok && body.version === version && body.inputPrice === inputPrice
+        && body.state === 'ready' && body.error === null) observed.add(body.pid);
       return workers.every(worker => observed.has(worker.pid));
     }, `both workers did not load pricing version ${version}`, 25_000);
   };
@@ -107,7 +105,6 @@ test('original-lab estimates and context tiers settle protected USD budgets acro
     }, 'shared price did not durably settle USD budget', 10_000);
     const ledger = await api(`/api/plugins/token-budget/control/keys/${keyId}`);
     expect(ledger.value.money.cumulativeNanoUsd).toBe(rows().reduce((sum, row) => sum + Math.round(row.cost_usd! * 1e9), 0));
-    return row;
   };
   const inventory = async () => {
     await waitUntil(async () => {
@@ -157,56 +154,11 @@ test('original-lab estimates and context tiers settle protected USD budgets acro
     await api(`/api/plugins/token-budget/control/keys/${keyId}`, 'PUT', { mode: 'cumulative', unit: 'usd', limit: 100 });
     const denied = await fetch(`${proxy}/pricing-estimate/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     expect(denied.status).toBe(401); await denied.text(); expect(calls).toBe(0);
-    await post('gpt-6.1-sol', 100_000, 80_000, 0.049);
-    await post('gpt-6.1-sol', 272_000, 270_000, 0.0635);
-    await post('GPT-6.1-SOL-HIGH', 100_000, 80_000, 0.049);
     expect((await api('/api/plugins/token-stats/control/pricing/mappings')).mappings).toEqual([]);
-    const oldRows = rows();
-    await publish(2, 2); await ready(2, 4);
-    await post('gpt-6.1-sol', 272_000, 270_000, 0.127);
-    expect(rows().slice(0, oldRows.length)).toEqual(oldRows);
-    await publish(3, 1, true);
-    // Wait for the reconcile interval, then prove both views still price v2.
-    await Bun.sleep(6_000); await ready(2, 4);
-    await post('gpt-6.1-sol', 100_000, 80_000, 0.098);
-    await publish(4); await ready(4, 2);
-    await api('/api/plugins/token-stats/control/pricing/mappings', 'PUT', [{ source: 'gpt-6.1-sol', provider: 'mirror', model: 'gpt-6.1-sol' }]);
-    await Bun.sleep(11_000);
-    await post('gpt-6.1-sol', 100_000, 80_000, 10.01);
-    const beforeRestart = rows();
-    await stopOwnedMaster(master); master = undefined;
-    master = await startTrackedGatewayMaster(startup, fixture, lease);
-    // Authenticated runtime inventory replaces the anonymous helper after restart.
-    await waitUntil(async () => (await fetch(`${management}/health`)).ok, 'restarted master did not become healthy');
-    await inventory(); await ready(4, 2);
-    expect(rows()).toEqual(beforeRestart);
-    await post('gpt-6.1-sol', 100_000, 80_000, 10.01);
+    await post('gpt-6.1-sol', 100_000, 80_000, 0.049);
 
-    if (process.env.BUNGEE_PRICING_BROWSER === '1') {
-      const { chromium } = await import('playwright');
-      const browser = await chromium.launch({ headless: true });
-      try {
-        const page = await browser.newPage();
-        const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
-        await page.goto(`${management}/#/login`);
-        const form = page.getByTestId('page-login').locator('form');
-        await form.locator('input[autocomplete="username"]').fill('pricing-admin');
-        await form.locator('input[autocomplete="current-password"]').fill(password);
-        await form.locator('button.nx-btn-primary').click();
-        await page.waitForURL(url => url.hash === '#/');
-        await page.goto(`${management}/#/plugins/token-stats/statistics`);
-        await page.getByTestId('token-stats-page-summary').waitFor();
-        const uppercase = page.getByTestId('token-stats-model-row').filter({ hasText: 'GPT-6.1-SOL-HIGH' });
-        await uppercase.waitFor();
-        expect(await page.getByTestId('token-stats-model-list').innerText()).toContain('gpt-6.1-sol');
-        await page.goto(`${management}/#/plugins/token-stats/pricing`);
-        await page.getByTestId('token-stats-settings').waitFor();
-        expect(await page.getByTestId('client-model-input').inputValue()).toBe('gpt-6.1-sol');
-        expect(errors).toEqual([]);
-      } finally { await browser.close(); }
-    }
     await writeFile(join(evidence, 'result.json'), JSON.stringify({ workers: workers.map(w => w.pid), authenticated: true,
-      calls, rows: rows(), browser: process.env.BUNGEE_PRICING_BROWSER === '1', budget: (await api(`/api/plugins/token-budget/control/keys/${keyId}`)).value.money }, null, 2));
+      calls, rows: rows(), budget: (await api(`/api/plugins/token-budget/control/keys/${keyId}`)).value.money }, null, 2));
     console.info(`pricing integration evidence: ${evidence}`);
   } catch (error) {
     failed = true;

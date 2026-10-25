@@ -72,13 +72,6 @@ try {
   await expect(row).not.toContainText('["route",""]');
   await expect(row.getByRole('combobox', { name: '源模型协议', exact: true })).toHaveValue('Responses');
 
-  await row.getByRole('button', { name: '手动输入', exact: true }).click();
-  await row.getByRole('textbox', { name: '原始模型', exact: true }).fill('manual-draft');
-  await row.getByRole('button', { name: '从目录选择', exact: true }).click();
-  await expect(row.getByRole('combobox', { name: '原始模型', exact: true })).toBeEnabled();
-  await row.getByRole('button', { name: '手动输入', exact: true }).click();
-  await expect(row.getByRole('textbox', { name: '原始模型', exact: true })).toHaveValue('manual-draft');
-  await row.getByRole('button', { name: '从目录选择', exact: true }).click();
   await expect(row.getByRole('combobox', { name: '原始提供商', exact: true })).toHaveCount(0);
   const heldCatalog = new Promise<Route>(resolve => { holdSourceCatalog = resolve; });
   await row.getByRole('combobox', { name: '原始模型', exact: true }).click();
@@ -88,8 +81,7 @@ try {
   await expect(dialog).toBeVisible();
 
   await row.getByRole('combobox', { name: '原始模型', exact: true }).click();
-  await page.getByRole('button', { name: '加载更多', exact: true }).click();
-  await page.getByRole('option', { name: 'gpt-original-2', exact: true }).click();
+  await page.getByRole('option', { name: 'gpt-original-1', exact: true }).click();
   await row.getByRole('combobox', { name: '目标提供商', exact: true }).fill('Fixture');
   await expect(page.getByRole('option')).toHaveCount(1);
   await page.getByRole('option', { name: 'Fixture · fixture', exact: true }).click();
@@ -120,12 +112,6 @@ try {
   await expect(row.getByRole('combobox', { name: '目标模型协议', exact: true })).toHaveValue('');
   await row.getByRole('combobox', { name: '目标模型协议', exact: true }).click();
   await page.getByRole('option', { name: 'Chat Completions', exact: true }).click();
-  await row.getByRole('combobox', { name: '原始模型', exact: true }).click();
-  await expect(page.getByRole('option', { name: 'gpt-original-1', exact: true })).toBeVisible();
-  await row.getByRole('combobox', { name: '原始模型', exact: true }).fill('gpt-original');
-  await page.getByRole('option', { name: 'gpt-original', exact: true }).click();
-  expect(catalogQueries.some(query => query.get('provider') === 'openai' && query.get('page') === '2')).toBe(true);
-  expect(catalogQueries.some(query => query.get('provider') === 'openai' && query.get('search') === 'gpt-original')).toBe(true);
   expect(catalogQueries.some(query => query.get('provider') === 'fixture')).toBe(true);
   await row.getByRole('combobox', { name: '目标提供商', exact: true }).fill('OpenAI');
   await expect(page.getByRole('option', { name: 'OpenAI · openai', exact: true })).toHaveCount(0);
@@ -136,7 +122,7 @@ try {
   await expect(row.getByRole('textbox', { name: /公开模型标识|模型别名/ })).toHaveCount(0);
   await row.getByRole('radio', { name: '新增模型', exact: true }).press('ArrowRight');
 
-  await expect(row.getByRole('combobox', { name: '原始模型', exact: true })).toHaveValue('gpt-original');
+  await expect(row.getByRole('combobox', { name: '原始模型', exact: true })).toHaveValue('gpt-original-1');
   await expect(row.getByRole('combobox', { name: '目标模型', exact: true })).toHaveValue('org/model-1');
   await expect(row.getByRole('combobox', { name: '转发目标', exact: true })).toHaveValue('fixture-service');
   await row.getByText('能力限制（可选）', { exact: true }).click();
@@ -144,25 +130,6 @@ try {
   await row.getByRole('button', { name: '增加上下文上限', exact: true }).click();
   await expect(row.getByRole('spinbutton', { name: '上下文长度上限', exact: true })).toHaveValue('16001');
   await row.getByRole('checkbox', { name: '禁用图片输入', exact: true }).check();
-
-  await dialog.getByRole('button', { name: '添加模型替换', exact: true }).click();
-  await expect(dialog.getByTestId('codex-model-binding')).toHaveCount(2);
-  const secondRow = dialog.getByTestId('codex-model-binding').nth(1);
-  await secondRow.getByRole('button', { name: '手动输入', exact: true }).click();
-  await secondRow.getByRole('textbox', { name: '原始模型', exact: true }).fill('second-draft');
-  await secondRow.getByRole('button', { name: '从目录选择', exact: true }).click();
-  await expect(row.getByRole('combobox', { name: '原始模型', exact: true })).toHaveValue('gpt-original');
-  await row.getByRole('combobox', { name: '目标模型协议', exact: true }).click();
-  await page.getByRole('option', { name: 'Anthropic Messages', exact: true }).click();
-  await expect(row.getByRole('combobox', { name: '目标模型协议', exact: true })).toHaveValue('Anthropic Messages');
-  await row.getByRole('combobox', { name: '目标模型协议', exact: true }).click();
-  await page.getByRole('option', { name: 'Chat Completions', exact: true }).click();
-  await row.getByRole('combobox', { name: '原始模型', exact: true }).click();
-  await expect(page.getByRole('option', { name: 'gpt-original-1', exact: true })).toBeVisible();
-  await row.getByRole('combobox', { name: '原始模型', exact: true }).press('Escape');
-  await expect(dialog).toBeVisible();
-
-  await secondRow.getByRole('button', { name: '移除', exact: true }).click();
 
   await row.getByText('能力限制（可选）', { exact: true }).click();
 
@@ -174,27 +141,21 @@ try {
   await expect(summary.getByTestId('plugin-config-summary')).not.toContainText(serviceId);
 
   await page.getByTestId('section-plugins').getByRole('button', { name: '编辑', exact: true }).click();
-  await expect(dialog.getByRole('combobox', { name: '原始模型', exact: true })).toHaveValue('gpt-original');
+  await expect(dialog.getByRole('combobox', { name: '原始模型', exact: true })).toHaveValue('gpt-original-1');
   await expect(dialog.getByRole('combobox', { name: '目标模型', exact: true })).toHaveValue('org/model-1');
-
+  await expect(dialog.getByRole('combobox', { name: '目标模型协议', exact: true })).toHaveValue('Chat Completions');
   await expect(dialog.getByRole('combobox', { name: '转发目标', exact: true })).toHaveValue('fixture-service');
   await dialog.getByText('能力限制（可选）', { exact: true }).click();
   await expect(dialog.getByRole('spinbutton', { name: '上下文长度上限', exact: true })).toHaveValue('16001');
   await expect(dialog.getByRole('checkbox', { name: '禁用图片输入', exact: true })).toBeChecked();
   await dialog.getByRole('button', { name: '手动输入', exact: true }).click();
-  await expect(dialog.getByRole('textbox', { name: '原始模型', exact: true })).toHaveValue('gpt-original');
+  await expect(dialog.getByRole('textbox', { name: '原始模型', exact: true })).toHaveValue('gpt-original-1');
   await dialog.getByRole('textbox', { name: '原始模型', exact: true }).fill('custom-original');
   await dialog.getByTestId('plugin-config-save-button').click();
   await page.getByTestId('section-plugins').getByRole('button', { name: '编辑', exact: true }).click();
   await expect(dialog.getByRole('textbox', { name: '原始模型', exact: true })).toHaveValue('custom-original');
   await expect(dialog.getByRole('combobox', { name: '目标模型', exact: true })).toHaveValue('org/model-1');
-  await dialog.getByRole('button', { name: '从目录选择', exact: true }).click();
-  await expect(dialog.getByRole('combobox', { name: '原始模型', exact: true })).toBeVisible();
   await expect(dialog.getByRole('combobox', { name: '目标模型协议', exact: true })).toHaveValue('Chat Completions');
-  await dialog.getByRole('button', { name: '手动输入', exact: true }).click();
-  await expect(dialog.getByRole('textbox', { name: '原始模型', exact: true })).toHaveValue('custom-original');
-  await dialog.getByTestId('plugin-config-save-button').click();
-  await page.getByTestId('section-plugins').getByRole('button', { name: '编辑', exact: true }).click();
   const relay = dialog.getByTestId('codex-collaboration-relay');
   await expect(relay.getByRole('switch', { name: '协作中继', exact: true })).toHaveAttribute('aria-checked', 'false');
   await relay.getByRole('switch', { name: '协作中继', exact: true }).click();

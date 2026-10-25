@@ -1,18 +1,36 @@
-import {expect, test} from 'bun:test';
+import {beforeAll, expect, test} from 'bun:test';
 import {createControl, recoverIdentity, MAX_SESSIONS} from '../../server/control';
 import {AsyncFakeState} from '../helpers/fake-durable-state';
 import type {ControlHostContext} from '../../../../packages/core/src/plugin-control/contracts';
-import type {DurableJson} from '../../../../packages/core/src/plugin-durable-state';
+import type {DurableJson, DurableRecord} from '../../../../packages/core/src/plugin-durable-state';
 const password = 'independent-account-records';
+const initialTime = 1_000_000;
 const req = (token?: string) => new Request('https://example.com/self', {headers: token ? {authorization: 'Bearer ' + token} : {}});
 const loginRequest = (name = 'owner', p = password) => new Request('https://example.com/login', {method: 'POST', body: JSON.stringify({username: name, password: p, transport: 'bearer'})});
+let seed: readonly DurableRecord[];
+beforeAll(async () => {
+  const state = new AsyncFakeState();
+  await recoverIdentity({operation:'reset', username:'owner', password, passwordConfirmation:password, reason:'test fixture'}, {durableState:state, now:()=>initialTime});
+  seed = await state.list(); expect(seed.some(record => record.key.startsWith('session:'))).toBe(false);
+});
 async function fixture() {
-  const state = new AsyncFakeState(), host: ControlHostContext = {signal: new AbortController().signal, durableState: state, secretStore: {} as never, storage: {} as never};
-  let now = 1_000_000; const control = createControl(host, {now: () => now});
-  await recoverIdentity({operation:'reset', username:'owner', password, passwordConfirmation:password, reason:'test fixture'}, {durableState:state, now:()=>now}); await control.start();
+  const state = new AsyncFakeState(seed), host: ControlHostContext = {signal: new AbortController().signal, durableState: state, secretStore: {} as never, storage: {} as never};
+  let now = initialTime; expect(await state.list()).toEqual(seed); const control = createControl(host, {now: () => now});
+  await control.start();
   const login = async () => { const r = await control.login(loginRequest()); expect(r.status).toBe(200); return (await r.json()).token as string; };
   return {state, host, control, login, advance: (ms: number) => {now += ms;}};
 }
+test('fixture snapshots preserve recorded versions and clone values per state', async () => {
+  const source = new AsyncFakeState();
+  await source.transact([{key: 'probe', expectedVersion: 0, value: {schema: 3, probe: 1}}]);
+  await source.transact([{key: 'probe', expectedVersion: 1, value: {schema: 3, probe: 2}}]);
+  const snapshot = await source.list(), first = new AsyncFakeState(snapshot), second = new AsyncFakeState(snapshot);
+  expect(await first.list()).toEqual(snapshot); expect((await first.get('probe'))!.version).toBe(2);
+  (snapshot[0].value as {schema: number; probe: number}).probe = 99;
+  expect((await first.get('probe'))!.value).toEqual({schema: 3, probe: 2});
+  await first.transact([{key: 'probe', expectedVersion: 2, value: {schema: 3, probe: 3}}]);
+  expect((await second.get('probe'))!.value).toEqual({schema: 3, probe: 2}); expect((await source.get('probe'))!.value).toEqual({schema: 3, probe: 2});
+});
 test('repeated authentication updates exactly one session and never the administrator, limiter or command history', async () => {
   const f = await fixture(), first = await f.login(), second = await f.login(), before = await f.state.list();
   const writes = f.state.writes.length;

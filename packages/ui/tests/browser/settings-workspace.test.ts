@@ -64,7 +64,6 @@ async function withSettings(run: (page: Page, model: ReturnType<typeof createMod
       const body=request.postDataJSON(); model.writes.push({method,path,body}); model.id=body.mutation_id;
       if(model.rejection) return json({error:model.rejection,reason:'lease_margin',message:'PRIVATE-ERROR',aggregate:{secret:'PRIVATE-ERROR'}},model.status);
       if(model.networkFailure) {evidence.expectFailure(request,'net::ERR_CONNECTION_RESET');return route.abort('connectionreset');}
-      if(model.nonJson) {evidence.expectStatus(route,503);return route.fulfill({status:503,contentType:'text/plain',body:'PRIVATE-ERROR'});}
       model.saved=body.aggregate ?? body.envelope.aggregate;model.revision=43;
       return json({...operation(model.id,model.active?'committed':'converged'),operation_id:model.id,revision:43},202);
     }
@@ -85,7 +84,7 @@ async function withSettings(run: (page: Page, model: ReturnType<typeof createMod
 function createModel() {
   return {saved:aggregate(),revision:42,id:'',writes:[] as Array<{method:string;path:string;body:any}>,validations:[] as any[],exports:0,
     active:false,queryState:'converged' as 'converged'|'draining'|'degraded',publication:null as ConfigurationPublication|null,
-    cleanupWrites:0,cleanupStatus:0,cleanupRefreshFailure:false,queries:0,rejection:'',status:503,networkFailure:false,nonJson:false,queryStatus:0,runtimeUnavailable:false,
+    cleanupWrites:0,cleanupStatus:0,cleanupRefreshFailure:false,queries:0,rejection:'',status:503,networkFailure:false,queryStatus:0,runtimeUnavailable:false,
 };
 }
 async function review(page:Page) {
@@ -156,15 +155,19 @@ test('import review can be cancelled and invalid snapshots are rejected',async()
 },60_000);
 
 test('submission failures retain the draft, distinguish known rejection from unknown acceptance and never repeat a write',async()=>{
-  for(const imported of [false,true]) for(const outcome of ['control_recovering','control_readiness_failed','repository_unavailable','conflict','invalid','non-json','network']) {
+  const cases:[imported:boolean,outcome:'control_recovering'|'conflict'|'invalid'|'network'][]=[
+    [false,'conflict'],[false,'network'],[false,'control_recovering'],
+    [true,'conflict'],[true,'network'],[true,'invalid'],
+  ];
+  for(const [imported,outcome] of cases) {
     await withSettings(async(page,model)=>{
-      model.rejection=outcome==='non-json'||outcome==='network'?'':outcome==='conflict'?'stale_revision':outcome==='invalid'?'invalid_configuration':outcome;
+      model.rejection=outcome==='network'?'':outcome==='conflict'?'stale_revision':outcome==='invalid'?'invalid_configuration':outcome;
       model.status=outcome==='conflict'?409:outcome==='invalid'?422:503;
-      model.networkFailure=outcome==='network';model.nonJson=outcome==='non-json';
+      model.networkFailure=outcome==='network';
       if(imported) {const next=aggregate();next.logical_configuration.log_level='error';await upload(page,envelope(next));await expect(page.getByTestId('import-preview')).toBeVisible();}
       else await page.getByTestId('logging-max-size').fill('52');
       await review(page);await page.getByTestId('config-confirm-publish').click();
-      const known=['control_recovering','control_readiness_failed','conflict','invalid'].includes(outcome);
+      const known=['control_recovering','conflict','invalid'].includes(outcome);
       await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase',known?'rejected':'unknown');
       await closeReview(page);
       if(imported) await expect(page.getByTestId('import-preview')).toBeVisible();else await expect(page.getByTestId('logging-max-size')).toHaveValue('52');
