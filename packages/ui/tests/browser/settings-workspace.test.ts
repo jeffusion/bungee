@@ -32,6 +32,7 @@ async function withSettings(run: (page: Page, model: ReturnType<typeof createMod
   const page=await context.newPage();
   const evidence=collectApiEvidence(page),errors=evidence.errors;
   await recordResponseDelivery(page,'/api/config/validate');
+  await recordResponseDelivery(page,'/api/config');
   await recordResponseDelivery(page,'/api/config/runtime');
   await page.route('https://fonts.googleapis.com/**',route=>route.fulfill({contentType:'text/css',body:''}));
   await page.addInitScript(language=>localStorage.setItem('locale',language),language);
@@ -97,6 +98,16 @@ async function closeReview(page:Page) {
 }
 async function upload(page:Page,value:unknown) {
   await page.getByTestId('config-import-input').setInputFiles({name:'snapshot.json',mimeType:'application/json',buffer:Buffer.from(typeof value==='string'?value:JSON.stringify(value))});
+}
+async function reloadSettings(page:Page) {
+  // A terminal operation can precede both its snapshot and follow-up runtime read.
+  for (const path of ['/api/config','/api/config/runtime']) {
+    const requestId: number | undefined = await page.evaluate(path => (window as any).editorResponseDelivery.requests
+      .findLast((entry: { method: string; url: string }) => entry.method === 'GET' && new URL(entry.url).pathname === path)?.id, path);
+    if (requestId === undefined) throw new Error(`Missing ${path} read before settings reload`);
+    await waitForResponseDelivery(page,requestId);
+  }
+  await page.reload();
 }
 
 test('review, cancellation, publication and export preserve the current draft and use snapshot CAS',async()=>{
@@ -174,7 +185,7 @@ test('an unknown response is queried by its original operation identity and surv
     await page.getByRole('button',{name:'Check this publication',exact:true}).click();
     await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','terminal');
     expect(model.queries).toBeGreaterThan(0);expect(model.writes).toHaveLength(1);
-    await page.reload();await expect(page.getByTestId('logging-max-size')).toHaveValue('52');expect(model.writes).toHaveLength(1);
+    await reloadSettings(page);await expect(page.getByTestId('logging-max-size')).toHaveValue('52');expect(model.writes).toHaveLength(1);
   });
 },60_000);
 
@@ -206,7 +217,7 @@ test('accepted publication stays locked across query failure and reload, then ex
     model.active=true;model.queryStatus=503;
     await page.getByTestId('logging-max-size').fill('52');await review(page);await page.getByTestId('config-confirm-publish').click();
     await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','active');await closeReview(page);
-    await page.reload();await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','active');
+    await reloadSettings(page);await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','active');
     await expect(page.getByTestId('logging-max-size')).toBeDisabled();
     model.queryStatus=0;model.queryState='degraded';await page.getByRole('button',{name:'Check this publication',exact:true}).click();
     await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','terminal');expect(model.writes).toHaveLength(1);
@@ -220,7 +231,7 @@ test('a restored plugin activation unlocks settings when background publication 
     model.publication=publicationFixture({operation:{operation_id:model.id,committed_revision:43,state:'draining',
       result_status:null,error_code:null,updated_at:1},recovery:null,retryable:false,serving_complete:true,serving_revision:43,target_revision:43});
     await page.evaluate(id=>sessionStorage.setItem('bungee:settings-publication',JSON.stringify({version:1,mutationId:id,accepted:true})),model.id);
-    await page.reload();
+    await reloadSettings(page);
     await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','active');
     await expect(page.getByTestId('logging-max-size')).toBeDisabled();
     expect(model.queries).toBeGreaterThan(0);
@@ -238,7 +249,7 @@ test('local tracking storage failures report a warning and corrupted metadata re
   for(const action of ['setItem','removeItem','corrupt'] as const) await withSettings(async(page,model)=>{
     if(action === 'corrupt') {
       await page.evaluate(()=>sessionStorage.setItem('bungee:settings-publication','{broken'));
-      await page.reload();await expect(page.getByTestId('settings-notice')).toBeVisible();
+      await reloadSettings(page);await expect(page.getByTestId('settings-notice')).toBeVisible();
       await expect(page.getByTestId('logging-max-size')).toBeDisabled();expect(model.writes).toHaveLength(0);return;
     }
     await page.evaluate(action=>{
@@ -320,7 +331,7 @@ test('a missing accepted operation remains locked across reload and never author
     model.active=true;model.queryStatus=404;
     await page.getByTestId('logging-max-size').fill('52');await review(page);await page.getByTestId('config-confirm-publish').click();
     await expect(page.getByTestId('settings-notice')).toBeVisible();await closeReview(page);
-    await page.reload();await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','active');
+    await reloadSettings(page);await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','active');
     await expect(page.getByTestId('logging-max-size')).toBeDisabled();
     expect(await page.evaluate(()=>JSON.parse(sessionStorage.getItem('bungee:settings-publication')!))).toEqual({version:1,mutationId:model.id,accepted:true});
     expect(model.writes).toHaveLength(1);
