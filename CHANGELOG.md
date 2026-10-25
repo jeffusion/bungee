@@ -1,3 +1,10 @@
+# [6.6.0](https://github.com/jeffusion/bungee/compare/v6.5.1...v6.6.0) (2026-10-25)
+
+
+### Features
+
+* **gateway:** support mixed route targets and unify management UI ([d9e55a1](https://github.com/jeffusion/bungee/commit/d9e55a1d56bc7c2f50873a6e5ba31125214ddae5))
+
 ## [6.5.1](https://github.com/jeffusion/bungee/compare/v6.5.0...v6.5.1) (2026-10-25)
 
 
