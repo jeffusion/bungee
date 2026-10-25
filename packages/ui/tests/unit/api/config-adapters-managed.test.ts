@@ -25,6 +25,22 @@ describe('managed endpoint editor contract', () => {
     expect(toV2Route(toEditorRoute(route, []), logical, route, 0)).toEqual(route);
   });
 
+  test('mixed route roundtrip retains upstreams, references, and management markers', () => {
+    const reference = { id: 'reference', position: 2, service_id: 'service', weight: 100, priority: 1, is_disabled: false };
+    const route: ConfigurationRoute = { id: 'route', position: 0, path: '/mixed',
+      endpoints: [endpoint], service_references: [reference], plugins: [] };
+    expect(toV2Route(toEditorRoute(route, []), logical, route, 0)).toEqual(route);
+  });
+
+  test('new mixed route endpoints receive positions after its references', () => {
+    const saved = toV2Route({
+      path: '/mixed',
+      service_references: [{ id: 'reference', position: 2, service_id: 'service', weight: 100, priority: 1, is_disabled: false }],
+      endpoints: [{ target: 'https://new.example' }],
+    }, logical, undefined, 0);
+    expect(saved.endpoints?.[0]?.position).toBe(3);
+  });
+
   test.each(['missing', 'id', 'name', 'duplicate'] as const)('rejects %s bindings on read and write', mode => {
     const broken = structuredClone(endpoint);
     Object.assign(broken, { plugins: mode === 'missing' ? undefined : mode === 'duplicate'

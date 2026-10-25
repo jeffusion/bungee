@@ -1,12 +1,14 @@
 <script lang="ts">
-  import { resolveRouteEndpoints, type Route, type Service } from '$api/routes';
+  import type { Route, Service } from '$api/routes';
   import { _ } from '$i18n';
   import { PanelCard, StatusBadge } from '$components/industrial';
+  import ServiceTargets from '$components/domain/service/ServiceTargets.svelte';
+  import { groupTargets } from './upstream-groups';
 
   let {route, services = []}: {route:Route;services?:Service[]} = $props();
 
   let showJson = $state(false);
-  const endpoints = $derived(resolveRouteEndpoints(route, services));
+  const targets = $derived(groupTargets(route).flatMap(group => group.targets));
 
   const previewRoute = $derived({
     ...route,
@@ -16,11 +18,11 @@
   const jsonConfig = $derived(JSON.stringify(previewRoute, null, 2));
 
   const stats = $derived({
-    upstreamsCount: endpoints.length,
+    upstreamsCount: targets.length,
     hasFailover: route.failover?.enabled || false,
     hasTransformer: (route.plugins && route.plugins.length > 0) || false,
     hasPathRewrite: route.path_rewrite && Object.keys(route.path_rewrite).length > 0,
-    totalWeight: endpoints.reduce((sum, u) => sum + (u.weight || 100), 0)
+    totalWeight: targets.reduce((sum, target) => sum + ((target.kind === 'endpoint' ? target.endpoint : target.reference).weight ?? 100), 0)
   });
 </script>
 
@@ -59,20 +61,7 @@
   </PanelCard>
 
   <PanelCard title={$_('routeEditor.upstreams')} tag="UPSTREAMS">
-    {#if route.service_references?.length}
-      <div class="mb-2"><StatusBadge variant="online">service: {route.service_references.map(reference => services.find(service => service._uid === reference.service_id)?.name ?? reference.service_id).join(', ')}</StatusBadge></div>
-    {/if}
-    <div class="space-y-2">
-      {#each endpoints as upstream, index}
-        <div class="flex items-center gap-3 p-3 border border-carbon-600 bg-carbon-900/60 rounded">
-          <div class="nx-feature-tag">{upstream.priority || index + 1}</div>
-          <div class="flex-1 min-w-0">
-            <div class="font-medium text-sm truncate" title={upstream.target}>{upstream.target || $_('routeEditor.notSet')}</div>
-            <div class="text-xs text-zinc-500">{$_('upstream.weight')}: {upstream.weight || 100}{#if upstream.plugins && upstream.plugins.length > 0}<span class="ml-2"><StatusBadge variant="info">Transformer</StatusBadge></span>{/if}</div>
-          </div>
-        </div>
-      {/each}
-    </div>
+    <div class="overflow-x-auto"><ServiceTargets service={route} {services} /></div>
   </PanelCard>
 
   <PanelCard title={$_('routeEditor.jsonConfig')} tag="JSON">

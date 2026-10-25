@@ -4,7 +4,7 @@
   import { listUpstreamSources, listSourceAccounts, createSourceDraft, applySourceDraft, type UpstreamSource, type SourceAccount } from '$api/upstream-sources';
   import { Button } from '$components/ui/button';
   import * as RadioGroup from '$components/ui/radio-group';
-  import * as Select from '$components/ui/select';
+  import { BSelect } from '$components/industrial';
   import { isLoading } from 'svelte-i18n';
   import { _ } from '$i18n';
   import { getPluginText } from '$utils/plugin-i18n';
@@ -25,7 +25,10 @@
   let source = $derived(sources.find(item => key(item) === selected));
   let account = $derived(accounts.find(item => item.id === accountId));
   const id = $props.id();
-  let selectedAccount = $derived(!$isLoading && accountId ? { value: accountId, label: account?.label ?? `${accountId} · ${$_('upstream.sourceMissingAccount')}` } : undefined);
+  const accountOptions = $derived(!$isLoading ? [
+    ...(accountId && !accounts.some(item => item.id === accountId) ? [{ value: accountId, label: `${accountId} · ${$_('upstream.sourceMissingAccount')}`, disabled: true }] : []),
+    ...accounts.map(item => ({ value: item.id, label: item.label + (item.available ? '' : ` · ${$_('upstream.sourceUnavailable')}`), disabled: !item.available })),
+  ] : []);
 
   function boundAccountRef() {
     const binding = upstream.plugins?.find(item => typeof item !== 'string' && item._uid === upstream.managedBy?.bindingId);
@@ -98,13 +101,9 @@
     <div class="flex flex-col sm:flex-row gap-2 sm:items-end">
       <div class="space-y-1.5 flex-1 min-w-0">
         <span class="nx-field-label">{$_('upstream.sourceAccount')}</span>
-        <Select.Root selected={selectedAccount} onSelectedChange={(next) => accountId = next?.value ?? ''}>
-          <Select.Trigger class="w-full" aria-label={$_('upstream.sourceAccount')} disabled={loading || applying || !source?.plugin.enabled}><Select.Value placeholder={$_('upstream.sourceChooseAccount')} /></Select.Trigger>
-          <Select.Content class="z-[200]">
-            {#if accountId && !accounts.some(item => item.id === accountId)}<Select.Item value={accountId} label={selectedAccount?.label} disabled>{selectedAccount?.label}</Select.Item>{/if}
-            {#each accounts as item (item.id)}<Select.Item value={item.id} label={item.label} disabled={!item.available}>{item.label}{item.available ? '' : ` · ${$_('upstream.sourceUnavailable')}`}</Select.Item>{/each}
-          </Select.Content>
-        </Select.Root>
+        <BSelect searchable bind:value={accountId} options={accountOptions} ariaLabel={$_('upstream.sourceAccount')}
+          searchLabels={{ search: $_('common.search'), empty: $_('common.noMatches') }}
+          placeholder={$_('upstream.sourceChooseAccount')} disabled={loading || applying || !source?.plugin.enabled} />
       </div>
       <Button variant="outline" disabled={!account?.available || applying || loading} onclick={apply} data-testid="upstream-account-apply">{applying ? $_('common.loading') : $_('upstream.sourceApply')}</Button>
     </div>

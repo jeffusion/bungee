@@ -18,6 +18,7 @@ describe('service references compiler', () => {
     const dto=compileRuntimeConfigSnapshot({revision:2,content_hash:hashConfigurationContent(renamed),aggregate:{logical_configuration:renamed,plugin_activations:[]}});
     expect(dto.config.services![1]!.service_references![0]!.service_id).toBe(id(1));
     expect(dto.config.routes[0]!.service_references![0]!.service_id).toBe(id(2));
+    expect(parsed.value.routes[0]!.endpoints).toBeUndefined();
     expect(dto.config.routes[0]).not.toHaveProperty('service');
   });
 
@@ -42,11 +43,22 @@ describe('service references compiler', () => {
     expect(parseNormalizeCompile({services:[branch]}).ok).toBe(false);
   });
 
-  test('rejects route empty references, mixed targets, and removed scalar fields', () => {
-    for(const target of [{service_references:[]},{service_id:id(1)},{service:'leaf'},
-      {service_references:[ref(33,1)],endpoints:[]}]) {
+  test('rejects route empty references and removed scalar fields while accepting mixed targets', () => {
+    for(const target of [{service_references:[]},{service_id:id(1)},{service:'leaf'}]) {
       expect(parseNormalizeCompile({services:[leaf],routes:[{id:id(3),path:'/',...target}]}).ok).toBe(false);
     }
+    const mixed=parseNormalizeCompile({services:[leaf],routes:[{id:id(3),path:'/',
+      service_references:[ref(33,1)],endpoints:[{id:id(12),target:'https://route.example'}]}]});
+    expect(mixed.ok).toBe(true);if(mixed.ok){
+      expect(mixed.value.routes[0]!.service_references![0]!.position).toBe(1);
+      expect(mixed.value.routes[0]!.endpoints![0]!.position).toBe(0);
+    }
+    const emptyEndpoints=parseNormalizeCompile({services:[leaf],routes:[{id:id(3),path:'/',
+      service_references:[ref(33,1)],endpoints:[]}]});
+    expect(emptyEndpoints.ok).toBe(true);
+    if(emptyEndpoints.ok)expect(emptyEndpoints.value.routes[0]!.endpoints).toBeUndefined();
+    expect(parseNormalizeCompile({services:[leaf],routes:[{id:id(3),path:'/',
+      service_references:[ref(33,1,{position:0})],endpoints:[{id:id(12),target:'https://route.example',position:0}]}]}).ok).toBe(false);
   });
 
   test('validates selection policies and rejects endpoint-health fields on Route failover', () => {

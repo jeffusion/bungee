@@ -1,9 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type {
-  CommittedConfigurationSnapshot,
-  ConfigurationRoute,
-  ConfigurationServiceRoute,
-} from '@jeffusion/bungee-types';
+import type { CommittedConfigurationSnapshot } from '@jeffusion/bungee-types';
 import type { RepositorySnapshot } from '../../../src/config-storage';
 import { compileRuntimeConfigSnapshot, RuntimeConfigCompileError } from '../../../src/config-storage/runtime-config';
 import { parseNormalizeCompileAggregate } from '../../../src/config-storage/aggregate';
@@ -104,10 +100,6 @@ function fullSnapshot(): CommittedConfigurationSnapshot {
     },
     plugin_activations: [{ plugin_name: 'installed-only' }, { plugin_name: 'active-plugin' }],
   });
-}
-
-function isServiceRoute(route: ConfigurationRoute): route is ConfigurationServiceRoute {
-  return route.service_references !== undefined;
 }
 
 describe('compileRuntimeConfigSnapshot', () => {
@@ -234,6 +226,30 @@ describe('compileRuntimeConfigSnapshot', () => {
     ]);
   });
 
+  test('compiles a Route that owns both upstreams and service references', () => {
+    const input = snapshot({
+      logical_configuration: {
+        services: [{
+          id: ID.service, position: 0, name: 'primary',
+          endpoints: [{ id: ID.upstreamA, target: 'https://service.example' }],
+        }],
+        routes: [{
+          id: ID.routeDirect, position: 0, path: '/mixed',
+          service_references: [{
+            id: '50000000-0000-4000-8000-000000000008', position: 1,
+            service_id: ID.service, weight: 100, priority: 1, is_disabled: false,
+          }],
+          endpoints: [{ id: ID.directUpstream, position: 0, target: 'https://direct.example' }],
+        }],
+      },
+      plugin_activations: [],
+    });
+    const route = compileRuntimeConfigSnapshot(input).config.routes[0]!;
+
+    expect(route.endpoints?.map(({ target }) => target)).toEqual(['https://direct.example']);
+    expect(route.service_references?.map(({ service_id }) => service_id)).toEqual([ID.service]);
+  });
+
   test('rejects inconsistent direct snapshots with typed errors', () => {
     const valid = fullSnapshot();
     const duplicateActivation: CommittedConfigurationSnapshot = {
@@ -246,7 +262,7 @@ describe('compileRuntimeConfigSnapshot', () => {
     expect(() => compileRuntimeConfigSnapshot(duplicateActivation)).toThrow(RuntimeConfigCompileError);
     expect(() => compileRuntimeConfigSnapshot(duplicateActivation)).toThrow('duplicate plugin activation');
 
-    const serviceRoute = valid.aggregate.logical_configuration.routes.find(isServiceRoute);
+    const serviceRoute = valid.aggregate.logical_configuration.routes.find(({ path }) => path === '/service');
     if (!serviceRoute) throw new Error('missing service route fixture');
     const unknownService: CommittedConfigurationSnapshot = {
       ...valid,

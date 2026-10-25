@@ -206,6 +206,13 @@ describe('layered Service execution',()=>{
     const body=await response.json();await completion;expect(response.status).toBe(200);expect(body.choices[0].message.content).toBe('ok');expect(sends).toBe(2);
   });
 
+  test('a Route owning upstreams and Service references fails over across both in priority order',async()=>{
+    const config=configFor([service('a',[endpoint('a1')]),service('b',[endpoint('b1')])],[ref('a',100,2),ref('b',100,3)]);
+    config.routes[0].endpoints=[endpoint('direct',{priority:1})];
+    await install(config);const calls:string[]=[];fetchMock(url=>{calls.push(url.hostname);return Response.json({ok:url.hostname==='b1.test'},{status:url.hostname==='b1.test'?200:503});});
+    const response=await send(config);await consume(response);
+    expect(response.status).toBe(200);expect(calls).toEqual(['direct.test','a1.test','b1.test']);
+  });
   test('mixed Service references B1 then B2 fail over before owned Endpoints E1 then E2',async()=>{
     const config=configFor([service('a',[endpoint('e1',{position:2,priority:3}),endpoint('e2',{position:3,priority:4})],
       {service_references:[{...ref('b1',100,1),position:0},{...ref('b2',100,2),position:1}],failover:{enabled:true,retry_on:[503]}}),

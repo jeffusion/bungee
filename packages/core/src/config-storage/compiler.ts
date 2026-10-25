@@ -260,15 +260,18 @@ function parseRoutes(
     const path = context.string(object, 'path', `${itemPath}.path`);
     if (paths.has(path)) context.add('duplicate_path', `${itemPath}.path`, 'Route path must be unique');
     else paths.add(path);
-    const references = parseReferences(object.service_references, `${itemPath}.service_references`, context, undefined, 'service_references' in object);
+    const endpointCandidates = Array.isArray(object.endpoints) ? object.endpoints : [];
+    const referenceCandidates = Array.isArray(object.service_references) ? object.service_references : [];
+    const sharedPositions = normalizePositions([...endpointCandidates, ...referenceCandidates], itemPath, context,
+      offset => offset < endpointCandidates.length ? `${itemPath}.endpoints[${offset}]`
+        : `${itemPath}.service_references[${offset - endpointCandidates.length}]`);
+    const references = parseReferences(object.service_references, `${itemPath}.service_references`, context,
+      sharedPositions.slice(endpointCandidates.length), 'service_references' in object);
     const hasService = references.length > 0;
     if ('service_references' in object && !hasService) context.add('invalid_value', `${itemPath}.service_references`, 'Service route requires at least one reference');
-    const endpointCount = Array.isArray(object.endpoints) ? object.endpoints.length : 0;
+    const endpointCount = endpointCandidates.length;
     const policies = copyKnown(object, ROUTE_KEYS, itemPath, context);
     validateRouteDomain(object, itemPath, hasService, endpointCount, context);
-    if (hasService && object.endpoints !== undefined) {
-      context.add('conflicting_owner', `${itemPath}.endpoints`, 'A service route cannot own upstreams');
-    }
     const base = {
       ...policies,
       id,
@@ -276,9 +279,12 @@ function parseRoutes(
       path,
       plugins: parsePlugins(object.plugins, `${itemPath}.plugins`, catalog, context, 'plugins' in object),
     };
-    if (hasService) routes.push({ ...base, service_references: references as [ServiceReference, ...ServiceReference[]] });
-    else routes.push({ ...base, endpoints: parseUpstreams(object.endpoints, `${itemPath}.endpoints`, catalog,
-      context, 'endpoints' in object) });
+    const endpoints = parseUpstreams(object.endpoints, `${itemPath}.endpoints`, catalog,
+      context, 'endpoints' in object, sharedPositions);
+    if (hasService) {
+      routes.push({ ...base, service_references: references as [ServiceReference, ...ServiceReference[]],
+        ...(endpoints.length ? { endpoints } : {}) });
+    } else routes.push({ ...base, endpoints });
   });
   return routes.sort((left, right) => left.position - right.position);
 }

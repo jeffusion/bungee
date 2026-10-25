@@ -48,9 +48,9 @@ test('source selection rejects stale account and draft responses and preserves m
         fail = false;
         await page.getByRole('alert').getByRole('button').click();
         await expect(page.getByRole('alert')).toHaveCount(0);
-        await expect(page.getByRole('combobox')).toContainText('missing-account');
+        await expect(page.getByRole('combobox')).toHaveValue(/missing-account/);
         await page.getByRole('combobox').click();
-        await expect(page.getByRole('option', {name:/missing-account/})).toHaveAttribute('aria-disabled','true');
+        await expect(page.getByRole('option', {name:/missing-account/})).toBeDisabled();
         await page.keyboard.press('Escape');
         await expect(output).toContainText('"accountRef":"missing-account"');
       } else {
@@ -59,7 +59,7 @@ test('source selection rejects stale account and draft responses and preserves m
         await page.getByRole('radio', { name: 'ChatGPT OAuth', exact: true }).click();
         if (scenario === 'draft') {
           await page.getByRole('combobox').click();
-          await expect(page.getByRole('option', {name:'Unavailable account · Unavailable',exact:true})).toHaveAttribute('aria-disabled','true');
+          await expect(page.getByRole('option', {name:'Unavailable account · Unavailable',exact:true})).toBeDisabled();
           await page.getByRole('option', { name: 'Available account', exact: true }).click();
           await page.getByTestId('upstream-account-apply').click();
         }

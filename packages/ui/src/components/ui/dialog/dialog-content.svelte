@@ -21,11 +21,11 @@
 		closeClass,
 		children,
 		onClosed,
+		el = $bindable<HTMLElement>(),
 		...restProps
 	}: Props = $props();
-	let element = $state<HTMLElement>();
 	$effect(() => {
-		const node = element;
+		const node = el;
 		if (!node) return;
 		const closed = () => { void tick().then(() => { if (!node.isConnected) onClosed?.(); }); };
 		node.addEventListener('outroend', closed);
@@ -36,7 +36,7 @@
 <Dialog.Portal>
 	<Dialog.Overlay />
 	<DialogPrimitive.Content
-		bind:el={element}
+		bind:el
 		{transition}
 		{transitionConfig}
 		class={cn(

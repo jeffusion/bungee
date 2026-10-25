@@ -65,8 +65,8 @@ describe('configuration collection positions', () => {
         'services[0].endpoints[0].plugins[1].position',
         'services[0].plugins[1].position',
         'routes[1].position',
-        'routes[0].plugins[1].position',
         'routes[0].endpoints[1].position',
+        'routes[0].plugins[1].position',
       ]);
     }
   });

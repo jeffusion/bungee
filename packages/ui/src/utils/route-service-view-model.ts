@@ -1,8 +1,8 @@
-import { resolveRouteEndpoints, type Route, type Service, type Upstream } from '$api/routes';
+import type { Route, Service, Upstream } from '$api/routes';
 import { findRuntimeUpstream, type RuntimeUpstreamsResponse } from '$api/runtime';
 import { sortBy } from 'lodash-es';
 
-export type RouteTargetSummaryKind = 'service' | 'custom_endpoints' | 'direct_response' | 'missing_service' | 'empty';
+export type RouteTargetSummaryKind = 'service' | 'mixed' | 'custom_endpoints' | 'direct_response' | 'missing_service' | 'empty';
 
 export type RouteFeatureBadgeSection =
   | 'websocket'
@@ -92,12 +92,14 @@ function hasModificationRules(route: Partial<Route>): boolean {
 }
 
 export function getRouteTargetSummary(route: Partial<Route>, services: Service[] = []): RouteTargetSummary {
+  const endpointCount = route.endpoints?.length ?? 0;
   if (route.service_references?.length) {
-    const targets = route.service_references.map(reference => services.find(service => service._uid === reference.service_id));
-    const names = targets.map((service, index) => service?.name ?? route.service_references![index].service_id);
+    const references = [...route.service_references].sort((a, b) => a.priority - b.priority || a.position - b.position);
+    const targets = references.map(reference => services.find(service => service._uid === reference.service_id));
+    const names = targets.map((service, index) => service?.name ?? references[index].service_id);
     const missing = targets.some(service => !service);
-    return { kind: missing ? 'missing_service' : 'service', label: `${missing ? 'missing service' : 'service'}: ${names.join(', ')}`,
-      serviceName: names.join(', '), serviceNames: names, endpointCount: resolveRouteEndpoints(route, services).length };
+    return { kind: missing ? 'missing_service' : endpointCount ? 'mixed' : 'service', label: `${endpointCount ? `${endpointCount} EP + ` : ''}${missing ? 'missing service' : 'service'}: ${names.join(', ')}`,
+      serviceName: names.join(', '), serviceNames: names, endpointCount };
   }
 
   if (route.endpoints && route.endpoints.length > 0) {
@@ -246,7 +248,7 @@ export function getRouteDisplayViewModel(route: Partial<Route>, services: Servic
   const target = getRouteTargetSummary(route, services);
   const badges = getRouteFeatureBadges(route);
   const preview = getEndpointPreview(
-    resolveRouteEndpoints(route, services),
+    route.endpoints ?? [],
     previewCount
   );
 

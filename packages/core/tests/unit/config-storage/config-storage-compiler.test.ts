@@ -214,24 +214,32 @@ describe('parseNormalizeCompile', () => {
     ]);
   });
 
-  test('rejects broken service references and conflicting upstream ownership', () => {
+  test('rejects broken service references and accepts mixed upstream and reference targets', () => {
     const unknownService = '10000000-0000-4000-8000-000000000099';
     expect(errorSummary({
       routes: [
         { id: IDS.route, path: '/missing', service_references: [{ id: '50000000-0000-4000-8000-000000000003', position: 0, service_id: unknownService, weight: 100, priority: 1, is_disabled: false }] },
-        {
-          id: '20000000-0000-4000-8000-000000000002',
-          path: '/owned-twice',
-          service_references: [{ id: '50000000-0000-4000-8000-000000000004', position: 0, service_id: IDS.service, weight: 100, priority: 1, is_disabled: false }],
-          endpoints: [{ id: IDS.upstream, target: 'https://example.com' }],
-        },
       ],
       services: [{ id: IDS.service, name: 'primary', endpoints: [] }],
     }, PLUGINS)).toEqual([
       { code: 'empty_service', path: 'services[0].endpoints' },
-      { code: 'conflicting_owner', path: 'routes[1].endpoints' },
       { code: 'unknown_service', path: 'routes[0].service_references[0].service_id' },
     ]);
+
+    const mixed = parseNormalizeCompile({
+      services: [{ id: IDS.service, name: 'primary', endpoints: [{ id: IDS.upstream, target: 'https://example.com' }] }],
+      routes: [{
+        id: IDS.route,
+        path: '/mixed',
+        service_references: [{ id: '50000000-0000-4000-8000-000000000004', service_id: IDS.service }],
+        endpoints: [{ id: '30000000-0000-4000-8000-000000000002', target: 'https://route.example' }],
+      }],
+    }, PLUGINS);
+    expect(mixed.ok).toBe(true);
+    if (mixed.ok) {
+      expect(mixed.value.routes[0]?.service_references?.[0]?.service_id).toBe(IDS.service);
+      expect(mixed.value.routes[0]?.endpoints?.[0]?.target).toBe('https://route.example');
+    }
   });
 
   test('rejects legacy route service names and explicit upstream owner fields', () => {

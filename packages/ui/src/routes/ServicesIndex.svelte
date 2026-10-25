@@ -1,24 +1,19 @@
 <script lang="ts">
 
   import { onMount, onDestroy } from 'svelte';
-  import { fade, fly } from 'svelte/transition';
-  import { cubicOut } from 'svelte/easing';
   import { push } from 'svelte-spa-router';
   import { _ } from '$i18n';
   import { ServiceReferencedError, ServicesAPI, type Service } from '$api/services';
   import { duplicateEditorService } from '$api/config-adapters';
   import { RoutesAPI, type Route } from '$api/routes';
-  import { findRuntimeUpstream, runtimeAvailabilityKey } from '$api/runtime';
-  import { formatLastUsed } from '$api/runtime-presentation';
+  import { runtimeAvailabilityKey } from '$api/runtime';
   import { runtimeUpstreams } from '$stores/runtime';
-  import RuntimeStatus from '$components/domain/service/RuntimeStatus.svelte';
   import RelationshipLink from '$components/domain/service/RelationshipLink.svelte';
   import HealthSummary from '$components/domain/service/HealthSummary.svelte';
-  import EndpointQuickPreview from '$components/domain/service/EndpointQuickPreview.svelte';
+  import ServiceTargets from '$components/domain/service/ServiceTargets.svelte';
   import {
     getServiceConsumers,
     getServiceHealthAggregate,
-    sortEndpointsForDisplay,
   } from '$utils/route-service-view-model';
   import { toast } from '$stores/toast';
   import {
@@ -30,6 +25,7 @@
   } from '$components/industrial';
   import { Input } from '$components/ui/input';
   import { Button } from '$components/ui/button';
+  import * as Sheet from '$components/ui/sheet';
 
   // ----- state ---------------------------------------------------------
   let services: Service[] = $state([]);
@@ -52,6 +48,7 @@
   // Endpoint drawer
   let showEndpointsDrawer = $state(false);
   let selectedServiceForEndpoints: Service | null = $state(null);
+  let endpointsDrawerTrigger = $state<HTMLElement | null>(null);
 
   let deletingNames = $state(new Set<string>());
 
@@ -136,25 +133,10 @@
   }
 
   function openEndpointsDrawer(service: Service) {
+    endpointsDrawerTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     selectedServiceForEndpoints = service;
     showEndpointsDrawer = true;
   }
-
-  function closeEndpointsDrawer() {
-    showEndpointsDrawer = false;
-  }
-
-  // Lock body scroll while drawer is open so wheel events on the backdrop
-  // can't leak through to the underlying page.
-  $effect(() => {
-    const open = showEndpointsDrawer;
-    if (typeof document !== 'undefined') {
-      document.documentElement.style.overflow = open ? 'hidden' : '';
-    }
-    // Keep the selected service while the drawer's outro still renders its rows.
-    return () => { document.documentElement.style.overflow = ''; };
-  });
-
 
   let serviceViewModels = $derived(services.map((service) => {
     const consumers = getServiceConsumers(service._uid ?? '', routes, services);
@@ -207,7 +189,6 @@
     if (e.key === 'Escape') {
       e.stopPropagation();
       if (openMenuFor) openMenuFor = null;
-      else if (showEndpointsDrawer) closeEndpointsDrawer();
       else if (showDeleteDialog) cancelDelete();
     }
   }
@@ -363,7 +344,6 @@
       {#each filteredViewModels as vm (vm.service.name)}
         <PanelCard
           title={vm.service.name}
-          tag={vm.isUnreferenced ? 'ORPHAN' : `${vm.consumers.count} REF`}
           stripe={vm.health.state === 'unhealthy' ? 'red' : vm.health.state === 'degraded' || vm.health.state === 'mixed' ? 'amber' : vm.health.state === 'healthy' ? 'emerald' : 'zinc'}
           corners={false}
           class="flex flex-col"
@@ -423,53 +403,49 @@
 
             <!-- stats row -->
             <div
-              class="flex items-center justify-between border border-carbon-600 bg-carbon-950/60 px-3 py-2"
+              class="flex flex-wrap items-center justify-between gap-3 border border-carbon-600 bg-carbon-950/60 px-3 py-2"
               data-testid="service-stats"
             >
               <HealthSummary aggregate={vm.health} />
-<div class="flex items-center gap-4 font-mono">
-            <div class="flex flex-col items-end leading-none">
-              <span class="nx-label-sm">{$_('services.endpointLabel')}</span>
-              <span class="mt-0.5 text-[12px] text-zinc-200">EP·{vm.service.endpoints.length} SVC·{vm.service.service_references?.length ?? 0}</span>
-            </div>
-            <div class="flex flex-col items-end leading-none">
-              <span class="nx-label-sm">{$_('services.consumerLabel')}</span>
-              <span class="mt-0.5 text-[12px] text-zinc-200">{vm.consumers.count}</span>
-            </div>
-            {#if vm.service.plugins && vm.service.plugins.length > 0}
-            <div class="flex flex-col items-end leading-none">
-              <span class="nx-label-sm">{$_('services.pluginLabel')}</span>
-              <span class="mt-0.5 text-[12px] text-nexus-300">{vm.service.plugins.length}</span>
-            </div>
-            {/if}
-          </div>
+              <div class="flex flex-wrap items-center gap-4 font-mono">
+                <div class="flex flex-col items-end gap-1">
+                  <span class="text-xs text-zinc-400">{$_('services.endpointLabel')}</span>
+                  <span class="text-sm text-zinc-200 tabular-nums">{vm.service.endpoints.length}</span>
+                </div>
+                <div class="flex flex-col items-end gap-1">
+                  <span class="text-xs text-zinc-400">{$_('services.serviceLabel')}</span>
+                  <span class="text-sm text-zinc-200 tabular-nums">{vm.service.service_references?.length ?? 0}</span>
+                </div>
+                <div class="flex flex-col items-end gap-1">
+                  <span class="text-xs text-zinc-400">{$_('services.consumerLabel')}</span>
+                  <span class="text-sm text-zinc-200 tabular-nums">{vm.consumers.count}</span>
+                </div>
+                {#if vm.service.plugins && vm.service.plugins.length > 0}
+                  <div class="flex flex-col items-end gap-1">
+                    <span class="text-xs text-zinc-400">{$_('services.pluginLabel')}</span>
+                    <span class="text-sm text-nexus-300 tabular-nums">{vm.service.plugins.length}</span>
+                  </div>
+                {/if}
+              </div>
             </div>
 
-            <!-- endpoints preview -->
+            <!-- direct upstream targets -->
             <div>
               <div class="flex justify-between items-center mb-1.5">
-                <span class="nx-label">// {$_('services.endpointsPreview')}</span>
-                {#if vm.service.endpoints.length > 0}
+                <span class="nx-label">// {$_('services.targetsPreview')}</span>
+                {#if vm.service.endpoints.length + (vm.service.service_references?.length ?? 0) > 0}
                   <button
                     class="font-mono text-[10px] uppercase tracking-command text-nexus-300 hover:text-nexus-200 hover:underline transition-colors"
                     onclick={() => openEndpointsDrawer(vm.service)}
                     data-testid="view-all-endpoints"
                   >
-                    {$_('services.viewEndpoints')} →
+                    {$_('services.viewTargets')} →
                   </button>
                 {/if}
               </div>
-              <EndpointQuickPreview
-                stateKey={vm.service._uid ?? ''}
-                endpoints={vm.service.endpoints}
-                limit={3}
-                on:overflowClick={() => openEndpointsDrawer(vm.service)}
-              />
+              <ServiceTargets service={vm.service} {services} compact onshowall={() => openEndpointsDrawer(vm.service)} />
             </div>
 
-            {#each vm.service.service_references ?? [] as reference}
-              <div class="font-mono text-xs text-nexus-300">SVC · {services.find(service => service._uid === reference.service_id)?.name ?? reference.service_id}</div>
-            {/each}
             <!-- referenced-by -->
             <div class="pt-3 border-t border-carbon-600">
               <span class="nx-label block mb-1.5">// {$_('services.referencedBy')}</span>
@@ -489,85 +465,45 @@
   {/if}
 
   <!-- ===== Endpoints drawer ===================================== -->
-  {#if showEndpointsDrawer && selectedServiceForEndpoints}
-    <div
-      class="fixed inset-0 z-[100] flex justify-end bg-black/70 backdrop-blur-sm"
-      style="margin-top: 0; margin-bottom: 0;"
-      transition:fade={{ duration: 160, easing: cubicOut }}
-      onclick={(e) => { if (e.target === e.currentTarget) closeEndpointsDrawer(); }}
-      onkeydown={handleEsc}
-      role="dialog"
-      tabindex="-1"
-      aria-modal="true"
+  <Sheet.Root bind:open={showEndpointsDrawer} preventScroll closeFocus={() => endpointsDrawerTrigger}>
+    {#if selectedServiceForEndpoints}
+      <Sheet.Content
+        side="right"
+        class="flex !h-dvh !w-full !max-w-5xl !gap-0 !p-0 flex-col overflow-hidden border-carbon-600 bg-carbon-950 shadow-industrial-lg"
+        closeLabel={$_('common.close')}
+        closeClass="!right-5 !top-3 flex h-8 w-8 items-center justify-center border border-carbon-500 text-zinc-400 !opacity-100"
+        aria-label={$_('services.targetsTitle')}
     >
-      <div class="w-full max-w-2xl h-full bg-carbon-950 border-l border-carbon-600 shadow-industrial-lg flex flex-col"
-           transition:fly={{ x: 320, duration: 180, easing: cubicOut }}>
-        <header class="flex items-center justify-between px-5 py-3 border-b border-carbon-600 bg-carbon-900">
-          <div class="flex items-center gap-2.5">
+        <header class="flex shrink-0 items-center justify-between px-5 py-3 pr-16 border-b border-carbon-600 bg-carbon-900">
+          <div class="flex min-w-0 items-center gap-2.5">
             <span class="nx-stripe" aria-hidden="true"></span>
-            <div class="flex flex-col leading-tight">
-              <span class="nx-label-sm">// {$_('upstreamsModal.title')}</span>
-              <span class="nx-display text-base text-zinc-50">{selectedServiceForEndpoints.name}</span>
+            <div class="flex min-w-0 flex-col leading-tight">
+              <span class="nx-label-sm">// {$_('services.targetsTitle')}</span>
+              <Sheet.Title class="nx-display truncate text-base font-normal text-zinc-50" title={selectedServiceForEndpoints.name}>{selectedServiceForEndpoints.name}</Sheet.Title>
             </div>
           </div>
-          <IconButton title={$_('common.close')} on:click={closeEndpointsDrawer}>
-            <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </IconButton>
         </header>
 
-        <div class="px-5 py-3 border-b border-carbon-600 bg-carbon-900/60">
+        <div class="shrink-0 px-5 py-3 border-b border-carbon-600 bg-carbon-900/60 space-y-2">
           <span class="font-mono text-[11px] uppercase tracking-command text-zinc-400">
-            {$_('services.endpointsCount', { values: { count: selectedServiceForEndpoints.endpoints.length } })}
+            {$_('services.targetsCount', { values: { endpoints: selectedServiceForEndpoints.endpoints.length, services: selectedServiceForEndpoints.service_references?.length ?? 0 } })}
           </span>
+          <Sheet.Description class="text-sm text-zinc-400">{$_('services.targetsHelp')}</Sheet.Description>
+          {#if selectedServiceForEndpoints.service_references?.length}
+            <p class="text-sm text-zinc-400">{$_('services.referenceHealthHelp')}</p>
+          {/if}
         </div>
 
-        <div class="flex-1 overflow-auto">
-          <table class="w-full" data-testid="endpoints-drawer-table">
-            <thead class="border-b border-carbon-600 bg-carbon-900/60 backdrop-blur-md sticky top-0 z-[1]">
-              <tr>
-                <th class="text-left nx-label py-2.5 px-4 w-20">{$_('routeCard.tableHeaders.status')}</th>
-                <th class="text-left nx-label py-2.5 px-4">{$_('routeCard.tableHeaders.target')}</th>
-                <th class="text-right nx-label py-2.5 px-4 w-20">{$_('routeCard.tableHeaders.weight')}</th>
-                <th class="text-right nx-label py-2.5 px-4 w-20">{$_('routeCard.tableHeaders.priority')}</th>
-                <th class="text-right nx-label py-2.5 px-4">{$_('runtime.activeRequests')}</th>
-                <th class="text-right nx-label py-2.5 px-4 w-28">{$_('routeCard.tableHeaders.lastUsed')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each sortEndpointsForDisplay(selectedServiceForEndpoints.endpoints) as upstream}
-                {@const record = findRuntimeUpstream($runtimeUpstreams, selectedServiceForEndpoints._uid ?? '', upstream._uid)}
-                <tr class="border-b border-carbon-600/60 hover:bg-carbon-700/40 transition-colors" class:opacity-50={upstream.is_disabled}>
-                  <td class="py-2.5 px-4">
-                    <RuntimeStatus stateKey={selectedServiceForEndpoints._uid ?? ''} {upstream} />
-                  </td>
-                  <td class="py-2.5 px-4">
-                    <div class="flex flex-col">
-                      <code class="text-[12px] font-mono text-zinc-200 break-all">{upstream.target}</code>
-                      {#if upstream.description}
-                        <span class="font-mono text-[10px] text-zinc-500 mt-0.5">{upstream.description}</span>
-                      {/if}
-                    </div>
-                  </td>
-                  <td class="py-2.5 px-4 text-right font-mono text-[12px] text-zinc-300 tabular-nums">{upstream.weight ?? 100}</td>
-                  <td class="py-2.5 px-4 text-right font-mono text-[12px] text-zinc-300 tabular-nums">{upstream.priority ?? 1}</td>
-                  <td class="py-2.5 px-4 text-right font-mono text-sm text-zinc-300 tabular-nums">{record?.active_request_count ?? $_('runtime.unavailable')}</td>
-                  <td class="py-2.5 px-4 text-right font-mono text-sm text-zinc-400 tabular-nums">
-                    {formatLastUsed($runtimeUpstreams, selectedServiceForEndpoints.name, upstream._uid, $_)}
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
+        <div class="min-h-0 flex-1 overflow-auto">
+          <ServiceTargets service={selectedServiceForEndpoints} {services} />
         </div>
 
-        <footer class="px-5 py-3 border-t border-carbon-600 bg-carbon-900 flex justify-end">
-          <button class="nx-btn-primary" onclick={closeEndpointsDrawer}>{$_('common.close')}</button>
+        <footer class="shrink-0 px-5 py-3 border-t border-carbon-600 bg-carbon-900 flex justify-end">
+          <Sheet.Close class="nx-btn-primary">{$_('common.close')}</Sheet.Close>
         </footer>
-      </div>
-    </div>
-  {/if}
+      </Sheet.Content>
+    {/if}
+  </Sheet.Root>
 
   <!-- ===== Delete confirmation (custom modal — has friction input) ==== -->
   {#if showDeleteDialog && serviceToDelete}

@@ -234,8 +234,14 @@ export function toV2Route(
     plugins: toV2Plugins(plugins, previous?.plugins ?? []),
   };
   if (service_references?.length) {
-    if (endpoints.length) throw new Error('服务引用与自定义端点不能同时保存');
-    return { ...base, service_references: JSON.parse(JSON.stringify(service_references)) };
+    return {
+      ...base,
+      service_references: JSON.parse(JSON.stringify(service_references)),
+      ...(endpoints.length ? {
+        endpoints: toV2Upstreams(endpoints, previous?.endpoints ?? [],
+          service_references.map(reference => reference.position)),
+      } : {}),
+    };
   }
   return { ...base, endpoints: toV2Upstreams(endpoints, previous?.endpoints ?? []) };
 }
