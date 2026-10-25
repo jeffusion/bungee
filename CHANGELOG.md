@@ -1,3 +1,10 @@
+## [6.5.1](https://github.com/jeffusion/bungee/compare/v6.5.0...v6.5.1) (2026-10-25)
+
+
+### Bug Fixes
+
+* **llm:** derive reasoning capabilities and preserve compatible streams ([24d71bf](https://github.com/jeffusion/bungee/commit/24d71bfe1e1b68acbf92d298411ad0e8ca15ece1))
+
 # [6.5.0](https://github.com/jeffusion/bungee/compare/v6.4.1...v6.5.0) (2026-10-24)
 
 
