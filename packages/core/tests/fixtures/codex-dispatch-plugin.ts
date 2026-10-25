@@ -4,7 +4,8 @@ import {conversionService} from '../../../../plugins/llm-protocol-adapter/server
 export default class extends CodexRouterPlugin {
   constructor(private readonly fixtureOptions?:any){super(fixtureOptions);}
   async init(context:any){
-    const catalog={status:()=>({version:1}),model:(input:any)=>this.fixtureOptions?.unavailable==='missing' || input.provider==='missing'?null:({provider:input.provider,model:input.model,name:input.model,catalogVersion:1,reasoningOptionsStatus:input.provider==='zai'?'known':'unknown',reasoningOptions:input.provider==='zai'?[{type:'effort',values:['low','high','max']}]:null,contextWindow:this.fixtureOptions?.unavailable==='context'?null:32000,outputLimit:4096,toolCall:true,reasoning:input.provider==='zai',inputModalities:this.fixtureOptions?.unavailable==='text'?['audio']:['text']})};
+    const knownModels=new Set(['glm-5.3','glm-5.3-flash','GLM-5.3','GLM-5.3-Flash']);
+    const catalog={status:()=>({version:1}),model:(input:any)=>this.fixtureOptions?.unavailable==='missing' || input.provider==='missing' || input.provider==='zai'&&!knownModels.has(input.model)?null:({provider:input.provider,model:input.model,name:input.model,catalogVersion:1,reasoningOptionsStatus:input.provider==='zai'?'known':'missing',reasoningOptions:input.provider==='zai'?[{type:'effort',values:['low','high','max']}]:null,contextWindow:this.fixtureOptions?.unavailable==='context'?null:32000,outputLimit:4096,toolCall:true,reasoning:input.provider==='zai',inputModalities:this.fixtureOptions?.unavailable==='text'?['audio']:['text']})};
     await super.init({...context,services:{consume:(provider:string)=>provider==='llm-protocol-adapter'?conversionService(catalog as any,true):catalog,rpc:{consume:()=>({get:async()=>null,put:async()=>null})}}});
   }
   register(hooks:any){

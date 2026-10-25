@@ -65,13 +65,12 @@ export function mergeCatalog(native: unknown, bindings: readonly ModelBinding[],
     }
     const overrides = binding.capabilityOverrides;
     const context = Math.min(info.contextWindow, overrides?.contextWindow ?? info.contextWindow);
-    const reasoning = info.reasoning && overrides?.reasoning !== false;
     // Only the implemented protocol subset is advertised; catalog fields are not promises of hosted tools.
     const model = {...template, slug:id, display_name:info.name, description:`${info.name} (${binding.provider})`,
       context_window:context, max_context_window:context, auto_compact_token_limit:Math.floor(context * 0.85),
       input_modalities: ['text', ...(info.inputModalities.includes('image') && overrides?.images !== false ? ['image'] : [])],
       supported_reasoning_levels: info.supportedEfforts.map(effort => ({effort,description:effort})),
-      supports_reasoning_effort_updates:info.supportedEfforts.length>0, default_reasoning_level:info.defaultEffort ?? 'none', support_verbosity:false,
+      supports_reasoning_effort_updates:info.supportedEfforts.length>0, default_reasoning_level:info.defaultEffort, support_verbosity:false,
     };
     if (replace) replacements.set(id, model); else added.push(model);
   }

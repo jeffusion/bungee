@@ -15,7 +15,8 @@ import type {GatewayFixture} from './gateway-runtime';
 export const CODEX_PROCESS_PROBE = 'codex-router-process-probe';
 export const CODEX_CHAT_MODEL = 'glm-5.3-flash';
 export const CODEX_ANTHROPIC_MODEL = 'claude-sonnet-4-6';
-export const CODEX_MODELS = ['org/native', 'org/chat', 'org/anthropic', 'org/native-ws'];
+export const CODEX_DEEPSEEK_MODEL = 'deepseek-flash';
+export const CODEX_MODELS = ['org/native', 'org/chat', 'org/anthropic', 'org/native-ws', 'org/deepseek-flash'];
 
 // Only this process's freshly created fixtures may launch a Codex probe.
 const probeTargets = new Map<string, Set<string>>();
@@ -72,6 +73,11 @@ export async function seedCodexRouterCatalog(fixture: GatewayFixture): Promise<v
           reasoning: id===CODEX_MODELS[1], modalities: {input: ['text'], output: ['text']}, cost: {input: 1, output: 2}}]))},
         zai: {models: Object.fromEntries([CODEX_CHAT_MODEL,'glm-5.3'].map(model=>[model,{name: 'GLM fixture', reasoning: true, reasoning_options: [{type: 'effort', values: ['low','high','max']}], tool_call: true, limit: {context: 200000, output: 4096}, modalities: {input: ['text'], output: ['text']}}]))},
         anthropic: {models: {[CODEX_ANTHROPIC_MODEL]: {name: 'Sonnet', reasoning: true, reasoning_options: [{type: 'effort', values: ['low','medium','high','max']}], tool_call: true, limit: {context: 200000, output: 4096}, modalities: {input: ['text'], output: ['text']}}}},
+        // Real models.dev /api.json record for deepseek-flash (fetched 2026-10-24); the upstream below is a local fixture, not DeepSeek.
+        deepseek: {models: {[CODEX_DEEPSEEK_MODEL]: {id: CODEX_DEEPSEEK_MODEL, name: 'DeepSeek V4.1 Flash 1017', reasoning: true,
+          reasoning_options: [{type: 'toggle'}, {type: 'effort', values: ['low','high','max']}], tool_call: true,
+          interleaved: {field: 'reasoning_content'}, modalities: {input: ['text','image'], output: ['text']},
+          limit: {context: 1048576, output: 393216}}}},
       }});
     } finally {configDb.close();}
 }

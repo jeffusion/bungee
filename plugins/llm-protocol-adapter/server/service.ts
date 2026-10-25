@@ -2,8 +2,12 @@ import { createProtocolSession, describeProtocolConversion, inspectAgentMessages
 import type { ModelIdentityDeclaration, ModelsDevCapabilitiesService } from '../../models-dev/contract';
 import type { CapabilityContext, ConversionService, EffectiveCapabilities, AdapterSession, HistoryClient } from '../contract';
 import {AgentRelay} from './relay';
-export const REASONING_RULES_VERSION = '2026-10-12.1';
+export const REASONING_RULES_VERSION = '2026-10-24.1';
 const concrete = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+// Protocol-level value constraints only. Responses/Chat carry the raw labelled effort;
+// Gemini has no generic effort encoding, so it advertises no selector.
+const effortProtocols = new Set(['responses', 'chat_completions', 'anthropic_messages']);
+const anthropicEfforts = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 function identityError(code: string, message: string): never {
     throw new ResponsesCodecError(code, message, 'modelIdentity');
 }
@@ -24,43 +28,34 @@ function checkedIdentity(value: unknown, model: string): ModelIdentityDeclaratio
         identityError('model_identity_mismatch', 'Declared wire model differs from the actual target');
     return identity;
 }
-/** Interface restrictions/defaults, not a second model capability catalog.
- * Sources: docs.z.ai/api-reference/llm/chat-completion and
- * platform.claude.com/docs/en/build-with-claude/effort (2026-10-10).
- */
-function rule(provider: string, model: string, protocol: string) {
-    if (provider === 'zai' && ['glm-5.3', 'glm-5.3-flash'].includes(model) && protocol === 'chat_completions')
-        return { values: ['low', 'high', 'max'], default: 'max', kind: 'chat' as const };
-    if (provider === 'anthropic' && protocol === 'anthropic_messages') {
-        if (['claude-opus-4-7', 'claude-opus-4-8', 'claude-opus-5', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'].includes(model))
-            return { values: ['low', 'medium', 'high', 'xhigh', 'max'], default: ['claude-opus-5-5', 'claude-haiku-5-5'].includes(model) ? 'medium' : 'high', kind: 'anthropic' as const };
-        if (['claude-opus-4-6', 'claude-sonnet-4-6'].includes(model))
-            return { values: ['low', 'medium', 'high', 'max'], default: 'high', kind: 'anthropic' as const };
-    }
-    return null;
-}
+/** Presets are the concrete models.dev effort values; no provider/model allowlist exists. */
 export function resolveCapabilities(catalog: ModelsDevCapabilitiesService, context: CapabilityContext): EffectiveCapabilities | null {
     const info = catalog.model(context);
     if (!info)
         return null;
-    const mapping = rule(context.provider, context.model, context.targetProtocol), restrictions = context.restrictions;
-    const candidates = info.reasoningOptionsStatus === 'known' ? info.reasoningOptions?.flatMap(option => option.type === 'effort' ? option.values.filter((value): value is Exclude<typeof value, null> => typeof value === 'string' && concrete.has(value)) : []) ?? [] : [];
-    const selected: string[] = mapping && info.reasoning && restrictions?.reasoning !== false ? [...new Set(candidates)].filter(v => mapping.values.includes(v)) : [];
-    // A selector also needs a documented default that actually belongs to its set.
-    const supportedEfforts = mapping && selected.includes(mapping.default) ? selected : [];
-    const defaultEffort = supportedEfforts.length ? mapping!.default : null;
-    const wirePolicy = supportedEfforts.length ? { effortMap: Object.fromEntries(supportedEfforts.map(value => [value, value])), ...(mapping!.kind === 'anthropic' ? { anthropicThinkingMode: 'adaptive' as const } : {}) } : null;
+    const restrictions = context.restrictions, reasoningAllowed = info.reasoning && restrictions?.reasoning !== false;
+    const allowed = context.targetProtocol === 'anthropic_messages' ? anthropicEfforts : concrete;
+    const candidates = reasoningAllowed && effortProtocols.has(context.targetProtocol) && info.reasoningOptionsStatus === 'known'
+        ? info.reasoningOptions?.flatMap(option => option.type === 'effort' ? option.values.filter((value): value is Exclude<typeof value, null> => typeof value === 'string' && allowed.has(value)) : []) ?? []
+        : [];
+    const supportedEfforts = [...new Set(candidates)];
+    // v1 publishes no verified default, so selection support never implies a default.
+    const wirePolicy = supportedEfforts.length ? { effortMap: Object.fromEntries(supportedEfforts.map(value => [value, value])) } : null;
     return { ...info, contextWindow: info.contextWindow === null ? null : Math.min(info.contextWindow, restrictions?.contextWindow ?? info.contextWindow),
         toolCall: info.toolCall && restrictions?.tools !== false, inputModalities: info.inputModalities.filter(v => v !== 'image' || restrictions?.images !== false),
-        supportedEfforts, defaultEffort, rulesVersion: REASONING_RULES_VERSION, wirePolicy,
-        codecCapabilities: { maxOutputTokens: info.outputLimit ?? undefined, reasoningHistory: info.reasoning && restrictions?.reasoning !== false,
-            reasoningEffort: supportedEfforts.length > 0, anthropicEffort: mapping?.kind === 'anthropic' && supportedEfforts.length > 0,
+        supportedEfforts, defaultEffort: null, rulesVersion: REASONING_RULES_VERSION, wirePolicy,
+        codecCapabilities: { maxOutputTokens: info.outputLimit ?? undefined, reasoningHistory: reasoningAllowed,
+            reasoningEffort: supportedEfforts.length > 0, anthropicEffort: supportedEfforts.length > 0,
             anthropicStructuredOutput: context.provider === 'anthropic' && /^claude-(?:opus-(?:4-[5678]|5(?:-5)?)|sonnet-(?:4-[56]|5(?:-5)?)|haiku-(?:4-5|5-5))$/.test(context.model),
             anthropicStrictTools: context.provider === 'anthropic' && /^claude-(?:opus-(?:4-[5678]|5(?:-5)?)|sonnet-(?:4-[56]|5(?:-5)?)|haiku-(?:4-5|5-5))$/.test(context.model), geminiJsonSchema: false } };
 }
 function fail(param: string): never { throw new ResponsesCodecError('unsupported_reasoning', 'Selected reasoning effort cannot be honored by the actual target', param); }
 function wireEffort(body: any, protocol: string): unknown {
     return protocol === 'responses' ? body?.reasoning?.effort : protocol === 'chat_completions' ? body?.reasoning_effort : protocol === 'anthropic_messages' ? body?.output_config?.effort : body?.generationConfig?.thinkingConfig?.thinkingLevel;
+}
+function chatMessages(body: unknown): Array<{ role?: unknown }> {
+    const messages = body && typeof body === 'object' ? (body as { messages?: unknown }).messages : undefined;
+    return Array.isArray(messages) ? messages as Array<{ role?: unknown }> : [];
 }
 export function conversionService(catalog: ModelsDevCapabilitiesService, worker: boolean, history?: HistoryClient, runBackground?: <T>(run:()=>T)=>T): ConversionService {
     const relay = new AgentRelay(history,Date.now,runBackground);
@@ -89,12 +84,14 @@ export function conversionService(catalog: ModelsDevCapabilitiesService, worker:
                 identityError('model_identity_unavailable', 'Declared catalog model is unavailable');
             const entryProfile = profile;
             let catalogVersion = profile?.catalogVersion ?? null;
-            let selected = context.selectedEffort;
+            let selected = context.selectedEffort, rewrittenDeveloper = false;
             const passthrough = context.sourceProtocol === context.targetProtocol;
             if (!passthrough && selected !== undefined && (!profile || !profile.supportedEfforts.includes(selected)))
                 fail('reasoning.effort');
             const engine = createProtocolSession({ ...context, capabilities: profile?.codecCapabilities ?? context.capabilities,
                 reasoningPolicy: profile?.wirePolicy ?? context.reasoningPolicy } as ProtocolSessionContext);
+            // DeepSeek Chat rejects the Responses developer role; rewrite only the outbound body, not canonical history.
+            const deepseekChat = context.sourceProtocol === 'responses' && context.targetProtocol === 'chat_completions' && profile?.provider === 'deepseek';
             let disposed = false;
             const session: AdapterSession = {
                 convertRequest(raw) {
@@ -105,8 +102,13 @@ export function conversionService(catalog: ModelsDevCapabilitiesService, worker:
                         selected = effort;
                     }
                     const result = engine.convertRequest(raw);
-                    if (!passthrough && selected !== undefined && context.targetProtocol === 'chat_completions' && profile?.provider === 'zai')
-                        result.body.thinking = { type: 'enabled' };
+                    rewrittenDeveloper = false;
+                    if (deepseekChat)
+                        for (const message of chatMessages(result.body))
+                            if (message.role === 'developer') {
+                                message.role = 'system';
+                                rewrittenDeveloper = true;
+                            }
                     return result;
                 }, convertResponse: raw => engine.convertResponse(raw), push: event => engine.push(event), finish: () => engine.finish(),
                 dispose() { if (!disposed) {
@@ -135,6 +137,10 @@ export function conversionService(catalog: ModelsDevCapabilitiesService, worker:
                     if (identity && !actual) identityError('model_identity_unavailable', 'Declared catalog model is unavailable');
                     if (actual && catalogVersion !== null && actual.catalogVersion !== catalogVersion)
                         identityError('model_identity_catalog_changed', 'Target catalog version differs from the generation snapshot');
+                    if (rewrittenDeveloper && actual?.provider !== 'deepseek')
+                        throw new ResponsesCodecError('unsupported_content', 'DeepSeek developer-role conversion cannot be sent to another target provider', 'messages');
+                    if (context.sourceProtocol === 'responses' && protocol === 'chat_completions' && actual?.provider === 'deepseek' && chatMessages(body).some(message => message?.role === 'developer'))
+                        throw new ResponsesCodecError('unsupported_content', 'DeepSeek target requires developer messages to be converted', 'messages');
                     const sameNativeIdentity = entryProfile
                         ? !!actual && actual.provider === entryProfile.provider && actual.model === entryProfile.model
                         : !identity && model === context.model;
@@ -142,8 +148,6 @@ export function conversionService(catalog: ModelsDevCapabilitiesService, worker:
                         if (!(passthrough && sameNativeIdentity && wireEffort(body, protocol) === selected)) {
                             if (!entryProfile || !actual || actual.rulesVersion !== entryProfile.rulesVersion || !actual.supportedEfforts.includes(selected) || wireEffort(body, protocol) !== selected)
                                 fail('reasoning.effort');
-                            if (protocol === 'anthropic_messages' && (body as any)?.thinking?.type !== 'adaptive') fail('thinking.type');
-                            if (protocol === 'chat_completions' && actual.provider === 'zai' && (body as any)?.thinking?.type !== 'enabled') fail('thinking.type');
                         }
                     } else if (!profile && actual && identity) {
                         // The first valid declaration can lock an otherwise unknown generation.

@@ -92,20 +92,21 @@ export async function probeCodexCli(input: {root: string; baseUrl: string; token
 }
 
 /** CLI model/list with temporary ChatGPT-shaped auth and real local key-access. */
-export async function probeCodexChatgptModels(input: {root: string; baseUrl: string; mockUrl: string; token: string; model: string; toolRoundTrip?: boolean; effort?: string; collaboration?: boolean}) {
+export async function probeCodexChatgptModels(input: {root: string; baseUrl: string; mockUrl: string; token: string; model: string; toolRoundTrip?: boolean; effort?: string; collaboration?: boolean; accountId?: string}) {
   assertCodexProbeTargets(input.root,[input.baseUrl,input.mockUrl]);
   const executable = Bun.which('codex');
   if (!executable) throw new Error('BUNGEE_CODEX_CLI_PROBE requires a local codex executable');
   // A repeated tool probe must not reuse an earlier MCP PID, audit, or patched file.
   const home = join(input.root, input.toolRoundTrip ? `cli-chatgpt-tool-${input.model.replaceAll('/','-')}-${randomUUID()}` : input.model === 'org/chat' ? 'cli-chatgpt-chat-home'
-    : input.model === 'org/anthropic' ? 'cli-chatgpt-anthropic-home' : 'cli-chatgpt-home'); await mkdir(home, {recursive: true});
+    : input.model === 'org/anthropic' ? 'cli-chatgpt-anthropic-home' : input.model === 'org/deepseek-flash' ? 'cli-chatgpt-deepseek-home' : 'cli-chatgpt-home'); await mkdir(home, {recursive: true});
   if(input.collaboration)await writeFile(join(home,'fixture-patched.txt'),'pending\n');
   const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const accountId = input.accountId ?? 'fixture-account';
   const claims = {email: 'fixture@example.invalid', exp: Math.floor(Date.now() / 1000) + 86400,
-    'https://api.openai.com/auth': {chatgpt_plan_type: 'pro', chatgpt_account_id: 'fixture-account', chatgpt_user_id: 'fixture-user'}};
+    'https://api.openai.com/auth': {chatgpt_plan_type: 'pro', chatgpt_account_id: accountId, chatgpt_user_id: 'fixture-user'}};
   const idToken = `${encode({alg: 'none', typ: 'JWT'})}.${encode(claims)}.c3R1Yg`;
   await writeFile(join(home, 'auth.json'), JSON.stringify({auth_mode: 'chatgpt', OPENAI_API_KEY: null,
-    tokens: {id_token: idToken, access_token: input.token, refresh_token: 'fixture-unused-refresh', account_id: 'fixture-account'},
+    tokens: {id_token: idToken, access_token: input.token, refresh_token: 'fixture-unused-refresh', account_id: accountId},
     last_refresh: new Date().toISOString()}), {mode: 0o600});
   const mcpAuditPath = join(home, 'mcp-audit.jsonl'), mcpInstanceId = randomUUID();
   let mcpIdentity: CapturedProcessIdentity | undefined;

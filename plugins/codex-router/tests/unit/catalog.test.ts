@@ -12,8 +12,29 @@ test('rich native metadata is preserved; original slash ID and intersected capab
   const native={models:[{slug:'native',visibility:'hidden',supported_in_api:false,extra:{x:1}}],other:'keep'};
   const result=mergeCatalog(native,bindings,service) as any;
   expect(result.models[0]).toEqual(native.models[0]);expect(result.other).toBe('keep');
-  expect(result.models[1]).toMatchObject({slug:'org/model',context_window:16000,input_modalities:['text'],supported_reasoning_levels:[],supports_search_tool:false});
+  expect(result.models[1]).toMatchObject({slug:'org/model',context_window:16000,input_modalities:['text'],supported_reasoning_levels:[],supports_reasoning_effort_updates:false,default_reasoning_level:null,supports_search_tool:false});
   expect(native.models).toHaveLength(1);
+});
+test('catalog effort metadata alone produces concrete levels while an absent or untrusted default stays null',()=>{
+  // Real models.dev /api.json record for deepseek-flash (fetched 2026-10-24); it carries no default field.
+  const metadata=new CatalogView();
+  metadata.apply(buildCatalogIndex({version:9,fetchedAt:9,catalog:{
+    deepseek:{models:{'deepseek-flash':{id:'deepseek-flash',name:'DeepSeek V4.1 Flash 1017',reasoning:true,
+      reasoning_options:[{type:'toggle'},{type:'effort',values:['low','high','max']}],tool_call:true,
+      interleaved:{field:'reasoning_content'},modalities:{input:['text','image']},limit:{context:1048576,output:393216}}}},
+    lab:{models:{plain:{name:'Plain',reasoning:true,tool_call:true,modalities:{input:['text']},limit:{context:32000,output:4000}}}},
+  }}));
+  const metadataService=conversionService(capabilitiesServiceOf(metadata),true);
+  const selected=parseBindings([
+    {provider:'deepseek',model:'deepseek-flash',target:{type:'service',id:'target',protocol:'chat_completions'}},
+    {provider:'lab',model:'plain',target:{type:'service',id:'target',protocol:'chat_completions'}},
+  ]);
+  const [deepseek,plain]=(mergeCatalog({models:[]},selected,metadataService) as any).models;
+  expect(deepseek).toMatchObject({slug:'deepseek-flash',display_name:'DeepSeek V4.1 Flash 1017',context_window:1048576,
+    input_modalities:['text','image'],supported_reasoning_levels:[{effort:'low'},{effort:'high'},{effort:'max'}],
+    supports_reasoning_effort_updates:true,default_reasoning_level:null});
+  expect(deepseek.default_reasoning_level).toBeNull();
+  expect(plain).toMatchObject({slug:'plain',supported_reasoning_levels:[],supports_reasoning_effort_updates:false,default_reasoning_level:null});
 });
 test('generic directory stays data[], refresh failure retains capability view and an empty view adds nothing',()=>{
   view.fail('network');expect(catalog.status().state).toBe('stale');

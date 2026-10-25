@@ -8,7 +8,22 @@ export function validateUsage(raw: unknown, protocol: LLMProtocol): void {
   if (raw === undefined || raw === null)
     return;
   const u = record(raw, 'usage');
-  const keys = protocol === 'chat_completions' ? ['prompt_tokens', 'completion_tokens', 'total_tokens', 'prompt_tokens_details', 'completion_tokens_details'] :
+  if (protocol === 'chat_completions') {
+    // Chat providers may append auxiliary usage statistics; validate only consumed counters.
+    for (const key of ['prompt_tokens', 'completion_tokens', 'total_tokens'])
+      if (u[key] !== undefined && u[key] !== null)
+        integer(u[key], `usage.${key}`);
+    for (const [container, counter] of [['prompt_tokens_details', 'cached_tokens'], ['completion_tokens_details', 'reasoning_tokens']] as const) {
+      const value = u[container];
+      if (value === undefined || value === null)
+        continue;
+      const details = record(value, `usage.${container}`);
+      if (details[counter] !== undefined && details[counter] !== null)
+        integer(details[counter], `usage.${container}.${counter}`);
+    }
+    return;
+  }
+  const keys =
     protocol === 'anthropic_messages' ? ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'] :
       ['input_tokens', 'output_tokens', 'total_tokens', 'input_tokens_details', 'output_tokens_details'];
   fields(u, keys, 'usage', 'unsupported_response');

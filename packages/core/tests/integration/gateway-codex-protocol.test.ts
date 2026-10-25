@@ -119,7 +119,7 @@ for(const [model,wire] of [['glm-5.3','GLM-5.3'],['glm-5.3-flash','GLM-5.3-Flash
   try {
     const response=await handleRequest(new Request('http://local/codex/responses',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'client',input:'hello',reasoning:{effort}})}),config,{logging});
     expect(response.status).toBe(200);await response.text();expect(calls).toHaveLength(1);
-    expect(calls[0].body).toMatchObject({model:wire,reasoning_effort:effort,thinking:{type:'enabled'}});
+    expect(calls[0].body).toMatchObject({model:wire,reasoning_effort:effort});expect(calls[0].body).not.toHaveProperty('thinking');
     expect(calls[0].body).not.toHaveProperty('annotations');expect(JSON.stringify(calls[0].body)).not.toContain('catalogModel');
   } finally {await registry.destroy();}
 });

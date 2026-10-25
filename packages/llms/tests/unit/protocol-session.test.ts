@@ -289,3 +289,68 @@ test('Codex metadata on calls/results is diagnosed and removed without losing hi
  expect(result.canonicalHistory).toHaveLength(3);expect(result.canonicalHistory.every(item=>!Object.hasOwn(item,'internal_chat_message_metadata_passthrough'))).toBe(true);expect(result.diagnostics.filter(item=>item.reason==='source_message_metadata')).toHaveLength(3);
  expect(result.body.messages).toMatchObject([{role:'system',content:'this turn only'},{role:'user'},{role:'assistant',tool_calls:[{id:'call'}]},{role:'tool',tool_call_id:'call',content:'done'}]);
 });
+
+test('Chat usage tolerates auxiliary counters while preserving consumed accounting', () => {
+  const usage = {
+    prompt_tokens: 12, completion_tokens: 7, total_tokens: 19,
+    prompt_tokens_details: { cached_tokens: 3, audio_tokens: 0, cache_creation_tokens: 2, nested: { source: 'upstream' } },
+    completion_tokens_details: { reasoning_tokens: 2, audio_tokens: 1, prediction_tokens: 2, accepted_prediction_tokens: 1, rejected_prediction_tokens: 1 },
+    prompt_tokens_extra: { provider: 'x' }, provider_usage: 'opaque',
+  };
+  const expected = { input_tokens: 12, output_tokens: 7, total_tokens: 19, input_tokens_details: { cached_tokens: 3 }, output_tokens_details: { reasoning_tokens: 2 } };
+  const snapshot = structuredClone(usage);
+  const json = createProtocolSession(ctx('responses', 'chat_completions'));
+  json.convertRequest(request('responses'));
+  const result = json.convertResponse({ choices: [{ index: 0, message: { role: 'assistant', content: 'answer' }, finish_reason: 'stop' }], usage });
+  expect(result.usage).toEqual(expected);
+  expect(usage).toEqual(snapshot);
+  expect(JSON.stringify(result.usage)).not.toContain('audio_tokens');
+
+  const streaming = createProtocolSession(ctx('responses', 'chat_completions'));
+  streaming.convertRequest(request('responses'));
+  const events = [...streaming.push({ choices: [{ index: 0, delta: { role: 'assistant', content: 'answer' } }] })];
+  events.push(...streaming.push({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage }));
+  events.push(...streaming.finish());
+  expect(usage).toEqual(snapshot);
+  expect(events.at(-1)?.type).toBe('response.completed');
+  expect((events.at(-1) as any).response.usage).toEqual(expected);
+  expect((events.at(-1) as any).response.output[0].content[0].text).toBe('answer');
+
+  for (const nullable of [null,
+    { prompt_tokens: 12, completion_tokens: 7, total_tokens: null, prompt_tokens_details: null, completion_tokens_details: null },
+    { prompt_tokens: 12, completion_tokens: 7, prompt_tokens_details: { cached_tokens: null }, completion_tokens_details: { reasoning_tokens: null } },
+  ]) {
+    const session = createProtocolSession(ctx('responses', 'chat_completions'));
+    session.convertRequest(request('responses'));
+    const out = session.convertResponse({ choices: [{ index: 0, message: { role: 'assistant', content: 'answer' }, finish_reason: 'stop' }], usage: nullable });
+    expect(out.usage).toEqual(nullable === null ? null : { input_tokens: 12, output_tokens: 7, total_tokens: 19, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 } });
+  }
+});
+
+test('Chat usage still rejects malformed consumed counters and other protocols keep strict field lists', () => {
+  const body = (usage: unknown) => ({ choices: [{ index: 0, message: { role: 'assistant', content: 'answer' }, finish_reason: 'stop' }], usage });
+  const chat = () => { const session = createProtocolSession(ctx('responses', 'chat_completions')); session.convertRequest(request('responses')); return session; };
+  for (const [usage, param] of [
+    [[], undefined],
+    ['opaque', undefined],
+    [{ prompt_tokens: -1 }, 'usage.prompt_tokens'],
+    [{ completion_tokens: 1.5 }, 'usage.completion_tokens'],
+    [{ total_tokens: '19' }, 'usage.total_tokens'],
+    [{ prompt_tokens_details: 3 }, undefined],
+    [{ prompt_tokens_details: [] }, undefined],
+    [{ prompt_tokens_details: { cached_tokens: -1 } }, 'usage.prompt_tokens_details.cached_tokens'],
+    [{ completion_tokens_details: 'x' }, undefined],
+    [{ completion_tokens_details: { reasoning_tokens: '2' } }, 'usage.completion_tokens_details.reasoning_tokens'],
+  ] as Array<[unknown, string?]>)
+    code(() => chat().convertResponse(body(usage)), 'invalid_payload', param);
+
+  const streaming = createProtocolSession(ctx('responses', 'chat_completions'));
+  streaming.convertRequest(request('responses'));
+  streaming.push({ choices: [{ index: 0, delta: { role: 'assistant', content: 'answer' } }] });
+  code(() => streaming.push({ choices: [], usage: { prompt_tokens: 12, prompt_tokens_details: { cached_tokens: '3' } } }), 'invalid_payload', 'usage.prompt_tokens_details.cached_tokens');
+
+  const responsesUsage = { input_tokens: 12, output_tokens: 7, total_tokens: 19, input_tokens_details: { cached_tokens: 3 }, output_tokens_details: { reasoning_tokens: 0 } };
+  code(() => createProtocolSession(ctx('chat_completions', 'responses')).convertResponse({ ...response('responses', 'f'), usage: { ...responsesUsage, audio_tokens: 0 } }), 'unsupported_response', 'usage.audio_tokens');
+  code(() => createProtocolSession(ctx('chat_completions', 'responses')).convertResponse({ ...response('responses', 'f'), usage: { ...responsesUsage, input_tokens_details: { cached_tokens: 3, audio_tokens: 0 } } }), 'unsupported_response', 'usage.input_tokens_details.audio_tokens');
+  code(() => createProtocolSession(ctx('responses', 'anthropic_messages')).convertResponse({ type: 'message', role: 'assistant', content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', usage: { input_tokens: 9, output_tokens: 7, audio_tokens: 0 } }), 'unsupported_response', 'usage.audio_tokens');
+});
