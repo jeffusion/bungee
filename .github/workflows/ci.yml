@@ -1,291 +1,772 @@
-name: CI
+# Temporary diagnostic evidence only. This workflow is not a validation gate and produces no proof artifact.
+name: macOS clock/dialog evidence (diagnostic only, not validation)
 
 on:
   pull_request:
-    branches: [main]
-  workflow_call:
-    inputs:
-      full:
-        type: boolean
-        default: true
-      ref:
-        description: Commit or ref to check out and test
-        type: string
-        required: true
-      base:
-        description: Available Git commit or ref used as the comparison baseline
-        type: string
-        required: true
-      head:
-        description: Full PR source SHA for provenance; does not select the checkout
-        type: string
-        required: true
-      pr:
-        type: number
-        required: true
+    branches: [fix/ci-regression-diagnostics]
 
 permissions:
   contents: read
 
 jobs:
-  plan:
-    runs-on: ubuntu-latest
+  prepare:
+    name: macOS prepare (plan + build, diagnostic only)
+    if: github.event.pull_request.head.ref == 'diagnostic/macos-evidence'
+    runs-on: macos-latest
+    timeout-minutes: 20
     outputs:
-      mode: ${{ steps.plan.outputs.mode }}
       integration: ${{ steps.plan.outputs.integration }}
       browser: ${{ steps.plan.outputs.browser }}
-      integration_shards: ${{ steps.plan.outputs.integration_shards }}
-      shards: ${{ steps.plan.outputs.shards }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-          fetch-depth: 0
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: '1.4.2'
-      - run: bun install --frozen-lockfile
-      - name: Select the cumulative test scope
-        id: plan
+      - name: Verify the diagnostic trigger
         env:
-          BASE: ${{ inputs.base || github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ inputs.head || github.event.pull_request.head.sha }}
-          FULL: ${{ inputs.full || false }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
-          args=(--base "$BASE" --committed --head "$PR_HEAD_SHA" --output "$RUNNER_TEMP/plan.json")
-          if [ "$FULL" = true ]; then args+=(--full); fi
-          bun scripts/checks/select-tests.ts "${args[@]}"
-          jq -r '"mode=" + .mode, "integration=" + (.files.integration | length | tostring), "browser=" + (.files.browser | length | tostring), "integration_shards=" + (if (.files.integration | length) > 1 then "[1,2]" else "[1]" end), "shards=" + (if (.files.browser | length) > 1 then "[1,2]" else "[1]" end)' "$RUNNER_TEMP/plan.json" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: test-plan
-          path: ${{ runner.temp }}/plan.json
-          if-no-files-found: error
-          retention-days: 14
-
-  # Keep Linux build/test on a Playwright-supported image; matrix.os also keys proof artifacts.
-  build:
-    needs: plan
-    if: needs.plan.outputs.mode != 'none'
-    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'ubuntu-24.04' || matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
+          test "$GITHUB_EVENT_NAME" = pull_request
+          test "$BASE_REF" = fix/ci-regression-diagnostics
+          test "$HEAD_REF" = diagnostic/macos-evidence
+          test "$HEAD_REPO" = "$GITHUB_REPOSITORY"
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || github.sha }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the frozen diagnostic base
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          FROZEN_BASE_SHA: 646ea66acbad87bf531e2749aa14d00e53ee244e
+          FROZEN_BASE_TREE: c6d360a19b0ed66ffdedd9cad5f9f6446013616e
+        run: |
+          set -euo pipefail
+          test "$PR_BASE_SHA" = "$FROZEN_BASE_SHA"
+          git cat-file -e "$FROZEN_BASE_SHA^{commit}"
+          test "$(git rev-parse "$FROZEN_BASE_SHA^{tree}")" = "$FROZEN_BASE_TREE"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: '1.4.2'
       - run: bun install --frozen-lockfile
-      - uses: actions/download-artifact@v4
-        with:
-          name: test-plan
-          path: ${{ runner.temp }}/plan
-      - name: Build platform artifacts once
+      - name: Record identity and the frozen-source diff whitelist
+        env:
+          SOURCE_HEAD: 646ea66acbad87bf531e2749aa14d00e53ee244e
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/diagnostic"
+          {
+            echo "job=$GITHUB_JOB"
+            echo "checkout_head=$(git rev-parse HEAD)"
+            echo "checkout_tree=$(git rev-parse HEAD^{tree})"
+            echo "bun=$(bun --version)"
+            echo "runner_os=$RUNNER_OS"
+            echo "runner_arch=$RUNNER_ARCH"
+            echo "image_os=${ImageOS:-unavailable}"
+            echo "image_version=${ImageVersion:-unavailable}"
+            echo "uname_m=$(uname -m)"
+            echo "sw_vers=$(sw_vers -productVersion) build=$(sw_vers -buildVersion)"
+            echo "pr_base=$BASE_SHA"
+            echo "pr_base_tree=$(git rev-parse "$BASE_SHA^{tree}")"
+            echo "previous_observation=macos-26-arm64 ImageVersion 20261021.0445.8 OS 26.6.2 arm64; current runner is recorded, not pinned"
+          } | tee "$RUNNER_TEMP/diagnostic/identity-prepare.txt"
+          git diff --name-status "$SOURCE_HEAD" HEAD | tee "$RUNNER_TEMP/diagnostic/source-diff.txt"
+          python3 - "$RUNNER_TEMP/diagnostic/source-diff.txt" <<'PY_DIFF'
+          import sys
+          expected = {
+              ".github/workflows/ci.yml": "M",
+              "packages/core/tests/fixtures/kernel-clock-child.ts": "M",
+              "packages/core/tests/integration/kernel-monotonic-clock.test.ts": "M",
+              "packages/ui/tests/browser/route-editor-target.test.ts": "M",
+          }
+          actual = {}
+          for line in open(sys.argv[1], encoding="utf-8"):
+              line = line.rstrip("\n")
+              if not line:
+                  continue
+              status, path = line.split("\t", 1)
+              actual[path] = status
+          if actual != expected:
+              print("source diff does not match the diagnostic whitelist", file=sys.stderr)
+              print("expected=" + repr(sorted(expected.items())), file=sys.stderr)
+              print("actual=" + repr(sorted(actual.items())), file=sys.stderr)
+              sys.exit(1)
+          print("source diff matches the four-file diagnostic whitelist")
+          PY_DIFF
+      - name: Generate the full committed plan and compare frozen candidates
+        id: plan
+        env:
+          BASE_SHA: 646ea66acbad87bf531e2749aa14d00e53ee244e
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/diagnostic"
+          bun scripts/checks/select-tests.ts --base "$BASE_SHA" --committed --head "$HEAD_SHA" --full --output "$RUNNER_TEMP/plan.json" > "$RUNNER_TEMP/diagnostic/plan.stdout.json"
+          python3 - "$RUNNER_TEMP/plan.json" <<'PY_PLAN'
+          import hashlib
+          import json
+          import os
+          import sys
+          plan = json.load(open(sys.argv[1], encoding="utf-8"))
+          # Frozen combined digest of {"integration": [...], "browser": [...]} from the original
+          # full plan: JSON.stringify-compatible compact JSON, original array order, no sort.
+          expected_combined = "d20b80e74ae19c992637ed45f5c22ded672289c0e5502d1d828d802a3d759137"
+          expected_counts = {"integration": 215, "browser": 36}
+          ok = True
+          if plan.get("mode") != "full" or plan.get("build") is not True:
+              print("plan is not a full build plan", file=sys.stderr)
+              ok = False
+          if plan.get("head") != os.environ["HEAD_SHA"] or plan.get("testCommit") != os.environ["HEAD_SHA"]:
+              print("plan head/commit does not match the checked-out PR head", file=sys.stderr)
+              ok = False
+          if plan.get("base") != os.environ["BASE_SHA"]:
+              print("plan base does not match the PR base SHA", file=sys.stderr)
+              ok = False
+          files = {
+              "integration": plan.get("files", {}).get("integration", []),
+              "browser": plan.get("files", {}).get("browser", []),
+          }
+          counts = {phase: len(entries) for phase, entries in files.items()}
+          combined = hashlib.sha256(json.dumps(files, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+          print(f"integration={counts['integration']} browser={counts['browser']} combined_sha256={combined} frozen_combined_sha256={expected_combined}")
+          if counts != expected_counts or combined != expected_combined:
+              print("candidate lists differ from the frozen full plan (counts or ordered combined digest)", file=sys.stderr)
+              ok = False
+          if not ok:
+              sys.exit(1)
+          print("candidate lists match the frozen full plan")
+          PY_PLAN
+          jq -r '"integration=" + (.files.integration | length | tostring), "browser=" + (.files.browser | length | tostring)' "$RUNNER_TEMP/plan.json" >> "$GITHUB_OUTPUT"
+      - name: Build and package once before any test execution
         run: |
           set -euo pipefail
           time bun run build
           tar -czf "$RUNNER_TEMP/build.tgz" packages/{types,llms,ui,core,cli}/dist packages/core/src/ui/assets.ts packages/core/src/ui/icon-resources.ts packages/ui/src/components/native-widgets/generated.ts
-          jq '{commit: .testCommit, tree: .tree}' "$RUNNER_TEMP/plan/plan.json" > "$RUNNER_TEMP/build.json"
-      - name: Complete fast regression
-        run: bun scripts/checks/select-tests.ts --plan "$RUNNER_TEMP/plan/plan.json" --phase unit --record "$RUNNER_TEMP/unit.json"
+          jq '{commit: .testCommit, tree: .tree}' "$RUNNER_TEMP/plan.json" > "$RUNNER_TEMP/build.json"
       - uses: actions/upload-artifact@v4
         with:
-          name: build-${{ matrix.os }}
+          name: diagnostic-plan
+          path: ${{ runner.temp }}/plan.json
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-build-macos
           path: |
             ${{ runner.temp }}/build.tgz
             ${{ runner.temp }}/build.json
           if-no-files-found: error
-          retention-days: 2
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: execution-${{ matrix.os }}-unit
-          path: ${{ runner.temp }}/unit.json*
-          if-no-files-found: error
-          retention-days: 14
+          name: diagnostic-prepare-evidence
+          path: |
+            ${{ runner.temp }}/diagnostic/
+          if-no-files-found: warn
+          retention-days: 7
 
   integration:
-    needs: [plan, build]
-    if: needs.plan.outputs.integration != '0' && needs.build.result == 'success'
-    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'ubuntu-24.04' || matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        shard: ${{ fromJSON(needs.plan.outputs.integration_shards) }}
+    name: macOS integration shard 1/2 (diagnostic, not validation)
+    needs: prepare
+    if: needs.prepare.result == 'success' && github.event.pull_request.head.ref == 'diagnostic/macos-evidence'
+    runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || github.sha }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: '1.4.2'
       - run: bun install --frozen-lockfile
+      - name: Record identity
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/diagnostic"
+          {
+            echo "job=$GITHUB_JOB"
+            echo "checkout_head=$(git rev-parse HEAD)"
+            echo "checkout_tree=$(git rev-parse HEAD^{tree})"
+            echo "bun=$(bun --version)"
+            echo "runner_os=$RUNNER_OS"
+            echo "runner_arch=$RUNNER_ARCH"
+            echo "image_os=${ImageOS:-unavailable}"
+            echo "image_version=${ImageVersion:-unavailable}"
+            echo "uname_m=$(uname -m)"
+            echo "sw_vers=$(sw_vers -productVersion) build=$(sw_vers -buildVersion)"
+          } | tee "$RUNNER_TEMP/diagnostic/identity-integration-1.txt"
       - uses: actions/download-artifact@v4
         with:
-          name: test-plan
+          name: diagnostic-plan
           path: ${{ runner.temp }}/plan
       - uses: actions/download-artifact@v4
         with:
-          name: build-${{ matrix.os }}
+          name: diagnostic-build-macos
           path: ${{ runner.temp }}/build
       - name: Restore artifacts for this platform and tree
         run: |
           set -euo pipefail
           jq -e --slurpfile plan "$RUNNER_TEMP/plan/plan.json" '.commit == $plan[0].testCommit and .tree == $plan[0].tree' "$RUNNER_TEMP/build/build.json"
           tar -xzf "$RUNNER_TEMP/build/build.tgz"
-      - name: Selected integration regression with native sharding
+      - name: Selected integration regression with native sharding and observer
         env:
-          SHARD: ${{ matrix.shard }}
-          COUNT: ${{ needs.plan.outputs.integration }}
+          SHARD: '1'
+          COUNT: ${{ needs.prepare.outputs.integration }}
+          BUNGEE_CLOCK_DIAGNOSTIC_DIR: ${{ runner.temp }}/clock-diagnostic
         run: |
+          set -euo pipefail
           count=1
           if [ "$COUNT" -gt 1 ]; then count=2; fi
+          diagnostic_dir="$BUNGEE_CLOCK_DIAGNOSTIC_DIR"
+          mkdir -p "$diagnostic_dir"
+          chmod 700 "$diagnostic_dir"
+          observer="$RUNNER_TEMP/clock-observer.py"
+          cat > "$observer" <<'PY_OBSERVER'
+          #!/usr/bin/env python3
+          """Read-only observer for the macOS kernel-clock integration case.
+
+          Registers the parent on the first case-start seen before 20s, the real child PID
+          from the parent's spawn record, and one direct sysctl target chosen by the
+          current stage at 15s. Rechecks identity tuples, snapshots ps status and PIPE/FIFO
+          lsof endpoints, then samples each live target once. No argv/env, signals, sudo,
+          retries, or captures started after 20s; captures finishing after 20s are late.
+          """
+
+          import argparse
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          import time
+          from concurrent.futures import ThreadPoolExecutor
+          from pathlib import Path
+
+          DEADLINE = 15.0
+          CASE_LIMIT = 20.0
+          POLL = 0.05
+          PS_TIMEOUT = 3.0
+          LSOF_TIMEOUT = 5.0
+          SAMPLE_TIMEOUT = 10.0
+          IDENTITY = "ps lstart(1s)+comm; PID reuse before a read is not excluded"
+
+
+          def now_ms():
+              return int(time.time() * 1000)
+
+
+          def read_records(path):
+              try:
+                  text = Path(path).read_text(encoding="utf-8")
+              except FileNotFoundError:
+                  return []
+              records = []
+              for line in text.splitlines():
+                  try:
+                      value = json.loads(line)
+                  except json.JSONDecodeError:
+                      continue
+                  if isinstance(value, dict):
+                      records.append(value)
+              return records
+
+
+          def run_tool(argv, timeout):
+              try:
+                  proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
+                  return proc.returncode, proc.stdout
+              except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                  return None, ""
+
+
+          def ps_rows(pids):
+              pids = [str(pid) for pid in pids if pid]
+              if not pids:
+                  return {}
+              code, out = run_tool(["ps", "-ww", "-o", "pid=,ppid=,uid=,lstart=,stat=,comm=", "-p", ",".join(pids)], PS_TIMEOUT)
+              rows = {}
+              if code is not None:
+                  for line in out.splitlines():
+                      parts = line.split()
+                      if len(parts) >= 10:
+                          try:
+                              pid, ppid, uid = int(parts[0]), int(parts[1]), int(parts[2])
+                          except ValueError:
+                              continue
+                          rows[pid] = {"pid": pid, "ppid": ppid, "uid": uid, "lstart": " ".join(parts[3:8]),
+                                       "stat": parts[8], "comm": " ".join(parts[9:])}
+              return rows
+
+
+          def identity_ok(row, uid, ppid):
+              return bool(row) and row["uid"] == uid and row["ppid"] == ppid and not row["stat"].startswith("Z") and row["lstart"] and row["comm"]
+
+
+          def entry(role, row):
+              return {"role": role, "pid": row["pid"], "uid": row["uid"], "ppid": row["ppid"], "lstart": row["lstart"], "comm": row["comm"]}
+
+
+          def matches(target, row):
+              return bool(row) and not row["stat"].startswith("Z") and (
+                  (row["uid"], row["ppid"], row["lstart"], row["comm"])
+                  == (target["uid"], target["ppid"], target["lstart"], target["comm"])
+              )
+
+
+          def sysctl_ok(row, uid, ppid):
+              return identity_ok(row, uid, ppid) and Path(row["comm"]).name == "sysctl"
+
+
+          def classify_case_start(start_wall, first_seen_wall):
+              if not isinstance(start_wall, int) or start_wall <= 0:
+                  return "missed", None
+              if start_wall > first_seen_wall:
+                  return "invalid", None
+              age = (first_seen_wall - start_wall) / 1000.0
+              return ("missed" if age >= CASE_LIMIT else "register"), age
+
+
+          def child_of(pid, uid, guard):
+              if not guard():
+                  return None
+              code, out = run_tool(["pgrep", "-P", str(pid)], PS_TIMEOUT)
+              if not guard() or code is None:
+                  return None
+              candidates = sorted(int(line) for line in out.splitlines() if line.strip().isdigit())
+              if not candidates or not guard():
+                  return None
+              rows = ps_rows(candidates)
+              if not guard():
+                  return None
+              for candidate in candidates:
+                  if sysctl_ok(rows.get(candidate), uid, pid):
+                      return rows[candidate]
+              return None
+
+
+          def lsof_pipes(text):
+              entries, pid, fd, kind = [], None, None, None
+              for line in text.splitlines():
+                  if line.startswith("p"):
+                      pid = int(line[1:]) if line[1:].isdigit() else None
+                  elif line.startswith("f"):
+                      fd = line[1:]
+                  elif line.startswith("t"):
+                      kind = line[1:]
+                  elif line.startswith("n") and kind in ("PIPE", "FIFO") and pid is not None and fd is not None:
+                      entries.append({"pid": pid, "fd": fd, "type": kind, "addresses": re.findall(r"0x[0-9a-fA-F]+", line[1:])})
+              return entries
+
+
+          def sample_one(target, path, case_start, guard):
+              check_ms, check = now_ms(), time.monotonic()
+              if not guard():
+                  return {"status": "unavailable", "reason": "guard-closed-before-identity", "exit_code": None, "bytes": 0,
+                          "file": path.name, "startedAtMs": check_ms, "finishedAtMs": now_ms(),
+                          "caseElapsedSeconds": round(check - case_start, 3), "late": check - case_start > CASE_LIMIT}
+              rows = ps_rows([target["pid"]])
+              if not guard():
+                  return {"status": "unavailable", "reason": "guard-closed-after-identity", "exit_code": None, "bytes": 0,
+                          "file": path.name, "startedAtMs": check_ms, "finishedAtMs": now_ms(),
+                          "caseElapsedSeconds": round(time.monotonic() - case_start, 3), "late": time.monotonic() - case_start > CASE_LIMIT}
+              row = rows.get(target["pid"])
+              if not matches(target, row):
+                  return {"status": "unavailable", "reason": "identity-missing-or-changed", "exit_code": None, "bytes": 0,
+                          "file": path.name, "startedAtMs": check_ms, "finishedAtMs": now_ms(),
+                          "caseElapsedSeconds": round(time.monotonic() - case_start, 3), "late": time.monotonic() - case_start > CASE_LIMIT}
+              if not guard():
+                  return {"status": "unavailable", "reason": "guard-closed-before-sample", "exit_code": None, "bytes": 0,
+                          "file": path.name, "startedAtMs": check_ms, "finishedAtMs": now_ms(),
+                          "caseElapsedSeconds": round(time.monotonic() - case_start, 3), "late": time.monotonic() - case_start > CASE_LIMIT}
+              started_ms = now_ms()
+              code, _ = run_tool(["/usr/bin/sample", str(target["pid"]), "1", "10", "-file", str(path)], SAMPLE_TIMEOUT)
+              ended = time.monotonic()
+              size = path.stat().st_size if path.exists() else 0
+              ok = code == 0 and size > 0
+              reason = "" if ok else ("tool-missing-or-timeout" if code is None else "empty-output" if code == 0 else "exit-" + str(code))
+              return {"status": "available" if ok else "unavailable", "reason": reason, "exit_code": code, "bytes": size,
+                      "file": path.name, "startedAtMs": started_ms, "finishedAtMs": now_ms(),
+                      "caseElapsedSeconds": round(ended - case_start, 3), "late": ended - case_start > CASE_LIMIT}
+
+
+          def write_record(path, record):
+              with Path(path).open("a", encoding="utf-8") as handle:
+                  handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+          def finish(path, outcome, reason, **fields):
+              write_record(path, {"event": "result", "outcome": outcome, "reason": reason, "finishedAtMs": now_ms(), **fields})
+
+
+          def ended_now(parent_path, run_ended):
+              return run_ended.exists() or any(record.get("stage") == "case-end" for record in read_records(parent_path))
+
+
+          def find_sysctl(stage, parent, child, uid, guard):
+              if stage == "clock-id":
+                  owner, role = parent, "sysctl-parent-direct"
+              elif stage in ("stdout", "stderr") and child and child.get("uid"):
+                  owner, role = child, "sysctl-child-direct"
+              else:
+                  return None
+              if not guard():
+                  return None
+              owner_row = ps_rows([owner["pid"]]).get(owner["pid"])
+              if not guard() or not matches(owner, owner_row):
+                  return None
+              row = child_of(owner["pid"], uid, guard)
+              if not guard():
+                  return None
+              return entry(role, row) if row else None
+
+
+          def take_capture(diag, parent_path, run_ended, parent, child, sysctl, case_start, first_seen, case_start_wall, stage, guard):
+              result = {"event": "result", "startedAtMs": now_ms(), "casePid": parent["pid"],
+                        "caseStartWallMs": case_start_wall, "firstSeenCaseElapsedSeconds": first_seen,
+                        "stageAtCapture": stage, "identityGranularity": IDENTITY,
+                        "parent": parent, "child": child, "sysctl": sysctl, "skipped": [],
+                        "sysctlLookup": "not-observed" if sysctl is None else "observed"}
+              if not guard():
+                  if ended_now(parent_path, run_ended):
+                      return {**result, "outcome": "not-reproduced", "reason": "observed-ended", "finishedAtMs": now_ms()}
+                  return {**result, "outcome": "missed-window", "reason": "window-closed-before-capture",
+                          "late": False, "finishedAtMs": now_ms()}
+              targets = [parent]
+              if child and child.get("uid"):
+                  targets.append(child)
+              elif child:
+                  result["skipped"].append({"role": "child", "pid": child["pid"], "reason": "child-identity-unavailable"})
+              if sysctl:
+                  targets.append(sysctl)
+
+              ps_started = now_ms()
+              rows = ps_rows([target["pid"] for target in targets])
+              ps_end = time.monotonic()
+              result["ps"] = {"startedAtMs": ps_started, "finishedAtMs": now_ms(),
+                              "caseElapsedSeconds": round(ps_end - case_start, 3), "late": ps_end - case_start > CASE_LIMIT}
+              live = []
+              for target in targets:
+                  if target["role"].startswith("sysctl-"):
+                      owner = parent if target["role"] == "sysctl-parent-direct" else child
+                      if not owner or not matches(owner, rows.get(owner["pid"])):
+                          result["skipped"].append({"role": target["role"], "pid": target["pid"], "reason": "owner-identity-missing-or-changed"})
+                          continue
+                  row = rows.get(target["pid"])
+                  if matches(target, row):
+                      target["observed"] = {"uid": row["uid"], "ppid": row["ppid"], "lstart": row["lstart"],
+                                            "stat": row["stat"], "comm": row["comm"]}
+                      live.append(target)
+                  else:
+                      result["skipped"].append({"role": target["role"], "pid": target["pid"], "reason": "identity-missing-or-changed"})
+              if not any(target["role"] == "parent" for target in live):
+                  return {**result, "outcome": "unavailable", "reason": "parent-identity-missing-or-changed",
+                          "late": result["ps"]["late"], "finishedAtMs": now_ms()}
+              if not guard():
+                  if ended_now(parent_path, run_ended):
+                      return {**result, "outcome": "partial", "reason": "observed-ended-before-fd", "samples": {},
+                              "targetEndedBeforeCompletion": True, "late": result["ps"]["late"], "finishedAtMs": now_ms()}
+                  return {**result, "outcome": "partial", "reason": "window-closed-before-fd", "samples": {},
+                          "late": result["ps"]["late"], "finishedAtMs": now_ms()}
+
+              lsof_started = now_ms()
+              code, out = run_tool(["lsof", "-nP", "-F", "pftn", "-p", ",".join(str(target["pid"]) for target in live)], LSOF_TIMEOUT)
+              lsof_end = time.monotonic()
+              result["lsof"] = {"status": "available" if code in (0, 1) else "unavailable",
+                                "reason": None if code in (0, 1) else ("timeout-or-missing" if code is None else "exit-" + str(code)),
+                                "entries": lsof_pipes(out) if code in (0, 1) else [], "startedAtMs": lsof_started,
+                                "finishedAtMs": now_ms(), "caseElapsedSeconds": round(lsof_end - case_start, 3),
+                                "late": lsof_end - case_start > CASE_LIMIT}
+              if not guard():
+                  if ended_now(parent_path, run_ended):
+                      return {**result, "outcome": "partial", "reason": "observed-ended-before-stack", "samples": {},
+                              "targetEndedBeforeCompletion": True, "late": result["ps"]["late"] or result["lsof"]["late"],
+                              "finishedAtMs": now_ms()}
+                  return {**result, "outcome": "partial", "reason": "window-closed-before-stack", "samples": {},
+                          "late": result["ps"]["late"] or result["lsof"]["late"], "finishedAtMs": now_ms()}
+
+              samples = {}
+              with ThreadPoolExecutor(max_workers=3) as pool:
+                  futures = {pool.submit(sample_one, target, diag / ("sample-" + target["role"] + "-" + str(target["pid"]) + ".txt"), case_start, guard): target for target in live}
+                  for future, target in futures.items():
+                      try:
+                          sample = future.result()
+                      except Exception as error:
+                          sample = {"status": "unavailable", "reason": "observer-error-" + type(error).__name__}
+                      samples[target["role"]] = sample
+                      if sample.get("reason") == "identity-missing-or-changed":
+                          result["skipped"].append({"role": target["role"], "pid": target["pid"], "reason": sample["reason"]})
+              result["samples"] = samples
+              ended_after = ended_now(parent_path, run_ended)
+              result["targetEndedDuringCapture"] = ended_after
+              late = result["ps"]["late"] or result["lsof"]["late"] or any(sample.get("late", False) for sample in samples.values())
+              complete = (
+                  not ended_after
+                  and not result["skipped"]
+                  and result["lsof"]["status"] == "available"
+                  and len(samples) == len(targets)
+                  and all(sample.get("status") == "available" for sample in samples.values())
+                  and not late
+              )
+              result["late"] = late
+              if ended_after:
+                  result["outcome"] = "partial"
+                  result["reason"] = "observed-ended-during-capture"
+              else:
+                  result["outcome"] = "sampled" if complete else ("partial" if samples or result["lsof"]["entries"] else "unavailable")
+                  result["reason"] = "all-requested-captures" if complete else "some-captures-unavailable-or-late"
+              result["finishedAtMs"] = now_ms()
+              return result
+
+
+          def observe(diag, result_path):
+              parent_path, run_ended = diag / "parent.jsonl", diag / "run-ended"
+              write_record(result_path, {"event": "observer-start", "startedAtMs": now_ms(), "uid": os.getuid(),
+                                         "deadlineSeconds": DEADLINE, "caseLimitSeconds": CASE_LIMIT})
+              parent = child = None
+              case_start_mono = case_start_wall = first_seen = None
+              spawn_registered = False
+
+              def stop_reason():
+                  if ended_now(parent_path, run_ended):
+                      return "observed-ended"
+                  if case_start_mono is not None and time.monotonic() - case_start_mono >= CASE_LIMIT:
+                      return "window-closed"
+                  return None
+
+              def guard():
+                  return stop_reason() is None
+
+              def stop(outcome_fields):
+                  reason = stop_reason()
+                  if reason == "window-closed":
+                      finish(result_path, "missed-window", "window-closed-before-capture", **outcome_fields)
+                  else:
+                      finish(result_path, "not-reproduced", "observed-ended", **outcome_fields)
+                  return
+
+              while True:
+                  records = read_records(parent_path)
+                  if any(record.get("stage") == "case-end" for record in records):
+                      finish(result_path, "not-reproduced", "observed-ended", pid=parent["pid"] if parent else None)
+                      return
+                  if run_ended.exists():
+                      finish(result_path, "not-reproduced", "target-case-not-observed" if parent is None else "run-ended")
+                      return
+
+                  start_record = next((r for r in records if r.get("stage") == "case-start" and isinstance(r.get("pid"), int)), None)
+                  if parent is None and start_record is not None:
+                      first_seen_wall, first_seen_mono = now_ms(), time.monotonic()
+                      state, elapsed = classify_case_start(start_record.get("timeMs"), first_seen_wall)
+                      if state == "missed":
+                          start_wall = start_record.get("timeMs")
+                          reason = "case-start-timestamp-missing" if not isinstance(start_wall, int) or start_wall <= 0 else "first-seen-at-or-after-20s"
+                          finish(result_path, "missed-window", reason,
+                                 caseStartWallMs=start_wall, firstSeenCaseElapsedSeconds=elapsed, late=False)
+                          return
+                      if state != "register":
+                          finish(result_path, "unavailable", "case-start-timestamp-in-future", pid=start_record["pid"])
+                          return
+                      case_start_mono = first_seen_mono - elapsed
+                      first_seen, case_start_wall = elapsed, start_record.get("timeMs")
+                      if not guard():
+                          stop({"pid": start_record["pid"], "caseStartWallMs": case_start_wall})
+                          return
+                      row = ps_rows([start_record["pid"]]).get(start_record["pid"])
+                      if not guard():
+                          stop({"pid": start_record["pid"], "caseStartWallMs": case_start_wall})
+                          return
+                      if not identity_ok(row, os.getuid(), start_record.get("ppid")):
+                          finish(result_path, "unavailable", "parent-identity-unavailable", pid=start_record["pid"])
+                          return
+                      parent = entry("parent", row)
+
+                  if parent is not None and not spawn_registered:
+                      spawn = next((r for r in records if r.get("pid") == parent["pid"] and isinstance(r.get("childPid"), int)), None)
+                      if spawn is not None:
+                          if not guard():
+                              stop({"pid": parent["pid"]})
+                              return
+                          child_pid = spawn["childPid"]
+                          row = ps_rows([child_pid]).get(child_pid)
+                          if not guard():
+                              stop({"pid": parent["pid"]})
+                              return
+                          child = entry("child", row) if identity_ok(row, os.getuid(), parent["pid"]) else {
+                              "role": "child", "pid": child_pid, "reason": "child-identity-unavailable"}
+                          spawn_registered = True
+
+                  if parent is not None and time.monotonic() - case_start_mono >= DEADLINE:
+                      records = read_records(parent_path)
+                      if any(record.get("stage") == "case-end" for record in records):
+                          finish(result_path, "not-reproduced", "observed-ended", pid=parent["pid"])
+                          return
+                      reason = stop_reason()
+                      if reason == "window-closed":
+                          finish(result_path, "missed-window", "window-closed-before-capture", pid=parent["pid"], late=False)
+                          return
+                      if reason:
+                          finish(result_path, "not-reproduced", reason, pid=parent["pid"])
+                          return
+                      stage = records[-1].get("stage") if records else None
+                      sysctl = find_sysctl(stage, parent, child, os.getuid(), guard)
+                      reason = stop_reason()
+                      if reason == "window-closed":
+                          finish(result_path, "missed-window", "window-closed-before-capture", pid=parent["pid"], late=False)
+                          return
+                      if reason:
+                          finish(result_path, "not-reproduced", reason, pid=parent["pid"])
+                          return
+                      write_record(result_path, take_capture(diag, parent_path, run_ended, parent, child, sysctl,
+                                                             case_start_mono, first_seen, case_start_wall, stage, guard))
+                      return
+                  time.sleep(POLL)
+
+
+          def self_check():
+              assert classify_case_start(1000, 1500) == ("register", 0.5)
+              assert classify_case_start(1000, 21000)[0] == "missed"
+              assert classify_case_start(2000, 1000)[0] == "invalid"
+              assert classify_case_start(None, 1000)[0] == "missed"
+              bun = {"pid": 1, "ppid": 2, "uid": 501, "lstart": "x", "stat": "S+", "comm": "bun"}
+              target = {"uid": 501, "ppid": 2, "lstart": "x", "comm": "bun"}
+              assert identity_ok(bun, 501, 2) and not identity_ok({**bun, "stat": "Z"}, 501, 2) and not identity_ok({**bun, "uid": 502}, 501, 2)
+              assert matches(target, bun) and not matches(target, {**bun, "stat": "Z"}) and not matches(target, None)
+              assert not matches(target, {**bun, "lstart": "changed"})
+              sysctl = {"pid": 3, "ppid": 1, "uid": 501, "lstart": "x", "stat": "S+", "comm": "/usr/sbin/sysctl"}
+              assert sysctl_ok(sysctl, 501, 1)
+              assert not sysctl_ok({**sysctl, "comm": "bun"}, 501, 1)
+              assert not sysctl_ok({**sysctl, "stat": "Z"}, 501, 1)
+              assert not sysctl_ok(None, 501, 1)
+              assert lsof_pipes("p1\nf3\ntPIPE\nn->0xabc\np2\nf4\ntREG\nn/tmp/x\n") == [
+                  {"pid": 1, "fd": "3", "type": "PIPE", "addresses": ["0xabc"]}]
+              print("observer self-check: ok")
+
+
+          def main():
+              parser = argparse.ArgumentParser(description="Read-only kernel-clock diagnostic observer")
+              parser.add_argument("--dir")
+              parser.add_argument("--self-check", action="store_true")
+              args = parser.parse_args()
+              if args.self_check:
+                  self_check()
+                  return 0
+              if not args.dir:
+                  parser.error("--dir is required unless --self-check")
+              diag = Path(args.dir)
+              if not diag.is_dir():
+                  print("observer: diagnostic directory is missing", file=sys.stderr)
+                  return 2
+              result_path = diag / "observer.jsonl"
+              try:
+                  observe(diag, result_path)
+              except Exception as error:
+                  try:
+                      finish(result_path, "unavailable", "observer-error-" + type(error).__name__)
+                  except Exception:
+                      pass
+                  print("observer: internal error " + type(error).__name__, file=sys.stderr)
+                  return 2
+              return 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          PY_OBSERVER
+          python3 "$observer" --dir "$diagnostic_dir" > "$diagnostic_dir/observer-console.log" 2>&1 &
+          observer_pid=$!
+          cleanup() {
+            status=$?
+            trap - EXIT INT TERM
+            set +e
+            : > "$diagnostic_dir/run-ended"
+            wait "$observer_pid"
+            observer_status=$?
+            if [ "$observer_status" -ne 0 ]; then
+              echo "::warning::clock observer exited with $observer_status; collection status is in the uploaded diagnostic artifact"
+              cat "$diagnostic_dir/observer-console.log" || true
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
           bun scripts/checks/select-tests.ts --plan "$RUNNER_TEMP/plan/plan.json" --phase integration --shard "$SHARD/$count" --record "$RUNNER_TEMP/integration-$SHARD.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: execution-${{ matrix.os }}-integration-${{ matrix.shard }}
-          path: ${{ runner.temp }}/integration-${{ matrix.shard }}.json*
-          if-no-files-found: error
-          retention-days: 14
+          name: diagnostic-execution-macos-integration-1
+          path: |
+            ${{ runner.temp }}/integration-1.json*
+            ${{ runner.temp }}/clock-diagnostic/
+            ${{ runner.temp }}/diagnostic/
+          if-no-files-found: warn
+          retention-days: 7
 
   browser:
-    needs: [plan, build]
-    if: needs.plan.outputs.browser != '0' && needs.build.result == 'success'
-    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'ubuntu-24.04' || matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    name: macOS browser shard 1/2 (diagnostic, not validation)
+    needs: prepare
+    if: needs.prepare.result == 'success' && github.event.pull_request.head.ref == 'diagnostic/macos-evidence'
+    runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || github.sha }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: '1.4.2'
       - run: bun install --frozen-lockfile
+      - name: Record identity
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/diagnostic"
+          {
+            echo "job=$GITHUB_JOB"
+            echo "checkout_head=$(git rev-parse HEAD)"
+            echo "checkout_tree=$(git rev-parse HEAD^{tree})"
+            echo "bun=$(bun --version)"
+            echo "runner_os=$RUNNER_OS"
+            echo "runner_arch=$RUNNER_ARCH"
+            echo "image_os=${ImageOS:-unavailable}"
+            echo "image_version=${ImageVersion:-unavailable}"
+            echo "uname_m=$(uname -m)"
+            echo "sw_vers=$(sw_vers -productVersion) build=$(sw_vers -buildVersion)"
+          } | tee "$RUNNER_TEMP/diagnostic/identity-browser-1.txt"
       - uses: actions/download-artifact@v4
         with:
-          name: test-plan
+          name: diagnostic-plan
           path: ${{ runner.temp }}/plan
       - uses: actions/download-artifact@v4
         with:
-          name: build-${{ matrix.os }}
+          name: diagnostic-build-macos
           path: ${{ runner.temp }}/build
       - name: Restore artifacts for this platform and tree
         run: |
           set -euo pipefail
           jq -e --slurpfile plan "$RUNNER_TEMP/plan/plan.json" '.commit == $plan[0].testCommit and .tree == $plan[0].tree' "$RUNNER_TEMP/build/build.json"
           tar -xzf "$RUNNER_TEMP/build/build.tgz"
-      - name: Install Chromium and Linux dependencies
-        if: matrix.os == 'ubuntu-latest'
-        run: bun ./node_modules/playwright/cli.js install --with-deps chromium
       - name: Install Chromium
-        if: matrix.os != 'ubuntu-latest'
         run: bun ./node_modules/playwright/cli.js install chromium
       - name: Selected browser regression with native sharding
         env:
-          SHARD: ${{ matrix.shard }}
-          COUNT: ${{ needs.plan.outputs.browser }}
+          SHARD: '1'
+          COUNT: ${{ needs.prepare.outputs.browser }}
         run: |
+          set -euo pipefail
           count=1
           if [ "$COUNT" -gt 1 ]; then count=2; fi
           bun scripts/checks/select-tests.ts --plan "$RUNNER_TEMP/plan/plan.json" --phase browser --shard "$SHARD/$count" --record "$RUNNER_TEMP/browser-$SHARD.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: execution-${{ matrix.os }}-browser-${{ matrix.shard }}
-          path: ${{ runner.temp }}/browser-${{ matrix.shard }}.json*
-          if-no-files-found: error
-          retention-days: 14
-
-  test:
-    needs: [plan, build, integration, browser]
-    if: always()
-    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'ubuntu-24.04' || matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: '1.4.2'
-      - uses: actions/download-artifact@v4
-        with:
-          name: test-plan
-          path: ${{ runner.temp }}/plan
-      - uses: actions/download-artifact@v4
-        if: needs.plan.outputs.mode != 'none'
-        with:
-          pattern: execution-${{ matrix.os }}-*
-          path: ${{ runner.temp }}/execution
-          merge-multiple: true
-      - name: Require planned jobs and exact executed-file union
-        env:
-          NEEDS: ${{ toJSON(needs) }}
-          PLATFORM: ${{ matrix.os }}
-        run: |
-          set -euo pipefail
-          jq -e '.plan.result == "success" and (if .plan.outputs.mode == "none" then .build.result == "skipped" else .build.result == "success" end) and (if .plan.outputs.integration == "0" then .integration.result == "skipped" else .integration.result == "success" end) and (if .plan.outputs.browser == "0" then .browser.result == "skipped" else .browser.result == "success" end)' <<< "$NEEDS"
-          mkdir -p "$RUNNER_TEMP/execution"
-          bun -e 'import {verifyRecords} from "./scripts/checks/test-proof.ts";
-          const plan=await Bun.file(`${process.env.RUNNER_TEMP}/plan/plan.json`).json();
-          const paths=Array.from(new Bun.Glob("*.json").scanSync({cwd:`${process.env.RUNNER_TEMP}/execution`,onlyFiles:true})).filter(p=>!p.endsWith(".timings.json"));
-          const records=await Promise.all(paths.map(p=>Bun.file(`${process.env.RUNNER_TEMP}/execution/${p}`).json()));
-          const proof=verifyRecords(plan,records,process.env.PLATFORM);
-          await Bun.write(`${process.env.RUNNER_TEMP}/${process.env.PLATFORM}.json`,JSON.stringify(proof));'
-      - uses: actions/upload-artifact@v4
-        with:
-          name: platform-${{ matrix.os }}
-          path: ${{ runner.temp }}/${{ matrix.os }}.json
-          if-no-files-found: error
-          retention-days: 14
-
-  proof:
-    needs: [plan, test]
-    if: ${{ always() && needs.plan.result == 'success' && needs.test.result == 'success' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: '1.4.2'
-      - uses: actions/download-artifact@v4
-        with:
-          name: test-plan
-          path: ${{ runner.temp }}/plan
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: platform-*
-          path: ${{ runner.temp }}/platform
-          merge-multiple: true
-      - name: Record strict PR validation provenance
-        env:
-          PR_NUMBER: ${{ inputs.pr || github.event.pull_request.number }}
-        run: |
-          bun -e 'import {createProof} from "./scripts/checks/test-proof.ts";
-          const dir=process.env.RUNNER_TEMP;
-          const plan=await Bun.file(`${dir}/plan/plan.json`).json();
-          const results=await Promise.all(["ubuntu-latest","macos-latest"].map(os=>Bun.file(`${dir}/platform/${os}.json`).json()));
-          const proof=createProof(plan,results,{pr:Number(process.env.PR_NUMBER),runId:process.env.GITHUB_RUN_ID,runAttempt:Number(process.env.GITHUB_RUN_ATTEMPT)});
-          await Bun.write(`${dir}/pr.json`,JSON.stringify(proof,null,2));'
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tested-pr
-          path: ${{ runner.temp }}/pr.json
-          if-no-files-found: error
-          retention-days: 14
+          name: diagnostic-execution-macos-browser-1
+          path: |
+            ${{ runner.temp }}/browser-1.json*
+            ${{ runner.temp }}/diagnostic/
+          if-no-files-found: warn
+          retention-days: 7

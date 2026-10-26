@@ -1,12 +1,23 @@
 import { expect, test } from 'bun:test';
 import { toArrayBuffer, type Pointer } from 'bun:ffi';
 import { fileURLToPath } from 'node:url';
+import { appendFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createKernelMonotonicClock, kernelMonotonicNowNs, readKernelDeadlineClockId } from '../../src/master-runtime/kernel-monotonic-clock';
 import { createConfigWorkerRuntimeController } from '../../src/config-publication/worker-runtime';
 import { drainMessage, fakeLifecycle, PROCESS_IDENTITY, startMessage } from '../helpers/config-publication-worker-runtime';
+
+const clockDiagnosticDir = process.env.BUNGEE_CLOCK_DIAGNOSTIC_DIR;
+// Temporary diagnostic trace: no env directory means no writes, and write failures never affect the test.
+const recordClockStage = (stage: string, childPid?: number): void => {
+  if (!clockDiagnosticDir) return;
+  try {
+    appendFileSync(join(clockDiagnosticDir, 'parent.jsonl'),
+      `${JSON.stringify({ timeMs: Date.now(), pid: process.pid, ppid: process.ppid, stage, ...(childPid === undefined ? {} : { childPid }) })}\n`);
+  } catch { console.error('[clock-diagnostic] marker-write-unavailable'); }
+};
 
 const output = (address: number) => new BigInt64Array(toArrayBuffer(address as Pointer, 0, 16));
 
@@ -53,49 +64,65 @@ test('musl loader fallback keeps nanosecond validation and counts suspend time',
 });
 
 test('older worker accepts a younger controller deadline and preserves the shared exit window', async () => {
-  const fake = fakeLifecycle();
-  const clockId = await readKernelDeadlineClockId();
-  const runtime = createConfigWorkerRuntimeController({ pid: 4321, identity: PROCESS_IDENTITY,
-    bootNonce: 'c0000000-0000-4000-8000-000000000001', bootId: clockId, lifecycle: fake.lifecycle });
+  recordClockStage('case-start');
   try {
-    expect((await runtime.apply(startMessage())).ok).toBe(true);
-    // Exceeds C: the former process-relative implementation rejected this takeover.
-    await Bun.sleep(6_000);
-    const entry = fileURLToPath(new URL('../fixtures/kernel-clock-child.ts', import.meta.url));
-    const before = kernelMonotonicNowNs();
-    const child = Bun.spawn([process.execPath, entry], { stdout: 'pipe', stderr: 'pipe' });
-    const text = await new Response(child.stdout).text();
-    const stderr = await new Response(child.stderr).text();
-    expect(await child.exited, stderr).toBe(0);
-    const controller = JSON.parse(text) as { now: string; startDeadline: string; exitDeadline: string; clockId: string };
-    const after = kernelMonotonicNowNs();
-    expect(BigInt(controller.now)).toBeGreaterThanOrEqual(before);
-    expect(BigInt(controller.now)).toBeLessThanOrEqual(after);
-    expect(controller.clockId).toBe(clockId);
-    // A much older parent must not truncate the younger worker's E window.
-    const childExitRemaining = BigInt(controller.exitDeadline) - after;
-    expect(childExitRemaining).toBeGreaterThan(0n);
-    expect(childExitRemaining).toBeLessThanOrEqual(10_000_000_000n);
-    // Mixed versions cannot mistake a legacy process-relative value for kernel time.
-    const legacy = await runtime.apply({ ...drainMessage(), start_boot_id: clockId.replace('kernel-monotonic-v1:', ''),
-      start_deadline_ns: controller.startDeadline });
-    expect(legacy.ok).toBe(false);
-    const expired = await runtime.apply({ ...drainMessage(), start_boot_id: clockId, start_deadline_ns: before.toString() });
-    expect(expired.ok).toBe(false);
-    const accepted = await runtime.apply({ ...drainMessage(), start_boot_id: clockId, start_deadline_ns: controller.startDeadline });
-    expect(accepted.ok).toBe(true);
-    await Bun.sleep(20);
-    const terminal = runtime.drainStatus();
-    expect(terminal?.ok).toBe(true);
-    if (!terminal?.ok || terminal.message.status !== 'worker-drained') throw new Error('terminal drain evidence missing');
-    const remaining = BigInt(terminal.message.exit_deadline_ns) - kernelMonotonicNowNs();
-    expect(remaining).toBeGreaterThan(0n);
-    expect(remaining).toBeLessThanOrEqual(BigInt(terminal.message.policy.worker_exit_timeout_ms) * 1_000_000n);
-    const originalDeadline = terminal.message.exit_deadline_ns;
-    await runtime.failClosed();
-    const finalized = runtime.drainStatus();
-    expect(finalized?.ok && 'exit_deadline_ns' in finalized.message ? finalized.message.exit_deadline_ns : null).toBe(originalDeadline);
-  } finally { await runtime.failClosed(); }
+    const fake = fakeLifecycle();
+    recordClockStage('clock-id');
+    const clockId = await readKernelDeadlineClockId();
+    const runtime = createConfigWorkerRuntimeController({ pid: 4321, identity: PROCESS_IDENTITY,
+      bootNonce: 'c0000000-0000-4000-8000-000000000001', bootId: clockId, lifecycle: fake.lifecycle });
+    try {
+      recordClockStage('start');
+      expect((await runtime.apply(startMessage())).ok).toBe(true);
+      // Exceeds C: the former process-relative implementation rejected this takeover.
+      recordClockStage('age-gap');
+      await Bun.sleep(6_000);
+      const entry = fileURLToPath(new URL('../fixtures/kernel-clock-child.ts', import.meta.url));
+      const before = kernelMonotonicNowNs();
+      const child = Bun.spawn([process.execPath, entry], { stdout: 'pipe', stderr: 'pipe',
+        env: { ...process.env, BUNGEE_CLOCK_DIAGNOSTIC_CHILD: '1' } });
+      recordClockStage('spawn', child.pid);
+      recordClockStage('stdout');
+      const text = await new Response(child.stdout).text();
+      recordClockStage('stderr');
+      const stderr = await new Response(child.stderr).text();
+      recordClockStage('exited');
+      expect(await child.exited, stderr).toBe(0);
+      const controller = JSON.parse(text) as { now: string; startDeadline: string; exitDeadline: string; clockId: string };
+      const after = kernelMonotonicNowNs();
+      expect(BigInt(controller.now)).toBeGreaterThanOrEqual(before);
+      expect(BigInt(controller.now)).toBeLessThanOrEqual(after);
+      expect(controller.clockId).toBe(clockId);
+      // A much older parent must not truncate the younger worker's E window.
+      const childExitRemaining = BigInt(controller.exitDeadline) - after;
+      expect(childExitRemaining).toBeGreaterThan(0n);
+      expect(childExitRemaining).toBeLessThanOrEqual(10_000_000_000n);
+      // Mixed versions cannot mistake a legacy process-relative value for kernel time.
+      recordClockStage('drain-legacy');
+      const legacy = await runtime.apply({ ...drainMessage(), start_boot_id: clockId.replace('kernel-monotonic-v1:', ''),
+        start_deadline_ns: controller.startDeadline });
+      expect(legacy.ok).toBe(false);
+      recordClockStage('drain-expired');
+      const expired = await runtime.apply({ ...drainMessage(), start_boot_id: clockId, start_deadline_ns: before.toString() });
+      expect(expired.ok).toBe(false);
+      recordClockStage('drain-valid');
+      const accepted = await runtime.apply({ ...drainMessage(), start_boot_id: clockId, start_deadline_ns: controller.startDeadline });
+      expect(accepted.ok).toBe(true);
+      recordClockStage('terminal-wait');
+      await Bun.sleep(20);
+      const terminal = runtime.drainStatus();
+      expect(terminal?.ok).toBe(true);
+      if (!terminal?.ok || terminal.message.status !== 'worker-drained') throw new Error('terminal drain evidence missing');
+      const remaining = BigInt(terminal.message.exit_deadline_ns) - kernelMonotonicNowNs();
+      expect(remaining).toBeGreaterThan(0n);
+      expect(remaining).toBeLessThanOrEqual(BigInt(terminal.message.policy.worker_exit_timeout_ms) * 1_000_000n);
+      const originalDeadline = terminal.message.exit_deadline_ns;
+      recordClockStage('fail-closed');
+      await runtime.failClosed();
+      const finalized = runtime.drainStatus();
+      expect(finalized?.ok && 'exit_deadline_ns' in finalized.message ? finalized.message.exit_deadline_ns : null).toBe(originalDeadline);
+    } finally { recordClockStage('finally'); await runtime.failClosed(); }
+  } finally { recordClockStage('case-end'); }
 }, 20_000);
 
 

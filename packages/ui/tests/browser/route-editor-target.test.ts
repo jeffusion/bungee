@@ -186,6 +186,7 @@ async function openEditorWithHistory(page: Page, path: string) {
 }
 
 async function dismissTargetDialogWithShortcuts(page: Page, owner: ReturnType<Page['locator']>, writes: unknown[]) {
+  try {
   const url = page.url(), writeCount = writes.length;
   await expect(page.getByTestId(/^(route|service)-save-button$/)).toBeEnabled();
   const opener = owner.getByTestId('route-upstream-add-button');
@@ -201,6 +202,122 @@ async function dismissTargetDialogWithShortcuts(page: Page, owner: ReturnType<Pa
   await expect(page).toHaveURL(url);
   await expect(owner).toBeVisible();
   assert.equal(writes.length, writeCount);
+  } catch (error) {
+    const snapshot: { phase: string; dom?: unknown; budget?: unknown; listeners: Record<string, unknown>; cleanup: Record<string, unknown> } = {
+      phase: 'after-helper-failure', dom: { status: 'unavailable', category: 'not-collected' }, listeners: {}, cleanup: {},
+    };
+    const unavailable = (cause: unknown) => ({ status: 'unavailable', category: page.isClosed() ? 'page-closed' : cause instanceof Error && cause.name === 'TimeoutError' ? 'timeout' : 'capture-failed' });
+    let session: import('playwright').CDPSession | undefined;
+    let stopScriptEvents: (() => void) | undefined;
+    const objectGroup = 'target-dialog-failure-snapshot';
+    const deadline = Date.now() + 1500;
+    let expired = false, budgetTimer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = () => expired || Date.now() >= deadline;
+    try {
+      const budget = new Promise<void>(resolve => {
+        budgetTimer = setTimeout(() => { expired = true; resolve(); }, 1500);
+      });
+      const capture = (async () => {
+      try {
+        snapshot.dom = await page.evaluate(() => {
+          const describe = (node: Element | null) => node ? {
+            tag: node.tagName.toLowerCase(), id: node.id, role: node.getAttribute('role'),
+            testid: node.getAttribute('data-testid'), dataState: node.getAttribute('data-state'),
+            ariaModal: node.getAttribute('aria-modal'), isConnected: node.isConnected,
+            inert: node.hasAttribute('inert'), escapee: node.hasAttribute('data-escapee'),
+          } : null;
+          const inertAncestors = (node: Element) => {
+            const ancestors = [];
+            for (let ancestor = node.parentElement; ancestor; ancestor = ancestor.parentElement) {
+              if (ancestor.hasAttribute('inert')) ancestors.push(describe(ancestor));
+            }
+            return ancestors;
+          };
+          return {
+            status: 'available', sampledAtMs: performance.now(), hasFocus: document.hasFocus(),
+            visibilityState: document.visibilityState, activeElement: describe(document.activeElement),
+            activeEscapee: describe(document.activeElement?.closest('[data-escapee]') ?? null),
+            dialogs: Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"]'), node => ({
+              ...describe(node), inertAncestors: inertAncestors(node),
+            })),
+            escapees: Array.from(document.querySelectorAll('[data-escapee]'), node => describe(node)),
+          };
+        });
+      } catch (cause) { snapshot.dom = unavailable(cause); }
+      if (timedOut()) return;
+      try {
+        session = await page.context().newCDPSession(page);
+        const locations: { scriptId: string; sourcePath: string }[] = [];
+        for (const target of ['document', 'window']) {
+          if (timedOut()) return;
+          try {
+            const remote = await session.send('Runtime.evaluate', { expression: target, objectGroup, returnByValue: false, silent: true });
+            if (timedOut()) return;
+            if (remote.exceptionDetails || !remote.result.objectId) {
+              snapshot.listeners[target] = { status: 'unavailable', category: 'remote-object-unavailable' };
+              continue;
+            }
+            const { listeners } = await session.send('DOMDebugger.getEventListeners', { objectId: remote.result.objectId });
+            snapshot.listeners[target] = {
+              status: 'available', listeners: listeners.filter(listener => listener.type === 'keydown' || listener.type === 'focusin').map(listener => {
+                const location = {
+                  type: listener.type, useCapture: listener.useCapture, passive: listener.passive, once: listener.once,
+                  scriptId: listener.scriptId, lineNumber: listener.lineNumber, columnNumber: listener.columnNumber,
+                  sourcePath: 'unavailable',
+                };
+                locations.push(location);
+                return location;
+              }),
+            };
+          } catch (cause) { snapshot.listeners[target] = unavailable(cause); }
+        }
+        if (timedOut()) return;
+        const origin = new URL(page.url()).origin, cdp = session;
+        const parsed = ({ scriptId, url }: { scriptId: string; url: string }) => {
+          if (timedOut()) return;
+          const matching = locations.filter(location => location.scriptId === scriptId);
+          if (!matching.length) return;
+          let sourcePath = url ? 'internal' : 'inline';
+          if (url) {
+            try {
+              const source = new URL(url);
+              if (source.protocol === 'http:' || source.protocol === 'https:') sourcePath = source.origin === origin ? source.pathname : 'other-origin';
+            } catch {}
+          }
+          for (const location of matching) location.sourcePath = sourcePath;
+        };
+        cdp.on('Debugger.scriptParsed', parsed);
+        stopScriptEvents = () => {
+          try { cdp.off('Debugger.scriptParsed', parsed); snapshot.cleanup.scriptEvents = 'removed'; }
+          catch (cause) { snapshot.cleanup.scriptEvents = unavailable(cause); }
+          stopScriptEvents = undefined;
+        };
+        if (timedOut()) return;
+        try { await cdp.send('Debugger.enable'); }
+        catch (cause) { snapshot.listeners.scriptPaths = unavailable(cause); }
+      } catch (cause) { snapshot.listeners.session = unavailable(cause); }
+      finally {
+        stopScriptEvents?.();
+        if (session && !timedOut()) {
+          try { await session.send('Runtime.releaseObjectGroup', { objectGroup }); snapshot.cleanup.objectGroup = 'released'; }
+          catch (cause) { snapshot.cleanup.objectGroup = unavailable(cause); }
+          if (!timedOut()) {
+            try { await session.detach(); snapshot.cleanup.session = 'detached'; }
+            catch (cause) { snapshot.cleanup.session = unavailable(cause); }
+          }
+        }
+      }
+      })().catch(cause => { snapshot.listeners.capture = unavailable(cause); });
+      await Promise.race([capture, budget]);
+      stopScriptEvents?.();
+      if (timedOut()) {
+        expired = true;
+        snapshot.budget = { status: 'unavailable', category: 'budget-timeout', limitMs: 1500 };
+        snapshot.cleanup.remaining = 'context-close';
+      }
+      console.error('目标弹窗失败快照:', JSON.stringify(snapshot));
+    } finally { stopScriptEvents?.(); clearTimeout(budgetTimer); throw error; }
+  }
 }
 
 async function addServiceReference(page: Page, owner: ReturnType<Page['locator']>, name: string) {
