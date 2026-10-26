@@ -57,7 +57,7 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
     const models = kind === 'client' ? values : values.map(model => ({ provider, model, name: model }));
     return json({ models, total: search ? values.length : 101, page: requestedPage, pageSize: 50 });
   }
-  // Dashboard smoke uses the same empty fixtures as dashboard-loading.browser.ts.
+  // Unrelated dashboard requests use empty fixtures.
   if (path === '/api/resources/api-key') return json({ keys: [] });
   if (path === '/api/runtime/upstreams') return json({ schema: 'bungee-runtime-upstreams-v1', generated_at: Date.now(),
     availability: 'complete', reason: null, admission: { revision: 1 }, workers: { observed: [], missing: [] }, upstreams: [] });

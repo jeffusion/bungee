@@ -8,6 +8,7 @@ This guide covers the current monorepo workflow for Bungee.
 
 - Bun `1.4.2` (the version fixed by the project, Docker and CI)
 - Node.js `>=18` (for ecosystem/tooling compatibility)
+- Git (affected planning and CI verify the current checkout's identity)
 
 ---
 
@@ -118,12 +119,15 @@ Tests belong to the module whose responsibility they primarily verify: `packages
 - `browser/`: core business workflows through real components, including authentication, configuration publication, account bindings and failure recovery; services are shared within a file and contexts are isolated between cases.
 - `helpers/`: explicit setup, waiting and cleanup; importing a helper must not allocate resources.
 - `fixtures/`: data and components loaded by the tested system.
+- `manual/`: acceptance that needs live external services or manual preparation; use explicit entry points without automatic test-discovery suffixes.
 
 Frontend automation verifies business state, request contracts and workflow results. Do not add tests for CSS, layout dimensions, animation, focus, translated wording or display formatting. Review presentation through the design system and browser inspection. Text may locate a control without making its wording a test contract.
 
 Use a descriptive kebab-case `<behavior>.test.ts`; the directory identifies its layer. Tests never import other test entries, and production code never imports tests. Keep snapshots beside their tests; keep databases, screenshots, logs and measurement results outside the checkout.
 
-`bun run test` builds before all three categories. Install Chromium with `bunx playwright install chromium`. Run an initial build before using category commands directly, and rebuild whenever the tested SDK or artifact changes. Bun discovers categories by path substring, with helper, fixture, manual and generated directories excluded in `bunfig.toml`; there is no separate test list.
+`bun run test` builds current artifacts once, then runs the complete unit, integration and browser categories in sequence with `--isolate`. Local entry points do not schedule concurrent shards: separate checkouts do not isolate host ports. Local results do not constitute a two-platform release proof.
+
+Install Chromium with `bunx playwright install chromium`. Run an initial build before using category commands directly, and rebuild whenever the tested SDK or artifact changes. Bun discovers categories by path substring, with helper, fixture, manual and generated directories excluded in `bunfig.toml`; there is no separate test list.
 
 The build command only builds; architecture assertions run with unit tests. `bun run check:architecture` remains available for focused checks.
 
@@ -145,7 +149,7 @@ All non-documentation changes run the complete unit category. Integration and br
 | Change | Additional scope |
 | --- | --- |
 | Explicit documentation, license, Agent-rule or skill paths | No product build or application tests when the entire change is documentation |
-| UI or plugin UI | UI integration, all UI/plugin browser files and root browser workflows |
+| UI or plugin UI | UI integration, all UI/plugin browser files and root browser workflows; the exact `Logs.svelte` route uses its maintained UI browser entry group, retaining root/plugin browser workflows |
 | Plugin server | Plugin and reverse-dependent plugin integration, core/root integration and root browser workflows |
 | Plugin manifest | Plugin-server scope plus UI scope |
 | CLI | CLI/core/root integration and root browser workflows |
@@ -155,7 +159,7 @@ All non-documentation changes run the complete unit category. Integration and br
 | Module helpers/fixtures | All owner tests plus confirmed cross-module consumers |
 | Root helpers/fixtures, unknown paths or an executable module without tests | Full regression with an explanation |
 
-The rules and dependency discovery live in [test-selection.ts](../../scripts/checks/test-selection.ts); the entry point is [select-tests.ts](../../scripts/checks/select-tests.ts). Documentation exemptions are path based; fixture Markdown is input data. Additions are discovered from directories, not a test-file whitelist. When adding modules or cross-module dependencies, maintain the rules and their tests. Do not silently broaden documentation exemptions or report an affected run as full validation.
+The rules and dependency discovery live in [test-selection.ts](../../scripts/checks/test-selection.ts); the entry point is [select-tests.ts](../../scripts/checks/select-tests.ts). Documentation exemptions are path based; fixture Markdown is input data. Test discovery remains directory based. Maintain route-specific entry groups when adding built-page tests; a missing required entry falls back to the broad UI scope. Plugin-server and root-helper changes retain their broad scopes rather than assuming static references describe every runtime consumer. When adding modules or cross-module dependencies, maintain the rules and their tests. Do not silently broaden documentation exemptions or report an affected run as full validation.
 
 `test:affected` handles its own build. Category commands still require an initial/current build and always run the whole category. Plan-only mode never builds. CI consumes one committed plan per run; execution records and native Bun timings remain outside versioned source. Execution rejects stale commit/tree identities.
 
@@ -166,7 +170,7 @@ requests targeting `main`, including subsequent updates, and as the reusable ful
 The Linux and macOS test jobs must pass before a PR can merge into `main`,
 and its branch must be up to date with `main`. Windows CI is disabled; the active matrix covers Linux and macOS.
 
-PR planning compares the PR base SHA with the actual checked-out test commit, covering the entire PR rather than the latest push. Each Linux/macOS workspace builds once and completes all fast tests. Integration runs in a separate serial job; browser files use at most two native Bun shards, each internally serial with `--isolate`. Jobs own independent workspaces and ports; artifacts are bound to their platform and code tree, including the generated UI assets, offline icon resources and widget registry sources. No browser service or mutable context is shared across files or jobs. The final checks verify native executed-file records: missing, failed, cancelled or unexpectedly skipped work cannot pass.
+PR planning compares the PR base SHA with the actual checked-out test commit, covering the entire PR rather than the latest push. Each Linux/macOS platform builds once and completes all fast tests. Selected integration and browser files each use at most two native Bun shards in independent jobs, internally serial with `--isolate`. Jobs own independent workspaces and ports; artifacts are bound to their platform and code tree, including the generated UI assets, offline icon resources and widget registry sources. No browser service or mutable context is shared across files or jobs. The final checks verify native executed-file records: missing, failed, cancelled or unexpectedly skipped work cannot pass.
 
 `testCommit` and `tree` identify the tested checkout; `head` and `pr` identify the source PR; `runId` and `runAttempt` identify the execution producing the proof. Proof generation takes the source SHA from the test plan. Release checks it against the PR head independently obtained from GitHub. These identities need not share a commit SHA: PR CI can test a merge commit, and a rebase merge can produce different commits with the same tree.
 
@@ -288,11 +292,11 @@ bun tests/manual/storage-native-acceptance.ts /absolute/path/to/bungee-linux
 bun tests/manual/plugin-business-browser-acceptance.ts --evidence-dir /tmp/bungee-plugin-browser
 ```
 
-The plugin business check downloads the public models.dev catalog and requires network access; it does not call paid model providers. Publication acceptance tools under `tests/manual/` require a disposable loopback backend and their declared environment inputs. They are excluded from automatic discovery. Read their ownership checks before using them, and never pass production data or credentials.
+The plugin business check downloads the public models.dev catalog and requires network access; it does not call paid model providers. The automatic models-dev process regression instead uses a controlled local HTTP catalog through the real downloader, snapshot publication and workers; it does not establish public-source compatibility. Publication acceptance tools under `tests/manual/` require a disposable loopback backend and their declared environment inputs. They are excluded from automatic discovery. Read their ownership checks before using them, and never pass production data or credentials.
 
 Header navigation, group dropdowns, language selection, logout and menu editing
 are covered by `packages/ui/tests/browser/header-actions.test.ts` and
 `packages/ui/tests/browser/menus.test.ts`. These checks use the current UI build
 with mocked management APIs.
 
-Package-local browser checks include NumberInput, scrolling, route editors and dashboard widget ownership. Use `bun test --isolate <path-to-test>` for a focused file. All browser evidence must distinguish mocked APIs, local real gateways and external providers.
+Package-local browser checks include NumberInput, scrolling, route editors and protected plugin hosting. Use `bun test --isolate <path-to-test>` for a focused file. All browser evidence must distinguish mocked APIs, local real gateways and external providers.

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
-import { PluginStateClient, type PluginStateOpenOptions } from '../../../src/plugin-state/client';
+import { PluginStateClient, type PluginStateDiagnostic, type PluginStateOpenOptions } from '../../../src/plugin-state/client';
 import { deferred, waitForState } from '../../helpers/plugin-state-progress';
 import { initializePluginStateDatabase } from '../../../src/plugin-state/schema';
 import type { RpcCommandExecution } from '../../../src/plugin-services/rpc-runtime';
@@ -594,11 +594,32 @@ describe('IPC physical progress and orphan resources',()=>{
     await client.close();expect(calls).toBe(0);expect(client.health().closeConfirmed).toBe(true);
   });
   test('close cancels a not started callback even before its business deadline',async()=>{
-    const client=await fault('late-callback');const journal=client.journal({namespace:'rpc.close-callback',privateStateNamespace:'owner'});await journal.status();let calls=0;
-    const command=execution('closing-owner','none',async()=>{calls++;return {ok:true};});
-    const pending=journal.execute({...command,context:{...command.context,deadlineAt:Date.now()+1000}}).catch(error=>error);
-    await waitForState(()=>client.health().requests.some(request=>request.methodClass==='write'));
-    await client.close();expect(await pending).toMatchObject({code:'unknown'});expect(calls).toBe(0);expect(client.health().closeConfirmed).toBe(true);
+    let stage='open',deadlineAt=0,calls=0,client:PluginStateClient|undefined,path:string|undefined;
+    const diagnostics:PluginStateDiagnostic[]=[];
+    try {
+      const opened=await fault('held-callback',{onDiagnostic:event=>diagnostics.push(event)});client=opened;
+      const releasePath=join(dirs.at(-1)!,'held-callback.db');path=releasePath;
+      stage='status';const journal=opened.journal({namespace:'rpc.close-callback',privateStateNamespace:'owner'});await journal.status();
+      const command=execution('closing-owner','none',async()=>{calls++;return {ok:true};});
+      deadlineAt=Date.now()+1000;
+      const pending=journal.execute({...command,context:{...command.context,deadlineAt}}).catch(error=>error);
+      // The ready file proves the real Worker created and owns the callback before close.
+      stage='waiting-ready';await waitForState(()=>existsSync(`${releasePath}.callback-1.ready`));
+      stage='closing';expect(Date.now()).toBeLessThan(deadlineAt);
+      const closing=opened.close();void closing.catch(()=>undefined);
+      await waitForState(()=>opened.health().state==='closing');
+      writeFileSync(`${releasePath}.callback-1.release`,'');
+      await closing;
+      expect(Date.now()).toBeLessThan(deadlineAt);
+      stage='assertions';
+      expect(await pending).toMatchObject({code:'unknown'});expect(calls).toBe(0);expect(opened.health().closeConfirmed).toBe(true);
+    } catch (error) {
+      console.error('plugin state close-callback failure',{stage,operationId:'closing-owner',deadlineAt,health:client?.health(),calls,diagnostics});
+      throw error;
+    } finally {
+      if(path)writeFileSync(`${path}.callback-1.release`,'');
+      await client?.close().catch(()=>undefined);
+    }
   });
   test('lost committed ACK preserves operation ID, journal proof and no reexecution',async()=>{
     const client=await fault('drop-write-ack',{requestTimeoutMs:300});let plans=0;

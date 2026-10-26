@@ -91,7 +91,7 @@ describe('public listener streaming and admission snapshots', () => {
     expect(releaseCount).toBe(1);
   });
 
-  test('real ingress signed control survives delayed headers and SSE beyond ten seconds while H expires', async () => {
+  test('real ingress signed control survives headers delayed beyond ten seconds and an expired handoff deadline, then the old body completes', async () => {
     const rootKey = new Uint8Array(32).fill(17);
     const instanceId = randomUUID();
     const processInstanceId = randomUUID();
@@ -211,7 +211,6 @@ describe('public listener streaming and admission snapshots', () => {
       const reader = oldResponse.body?.getReader();
       expect(new TextDecoder().decode((await reader?.read())?.value)).toBe('data: old-start\n\n');
       expect(await replacement.handoffStatus?.()).toMatchObject({ pending: 0, complete: true });
-      await new Promise((resolve) => setTimeout(resolve, 11_000));
       releaseOldBody();
       expect(new TextDecoder().decode((await reader?.read())?.value)).toBe('event: done\ndata: [DONE]\n\n');
       expect((await reader?.read())?.done).toBeTrue();

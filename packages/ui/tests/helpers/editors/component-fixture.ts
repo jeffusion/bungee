@@ -34,7 +34,7 @@ export function editorFixture(scenarios: string[]) {
         return route.fulfill({ status: 500, json: { error: 'unexpected_request' } });
       });
       await options?.beforeMount?.(page);
-      const initialConfig = ['route','service'].includes(scenario) ? page.waitForResponse(response => response.request().method() === 'GET' && new URL(response.url()).pathname === '/api/config') : undefined;
+      const initialConfig = scenario === 'service' ? page.waitForResponse(response => response.request().method() === 'GET' && new URL(response.url()).pathname === '/api/config') : undefined;
       await page.goto(`${fixtureUrl(scenario)}?${query}${options?.hash??''}`);
       if(initialConfig) { await (await initialConfig).finished(); await page.evaluate(async()=>{await Promise.resolve();}); }
       try { await run(page,evidence); } catch (error) { throw new AggregateError([error, ...errors.map(message => new Error(message))], 'Component browser assertion failed'); }

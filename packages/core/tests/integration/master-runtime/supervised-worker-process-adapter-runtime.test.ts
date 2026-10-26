@@ -6,6 +6,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import type { WorkerExitEvidence } from '../../../src/config-publication/coordinator-types';
 import { drainWorkers } from '../../../src/config-publication/drain-workers';
 import { timeoutScheduler } from '../../../src/config-worker/timeout-scheduler';
 import { captureProcessIdentity, probeProcessIdentity } from '../../../src/master-runtime/process-identity';
@@ -483,7 +484,7 @@ test('真实worker D到期执行HTTP force并取消仍在传输的SSE后持久�
   }
 }, 12_000);
 
-test('real C=2s D=1s E=1s lost drain ACK still performs natural cleanup and exits with signed proof', async () => {
+async function runLostDrainAckCase(pauseOnFirstTerminalRead: boolean): Promise<void> {
   const directory = await mkdtemp(join(tmpdir(), 'worker-cde-lost-ack-'));
   const childEntry = resolve(import.meta.dir, '../../fixtures/supervised-worker-termination-child.ts');
   const lifetimeGuard = process.platform === 'win32' ? undefined : armProcessLifetimeGuard({ directory: join(directory, 'guards'), processInstanceId: IDENTITY.worker_instance_id });
@@ -499,6 +500,21 @@ test('real C=2s D=1s E=1s lost drain ACK still performs natural cleanup and exit
   let droppedAcks = 0;
   let drainCompletedAt = 0;
   let ackAbortedAt = 0;
+  // The gate pauses the first signed terminal read while its retirement fence is
+  // held, so a second verification call races the in-flight proof instead of
+  // waiting for the child or a fixed delay.
+  let terminalReadSeen = false;
+  let terminalReadStarted = false;
+  let markTerminalReadEntered: () => void = () => undefined;
+  let releaseTerminalRead: (() => void) | undefined;
+  const terminalReadEntered = new Promise<void>((resolveEntered) => { markTerminalReadEntered = resolveEntered; });
+  const terminalReadReleased = new Promise<void>((resolveReleased) => { releaseTerminalRead = resolveReleased; });
+  // Resolves with the real published evidence, so the fence outlives the descriptor read.
+  let markExitPublished: (evidence: WorkerExitEvidence) => void = () => undefined;
+  const exitPublished = new Promise<WorkerExitEvidence>((resolvePublished) => { markExitPublished = resolvePublished; });
+  let unsubscribeExitPublication: () => void = () => undefined;
+  let competingExit: ReturnType<SupervisedConfigWorkerProcessAdapter['verifyExactExit']> | null = null;
+  let drainOutcome: ReturnType<typeof drainWorkers> | null = null;
   const onEvent = (event: { readonly event: string; readonly [key: string]: unknown }): void => {
     events.push(event);
     if (event.event === 'drain_complete') drainCompletedAt = performance.now();
@@ -563,8 +579,25 @@ test('real C=2s D=1s E=1s lost drain ACK still performs natural cleanup and exit
       credential, authority: AUTHORITY, timeoutMs: 5_000, fetch: loseDrainAck });
     await client.attach();
     adapter = new SupervisedConfigWorkerProcessAdapter({ identity: IDENTITY, descriptorPath, supervisionSeed: seed,
-      client: { authority: AUTHORITY, timeoutMs: 5_000 }, pid: child.pid, readyClient: client, lifetimeGuard });
+      client: { authority: AUTHORITY, timeoutMs: 5_000 }, pid: child.pid, readyClient: client, lifetimeGuard,
+      ...(pauseOnFirstTerminalRead ? {
+        // readyClient initialization never calls this; the held guard still reads the real .held file.
+        readDescriptor: async () => {
+          terminalReadStarted = true;
+          const raw = JSON.parse(await readFile(descriptorPath, 'utf8')) as {
+            readonly evidence?: { readonly message?: { readonly status?: string } };
+          };
+          const status = raw.evidence?.message?.status;
+          if (!terminalReadSeen && (status === 'worker-drained' || status === 'worker-drain-failed')) {
+            terminalReadSeen = true;
+            markTerminalReadEntered();
+            await terminalReadReleased;
+          }
+          return raw;
+        },
+      } : {}) });
     await within(adapter.initialization, 2_000);
+    if (pauseOnFirstTerminalRead) unsubscribeExitPublication = adapter.subscribeExit((evidence) => { markExitPublished(evidence); });
     const start = { ...startCurrentMessage(), ...IDENTITY };
     await adapter.send(start);
     const privatePort = adapter.cachedStatus?.private_port;
@@ -573,9 +606,26 @@ test('real C=2s D=1s E=1s lost drain ACK still performs natural cleanup and exit
       content_hash: start.content_hash, plugin_catalog_hash: start.plugin_catalog_hash,
       publication: null, private_port: privatePort as number };
     const drainSentAt = performance.now();
-    const evidence = await within(drainWorkers([worker], timeoutScheduler, {
+    drainOutcome = drainWorkers([worker], timeoutScheduler, {
       drain_start_timeout_ms: 2_000, drain_timeout_ms: 1_000, worker_exit_timeout_ms: 1_000,
-    }), 7_000);
+    });
+    const drain = within(drainOutcome, 7_000);
+    void drain.catch(() => undefined);
+    if (pauseOnFirstTerminalRead) {
+      await within(terminalReadEntered, 7_000);
+      competingExit = adapter.verifyExactExit();
+      void competingExit.catch(() => undefined);
+      releaseTerminalRead?.();
+    }
+    const evidence = await drain;
+    if (pauseOnFirstTerminalRead) {
+      expect(await within(exitPublished, 7_000)).toMatchObject({ exited: true, pid: child.pid,
+        terminalDrain: { status: 'worker-drained', cleanup_state: 'success' } });
+    }
+    if (competingExit !== null) {
+      expect(await within(competingExit, 7_000)).toMatchObject({ exited: true, pid: child.pid,
+        terminalDrain: { status: 'worker-drained', cleanup_state: 'success' } });
+    }
     const names = events.map(({ event }) => event);
     expect(droppedAcks).toBe(1);
     expect(drainCompletedAt - drainSentAt).toBeGreaterThanOrEqual(0);
@@ -592,12 +642,28 @@ test('real C=2s D=1s E=1s lost drain ACK still performs natural cleanup and exit
       terminalDrain: { status: 'worker-drained', cleanup_state: 'success' } });
     expect(child.exitCode).toBe(0);
   } finally {
+    releaseTerminalRead?.();
     adapter?.disconnect();
     if (child !== undefined && child.exitCode === null && child.signalCode === null) {
       const exited = new Promise<void>((resolveExit) => child?.once('exit', () => resolveExit()));
       child.kill('SIGTERM');
       await within(exited, 1_000);
     }
+    await within(Promise.allSettled([
+      competingExit,
+      drainOutcome,
+      ...(terminalReadStarted ? [exitPublished] : []),
+    ]), 2_000);
+    unsubscribeExitPublication();
+    adapter?.releaseLifetimeRetirementFence();
     await rm(directory, { recursive: true, force: true });
   }
+}
+
+test('real C=2s D=1s E=1s lost drain ACK still performs natural cleanup and exits with signed proof', async () => {
+  await runLostDrainAckCase(false);
+}, 9_000);
+
+test('a concurrent exact exit verification returns the signed terminal proof while the first holds the retirement fence', async () => {
+  await runLostDrainAckCase(true);
 }, 9_000);

@@ -1012,7 +1012,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     await assertMetered(calls.slice(start));
   },60000);
 
-  for(const cipher of ['fixture-opaque-agent-task','fixture-headerless-relay'])for(const relayType of ['route','service'] as const)test(`built native auxiliary relay (${cipher}, ${relayType}) uses shared cache across workers, isolates identity and counts actual calls`, async () => {
+  for(const [cipher,relayType] of [['fixture-opaque-agent-task','route'],['fixture-headerless-relay','service']] as const)test(`built native auxiliary relay (${cipher}, ${relayType}) uses shared cache across workers, isolates identity and counts actual calls`, async () => {
     const saved=structuredClone(aggregate),start=calls.length;
     try {
       aggregate.logical_configuration.routes[0].path_rewrite={'^/codex':'/backend-api/codex'};

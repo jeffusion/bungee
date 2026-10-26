@@ -319,9 +319,12 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
       if (proof.kind === 'live') return null;
       if (proof.kind === 'unknown') throw new Error(`worker lifetime guard exit proof is unknown (${proof.reason})`);
       this.retirementFence = proof.fence;
-      let terminal: WorkerDrainedMessage | WorkerDrainFailedMessage | null = null;
-      try { terminal = await this.readTerminalDrainEvidence(); } catch { /* cleanup remains independent and unknown */ }
-      return this.publishExitEvidence(terminal ?? undefined);
+      // Concurrent probes must await publication instead of contending with our retirement fence.
+      this.exitPublication = this.readTerminalDrainEvidence().then(
+        (terminal) => this.publishExitEvidence(terminal ?? undefined),
+        () => this.publishExitEvidence(),
+      );
+      return this.exitPublication;
     }
     if (process.platform !== 'win32' && this.options.processIdentity === undefined) {
       throw new Error('worker lifetime guard was not verified; exit remains unknown');

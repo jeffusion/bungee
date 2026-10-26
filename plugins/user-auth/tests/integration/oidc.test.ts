@@ -354,19 +354,33 @@ test.each(['fence-ack', 'cleanup-write', 'cleanup-ack', 'final-ack'] as const)('
 });
 
 test('deletion of 512 bindings across 128 users resumes between batches and revokes each user exactly once', async () => {
-  const f = await fixture();
-  const ownerId = (await (await f.call(f.owner, '/self')).json() as {administrator: {id: string}}).administrator.id;
+  const f = await authFixture();
+  let owner = await f.login();
+  const connectionResponse = await f.call(owner, '/login-connections', 'POST', {id: crypto.randomUUID(), label: 'Fixture OIDC', provider: 'oidc', configuration: {mode: 'manual', issuer: 'https://idp.example', authorizationEndpoint: 'https://idp.example/authorize', tokenEndpoint: 'https://idp.example/token', jwksUri: 'https://idp.example/jwks'}, clientId: 'fixture-client', clientSecret: 'fixture-client-secret', enabled: true});
+  expect(connectionResponse.status).toBe(201);
+  const connection = (await connectionResponse.json() as {connection: {id: string; version: number}}).connection;
+  const ownerId = (await (await f.call(owner, '/self')).json() as {administrator: {id: string}}).administrator.id;
   const ids = [ownerId];
+  let subject = await f.control.authenticate(request('/self', 'GET', undefined, {authorization: 'Bearer ' + owner}));
+  expect(subject).not.toBeNull();
+  const invoke = async (path: string, method: string, payload: unknown) => {
+    const req = request(path, method, payload, {authorization: 'Bearer ' + owner});
+    const handler = f.control.api.find(route => route.path === path && route.methods.includes(method))!;
+    return handler.invoke({...f.host, request: req, requestSignal: req.signal, subject: subject ?? undefined});
+  };
   for (let i = 1; i < 128; i++) {
-    const created = await f.call(f.owner, '/users', 'POST', {username: 'user-' + i});
+    const created = await invoke('/users', 'POST', {username: 'user-' + i});
     expect(created.status).toBe(201);
     ids.push((await created.json() as {user: {id: string}}).user.id);
   }
-  let owner = f.owner;
   for (let i = 0; i < 512; i++) {
     const userId = ids[i % ids.length]!;
-    expect((await f.call(owner, '/identities', 'POST', {userId, connectionId: f.connection.id, subject: 'subject-' + i})).status).toBe(200);
-    if (userId === ownerId) owner = await f.login();
+    expect((await invoke('/identities', 'POST', {userId, connectionId: connection.id, subject: 'subject-' + i})).status).toBe(200);
+    if (userId === ownerId) {
+      owner = await f.login();
+      subject = await f.control.authenticate(request('/self', 'GET', undefined, {authorization: 'Bearer ' + owner}));
+      expect(subject).not.toBeNull();
+    }
   }
   const before = await f.state.list();
   const beforeUsers = await (await f.call(owner, '/users')).json();
@@ -376,11 +390,11 @@ test('deletion of 512 bindings across 128 users resumes between batches and revo
     const result = await original(mutations);
     if (!interrupted && mutations.filter(m => m.key.startsWith('identity:')).length === 255) {
       interrupted = true;
-      throw new Error('process interrupted after cleanup batch committed');
+      throw new Error('cleanup acknowledgement lost after batch committed');
     }
     return result;
   };
-  expect((await f.call(owner, '/login-connections', 'DELETE', {id: f.connection.id, version: f.connection.version})).status).toBe(503);
+  expect((await f.call(owner, '/login-connections', 'DELETE', {id: connection.id, version: connection.version})).status).toBe(503);
   expect(interrupted).toBe(true);
   expect((await f.state.list()).filter(r => r.key.startsWith('identity:') && (r.value as {identity: unknown}).identity !== null)).toHaveLength(257);
   const restarted = createControl(f.host, {now: f.now}); await restarted.start();

@@ -10,12 +10,20 @@ let faultMode='silent';
 let dropProbes=false;
 let storagePath='';
 let sourceSequence=0;
+let callbackSequence=0;
 const heldSources=new Map<number,number>();
 scope.postMessage = (message:any) => {
   if(message.type==='response' && (responseIds.has(message.id)||dropAcks.has(message.id)))return;
   if(message.type==='response'&&heldSources.has(message.id)){
     const sequence=heldSources.get(message.id)!;heldSources.delete(message.id);
     const gate=`${storagePath}.source-${sequence}`;
+    writeFileSync(`${gate}.ready`,'');
+    const release=()=>{if(existsSync(`${gate}.release`))post(message);else setTimeout(release,5);};
+    release();return;
+  }
+  if(message.type==='callback'&&faultMode==='held-callback'){
+    // The real worker already owns this callback; close must decide before the host forwards it.
+    const gate=`${storagePath}.callback-${++callbackSequence}`;
     writeFileSync(`${gate}.ready`,'');
     const release=()=>{if(existsSync(`${gate}.release`))post(message);else setTimeout(release,5);};
     release();return;
@@ -32,7 +40,7 @@ scope.onmessage = (event:any) => {
   if(request.type==='request') {
     if(request.method==='open') {
       const path=request.args[0] as string;storagePath=path;
-      scope.faultMode=path.includes('late-cap')?'late-cap':path.includes('late-source')?'late-source':path.includes('late-callback')?'late-callback':path.includes('drop-write-ack')?'drop-write-ack':path.includes('drop-probe')?'drop-probe':path.includes('drop-release-ack')?'drop-release-ack':path.includes('lost-ack')?'lost-ack':path.includes('silent-close')?'silent-close':path.includes('silent-cap')?'silent-cap':path.includes('silent-release')?'silent-release':'silent';
+      scope.faultMode=path.includes('late-cap')?'late-cap':path.includes('late-source')?'late-source':path.includes('held-callback')?'held-callback':path.includes('late-callback')?'late-callback':path.includes('drop-write-ack')?'drop-write-ack':path.includes('drop-probe')?'drop-probe':path.includes('drop-release-ack')?'drop-release-ack':path.includes('lost-ack')?'lost-ack':path.includes('silent-close')?'silent-close':path.includes('silent-cap')?'silent-cap':path.includes('silent-release')?'silent-release':'silent';
     }
     faultMode=scope.faultMode;
     if(faultMode==='late-cap'&&['durable','journal'].includes(request.method))delayed.set(request.id,400);

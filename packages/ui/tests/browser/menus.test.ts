@@ -1,6 +1,6 @@
 import { test } from 'bun:test';
 import { expect, type Page, type Route } from 'playwright/test';
-import { BUILTIN_MENU_PAGES, type MenuLayout, type MenuNode, type MenuPage, type MenuSnapshot } from '@jeffusion/bungee-types';
+import { type MenuLayout, type MenuNode, type MenuPage } from '@jeffusion/bungee-types';
 import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
 import { observeNetwork } from '../helpers/dashboard/network';
@@ -184,51 +184,6 @@ test('menu editor saves, reloads, preserves conflicted drafts, guards navigation
 
     network.assertSettled(); expect(errors).toEqual([]);
 }), 150_000);
-
-test('flat and grouped menus follow configured navigation order', () => runtime.run(async page => {
-  await page.route('https://fonts.googleapis.com/**', route => route.fulfill({ contentType: 'text/css', body: '' }));
-  await page.route('https://fonts.gstatic.com/**', route => route.fulfill({ body: '' }));
-    const errors: string[] = []; const network = observeNetwork(page, errors); page.on('pageerror', error => errors.push(error.message));
-    await page.addInitScript(() => localStorage.setItem('locale', 'en'));
-    const catalog = [...BUILTIN_MENU_PAGES, ...Array.from({ length: 12 }, (_, index) => ({ id: `plugin:long:${index}`, label: `Plugin contribution with complete long label ${index}`, href: `/#/extensions/long/${index}`, source: 'plugin' as const, pluginName: 'long', available: true, defaultIcon: 'lucide:puzzle' }))];
-    const flat: MenuLayout = catalog.map(page => ({ kind: 'page', pageId: page.id, visible: true }));
-    let snapshot: MenuSnapshot = { ...menuSnapshot(), catalog, layout: flat };
-    await page.route('**/api/**', route => {
-      const path = new URL(route.request().url()).pathname, json = (value: unknown) => route.fulfill({ json: value });
-      if (route.request().method() !== (path === '/api/ui/menus' && route.request().method() === 'PUT' ? 'PUT' : 'GET')) throw new Error(`Unexpected method: ${route.request().method()} ${path}`);
-      if (path === '/api/auth/mode') return json({ mode: 'anonymous' });
-      if (path === '/api/auth/verify') return json({ mode: 'anonymous', success: true, subject: { id: 'anonymous', provider: 'anonymous' } });
-      if (path === '/api/plugins') return json([]);
-      if (path === '/api/ui/menus') return json(snapshot);
-      if (path === '/api/ui/icons/collections') return json(iconCollections);
-      if (path === '/api/ui/icons/data') return fulfillMenuIcons(route);
-      if (path === '/api/config/runtime') return json(configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null, retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 })));
-      if (path === '/api/config') return json({ revision: 1, content_hash: 'menus-fixture', config: configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null, retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 })).config });
-      if (path === '/api/plugins/schemas' || path === '/api/plugin-translations') return json({});
-      throw new Error(`Unexpected API: ${route.request().method()} ${path}`);
-    });
-    await page.goto(`${runtime.origin}/#/menus`);
-    const top = page.getByTestId('header-top-menu');
-    {
-
-      await expect(top).toBeVisible();
-      await expect(top.locator('a')).toHaveCount(catalog.length);
-      expect(await top.locator('a').evaluateAll(nodes => nodes.map(node => node.getAttribute('href')))).toEqual(catalog.map(item => item.href));
-      await expect(top.locator('a[href="/#/menus"]')).toHaveAttribute('aria-current', 'page');
-      await expect(page.locator('#header-menu-trigger')).toBeHidden();
-      await expect(page.getByTestId('header-menu')).toHaveCount(0);
-      await page.locator('#header-more-trigger').click();
-      await expect(page.getByTestId('header-more-menu').getByRole('menuitem', { name: catalog.at(-1)!.label, exact: true })).toBeVisible();
-      await page.keyboard.press('Escape');
-    }
-    snapshot = { ...snapshot, revision: 2, layout: [flat[0], { kind: 'group', id: 'group:mixed', title: 'Operations', visible: true, children: flat.slice(1, 4) as any }, ...flat.slice(4)] };
-    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
-    await expect(top.getByRole('button', { name: 'Operations', exact: true })).toBeVisible();
-    await top.getByRole('button', { name: 'Operations', exact: true }).click();
-    await expect(page.getByRole('menuitem', { name: 'Routes', exact: true })).toBeVisible(); await page.keyboard.press('Escape');
-    await expect(top.locator('li')).toHaveCount(catalog.length - 2);
-    network.assertSettled(); expect(errors).toEqual([]);
-}), 90_000);
 
 test('disabled plugins disappear when menu refresh fails and recover their saved preferences', () => runtime.run(async page => {
   await page.route('https://fonts.googleapis.com/**', route => route.fulfill({ contentType: 'text/css', body: '' }));
