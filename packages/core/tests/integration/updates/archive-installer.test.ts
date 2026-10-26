@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { installBinaryArchive, parseTarListing } from '../../../src/binary/archive-installer';
+import { installBinaryArchive, parseTarListing } from '../../../src/updates/archive-installer';
 
 const roots: string[] = [];
 

@@ -1,3 +1,4 @@
+import { systemUpdateStatusFixture } from '../helpers/system-updates';
 import { afterAll, beforeAll, test } from 'bun:test';
 import { chromium, expect, type Browser, type Page } from 'playwright/test';
 import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
@@ -43,6 +44,7 @@ async function withSettings(run: (page: Page, model: ReturnType<typeof createMod
     if(method !== 'GET' && !allowedWrite) {errors.push(`Unexpected ${method} ${path}`);return json({error:'unexpected_method'},500);}
     if(path === '/api/auth/mode') return json({mode:'anonymous',publicOrigin:runtime.origin});
     if(path === '/api/auth/verify') return json({success:true,mode:'anonymous',subject:{id:'anonymous',provider:'anonymous'}});
+    if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
     if(path === '/api/ui/menus') return json(menuSnapshot());
     if(path === '/api/ui/icons/data') return fulfillMenuIcons(route);
     if(path === '/api/plugins') return json([]);

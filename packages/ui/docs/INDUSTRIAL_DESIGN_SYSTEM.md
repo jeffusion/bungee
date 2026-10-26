@@ -773,6 +773,16 @@ and above; reserve its width before fitting navigation entries into More.
 
 The brand shows the build's package version beside BUNGEE in subdued monospace
 text. On narrow screens the compact brand retains the version beside its icon.
+The update control sits beside the version and marks an available release with the orange accent.
+Its IndustrialDialog shows release metadata, checks, availability and operation progress.
+Opening or checking never downloads. Download requires confirmation; after verification,
+installation and restart require a second confirmation warning about brief downtime and
+loss of unsaved drafts on reload. Cancelling leaves the current service running. The
+confirming page starts a fixed 10-second countdown and reloads once it expires, independently
+of service readiness or operation status. Other pages retain their drafts and refresh manually.
+Pending or unknown results disable another submission; refresh and reauthentication only
+query status. Keep this flow in the system domain component, using existing tokens.
+
 Desktop navigation preserves compact 11px menu labels and 16px icons, with a short orange
 underline and slim leading marker for the current entry. Avoid per-entry boxes;
 fine rules separate the brand and utility areas. More uses a raised carbon surface

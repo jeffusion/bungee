@@ -2,7 +2,7 @@
 
 import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
-import { getAssetName } from '../../packages/cli/src/binary/names';
+import { getAssetName } from '../../packages/core/src/updates/names';
 import { buildExternalPlugins } from './build-external-plugins';
 
 const ROOT = resolve(import.meta.dir, '../..');
@@ -26,6 +26,16 @@ export type BinaryArchiveOptions = {
   readonly binaryName: string;
 };
 
+export function selectBinaryTargets(args: readonly string[]): readonly (typeof TARGETS)[number][] {
+  if (args.length === 0) return TARGETS;
+  if (args.length !== 2 || args[0] !== '--target') {
+    throw new Error('Usage: build-binaries.ts [--target <binaryName>]');
+  }
+  const target = TARGETS.find(target => target.binaryName === args[1]);
+  if (!target) throw new Error(`Unknown binary target: ${args[1]}`);
+  return [target];
+}
+
 async function run(command: readonly string[], cwd?: string): Promise<void> {
   const process = Bun.spawn([...command], { cwd, stdout: 'inherit', stderr: 'inherit' });
   const exitCode = await process.exited;
@@ -47,13 +57,14 @@ export async function createBinaryArchive(options: BinaryArchiveOptions): Promis
   }
 }
 
-export async function buildBinaries(): Promise<void> {
+export async function buildBinaries(args: readonly string[] = []): Promise<void> {
+  const targets = selectBinaryTargets(args);
   mkdirSync(BIN_DIR, { recursive: true });
-  for (const target of TARGETS) rmSync(join(BIN_DIR, target.binaryName), { force: true });
+  for (const target of targets) rmSync(join(BIN_DIR, target.binaryName), { force: true });
   await run([process.execPath, 'packages/core/scripts/build.ts'], ROOT);
   await buildExternalPlugins();
   if (!existsSync(BUILT_PLUGINS)) throw new Error('Built plugin directory is missing');
-  for (const target of TARGETS) {
+  for (const target of targets) {
     const staging = mkdtempSync(join(BIN_DIR, '.binary-build-'));
     try {
       const binaryPath = join(staging, target.binaryName);
@@ -75,4 +86,4 @@ export async function buildBinaries(): Promise<void> {
   console.log(`Binary archives written to ${BIN_DIR}`);
 }
 
-if (import.meta.main) await buildBinaries();
+if (import.meta.main) await buildBinaries(process.argv.slice(2));

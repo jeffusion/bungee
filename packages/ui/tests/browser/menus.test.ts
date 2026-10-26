@@ -1,3 +1,4 @@
+import { systemUpdateStatusFixture } from '../helpers/system-updates';
 import { test } from 'bun:test';
 import { expect, type Page, type Route } from 'playwright/test';
 import { BUILTIN_MENU_PAGES, type MenuLayout, type MenuNode, type MenuPage, type MenuSnapshot } from '@jeffusion/bungee-types';
@@ -42,6 +43,7 @@ test('menu editor saves, reloads, preserves conflicted drafts, guards navigation
       if (url.pathname === '/api/plugins') return json([]);
       if (url.pathname === '/api/config/runtime') return json(configuration);
       if (url.pathname === '/api/config') return json({ revision: 1, content_hash: configuration.content_hash, config: configuration.config });
+      if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
       if (url.pathname === '/api/ui/menus') {
         if (route.request().method() === 'PUT') {
           writes++; lastWrite = route.request().postDataJSON();
@@ -199,6 +201,7 @@ test('flat and grouped menus follow configured navigation order', () => runtime.
       if (path === '/api/auth/mode') return json({ mode: 'anonymous' });
       if (path === '/api/auth/verify') return json({ mode: 'anonymous', success: true, subject: { id: 'anonymous', provider: 'anonymous' } });
       if (path === '/api/plugins') return json([]);
+      if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
       if (path === '/api/ui/menus') return json(snapshot);
       if (path === '/api/ui/icons/collections') return json(iconCollections);
       if (path === '/api/ui/icons/data') return fulfillMenuIcons(route);
@@ -252,6 +255,7 @@ test('disabled plugins disappear when menu refresh fails and recover their saved
         contributes: { navigation: [{ label: plugin.label, path: '/page' }] } } }]);
       if (path === '/api/ui/icons/collections') return json(iconCollections);
       if (path === '/api/ui/icons/data') return fulfillMenuIcons(route);
+      if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
       if (path === '/api/ui/menus') {
         if (remainingMenuFailures > 0) { remainingMenuFailures--; failedReads++; network.expectHttpError(route.request(), 503); return route.fulfill({ status: 503, json: { error: 'menu_storage_unavailable' } }); }
         return json(snapshot);
@@ -313,6 +317,7 @@ test('menu actions support reordering, reparenting, validation and read-only pre
       if (path === '/api/config/runtime') return json(configuration);
       if (path === '/api/ui/icons/collections') return json(iconCollections);
       if (path === '/api/ui/icons/data') return fulfillMenuIcons(route);
+      if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
       if (path === '/api/ui/menus') {
         if (request.method() === 'PUT') { captured.layout = request.postDataJSON().layout; return json({ ...initial, layout: captured.layout, revision: 2 }); }
         return json(initial);
@@ -429,6 +434,7 @@ test('menu drag reorders groups and preserves disabled plugin preferences', () =
       if (path === '/api/plugins') return json([]);
       if (path === '/api/ui/icons/collections') return json(iconCollections);
       if (path === '/api/ui/icons/data') return fulfillMenuIcons(route);
+      if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
       if (path === '/api/ui/menus') {
         if (route.request().method() === 'PUT') { captured.layout = route.request().postDataJSON().layout; snapshot = { ...snapshot, layout: captured.layout!, revision: snapshot.revision + 1 }; }
         return json(snapshot);

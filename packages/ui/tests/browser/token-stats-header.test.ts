@@ -1,3 +1,4 @@
+import { systemUpdateStatusFixture } from '../helpers/system-updates';
 import { serviceReference } from '../helpers/service-references';
 import { test as browserTest } from 'bun:test';
 import { expect } from 'playwright/test';
@@ -58,6 +59,7 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
         officialInputTokens: 1200, officialOutputTokens: 600, logicalRequests: 1, upstreamAttempts: 1,
         authorityBreakdown: { input: { official: 1 }, output: { official: 1 } } }] });
   }
+  if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
   if (url.pathname === '/api/ui/menus') return json(tokenMenuSnapshot());
   if (url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
   throw new Error(`Unexpected API: ${route.request().method()} ${url.pathname}`);

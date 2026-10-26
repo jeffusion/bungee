@@ -8,11 +8,11 @@
 
 CLI 从配置数据库旁的 `plugin-secrets.key` 读取初始化时持久化的加密密钥，恢复命令不接受参数或环境变量覆盖。恢复数据库备份时，同时还原配套的密钥文件；CLI 初始化约定见 [CLI 参考](../reference/cli.md#bungee-init)。
 
-Docker 部署先停止原容器，再以同一镜像、原数据卷和环境变量运行临时交互容器。官方镜像工作目录为 `/usr/app`，在原 Compose 项目目录执行：
+Docker 部署先停止原容器，再以匹配已选运行时版本的镜像、原数据卷和环境变量运行临时交互容器。页面更新保存在原容器可写层，不会带入临时容器；先确认恢复镜像支持当前数据库。官方镜像工作目录为 `/usr/app`，在原 Compose 项目目录执行：
 
 ```sh
 docker compose stop bungee
-docker compose run --rm -it --no-deps --entrypoint bun bungee packages/core/dist/main.js --recover /usr/app/data/bungee.db --plugin user-auth --action reset-password
+docker compose run --rm -it --no-deps bungee ./docker-entrypoint.sh --recover /usr/app/data/bungee.db --plugin user-auth --action reset-password
 docker compose up -d bungee
 ```
 
@@ -85,5 +85,7 @@ bungee recover < recovery.json
 ```sh
 bun packages/core/dist/main.js --prepare-runtime-upgrade /path/to/data/bungee.db
 ```
+
+上例适用于源码构建产物；官方 Docker 镜像使用 `./docker-entrypoint.sh --prepare-runtime-upgrade /usr/app/data/bungee.db`，并遵循上述停止实例、版本匹配和原数据卷要求。
 
 命令持有停止锁，执行配置库连续迁移，并分页规范化已有 executor 证明。缺失的进程寿命证据仍为未知；它不制造退出证明、不执行业务命令、不删除 pending 或 unknown 结果。格式或身份损坏时事务回滚并报错。成功后启动候选实例，确认实际版本、管理与数据健康以及目标 revision 的代理请求。新实例开始业务写入后，不得直接覆盖恢复旧数据库。

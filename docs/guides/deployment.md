@@ -3,6 +3,7 @@
 ## CLI
 
 ```bash
+npx @jeffusion/bungee@latest upgrade
 npx @jeffusion/bungee@latest init
 npx @jeffusion/bungee@latest start
 npx @jeffusion/bungee@latest status
@@ -36,23 +37,27 @@ Management is anonymous and proxy routes are public by default. `bungee init` in
 Set `BUNGEE_PLUGIN_SECRETS_KEY` to a stable, privately stored encryption key before starting Compose.
 
 ```bash
-docker compose run --rm --no-deps bungee bun packages/core/dist/main.js --initialize-config /usr/app/data/bungee.db
+docker compose run --rm --no-deps bungee ./docker-entrypoint.sh --initialize-config /usr/app/data/bungee.db
 docker compose up -d
 docker compose ps
 docker compose logs -f bungee
 ```
 
-Enable management authentication online in the plugin center. For offline account recovery, stop the original container and use a temporary interactive container with the same image, original volumes and environment. The official image uses `/usr/app` as its working directory:
+Enable management authentication online in the plugin center. For offline account recovery, stop the original container and use a temporary interactive container with the original volumes and environment. Its image must match the selected runtime release; updates in the original container's writable layer are not copied to temporary containers. The official image uses `/usr/app` as its working directory:
 
 ```sh
 docker compose stop bungee
-docker compose run --rm -it --no-deps --entrypoint bun bungee packages/core/dist/main.js --recover /usr/app/data/bungee.db --plugin user-auth --action reset-password
+docker compose run --rm -it --no-deps bungee ./docker-entrypoint.sh --recover /usr/app/data/bungee.db --plugin user-auth --action reset-password
 docker compose up -d bungee
 ```
 
 Restart only after recovery succeeds. Use `add-user` to create an account or `reset` to recover the original administrator; see [offline recovery](offline-recovery.md). These actions do not enable the plugin or change the selected provider. Do not run recovery against a running instance or an empty replacement volume.
 
 The supplied compose file requires `BUNGEE_PLUGIN_SECRETS_KEY` for encrypted plugin credentials. It is separate from API Keys, which are created and revoked through their lifecycle API rather than a core token list. The compose file persists `/usr/app/data` and `/usr/app/logs`; it does not mount a configuration file. It publishes the public listener and binds management to host loopback by default.
+
+The official image executes a release binary under tini. `BUNGEE_INSTALL_ROOT=/usr/app/runtime` is separate from the data and log volumes: `version.txt` selects a stable `x.y.z` release in `bin/<version>/`, containing the executable and adjacent `plugins/`. Startup rejects a missing or invalid selection without downloading or selecting a fallback.
+
+The dashboard version control checks release metadata and requires confirmation before downloading, installing and restarting. This updates only the container's binary and bundled plugins; it does not pull an image or access the host. Restarting the same container retains the update. Recreating the container, including replacement by Compose, restores the image release while preserving the databases. Choose an image compatible with those databases before recreation or offline recovery. An update failure never automatically rolls back a potentially migrated database; see [binary updates](../architecture/runtime.md#binary-updates).
 
 The public data listener is `0.0.0.0:8088` and is proxy-only. The management
 root is `http://127.0.0.1:8089/`; its API is `/api`, plugin static assets are

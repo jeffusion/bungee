@@ -1,3 +1,4 @@
+import { systemUpdateStatusFixture } from '../system-updates';
 import { serviceReference } from '../service-references';
 import type { Page } from 'playwright';
 import { configurationRuntimeFixture, publicationFixture } from '../publication';
@@ -108,6 +109,7 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
       { name: 'intruder', enabled: true, metadata: { contributes: { nativeWidgets: tokenManifest.contributes.nativeWidgets } } },
       { name: 'models-dev', version: modelsDevManifest.version, enabled: true, metadata: { ...modelsDevManifest.metadata, contributes: modelsDevManifest.contributes } }]
     : [{ name: 'demo', enabled: true, metadata: { name: 'demo', version: '1.0.0', contributes: { widgets: [{ id: 'demo', title: '测试插件', path: 'widget.html', size: 'medium' }] } } }] });
+  if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
   if (url.pathname === '/api/ui/menus') return route.fulfill({ json: native ? tokenMenuSnapshot() : menuSnapshot() });
   if (url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
   pageErrors.push(`Unexpected API: ${route.request().method()} ${url.pathname}`);

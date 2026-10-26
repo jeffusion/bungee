@@ -1,3 +1,4 @@
+import { systemUpdateStatusFixture } from '../helpers/system-updates';
 import { test } from 'bun:test';
 import { expect } from 'playwright/test';
 import { dashboardSample, historySample } from '../helpers/dashboard/stats';
@@ -54,6 +55,7 @@ test('Token loading shares requests and retries failures', () => uiRuntime.run(a
               estimatedCostUsd: empty ? 0 : 0.078,
               authorityBreakdown: { input: { official: 1 }, output: { official: 1 } } });
           }
+          if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
           if (url.pathname === '/api/ui/menus') return json(menuSnapshot());
           if (url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
           throw new Error(`Unexpected API: ${route.request().method()} ${url.pathname}`);

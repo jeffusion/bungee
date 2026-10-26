@@ -13,6 +13,7 @@
   import LogOut from 'lucide-svelte/icons/log-out';
   import MenuIcon from '$components/domain/menu/MenuIcon.svelte';
   import MenuGroup from './MenuGroup.svelte';
+  import SystemUpdates from '$components/domain/system/SystemUpdates.svelte';
   import type { EffectiveMenu, EffectivePage } from '$components/domain/menu/menu-model';
   import { version } from '../../../../../package.json';
   const moreControlWidth = 104;
@@ -159,6 +160,7 @@
     <span class="hidden flex-col leading-none sm:flex"><span class="flex items-baseline gap-[8px]"><span class="nx-display text-[16px] tracking-[0.04em] text-zinc-50">BUNGEE</span><span class="font-mono text-[11px] text-zinc-400">v{version}</span></span><span class="mt-[5px] font-mono text-[9px] uppercase tracking-chiseled text-zinc-500">REVERSE PROXY</span></span>
     <span class="font-mono text-[11px] text-zinc-400 sm:hidden">v{version}</span>
   </a>
+  <SystemUpdates />
   <nav aria-label={$_('header.navigation')} use:measureNavigation={items} class="hidden w-0 min-w-0 flex-1 border-l border-carbon-600 md:flex" data-testid="header-top-menu">
     <div class="header-tabs-viewport min-w-0 flex-1 overflow-hidden">
     <ul class="flex h-full w-max items-stretch">

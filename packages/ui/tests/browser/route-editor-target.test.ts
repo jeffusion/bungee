@@ -1,4 +1,5 @@
 import { serviceReference } from '../helpers/service-references';
+import { systemUpdateStatusFixture } from '../helpers/system-updates';
 import {afterAll,beforeAll,test} from 'bun:test';
 import {chromium,type Browser,type Page} from 'playwright';
 import {expect} from 'playwright/test';
@@ -33,6 +34,7 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/,async route=>{const request=ro
 
         let body;
         if (key === 'GET /api/auth/mode') body = { mode: 'anonymous', publicOrigin: origin };
+        else if (key === 'GET /api/system/updates') body = systemUpdateStatusFixture;
         else if (key === 'GET /api/auth/verify') body = { success: true, mode: 'anonymous', subject: { id: 'anonymous', provider: 'anonymous' } };
         else if (key === 'GET /api/ui/menus') body = menuSnapshot();
         else if (key === 'GET /api/ui/icons/data') return fulfillMenuIcons(route);

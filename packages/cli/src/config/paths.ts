@@ -3,7 +3,7 @@ import os from 'os';
 import fs from 'fs';
 
 export class ConfigPaths {
-  public static readonly CONFIG_DIR = path.join(os.homedir(), '.bungee');
+  public static readonly CONFIG_DIR = process.env.BUNGEE_INSTALL_ROOT ?? path.join(os.homedir(), '.bungee');
   public static readonly PID_FILE = path.join(ConfigPaths.CONFIG_DIR, 'bungee.pid');
   public static readonly LOG_FILE = path.join(ConfigPaths.CONFIG_DIR, 'bungee.log');
   public static readonly ERROR_LOG_FILE = path.join(ConfigPaths.CONFIG_DIR, 'bungee.error.log');

@@ -1,3 +1,4 @@
+import { systemUpdateStatusFixture } from '../helpers/system-updates';
 import {createDefaultMenuLayout} from '@jeffusion/bungee-types';
 import {menuSnapshot, fulfillMenuIcons} from '../helpers/menus';
 import { test as browserTest } from 'bun:test';
@@ -60,6 +61,7 @@ try {
         metadata: { ...manifest.metadata, contributes: manifest.contributes } })));
       if (request.method() === 'GET' && url.pathname === '/api/plugin-translations') return json(Object.fromEntries(['zh-CN', 'en'].map(code =>
         [code, { plugins: Object.fromEntries(manifests.map(item => [item.name, item.translations[code]])) }])));
+      if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
       if (request.method() === 'GET' && url.pathname === '/api/ui/menus') {
         const snapshot = menuSnapshot();
         const catalog = [...snapshot.catalog, ...manifests.filter(item => item.name !== 'token-budget' || budgetEnabled).flatMap(item => (item.contributes.navigation ?? []).map((nav: any) => ({

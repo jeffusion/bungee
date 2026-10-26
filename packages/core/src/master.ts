@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
 import {
   MasterConfigPublicationCoordinator,
   WorkerAdmissionRegistry,
@@ -28,6 +28,10 @@ import { currentLaunchIdentity } from './daemon-control/launch-identity';
 import { serializeErrorChain } from './master-runtime/error-chain';
 import {ComponentRecovery} from './master-runtime/component-recovery';
 import {holdCurrentProcessLifetimeGuard} from './supervision/process-lifetime-guard';
+import { UpdateController } from './updates/controller';
+import { assertUpdateStart } from './updates/installation';
+import { replaceMaster } from './updates/restart';
+import { CORE_HOST_VERSION } from './core-version';
 
 function environment(): Record<string, string> {
   return Object.fromEntries(
@@ -95,6 +99,10 @@ export async function startMasterProcess(
   dependencies: MasterProcessDependencies = PRODUCTION_DEPENDENCIES,
   bootNonce: string | null = null,
 ): Promise<MasterProcessHandle> {
+  const production = dependencies === PRODUCTION_DEPENDENCIES;
+  if (production && process.env.BUNGEE_INSTALL_ROOT) assertUpdateStart(process.env.BUNGEE_INSTALL_ROOT, process.env.BUNGEE_UPDATE_TOKEN);
+  const daemonBootstrap = await takeOverDaemonBootstrap({ marker: bootNonce,
+    runtimeDirectory: production && process.env.BUNGEE_INSTALL_ROOT ? join(process.env.BUNGEE_INSTALL_ROOT, 'run') : undefined });
   if (dependencies === PRODUCTION_DEPENDENCIES) {
     const owner = process.argv.find(argument => argument.startsWith('--bungee-process-identity='))?.slice('--bungee-process-identity='.length) ?? randomUUID();
     const options = readMasterProcessOptions();
@@ -110,6 +118,23 @@ export async function startMasterProcess(
       context: { ...dependencies.context, entry: identity.entrypoint ?? process.execPath },
     };
   }
-  const daemonBootstrap = await takeOverDaemonBootstrap({ marker: bootNonce });
-  return startMasterComposition(dependencies, daemonBootstrap);
+  if (!production) return startMasterComposition(dependencies, daemonBootstrap);
+  let handle: MasterProcessHandle | undefined;
+  const updates = new UpdateController({ version: CORE_HOST_VERSION, root: process.env.BUNGEE_INSTALL_ROOT,
+    publicOrigin: process.env.BUNGEE_PUBLIC_ORIGIN ? new URL(process.env.BUNGEE_PUBLIC_ORIGIN).origin : undefined,
+    compiled: resolveWorkerLaunch({ executable: process.execPath, entry: process.argv[1] ?? process.execPath }).source === 'compiled',
+    restart: (activate, token, signal) => {
+      if (!handle || !process.env.BUNGEE_INSTALL_ROOT) throw new Error('runtime_not_ready');
+      return replaceMaster({ handle, bootstrap: daemonBootstrap, options: readMasterProcessOptions(),
+        root: process.env.BUNGEE_INSTALL_ROOT, accessDbPath: accessLogDatabasePath(), activate, token, signal });
+    } });
+  const cancel = () => updates.cancel();
+  process.prependListener('SIGTERM', cancel); process.prependListener('SIGINT', cancel);
+  handle = await startMasterComposition({ ...dependencies, updates }, daemonBootstrap);
+  await updates.completeStartup(process.env.BUNGEE_UPDATE_TOKEN, () => {
+    const health = handle?.updateReadiness?.(); return health?.management === true && health.data === true;
+  });
+  delete process.env.BUNGEE_UPDATE_TOKEN;
+  updates.startChecking();
+  return handle;
 }
