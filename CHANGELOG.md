@@ -1,3 +1,10 @@
+# [6.7.0](https://github.com/jeffusion/bungee/compare/v6.6.0...v6.7.0) (2026-10-26)
+
+
+### Features
+
+* **updates:** add user-triggered runtime upgrades ([6fb6a3a](https://github.com/jeffusion/bungee/commit/6fb6a3adb0332323d774af01880a25882bcf283d))
+
 # [6.6.0](https://github.com/jeffusion/bungee/compare/v6.5.1...v6.6.0) (2026-10-25)
 
 
