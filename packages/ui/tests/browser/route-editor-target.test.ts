@@ -189,75 +189,6 @@ async function dismissTargetDialogWithShortcuts(page: Page, owner: ReturnType<Pa
   const url = page.url(), writeCount = writes.length;
   await expect(page.getByTestId(/^(route|service)-save-button$/)).toBeEnabled();
   const opener = owner.getByTestId('route-upstream-add-button');
-  // 临时失败诊断：只观察，不改变焦点、事件传播或原操作之间的等待。
-  const diagnostics = await page.evaluateHandle(() => {
-    const started = performance.now(), records: Record<string, unknown>[] = [];
-    const timers = new Set<number>(), nodes = new WeakMap<Element, number>();
-    const selector = '[role="dialog"], [role="alertdialog"]';
-    let nextNode = 0, dropped = 0;
-    function describe(target: EventTarget | null) {
-      if (!(target instanceof Element)) return target === window ? { tag: 'window' } : null;
-      if (!nodes.has(target)) nodes.set(target, ++nextNode);
-      return { node: nodes.get(target), tag: target.tagName, id: target.id,
-        role: target.getAttribute('role'), testId: target.getAttribute('data-testid'),
-        state: target.getAttribute('data-state'), ariaModal: target.getAttribute('aria-modal'), connected: target.isConnected };
-    }
-    function snapshot() {
-      return { activeElement: describe(document.activeElement), hasFocus: document.hasFocus(),
-        dialogs: Array.from(document.querySelectorAll(selector)).slice(0, 8).map(describe) };
-    }
-    function record(type: string, details: Record<string, unknown> = {}) {
-      if (records.length >= 160) { dropped++; return null; }
-      const entry: Record<string, unknown> = { ms: performance.now() - started, type, ...details, ...snapshot() };
-      records.push(entry);
-      return entry;
-    }
-    function onEvent(event: Event) {
-      const entry = record(event.type, { target: describe(event.target), trusted: event.isTrusted,
-        ...(event instanceof KeyboardEvent ? { key: event.key, code: event.code, metaKey: event.metaKey,
-          ctrlKey: event.ctrlKey, altKey: event.altKey, shiftKey: event.shiftKey, repeat: event.repeat,
-          defaultPreventedAtCapture: event.defaultPrevented } : {}) });
-      if (!entry || !(event instanceof KeyboardEvent)) return;
-      // 后续 task 才读取取消状态，避免 capture 内的 microtask 早于其余原生 listener。
-      const timer = window.setTimeout(() => {
-        timers.delete(timer);
-        entry.afterDispatch = { ms: performance.now() - started, defaultPrevented: event.defaultPrevented, ...snapshot() };
-      }, 0);
-      timers.add(timer);
-    }
-    function dialogNodes(node: Node) {
-      return node instanceof Element ? [...(node.matches(selector) ? [node] : []), ...node.querySelectorAll(selector)] : [];
-    }
-    const observer = new MutationObserver(changes => {
-      for (const change of changes) {
-        if (change.type === 'attributes') {
-          if (change.target instanceof Element && (change.target.matches(selector)
-            || (change.attributeName === 'role' && ['dialog', 'alertdialog'].includes(change.oldValue ?? '')))) {
-            record('dialog-attribute', { target: describe(change.target), attribute: change.attributeName, oldValue: change.oldValue });
-          }
-        } else {
-          for (const node of change.removedNodes) for (const dialog of dialogNodes(node)) record('dialog-removed', { target: describe(dialog) });
-          for (const node of change.addedNodes) for (const dialog of dialogNodes(node)) record('dialog-added', { target: describe(dialog) });
-        }
-      }
-    });
-    const types = ['keydown', 'keyup', 'focus', 'blur', 'focusin', 'focusout'];
-    function dispose() {
-      observer.disconnect();
-      for (const type of types) window.removeEventListener(type, onEvent, true);
-      for (const timer of timers) window.clearTimeout(timer);
-      timers.clear();
-    }
-    try {
-      observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true,
-        attributeOldValue: true, attributeFilter: ['role', 'data-state', 'aria-modal'] });
-      for (const type of types) window.addEventListener(type, onEvent, { capture: true, passive: true });
-      record('installed');
-      return { read: () => ({ records, dropped, pendingAfterDispatch: timers.size,
-        ms: performance.now() - started, ...snapshot() }), dispose };
-    } catch (error) { dispose(); throw error; }
-  }).catch(() => null);
-  try {
   await opener.click();
   const dialog = page.getByRole('dialog');
   await expect(dialog).toBeVisible();
@@ -270,18 +201,6 @@ async function dismissTargetDialogWithShortcuts(page: Page, owner: ReturnType<Pa
   await expect(page).toHaveURL(url);
   await expect(owner).toBeVisible();
   assert.equal(writes.length, writeCount);
-  } catch (error) {
-    try {
-      console.error('目标弹窗快捷键失败诊断:', JSON.stringify(diagnostics ? await diagnostics.evaluate(recorder => recorder.read()) : { unavailable: true }));
-    } catch { console.error('无法读取目标弹窗快捷键失败诊断'); }
-    throw error;
-  } finally {
-    if (diagnostics) {
-      try { await diagnostics.evaluate(recorder => recorder.dispose()); }
-      catch { /* 页面销毁时不能让诊断清理覆盖原结果。 */ }
-      await diagnostics.dispose().catch(() => {});
-    }
-  }
 }
 
 async function addServiceReference(page: Page, owner: ReturnType<Page['locator']>, name: string) {
