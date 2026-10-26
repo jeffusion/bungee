@@ -1,3 +1,4 @@
+import { systemUpdateStatusFixture } from '../helpers/system-updates';
 import { serviceReference } from '../helpers/service-references';
 import { test as browserTest } from 'bun:test';
 import { expect, type Route } from 'playwright/test';
@@ -32,6 +33,7 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
   const json = (value: unknown) => route.fulfill({ json: value });
   if (url.pathname === '/api/auth/mode') return json({ mode: 'anonymous', publicOrigin: url.origin });
   if (url.pathname === '/api/auth/verify') return json({ success: true, mode: 'anonymous' });
+  if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
   if (url.pathname === '/api/ui/menus') return json(menuSnapshot());
   if (url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
   if (url.pathname === '/api/config/runtime') return json(runtime);

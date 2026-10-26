@@ -6,6 +6,7 @@ import {
   DAEMON_INSTANCE_HEADER,
   DAEMON_PID_HEADER,
   DAEMON_SHUTDOWN_PATH,
+  DAEMON_UPDATES_PATH,
   type DaemonMetadataV1,
 } from '@jeffusion/bungee-types';
 
@@ -30,6 +31,7 @@ export type DaemonShutdownHandler = {
 };
 
 export type DaemonShutdownHandlerOptions = {
+  readonly updates?: { handle(request: Request, privateControl: boolean): Promise<Response> };
   readonly metadata: DaemonMetadataV1 | (() => DaemonMetadataV1);
   readonly isReady?: () => boolean;
   readonly onShutdownRequested: () => void | Promise<void>;
@@ -134,6 +136,16 @@ export function createDaemonShutdownHandler(options: DaemonShutdownHandlerOption
     get accepted() { return accepted; },
     async handle(request, context) {
       const metadata = readMetadata();
+      const url = new URL(request.url);
+      if (options.updates && [DAEMON_UPDATES_PATH, `${DAEMON_UPDATES_PATH}/check`].includes(url.pathname)) {
+        const candidate = bearerCandidate(singleHeader(request, DAEMON_AUTHORIZATION_HEADER));
+        const secretEqual = comparator(candidate.bytes, expectedSecret);
+        if (url.search || metadata.state !== 'armed' || options.isReady?.() === false || !candidate.canonical || !secretEqual
+          || singleHeader(request, DAEMON_BOOT_HEADER) !== metadata.boot_nonce
+          || singleHeader(request, DAEMON_PID_HEADER) !== String(metadata.pid)
+          || singleHeader(request, DAEMON_INSTANCE_HEADER) !== metadata.instance_id) return notFound();
+        return options.updates.handle(request, true);
+      }
       if (!validRequest(request, metadata, expectedSecret, comparator)) return notFound();
       if (metadata.state === 'launching' || metadata.state === 'starting' || options.isReady?.() === false || context === undefined) {
         return response(STARTING_BODY, 503);

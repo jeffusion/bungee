@@ -1,3 +1,4 @@
+import { systemUpdateStatusFixture } from '../helpers/system-updates';
 import {createDefaultMenuLayout} from '@jeffusion/bungee-types';
 import { test } from 'bun:test';
 import { expect } from 'playwright/test';
@@ -99,6 +100,7 @@ test('management setup gates protected requests, confirms initialization, and jo
           if (request.method() === 'GET' && url.pathname === '/api/plugins/user-auth/control/turnstile') return json({version: 1, enabled: false, siteKey: '', hostnames: [], hasSecret: false});
           if (request.method() === 'GET' && url.pathname === '/api/plugins/user-auth/control/self') return json({administrator: {id: 'fixture-admin', username: 'admin', displayName: 'admin', disabled: false, hasLocalPassword: true, requiresPasswordChange: false}});
           if (request.method() === 'GET' && url.pathname === '/api/plugins/user-auth/control/session-policy') return json({version: 1, policy: {idleTimeoutMinutes: 30, absoluteTimeoutMinutes: 480}});
+          if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
           if (request.method() === 'GET' && url.pathname === '/api/ui/menus') {
             const snapshot = menuSnapshot();
             const catalog = [...snapshot.catalog,...manifest.contributes.navigation.map(nav => ({id:`plugin:user-auth:${encodeURIComponent(nav.path)}`,label:nav.label,href:`/#/extensions/user-auth${nav.path}`,source:'plugin' as const,pluginName:manifest.name,defaultIcon:'lucide:user',available:true}))];

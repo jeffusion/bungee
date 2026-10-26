@@ -1,4 +1,5 @@
 import {requestServiceDeclared, RequestRouteProtections} from '../plugin-control/request-service-authority';
+import type { UpdateController } from '../updates/controller';
 import { PluginJournalRecovery } from './plugin-journal-recovery';
 import { kernelMonotonicNowNs, readKernelDeadlineClockId } from './kernel-monotonic-clock';
 import {ComponentRecoveryStopped, type ComponentRecovery} from './component-recovery';
@@ -173,6 +174,7 @@ export interface MasterProcessCoordinator extends MasterRuntimeCoordinator {
 }
 
 export interface MasterProcessDependencies {
+  readonly updates?: UpdateController;
   readonly runtimeRecovery?: ComponentRecovery;
   readonly executorLifetimeGuard?: HeldProcessLifetimeGuardFacts | null;
   readonly context: MasterProcessContext;
@@ -207,6 +209,8 @@ export interface MasterProcessDependencies {
 }
 
 export interface MasterProcessHandle {
+  shutdownForUpdate?(): Promise<void>;
+  updateReadiness?(): { management: boolean; data: boolean };
   readonly runtime: MasterProcessRuntime;
   readonly dataPort?: number | null;
   readonly managementPort?: number | null;
@@ -487,6 +491,7 @@ export async function startMasterComposition(
   let handlerReady = false;
   let diskPublished = false;
   let shutdownRequested = false;
+  let updateReadiness = (): { management: boolean; data: boolean } => ({ management: false, data: false });
   let daemonArmPromise: Promise<void> | null = null;
   let controlApi: ReturnType<typeof createConfigControlApi> | null = null;
   let masterUIHandler: ((request: Request) => Promise<Response | null>) | null = null;
@@ -988,7 +993,7 @@ export async function startMasterComposition(
     resources.controlListener.start();
     resources.listener = dependencies.createManagementListener({
       profile: 'management',
-      health: () => {
+      health: updateReadiness = () => {
         const registry = resources.ingressController?.trustedActiveAdmissionIfFresh();
         const admitted = trackedAdmission.snapshot();
         const data = !!registry && registry.workers.length > 0 && admitted.length === registry.workers.length
@@ -1929,6 +1934,7 @@ export async function startMasterComposition(
     healthTimer.unref?.();
     let backgroundStopPromise: Promise<void> | null = null;
     const stopBackgroundTasks = (): Promise<void> => {
+      dependencies.updates?.stopChecking();
       if (backgroundStopPromise !== null) return backgroundStopPromise;
       backgroundStopPromise = (async () => {
         const errors: unknown[] = [];
@@ -2062,6 +2068,7 @@ export async function startMasterComposition(
     };
     const menuRepository = resources.repository;
     controlApi = createConfigControlApi({
+      updates: dependencies.updates,
       repository: resources.repository,
       retirementDeadline: (bootId, deadlineNs) => {
         if (bootId !== runtimeClockId) return null;
@@ -2210,9 +2217,10 @@ export async function startMasterComposition(
       'invalid_state', 'master shutdown coordinator is unavailable',
     ));
     daemonControl = daemonBootstrap === null ? null : createDaemonShutdownHandler({
+      updates: dependencies.updates,
       metadata: () => daemonMetadata!,
       isReady: () => handlerReady,
-      onShutdownRequested: () => requestShutdown(),
+      onShutdownRequested: () => { dependencies.updates?.cancel(); return requestShutdown(); },
       onShutdownError: (error) => logger.error({ error: serializeErrorChain(error) }, 'Daemon shutdown failed'),
     });
     const instanceLocks = [...resources.locks];
@@ -2453,6 +2461,8 @@ export async function startMasterComposition(
     requestShutdown = signals.shutdown;
     await armDaemon();
     const baseHandle = {
+      shutdownForUpdate: coordinateShutdown,
+      updateReadiness,
       runtime,
       shutdown: signals.shutdown,
       removeSignalHandlers: signals.remove,

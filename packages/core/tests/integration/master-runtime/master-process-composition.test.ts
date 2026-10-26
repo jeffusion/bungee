@@ -820,7 +820,7 @@ describe('master process composition', () => {
     const { dependencies, managementOptions } = fixture();
     const processHandle = await startMasterComposition(dependencies);
 
-    expect(Object.keys(processHandle)).toEqual(['runtime', 'shutdown', 'removeSignalHandlers']);
+    expect(Object.keys(processHandle)).toEqual(['shutdownForUpdate', 'updateReadiness', 'runtime', 'shutdown', 'removeSignalHandlers']);
     expect(managementOptions()!.daemonControl).toBeUndefined();
   });
 

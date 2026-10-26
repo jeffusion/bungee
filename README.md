@@ -210,6 +210,9 @@ Documentation index: [docs/README.md](docs/README.md)
 ### Option 1: CLI (Recommended for Production)
 
 ```bash
+# Install and select the latest stable runtime release
+npx @jeffusion/bungee@latest upgrade
+
 # Initialize the SQLite data directory (~/.bungee/data)
 npx @jeffusion/bungee@latest init
 
@@ -226,6 +229,8 @@ CLI installations persist configuration in `~/.bungee/data/bungee.db`, plugin st
 and secrets in `~/.bungee/data/plugin-state.db`, and access logs in `~/.bungee/logs/access.db`. `start` does not read a JSON config file.
 
 `init` generates and persists the plugin encryption key in `~/.bungee/data/plugin-secrets.key`. A key can be supplied only during initialization; later CLI commands read the persisted file. See the [CLI reference](./docs/reference/cli.md#bungee-init) for initialization options and backup requirements.
+
+Background update checks only show reminders. Install and restart explicitly with the version control in the dashboard or `bungee upgrade`; ordinary startup never downloads a release. See [update behavior and recovery limits](./docs/reference/cli.md#bungee-upgrade).
 
 Bungee uses a revisioned configuration aggregate:
 
@@ -246,9 +251,11 @@ See [Configuration Guide](./docs/reference/configuration.md) for the current sch
 Set a stable private `BUNGEE_PLUGIN_SECRETS_KEY`, then follow the [Docker initialization steps](docs/guides/deployment.md#docker-compose).
 
 ```bash
-docker compose run --rm --no-deps bungee bun packages/core/dist/main.js --initialize-config /usr/app/data/bungee.db
+docker compose run --rm --no-deps bungee ./docker-entrypoint.sh --initialize-config /usr/app/data/bungee.db
 docker compose up -d
 ```
+
+The official image runs a release binary. Dashboard updates stay in that container's writable layer; container recreation restores the image version while retaining the data volumes. Check database compatibility before recreating with an older image. See [Docker deployment](docs/guides/deployment.md#docker-compose).
 
 ### Option 3: Development Mode
 

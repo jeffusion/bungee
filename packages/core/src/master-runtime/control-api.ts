@@ -45,6 +45,7 @@ export interface ConfigControlRepository {
 }
 
 export type ConfigControlApiOptions = {
+  readonly updates?: { handle(request: Request): Promise<Response> };
   readonly managementProviderMetadata?: (name:string) => {name:string;loginComponent?:string;setupComponent?:string};
   readonly managementAuth?: ManagementAuthentication;
   readonly resourceCollection?: () => Promise<readonly unknown[]>;
@@ -1048,6 +1049,7 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
       const statsRequest = serializedOptions.statsApi?.matches(path) === true;
       const observabilityRequest = serializedOptions.observabilityApi?.matches(path) === true;
       const pluginCatalogRequest = serializedOptions.pluginCatalogApi?.matches(path) === true;
+      const updatesRequest = serializedOptions.updates !== undefined && ['/api/system/updates', '/api/system/updates/check', '/api/system/updates/confirm'].includes(path);
       const mutationRequest = isMutationRequest(path, request.method, upstreamToggleMatch, pluginToggleMatch);
       const managed = path === '/api/auth/setup' || path === '/api/config' || path === '/api/config/runtime' || path === '/api/runtime/upstreams' || path === '/api/runtime/routes'
         || path === '/api/config/validate'
@@ -1055,7 +1057,7 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
         || operationMatch !== null || retryMatch !== null
         || upstreamToggleMatch !== null || pluginToggleMatch !== null || pluginControlMatch || statsRequest
         || pluginCatalogRequest || path === '/api/resources/api-key' || /^\/api\/resources\/api-key\/[^/]+\/extensions$/.test(path) || path === '/api/auth/logout';
-      const managedWithObservability = managed || observabilityRequest || menuRequest;
+      const managedWithObservability = managed || observabilityRequest || menuRequest || updatesRequest;
       if (!managedWithObservability) return path === '/api' || path.startsWith('/api/') ? notFound() : null;
       try {
         const identity = await serializedOptions.managementAuth?.authenticate(request);
@@ -1090,6 +1092,7 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
         if (!mutationRequest && !matchesCurrentAuth(request, snapshot, serializedOptions)) {
           return json({ error: 'unauthorized' }, 401);
         }
+        if (updatesRequest) return await serializedOptions.updates!.handle(request);
         if (path === '/api/auth/logout' && request.method === 'POST') {
           const provider = serializedOptions.managementAuth?.provider();
           return provider ? await provider.logout(request) : json({ success: true });

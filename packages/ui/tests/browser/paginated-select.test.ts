@@ -1,3 +1,4 @@
+import { systemUpdateStatusFixture } from '../helpers/system-updates';
 import {collectApiEvidence} from '../helpers/editors/api-evidence';
 import { test as browserTest } from 'bun:test';
 import { chromium, expect } from 'playwright/test';
@@ -30,6 +31,7 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
   const json = (value: unknown) => route.fulfill({ json: value });
   if (path === '/api/auth/mode') return json({ mode: 'anonymous', publicOrigin: url.origin });
   if (path === '/api/auth/verify') return json({ success: true, mode: 'anonymous' });
+  if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
   if (path === '/api/ui/menus') return json(menuSnapshot());
   if (path === '/api/ui/icons/data') return fulfillMenuIcons(route);
   if (path === '/api/config/runtime') return json(runtime);

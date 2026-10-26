@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { getAssetName, getBinaryName } from '../../../src/binary/names';
+import { getAssetName, getBinaryName } from '../../../src/updates/names';
 
 describe('binary release names', () => {
   test('maps every supported target to its archive asset', () => {

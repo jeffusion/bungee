@@ -4,7 +4,6 @@ interface StartOptions {
   readonly port?: string;
   readonly workers?: string;
   readonly detach?: boolean;
-  readonly autoUpgrade?: boolean;
 }
 
 export async function startCommand(options: StartOptions = {}): Promise<void> {

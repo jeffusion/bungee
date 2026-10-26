@@ -1,10 +1,10 @@
 # ============================================
 # Bungee Reverse Proxy - Production Docker Image
 # ============================================
-# Multi-stage build (3 stages):
+# Multi-stage build:
 #   1. deps: Install workspace dependencies
-#   2. build: Build UI + bundle assets + build core
-#   3. production: Minimal runtime image (~200MB)
+#   2. build: Build UI + bundle assets + native release archive
+#   3. production: Binary runtime with bundled plugin dependencies
 
 # ---- Base Stage ----
 FROM oven/bun:1.4.2 AS base
@@ -33,6 +33,7 @@ COPY packages/llms ./packages/llms
 COPY plugins ./plugins
 COPY scripts/build/bundle-ui.ts ./scripts/build/
 COPY scripts/build/build-external-plugins.ts ./scripts/build/
+COPY scripts/build/build-binaries.ts ./scripts/build/
 COPY scripts/checks/check-gateway-architecture.ts ./scripts/checks/
 COPY scripts/tests/unit/checks/check-gateway-architecture.test.ts ./scripts/tests/unit/checks/
 
@@ -45,10 +46,13 @@ RUN bun run check:architecture && \
     bun run build:ui && \
     bun run bundle:ui && \
     bun run build:llms && \
-    bun run build:core && \
-    test -s packages/core/dist/config-storage-worker.js && \
-    test -s packages/core/dist/plugin-state-worker.js && \
-    test -s packages/core/dist/observability-worker.js
+    binary_name="$(bun -e 'import { getBinaryName } from "./packages/core/src/updates/names.ts"; console.log(getBinaryName())')" && \
+    bun run build:binaries --target "$binary_name" && \
+    version="$(bun -e 'console.log(require("./package.json").version)')" && \
+    printf '%s\n' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' && \
+    mkdir -p "runtime/bin/$version" && \
+    tar -xzf "bin/$binary_name.tar.gz" -C "runtime/bin/$version" && \
+    printf '%s\n' "$version" > runtime/version.txt
 
 # ---- Production Stage ----
 FROM base AS production
@@ -58,17 +62,17 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends wget tini && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy dependencies from deps stage
+# Keep Bun and installed dependencies for dynamically loaded plugin artifacts.
 COPY --from=deps /usr/app/node_modules ./node_modules
 
 # Copy built types package (with dist/ containing .d.ts files)
 COPY --from=build /usr/app/packages/types/dist ./packages/types/dist
 COPY --from=build /usr/app/packages/types/package.json ./packages/types/
 
-# Copy built core artifacts (ONLY dist/, not src/)
-COPY --from=build /usr/app/packages/core/dist ./packages/core/dist
+# Copy the selected release executable and its adjacent plugins.
+COPY --from=build /usr/app/runtime ./runtime
 
-# Copy package files and configuration
+# Copy package metadata for runtime dependency resolution.
 COPY package.json ./
 COPY packages/core/package.json ./packages/core/
 
@@ -78,10 +82,11 @@ COPY scripts/runtime/docker-entrypoint.sh ./
 RUN chmod 0755 healthcheck.sh docker-entrypoint.sh
 
 # Create data and logs directories with proper permissions
-RUN mkdir -p data logs && chown -R bun:bun data logs packages/core/dist/plugins
+RUN mkdir -p data logs && chown -R bun:bun data logs runtime
 
 # Set environment variables
 ENV NODE_ENV=production \
+    BUNGEE_INSTALL_ROOT=/usr/app/runtime \
     PORT=8088 \
     BUNGEE_MANAGEMENT_HOST=0.0.0.0 \
     BUNGEE_MANAGEMENT_PORT=8089 \
@@ -103,5 +108,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 # Use tini as PID 1 to properly handle signals and reap zombie processes
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
-# Start application using compiled main.js entry point
+# Exec the selected release binary under tini.
 CMD ["./docker-entrypoint.sh"]

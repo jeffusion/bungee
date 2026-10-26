@@ -1,3 +1,4 @@
+import { systemUpdateStatusFixture } from '../helpers/system-updates';
 import { afterAll, beforeAll, test } from 'bun:test';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 import { expect } from 'playwright/test';
@@ -49,6 +50,7 @@ const base = uiRuntime.origin;
       if(request.method() !== 'GET' && !(request.method() === 'POST' && path === retryPath)) {errors.push(`Unexpected ${request.method()} ${path}`);return route.fulfill({status:500,json:{error:'unexpected_method'}});}
       if (path === '/api/auth/mode') return route.fulfill({json:{mode:'anonymous',publicOrigin:base}});
       if (path === '/api/auth/verify') return route.fulfill({ json: { success: true, mode:'anonymous',subject:{id:'anonymous',provider:'anonymous'} } });
+      if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
       if (path === '/api/ui/menus') return route.fulfill({ json: menuSnapshot() });
       if (path === '/api/ui/icons/data') return fulfillMenuIcons(route);
       if (path === '/api/config/runtime') { runtimeReads++; return route.fulfill({ json: runtime }); }
@@ -157,6 +159,7 @@ test('runtime facts distinguish historical failure, active cleanup, dependency f
         const json = (body: unknown, status = 200) => { if(status >= 400) evidenceApi.expectStatus(route,status); return route.fulfill({ json: body, status }); };
         if (path === '/api/auth/mode') return json({ mode: 'anonymous', publicOrigin: ui.origin });
         if (path === '/api/auth/verify') return json({ success: true, mode: 'anonymous', subject: { id: 'anonymous', provider: 'anonymous' } });
+        if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
         if (path === '/api/ui/menus') return json(menuSnapshot());
         if (path === '/api/ui/icons/data') return fulfillMenuIcons(route);
         if (path === '/api/config/runtime') return unavailable ? json({ error: 'repository_unavailable' }, 503) : json(runtime);

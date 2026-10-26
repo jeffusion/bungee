@@ -34,6 +34,8 @@ services:
       - LOG_LEVEL=info
 
     volumes:
+      # Runtime binary updates stay in the container layer; recreation selects the image version.
+      # Verify that version supports the persistent databases before recreating.
       # To backup: docker run --rm -v bungee_data:/data -v $(pwd):/backup alpine cp -r /data /backup/
       - data:/usr/app/data
       - logs:/usr/app/logs

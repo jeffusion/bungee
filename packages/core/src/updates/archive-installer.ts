@@ -91,6 +91,9 @@ export function installBinaryArchive(options: BinaryArchiveInstall): string {
   let backedUp = false;
   try {
     validateListing(runTar(['-tzf', options.archivePath]), options.binaryName);
+    if (runTar(['-tvzf', options.archivePath]).split(/\r?\n/).filter(Boolean).some(line => !['-', 'd'].includes(line[0]!))) {
+      throw new Error('Binary archive contains a link or special file');
+    }
     runTar(['-xzf', options.archivePath, '-C', staging]);
     validateExtractedTree(staging, options.binaryName);
     chmodSync(join(staging, options.binaryName), 0o755);

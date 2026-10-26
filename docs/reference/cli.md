@@ -20,7 +20,7 @@ The npm package is `@jeffusion/bungee`; its executable is named `bungee`. Use `n
 | `bungee ui` | Open dashboard in browser |
 | `bungee export` | Export a sealed configuration snapshot |
 | `bungee import` | Import a sealed snapshot and wait for publication |
-| `bungee upgrade` | Upgrade binary to latest version |
+| `bungee upgrade` | Install the latest stable release and restart a running instance |
 
 ---
 
@@ -61,13 +61,11 @@ Structured `kind: plugin-state` recovery reads bounded JSON through stdin or `--
 - `-p, --port <port>`: set the public proxy/Ingress port
 - `-w, --workers <count>`: worker process count (default `2`)
 - `-d, --detach`: run as daemon (default enabled)
-- `--auto-upgrade`: auto-upgrade binary when version mismatch is detected
 
 ### `bungee restart`
 
 - `-p, --port <port>`: set the public proxy/Ingress port
 - `-w, --workers <count>`
-- `--auto-upgrade`
 
 ### `bungee logs`
 
@@ -81,7 +79,13 @@ Structured `kind: plugin-state` recovery reads bounded JSON through stdin or `--
 
 ### `bungee upgrade`
 
-- `-f, --force`: force re-download even when current version is latest
+Fetches the latest stable release from GitHub, installs its executable and bundled plugins, and waits for the result. When the instance is running on a supported Linux/macOS binary deployment, it installs and restarts that instance. When stopped, it installs and selects the release for the next start. An incomplete release asset set cannot be installed.
+
+- `-f, --force`: explicitly reinstall even when the latest release is already selected
+
+`init`, `start`, `restart` and `recover` use the selected local release without downloading. If no release is installed, run `bungee upgrade` first. Updating the npm CLI alone does not change the selected runtime release. Windows and source deployments show update information but do not support an online runtime restart.
+
+Updating interrupts service. Back up the databases and matching encryption key before updating. A failed update never automatically selects an older binary: the newer runtime may already have migrated the databases. If the restart result is unknown, inspect instance status and health before issuing another update.
 
 ### `bungee export`
 
@@ -103,8 +107,11 @@ Structured `kind: plugin-state` recovery reads bounded JSON through stdin or `--
 
 CLI-managed default directory:
 
+`BUNGEE_INSTALL_ROOT` overrides `~/.bungee` for the selected release, data, logs and daemon control metadata together.
+
 ```text
 ~/.bungee/
+├── version.txt
 ├── bungee.pid
 ├── bungee.log
 ├── bungee.error.log
@@ -128,6 +135,7 @@ CLI-managed default directory:
 ### Bootstrap and start
 
 ```bash
+npx @jeffusion/bungee@latest upgrade
 npx @jeffusion/bungee@latest init
 npx @jeffusion/bungee@latest start
 npx @jeffusion/bungee@latest status

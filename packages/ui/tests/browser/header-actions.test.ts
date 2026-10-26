@@ -1,3 +1,4 @@
+import { systemUpdateStatusFixture } from '../helpers/system-updates';
 import { test as browserTest } from 'bun:test';
 import { chromium, expect, type Route } from 'playwright/test';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
@@ -42,6 +43,7 @@ browserTest('header navigation and confirmed session logout', async () => {
             provider: mode === 'plugin' ? 'user-auth' : 'anonymous' }, csrfToken: 'test-csrf' } : {}) });
         if (['POST'].includes(route.request().method()) && url.pathname === '/api/auth/logout') { authenticated = false; logoutCalls++; return json({ success: true }); }
         if (route.request().method() === 'GET' && url.pathname === '/api/auth/login/options') return json({local:{enabled:true,turnstile:{enabled:false}},methods:[]});
+        if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
         if (route.request().method() === 'GET' && url.pathname === '/api/ui/menus') return json(snapshot);
         if (route.request().method() === 'GET' && url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
         if (route.request().method() === 'GET' && url.pathname === '/api/config/runtime') return json(runtime);

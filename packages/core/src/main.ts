@@ -9,6 +9,8 @@ export { recoverOffline };
 import { serializeErrorChain } from './master-runtime/error-chain';
 import { clearDaemonBootstrapEnvironment } from './daemon-control/bootstrap';
 import { parseDaemonBootMarker } from './daemon-control/launch-identity';
+import { CORE_HOST_VERSION } from './core-version';
+import { assertNoUpdate, recordUpdateStartupFailure } from './updates/installation';
 
 export interface ProcessRoleDependencies {
   startWorker(): Promise<unknown>;
@@ -68,7 +70,8 @@ export async function dispatchProcessRole(
   }
 }
 
-if (import.meta.main) {
+export async function runMain(): Promise<void> {
+  if (process.argv[2] === '--version' && process.argv.length === 3) { console.log(CORE_HOST_VERSION); return; }
   const role = process.env.BUNGEE_ROLE ?? 'master';
   if (role === 'master') dotenv.config();
   let bootNonce: string | null = null;
@@ -79,11 +82,13 @@ if (import.meta.main) {
       const { oauthCallbackCommand } = await import('./oauth-callback');
       await oauthCallbackCommand();
     } else if(process.argv.includes('--prepare-runtime-upgrade')) {
+      if (process.env.BUNGEE_INSTALL_ROOT) assertNoUpdate(process.env.BUNGEE_INSTALL_ROOT);
       const args=process.argv.slice(2);
       if(args.length!==2||args[0]!=='--prepare-runtime-upgrade'||!args[1]) throw new Error('invalid_runtime_upgrade_arguments');
       const {prepareRuntimeUpgrade}=await import('./master-runtime/runtime-upgrade');
       console.log(JSON.stringify(await prepareRuntimeUpgrade(args[1])));
     } else if (process.argv.includes('--recover')) {
+      if (process.env.BUNGEE_INSTALL_ROOT) assertNoUpdate(process.env.BUNGEE_INSTALL_ROOT);
       const args = process.argv.slice(2);
       if (args[0] !== '--recover' || !args[1] || args[1].startsWith('--')) throw new Error('invalid_recovery_arguments');
       if (args.length === 2) {
@@ -97,6 +102,7 @@ if (import.meta.main) {
     } else if (process.argv.slice(2).some(arg => arg.startsWith('--recover'))) {
       throw new Error('invalid_recovery_arguments');
     } else if (initIndex >= 0) {
+      if (process.env.BUNGEE_INSTALL_ROOT) assertNoUpdate(process.env.BUNGEE_INSTALL_ROOT);
       const configDbPath = process.argv[initIndex + 1];
       if (!configDbPath) throw new Error('Configuration database path is required');
       await initializeConfigurationDatabase({configDbPath});
@@ -108,6 +114,8 @@ if (import.meta.main) {
     await dispatchProcessRole(role, undefined, bootNonce);
     }
   } catch (error) {
+    try { recordUpdateStartupFailure(process.env.BUNGEE_INSTALL_ROOT, process.env.BUNGEE_UPDATE_TOKEN); }
+    catch { console.error('Update startup result could not be persisted.'); }
     if (process.argv[2] === 'oauth-callback') {
       console.error('OAuth callback capture failed or was cancelled. Check the local port and restart the login.');
       process.exitCode = 1;
@@ -125,3 +133,5 @@ if (import.meta.main) {
     }
   }
 }
+
+if (import.meta.main) await runMain();

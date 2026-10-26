@@ -1,3 +1,4 @@
+import { systemUpdateStatusFixture } from '../../helpers/system-updates';
 import { beforeAll, afterAll, expect, test } from 'bun:test';
 import { chromium, expect as rendered, type Browser, type Page } from 'playwright/test';
 import { resolve } from 'node:path';
@@ -34,6 +35,7 @@ async function withLogs(answer: (request: Request) => Promise<Response>, run: (p
       const json = (value:unknown) => route.fulfill({json:value});
       if(url.pathname === '/api/auth/mode') return json({mode:'anonymous',publicOrigin:runtime.origin});
       if(url.pathname === '/api/auth/verify') return json({success:true,mode:'anonymous',subject:{id:'anonymous',provider:'anonymous'}});
+      if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
       if(url.pathname === '/api/ui/menus') return json(menuSnapshot());
       if(url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
       if(url.pathname === '/api/config/runtime') return json(config);

@@ -1,4 +1,5 @@
 import { isIP } from 'node:net';
+import { DAEMON_UPDATES_PATH } from '@jeffusion/bungee-types';
 import { PLUGIN_STORAGE_RPC_PATH } from '../data-admission/rpc';
 import { attestManagementRequestSource } from './request-source';
 import { PLUGIN_PEER_WS_PATH, type PluginPeerConnectionData, type PluginPeerWebSocketServer } from '../plugin-services/peer-websocket';
@@ -141,7 +142,7 @@ export async function handleManagementRequest(
   const profile = options.profile;
   if (profile === 'master-control') {
     if (isReservedDaemonPath(url.pathname)) {
-      if (url.pathname !== DAEMON_SHUTDOWN_PATH || options.daemonControl === undefined) return notFound();
+      if (![DAEMON_SHUTDOWN_PATH, DAEMON_UPDATES_PATH, `${DAEMON_UPDATES_PATH}/check`].includes(url.pathname) || options.daemonControl === undefined) return notFound();
       return options.daemonControl.handle(request, context);
     }
     if (url.pathname === PLUGIN_STORAGE_RPC_PATH) return await options.controlApi.handle(request) ?? notFound();

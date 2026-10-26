@@ -63,7 +63,6 @@ Usage counts are replacement totals for the specified attempt, applied to its or
     .option('-p, --port <port>', 'Override default port')
     .option('-w, --workers <count>', 'Number of worker processes', '2')
     .option('-d, --detach', 'Run as daemon (default)', true)
-    .option('--auto-upgrade', 'Automatically upgrade binary if version mismatch')
     .action(startCommand);
 
   program
@@ -76,7 +75,6 @@ Usage counts are replacement totals for the specified attempt, applied to its or
     .description('Restart proxy server daemon')
     .option('-p, --port <port>', 'Override default port')
     .option('-w, --workers <count>', 'Number of worker processes', '2')
-    .option('--auto-upgrade', 'Automatically upgrade binary if version mismatch')
     .action(restartCommand);
 
   program

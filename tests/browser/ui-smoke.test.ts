@@ -6,6 +6,7 @@ import { readFile } from 'node:fs/promises';
 import { startUiRuntime } from '../helpers/ui-runtime';
 import { configurationRuntimeFixture, publicationFixture } from '../../packages/ui/tests/helpers/publication';
 import { menuSnapshot, fulfillMenuIcons } from '../../packages/ui/tests/helpers/menus';
+import { systemUpdateStatusFixture } from '../../packages/ui/tests/helpers/system-updates';
 
 let runtime: Awaited<ReturnType<typeof startUiRuntime>>;
 let browser: Browser;
@@ -39,6 +40,7 @@ async function withPage(run: (page: Page, loginCount: () => number) => Promise<v
       const url = new URL(request.url());
       const key = `${request.method()} ${url.pathname}`;
       switch (key) {
+        case 'GET /api/system/updates': return route.fulfill({ json: systemUpdateStatusFixture });
         case 'GET /api/auth/mode':
           return route.fulfill({ json: { mode: 'plugin', initialized: true, publicOrigin: url.origin,
             provider: { name: 'user-auth', loginComponent: manifest.management.loginComponent } } });

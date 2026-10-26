@@ -2,13 +2,29 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createBinaryArchive } from '../../../build/build-binaries';
-import { parseTarListing } from '../../../../packages/cli/src/binary/archive-installer';
+import { createBinaryArchive, selectBinaryTargets } from '../../../build/build-binaries';
+import { parseTarListing } from '../../../../packages/core/src/updates/archive-installer';
 
 const roots: string[] = [];
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+describe('selectBinaryTargets', () => {
+  test('keeps every release target by default and selects one explicit target', () => {
+    const all = selectBinaryTargets([]);
+    expect(all.map(target => target.binaryName)).toEqual([
+      'bungee-linux', 'bungee-linux-arm64', 'bungee-macos', 'bungee-macos-arm64', 'bungee-windows.exe',
+    ]);
+    for (const target of all) expect(selectBinaryTargets(['--target', target.binaryName])).toEqual([target]);
+  });
+
+  test('rejects unknown targets and malformed options', () => {
+    for (const args of [['--target', 'linux'], ['--target'], ['bungee-linux'], ['--target', 'bungee-linux', '--force']]) {
+      expect(() => selectBinaryTargets(args)).toThrow();
+    }
+  });
 });
 
 describe('createBinaryArchive', () => {

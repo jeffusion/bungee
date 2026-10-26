@@ -1,3 +1,4 @@
+import { systemUpdateStatusFixture } from '../helpers/system-updates';
 import { serviceReference } from '../helpers/service-references';
 import { test as browserTest } from 'bun:test';
 import assert from 'node:assert/strict';
@@ -51,6 +52,7 @@ try {
       const respond = (json: unknown, status = 200) => route.fulfill({ json, status });
       if (url.pathname === '/api/auth/mode') return respond({ mode: 'anonymous', publicOrigin: runtime.origin });
       if (url.pathname === '/api/auth/verify') return respond({ success: true, mode: 'anonymous', subject: { id: 'anonymous', provider: 'anonymous' } });
+      if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
       if (url.pathname === '/api/ui/menus') return respond(menuSnapshot());
       if (url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
       if (url.pathname === '/api/plugin-translations') return respond({});

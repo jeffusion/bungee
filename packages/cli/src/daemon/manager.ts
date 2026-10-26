@@ -8,6 +8,7 @@ import { basename, isAbsolute, join } from 'node:path';
 import { isIP } from 'node:net';
 import {
   DAEMON_AUTHORIZATION_HEADER, DAEMON_BOOT_HEADER, DAEMON_INSTANCE_HEADER, DAEMON_PID_HEADER, DAEMON_SHUTDOWN_PATH,
+  DAEMON_UPDATES_PATH, type SystemUpdateStatus,
   encodeDaemonShutdownSecret, type DaemonMetadataV1,
 } from '@jeffusion/bungee-types';
 import {
@@ -23,6 +24,8 @@ import {
 import { ConfigPaths } from '../config/paths';
 import { readPluginSecretsKey, withPluginSecretsKey } from '../config/plugin-secrets-key';
 import { BinaryManager } from '../binary/manager';
+import { assertNoUpdate, requestUpdateStop, UpdateStore } from '../../../core/src/updates/installation';
+import { compareVersions } from '../../../core/src/updates/release';
 import { createDaemonRuntime } from './runtime';
 import { deleteLegacyPidFile, readLegacyPidFile, writeLegacyPidMirror } from './pid-mirror';
 import {
@@ -53,7 +56,6 @@ export type DaemonStatus = Readonly<{
 export type StartOptions = {
   readonly workers?: string;
   readonly port?: string;
-  readonly autoUpgrade?: boolean;
   /** Test/development-only direct Bun launch. It deliberately has no wrapper arguments. */
   readonly directLaunch?: LaunchDescriptor;
   readonly launchDescriptor?: LaunchDescriptor;
@@ -121,10 +123,10 @@ const MAX_OWNER_GONE_DIAGNOSTIC_ATTEMPT = 999;
 function ownerGoneDiagnosticText(diagnostic: OwnerGoneResult['diagnostic']): string {
   return `pid_probe=${diagnostic.pid_probe}, marker_probe=${diagnostic.marker_probe}, marker_reason=${diagnostic.marker_reason ?? 'null'}, metadata=removed, attempt=${diagnostic.attempt}`;
 }
-async function readShutdownResponse(response: Response): Promise<string> {
+async function readShutdownResponse(response: Response, maximumBytes = MAX_SHUTDOWN_RESPONSE_BYTES): Promise<string> {
   if (response.body === null || response.body === undefined) {
     const text = await response.text();
-    if (new TextEncoder().encode(text).byteLength > MAX_SHUTDOWN_RESPONSE_BYTES) throw new Error('shutdown response is too large');
+    if (new TextEncoder().encode(text).byteLength > maximumBytes) throw new Error('control response is too large');
     return text;
   }
   const reader = response.body.getReader();
@@ -135,7 +137,7 @@ async function readShutdownResponse(response: Response): Promise<string> {
       const item = await reader.read();
       if (item.done) break;
       size += item.value.byteLength;
-      if (size > MAX_SHUTDOWN_RESPONSE_BYTES) {
+      if (size > maximumBytes) {
         await reader.cancel('shutdown response too large');
         throw new Error('shutdown response is too large');
       }
@@ -180,10 +182,10 @@ function canonicalLaunchDescriptor(descriptor: LaunchDescriptor): LaunchDescript
   catch (error) { throw new Error(`Daemon entrypoint cannot be canonicalized: ${errorText(error)}`); }
 }
 
-export async function resolveCoreLaunchDescriptor(options: Pick<StartOptions, 'directLaunch' | 'launchDescriptor' | 'autoUpgrade'> = {}): Promise<LaunchDescriptor> {
+export async function resolveCoreLaunchDescriptor(options: Pick<StartOptions, 'directLaunch' | 'launchDescriptor'> = {}): Promise<LaunchDescriptor> {
   const direct = options.directLaunch ?? options.launchDescriptor;
   if (direct !== undefined) return canonicalLaunchDescriptor(direct);
-  const binaryPath = await BinaryManager.ensureBinary({ autoUpgrade: options.autoUpgrade });
+  const binaryPath = await BinaryManager.ensureBinary();
   try { return { executable: realpathSync.native(binaryPath), entrypoint: null }; }
   catch (error) { throw new Error(`Daemon executable cannot be canonicalized: ${errorText(error)}`); }
 }
@@ -455,6 +457,7 @@ export class DaemonManager {
   }
 
   async start(options: StartOptions = {}): Promise<void> {
+    assertNoUpdate(this.configDir);
     await this.inspectExisting();
     const runtime = createDaemonRuntime({
       dataDirectory: this.dataDirectory, logsDirectory: this.logsDirectory, workers: options.workers,
@@ -469,6 +472,7 @@ export class DaemonManager {
       executable: descriptor.executable, shutdown_secret: shutdownSecret, entrypoint: descriptor.entrypoint,
       pid: null, instance_id: null, management_host: null, management_port: null,
     };
+    assertNoUpdate(this.configDir);
     try {
       await createLaunchingDaemonMetadataFile(this.metadataFile, launching, this.fileOptions());
     } catch (error) {
@@ -482,6 +486,7 @@ export class DaemonManager {
 
     const env = {
       ...withPluginSecretsKey(runtime.env, key),
+      ...((options.directLaunch ?? options.launchDescriptor ?? this.injectedLaunch) === undefined ? { BUNGEE_INSTALL_ROOT: BinaryManager.root } : {}),
       BUNGEE_ROLE: 'master',
       BUNGEE_DAEMON_METADATA_PATH: this.metadataFile,
       BUNGEE_DAEMON_BOOT_NONCE: bootNonce,
@@ -674,6 +679,7 @@ export class DaemonManager {
   }
 
   async stop(): Promise<void> {
+    requestUpdateStop(this.configDir);
     const deadline = this.now() + this.stopTimeoutMs;
     let bootNonce: string | undefined;
     let lastOwner: DaemonMetadataV1 | undefined;
@@ -780,6 +786,70 @@ export class DaemonManager {
     console.log('🔄 Restarting Bungee daemon...');
     await this.stop();
     await this.start(options);
+  }
+
+  async upgrade(options: { force?: boolean } = {}): Promise<void> {
+    let metadata: DaemonMetadataV1;
+    try { metadata = await readDaemonMetadataFile(this.metadataFile, this.fileOptions()); }
+    catch (error) {
+      if (!isMissing(error)) throw error;
+      await this.inspectExisting();
+      await BinaryManager.upgrade(options);
+      return;
+    }
+    if (metadata.state !== 'armed') throw new Error('Daemon is not ready for an upgrade');
+    if (await this.probeProcess(metadata.pid, { executable: metadata.executable, entrypoint: metadata.entrypoint }, metadata.boot_nonce) !== 'exact') {
+      throw new Error('Cannot safely identify the running daemon');
+    }
+    const control = async (owner: DaemonMetadataV1, method: string, suffix = '', body?: unknown): Promise<SystemUpdateStatus> => {
+      if (owner.state !== 'armed') throw new Error('Daemon is not ready');
+      const response = await this.httpRequest(`http://127.0.0.1:${owner.management_port}${DAEMON_UPDATES_PATH}${suffix}`, {
+        method, headers: {
+          [DAEMON_AUTHORIZATION_HEADER]: `Bearer ${owner.shutdown_secret}`,
+          [DAEMON_BOOT_HEADER]: owner.boot_nonce, [DAEMON_INSTANCE_HEADER]: owner.instance_id,
+          [DAEMON_PID_HEADER]: String(owner.pid), 'content-type': 'application/json',
+        }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(20_000),
+      });
+      const result = JSON.parse(await readShutdownResponse(response, 16_384));
+      if (!response.ok) throw new Error(result.error ?? `Update control HTTP ${response.status}`);
+      if (typeof result.running_version !== 'string' || !('operation' in result)) throw new Error('Invalid update status');
+      return result;
+    };
+    const status = await control(metadata, 'POST', '/check', {});
+    if (status.check_error || !status.latest) throw new Error(status.check_error ?? 'release_check_failed');
+    if (compareVersions(status.latest.version, status.running_version) < 0
+      || (status.latest.version === status.running_version && !options.force)) {
+      console.log(`Bungee ${status.running_version} is already up to date.`); return;
+    }
+    const id = randomUUID();
+    console.log(`Upgrading Bungee ${status.running_version} → ${status.latest.version}; the running instance will restart.`);
+    try {
+      await control(metadata, 'POST', '', { operation_id: id, current_version: status.running_version,
+        target_version: status.latest.version, force: options.force });
+    } catch (error) {
+      // A lost acknowledgement is not permission to submit another upgrade.
+      const result = await control(metadata, 'GET').catch(() => null);
+      if (result && result.operation?.id !== id) throw error;
+    }
+    const deadline = this.now() + 600_000;
+    while (this.now() < deadline) {
+      try {
+        const recorded = new UpdateStore(this.configDir).read(id);
+        if (recorded?.phase === 'failed' || recorded?.phase === 'cancelled') throw Object.assign(new Error(recorded.error ?? recorded.phase), { terminal: true });
+        metadata = await readDaemonMetadataFile(this.metadataFile, this.fileOptions());
+        const result = await control(metadata, 'GET');
+        const operation = result.operation;
+        if (operation?.id === id) {
+          if (operation.phase === 'succeeded') {
+            if (result.running_version !== status.latest.version) throw new Error('Running version did not match the upgrade');
+            console.log(`Bungee ${result.running_version} is ready.`); return;
+          }
+          if (operation.phase === 'failed' || operation.phase === 'cancelled') throw Object.assign(new Error(operation.error ?? operation.phase), { terminal: true });
+        }
+      } catch (error) { if ((error as {terminal?:boolean}).terminal) throw error; }
+      await this.sleep(250);
+    }
+    throw new Error('Upgrade result is unknown; inspect the instance before another upgrade');
   }
 
   async getStatus(): Promise<DaemonStatus> {

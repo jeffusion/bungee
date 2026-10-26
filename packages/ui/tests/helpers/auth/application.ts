@@ -1,3 +1,4 @@
+import { systemUpdateStatusFixture } from '../system-updates';
 import {afterEach, expect as bunExpect} from 'bun:test';
 import {expect, type Page} from 'playwright/test';
 import {createDefaultMenuLayout} from '@jeffusion/bungee-types';
@@ -13,7 +14,7 @@ const methods: Record<string, readonly string[]> = {
   '/api/auth/mode': ['GET'], '/api/auth/verify': ['GET'], '/api/auth/login/options': ['GET'],
   '/api/auth/login': ['POST'], '/api/auth/logout': ['POST'], '/api/auth/login/start': ['POST'],
   '/api/ui/menus': ['GET'], '/api/ui/icons/data': ['GET'], '/api/plugin-translations': ['GET'],
-  '/api/plugins': ['GET'], '/api/config/runtime': ['GET'], '/api/config': ['GET'],
+  '/api/system/updates': ['GET'], '/api/plugins': ['GET'], '/api/config/runtime': ['GET'], '/api/config': ['GET'],
   '/api/runtime/upstreams': ['GET'], '/api/stats/dashboard': ['GET'], '/api/resources/api-key': ['GET'],
   [control + '/self']: ['GET'], [control + '/users']: ['GET', 'POST'],
   [control + '/users/update']: ['PUT'], [control + '/users/password']: ['POST'],
@@ -67,6 +68,7 @@ export async function mockApplication(page: Page, handle: (path: string, method:
     if (url.pathname === '/api/auth/mode') return route.fulfill({json: {mode: 'plugin', initialized: true, publicOrigin: 'https://public.example', provider: {name: manifest.name, ...manifest.management}}});
     if (url.pathname === '/api/auth/verify') return route.fulfill({json: {mode: 'plugin', success: signedIn, ...(signedIn ? {subject: {id: 'admin', provider: manifest.name}, csrfToken: 'csrf'} : {})}});
     if (url.pathname === '/api/auth/login/options') return route.fulfill({json: {local: {enabled: true, turnstile: {enabled: false}}, methods: []}});
+    if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
     if (url.pathname === '/api/ui/menus') return route.fulfill({json: {...menus, catalog, layout: createDefaultMenuLayout(catalog)}});
     if (url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
     if (url.pathname === '/api/plugin-translations') return route.fulfill({json: Object.fromEntries(Object.entries(manifest.translations).map(([language, messages]) => [language, {plugins: {[manifest.name]: messages}}]))});

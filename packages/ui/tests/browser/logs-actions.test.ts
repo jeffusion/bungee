@@ -1,3 +1,4 @@
+import { systemUpdateStatusFixture } from '../helpers/system-updates';
 import { test as browserTest } from 'bun:test';
 import { chromium, expect } from 'playwright/test';
 import {collectApiEvidence} from '../helpers/editors/api-evidence';
@@ -37,6 +38,7 @@ try {
         if (url.pathname === '/api/config/runtime') return route.fulfill({ json: config });
         if (url.pathname === '/api/config') return route.fulfill({ json: { revision: 1, content_hash: config.content_hash, config: config.config } });
         if (url.pathname === '/api/plugins') return route.fulfill({ json: [] });
+        if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
         if (url.pathname === '/api/ui/menus') {
           // Log panel bounds use a compact user layout, independently of header overflow.
           const snapshot = menuSnapshot();

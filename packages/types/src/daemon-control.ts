@@ -7,6 +7,7 @@ export const DAEMON_BOOT_HEADER = 'x-bungee-daemon-boot' as const;
 export const DAEMON_INSTANCE_HEADER = 'x-bungee-daemon-instance' as const;
 export const DAEMON_PID_HEADER = 'x-bungee-daemon-pid' as const;
 export const DAEMON_PROCESS_IDENTITY_MARKER_PREFIX = '--bungee-process-identity=' as const;
+export const DAEMON_UPDATES_PATH = '/__bungee/internal/daemon/updates' as const;
 
 type DaemonMetadataBase = {
   readonly schema: typeof DAEMON_METADATA_SCHEMA;
