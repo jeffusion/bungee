@@ -1,8 +1,7 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { getAssetName, getBinaryName } from '../../../src/updates/names';
 import { DaemonManager } from '../../../../cli/src/daemon/manager';
@@ -10,6 +9,7 @@ import { readDaemonMetadataFile } from '@jeffusion/bungee-types/daemon-file';
 import { createBinaryArchive } from '../../../../../scripts/build/build-binaries';
 import { buildExternalPlugins } from '../../../../../scripts/build/build-external-plugins';
 import { BinaryManager } from '../../../../cli/src/binary/manager';
+import { makeCanonicalTempDir } from '../../../../../tests/helpers/daemon-fixture';
 
 let root: string, bytes: Buffer, server: ReturnType<typeof Bun.serve>;
 let origin: string;
@@ -20,7 +20,7 @@ const binary = getBinaryName();
 const project = resolve(import.meta.dir,'../../../../..');
 
 beforeAll(async () => {
-  root=mkdtempSync(join(tmpdir(),'bungee-runtime-updates-'));
+  root=makeCanonicalTempDir('bungee-runtime-updates');
   const workers=['config-storage-worker.js','plugin-state-worker.js','observability-worker.js'].map(name=>join(project,'packages/core/dist',name));
   await buildExternalPlugins({outputDirectory:join(root,'plugins')});
   for (const version of ['6.6.0','6.6.1']) {

@@ -1,11 +1,11 @@
 import { expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { assertNoUpdate, selectedVersion } from '../../../../core/src/updates/installation';
+import { makeCanonicalTempDir } from '../../../../../tests/helpers/daemon-fixture';
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) test(`offline upgrade ${signal} cancels and releases ownership without starting`, async () => {
-  const root = mkdtempSync(join(tmpdir(), 'bungee-upgrade-signal-'));
+  const root = makeCanonicalTempDir('bungee-upgrade-signal');
   writeFileSync(join(root, 'version.txt'), '6.6.0\n');
   const fixture = join(root, 'upgrade-fixture.mjs');
   const build = await Bun.build({ entrypoints: [resolve(import.meta.dir, '../../fixtures/upgrade-signal.ts')],

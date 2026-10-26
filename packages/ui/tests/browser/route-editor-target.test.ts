@@ -194,10 +194,10 @@ async function dismissTargetDialogWithShortcuts(page: Page, owner: ReturnType<Pa
   await opener.click();
   const dialog = page.getByRole('dialog');
   await expect(dialog).toBeVisible();
-  await page.keyboard.press('ControlOrMeta+s');
-  await page.keyboard.press('ControlOrMeta+1');
+  await dialog.press('ControlOrMeta+s');
+  await dialog.press('ControlOrMeta+1');
   assert.equal(writes.length, writeCount);
-  await page.keyboard.press('Escape');
+  await dialog.press('Escape');
   await expect(dialog).toHaveCount(0);
   await expect(opener).toBeFocused();
   await expect(page).toHaveURL(url);
