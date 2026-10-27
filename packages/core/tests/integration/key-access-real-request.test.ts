@@ -87,6 +87,12 @@ test('real master/ingress/worker enforces model policy and honors Authorization 
     expect(await open.json()).toEqual({model:'public-model',authorization:'Bearer upstream-service-secret',safeHeader:'service-header'});
     const protectedRoutes=await fetch(base+'/api/plugins/key-access/control/routes',{method:'PUT',headers,body:JSON.stringify({protectedRouteIds:[routeId,stripRouteId]})});
     expect(protectedRoutes.status).toBe(200);
+    const beforeCopy = await (await fetch(base+'/api/config')).json();
+    const copied = await fetch(base+'/api/routes/duplicate', {method:'POST',headers,
+      body:JSON.stringify({path:'/v1',mutation_id:crypto.randomUUID()})});
+    expect(copied.status).toBe(422);
+    expect(await copied.json()).toEqual({error:'route_copy_protected'});
+    expect(await (await fetch(base+'/api/config')).json()).toEqual(beforeCopy);
     const catalog=await (await fetch(base+'/api/plugins')).json();
     expect(catalog.find((plugin:{name:string})=>plugin.name==='key-access').blockedReason).toBe('protected_routes_require_plugin');
     const disabled=await fetch(base+'/api/plugins/key-access/disable',{method:'POST',headers,body:'{}'});

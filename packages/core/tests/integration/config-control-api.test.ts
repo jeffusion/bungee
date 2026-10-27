@@ -156,6 +156,93 @@ afterEach(async () => {
 });
 
 describe('configuration control with an explicit management provider', () => {
+  test('route duplication rebuilds owned identities and preserves policies, references and managed bindings', async () => {
+    const { api, repository, publishCalls } = fixture(1, 'converged');
+    const id = (value: number) => `a0000000-0000-4000-8000-${String(value).padStart(12, '0')}`;
+    const plugin = { id: id(4), position: 0, name: 'fixture-plugin', enabled: true, options: { nested: { id: 'business-id' } } };
+    const source = {
+      id: id(1), position: 0, path: '/source/', path_rewrite: { '^/source': '' },
+      timeouts: { request_ms: 12345 }, plugins: [plugin],
+      service_references: [{ id: id(6), position: 1, service_id: id(5), weight: 30, priority: 2, is_disabled: true }],
+      endpoints: [{ id: id(2), position: 0, target: 'https://example.test', weight: 70, priority: 1,
+        is_disabled: false, plugins: [{ ...plugin, id: id(3) }],
+        managedBy: { plugin: plugin.name, contributionId: 'account', bindingId: id(3) } }],
+    };
+    const seeded = { ...aggregate(), logical_configuration: { ...aggregate().logical_configuration,
+      services: [{ id: id(5), position: 0, name: 'shared', endpoints: [{ ...source.endpoints[0]!, id: id(9), plugins: [], managedBy: undefined }], plugins: [] }],
+      routes: [source, { id: id(7), position: 1, path: '/source/-copy', direct_response: { enabled: true, status: 200, body: 'ok' }, endpoints: [], plugins: [] },
+        { id: id(8), position: 2, path: '/source/-copy-2', direct_response: { enabled: true, status: 200, body: 'ok' }, endpoints: [], plugins: [] }],
+    } };
+    expect((await api.handle(authorized('/api/config', { method: 'PUT', body: JSON.stringify({
+      expected_revision: 1, mutation_id: 'copy-seed', aggregate: seeded,
+    }) })))?.status).toBe(202);
+    await waitForNoActivePublication(repository);
+    const before = repository.getSnapshot();
+    const send = (mutation_id: string) => api.handle(authorized('/api/routes/duplicate', {
+      method: 'POST', body: JSON.stringify({ path: source.path, mutation_id }),
+    }));
+    const response = await send('copy-first');
+    expect(response?.status).toBe(202);
+    expect(await response!.json()).toMatchObject({ operation_id: 'copy-first', revision: 3 });
+    await waitForNoActivePublication(repository);
+    const after = repository.getSnapshot();
+    const copy = after.aggregate.logical_configuration.routes.at(-1)!;
+    expect(copy.path).toBe('/source/-copy-3');
+    expect(copy.position).toBe(3);
+    expect(copy.id).not.toBe(source.id);
+    expect(copy.plugins[0]!.id).not.toBe(plugin.id);
+    expect(copy.service_references![0].id).not.toBe(source.service_references[0]!.id);
+    expect(copy.endpoints![0]!.id).not.toBe(source.endpoints[0]!.id);
+    expect(copy.endpoints![0]!.plugins[0]!.id).not.toBe(id(3));
+    expect(copy.endpoints![0]!.managedBy!.bindingId).toBe(copy.endpoints![0]!.plugins[0]!.id);
+    expect(copy).toEqual({ ...before.aggregate.logical_configuration.routes[0]!,
+      id: copy.id, position: 3, path: copy.path,
+      plugins: [{ ...plugin, id: copy.plugins[0]!.id }],
+      service_references: [{ ...source.service_references[0]!, id: copy.service_references![0].id }],
+      endpoints: [{ ...source.endpoints[0]!, id: copy.endpoints![0]!.id,
+        plugins: [{ ...plugin, id: copy.endpoints![0]!.plugins[0]!.id }],
+        managedBy: { ...source.endpoints[0]!.managedBy, bindingId: copy.endpoints![0]!.plugins[0]!.id } }],
+    });
+    expect(after.aggregate.logical_configuration.routes.slice(0, -1)).toEqual(before.aggregate.logical_configuration.routes);
+    expect(after.aggregate.logical_configuration.services).toEqual(before.aggregate.logical_configuration.services);
+    expect(after.aggregate.plugin_activations).toEqual(before.aggregate.plugin_activations);
+    expect(parseNormalizeCompileAggregate(after.aggregate).ok).toBe(true);
+    expect((await send('copy-first'))?.status).toBe(409);
+    expect(repository.getSnapshot()).toEqual(after);
+    expect((await send('copy-second'))?.status).toBe(202);
+    await waitForNoActivePublication(repository);
+    expect(repository.getSnapshot().aggregate.logical_configuration.routes.at(-1)!.path).toBe('/source/-copy-4');
+    expect(publishCalls).toEqual(['copy-seed', 'copy-first', 'copy-second']);
+  });
+
+  test('route duplication rejects invalid requests, missing sources and unavailable writes without changes', async () => {
+    let ready = true;
+    const { api, repository } = fixture(1, 'converged', undefined, () => ready);
+    const source = { id: 'a0000000-0000-4000-8000-000000000001', position: 0, path: '/plain', direct_response: { enabled: true, status: 200, body: 'ok' }, endpoints: [], plugins: [] };
+    expect((await api.handle(authorized('/api/config', { method: 'PUT', body: JSON.stringify({
+      expected_revision: 1, mutation_id: 'plain-seed',
+      aggregate: { ...aggregate(), logical_configuration: { ...aggregate().logical_configuration, routes: [source] } },
+    }) })))?.status).toBe(202);
+    await waitForNoActivePublication(repository);
+    const before = repository.getSnapshot();
+    const path = '/api/routes/duplicate';
+    expect((await api.handle(request(path, { method: 'POST', body: '{}' })))?.status).toBe(401);
+    expect((await api.handle(authorized(path)))?.status).toBe(405);
+    for (const body of [{}, { path: '/plain' }, { path: 1, mutation_id: 'invalid' },
+      { path: '/plain', mutation_id: 'bad key' }, { path: '/plain', mutation_id: 'extra', aggregate: {} }]) {
+      expect((await api.handle(authorized(path, { method: 'POST', body: JSON.stringify(body) })))?.status).toBe(400);
+    }
+    const missing = await api.handle(authorized(path, { method: 'POST', body: JSON.stringify({ path: '/missing', mutation_id: 'missing' }) }));
+    expect(missing?.status).toBe(404);
+    expect(await missing!.json()).toEqual({ error: 'route_not_found' });
+    ready = false;
+    expect((await api.handle(authorized(path, { method: 'POST', body: JSON.stringify({ path: '/plain', mutation_id: 'not-ready' }) })))?.status).toBe(503);
+    expect(repository.getSnapshot()).toEqual(before);
+    ready = true;
+    expect((await api.handle(authorized(path, { method: 'POST', body: JSON.stringify({ path: '/plain', mutation_id: 'plain-copy' }) })))?.status).toBe(202);
+    expect(repository.getSnapshot().aggregate.logical_configuration.routes.at(-1)).toMatchObject({ path: '/plain-copy', endpoints: [], plugins: [] });
+  });
+
   test('default anonymous management reads and writes without tokens', async () => {
     const {api}=fixture(1,'converged',undefined,undefined,undefined,false);
     expect((await api.handle(request('/api/config')))?.status).toBe(200);

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { retainAccepted } from '../../../src/components/domain/config/publication-state';
+import { ApiError } from '../../../src/api/client';
 import {
   ConfigurationOperationDegradedError,
   ConfigurationOperationTimeoutError,
@@ -8,6 +9,7 @@ import {
   ConfigurationValidationError,
   ConfigurationSubmissionUnknownError,
   commitConfiguration,
+  duplicateConfigurationRoute,
   getConfigSnapshot,
   updateConfig,
 } from '../../../src/api/config';
@@ -93,6 +95,37 @@ afterEach(() => {
 });
 
 describe('configuration snapshot shape', () => {
+  test('duplicates a route with one POST and no configuration round trip', async () => {
+    const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
+    setResponses(requests, [accepted('committed')]);
+    await duplicateConfigurationRoute('/source/?encoded=%2F', { completion: 'committed' });
+    expect(requests.map(request => [request.url, request.init?.method])).toEqual([['/api/routes/duplicate', 'POST']]);
+    expect(JSON.parse(String(requests[0]!.init?.body))).toEqual({ path: '/source/?encoded=%2F', mutation_id: expect.any(String) });
+  });
+
+  test('reconciles a lost duplicate response by operation ID without creating another copy', async () => {
+    const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
+    let mutationId = '';
+    setResponses(requests, [(_input, init) => {
+      mutationId = JSON.parse(String(init?.body)).mutation_id;
+      throw new TypeError('connection lost');
+    }, input => {
+      expect(String(input)).toBe(`/api/config/operations/${mutationId}`);
+      return Response.json({ operation: { ...operation('committed'), mutation_id: mutationId }, workers: [] });
+    }]);
+    const result = await duplicateConfigurationRoute('/source', { completion: 'committed' });
+    expect(result.operation.mutation_id).toBe(mutationId);
+    expect(requests.map(request => request.init?.method ?? 'GET')).toEqual(['POST', 'GET']);
+  });
+
+  test('explains why duplicating a protected route is rejected', async () => {
+    setResponses([], [Response.json({error:'route_copy_protected'}, {status:422})]);
+    const error = await rejection(duplicateConfigurationRoute('/protected', {completion:'committed'}));
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(ApiError);
+    expect(error).not.toBeInstanceOf(ConfigurationValidationError);
+  });
+
   test('snapshot exposes exactly config, revision, and content_hash', async () => {
     // Given
     const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];

@@ -848,8 +848,11 @@ export async function startMasterComposition(
       (catalog.records?.() ?? []).filter(record => record.controlPath).map(record => record.name),resources.pluginControl!,
     );
     await refreshRouteProtections();
-    const guardDataTransition = async (_active: import('@jeffusion/bungee-types').ConfigurationAggregate, next: import('@jeffusion/bungee-types').ConfigurationAggregate): Promise<Response | null> => {
+    const guardDataTransition = async (_active: import('@jeffusion/bungee-types').ConfigurationAggregate, next: import('@jeffusion/bungee-types').ConfigurationAggregate, duplicatedRouteId?: string): Promise<Response | null> => {
       await refreshRouteProtections();
+      if (duplicatedRouteId && [...routeProtections.values()].some(routeIds => routeIds.includes(duplicatedRouteId))) {
+        return Response.json({error:'route_copy_protected'},{status:422});
+      }
       for (const [plugin,routeIds] of routeProtections) if (routeIds.length && !next.plugin_activations.some(value => value.plugin_name === plugin)) {
         return Response.json({error:'protected_routes_require_plugin',plugin,routeIds},{status:422});
       }

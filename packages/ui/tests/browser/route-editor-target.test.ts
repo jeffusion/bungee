@@ -48,6 +48,15 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/,async route=>{const request=ro
           publication: { operation: null, recovery: null, retryable: false,
             serving_complete: false, serving_revision: null, target_revision: 1 } };
         else if (key === 'GET /api/runtime/upstreams') body = { workers: [], services: {}, availability: 'unknown', upstreams: [] };
+        else if (key === 'POST /api/routes/duplicate') {
+          const payload = request.postDataJSON();
+          assert.deepEqual(Object.keys(payload).sort(), ['mutation_id', 'path']);
+          assert.equal(payload.path, '/fixture-custom/');
+          state.writes.push(payload);
+          state.logical.routes.push({ id: 'copied-route', position: 2, path: '/fixture-custom/-copy', endpoints: [endpoint('copied-endpoint', 'https://example.test')], plugins: [] });
+          revision++;
+          return route.fulfill({status:202,json:{operation_id:payload.mutation_id,revision,operation:{state:'committed',mutation_id:payload.mutation_id},workers:[]}});
+        }
         else if (key === 'PUT /api/config') { const payload = request.postDataJSON(); assert.equal(payload.expected_revision, revision); state.writes.push(payload); state.logical = payload.aggregate.logical_configuration; revision++; return route.fulfill({status:202,json:{operation_id:payload.mutation_id,revision,operation:{state:'converged',mutation_id:payload.mutation_id},workers:[]}}); }
         else if (key === 'POST /api/config/validate') body = { valid: true, errors: [] };
         else {
@@ -71,6 +80,20 @@ try { await run(page,state); evidence.verify(); } catch(error) {
 }
 }finally{await context.close();}
 }
+
+test('route list copy uses the dedicated endpoint and reloads the created route', async () => {
+  await withEditor(async (page,state) => {
+    await page.goto(`${runtime.origin}/#/routes`);
+    const copy = page.locator('tr').filter({has:page.getByText('/fixture-custom/', {exact:true})}).getByRole('button', {name:'复制', exact:true});
+    await expect(copy).toBeEnabled();
+    await copy.click();
+    await expect(page.getByTestId('route-rules-table').getByText('/fixture-custom/-copy', {exact:true})).toBeVisible();
+    assert.equal(state.writes.length, 1);
+    assert.equal(state.writes[0].path, '/fixture-custom/');
+    await expect(copy).toBeEnabled();
+    await page.screenshot({path:'/tmp/bungee-route-copy.png'});
+  });
+}, 60_000);
 
 for(const name of ['new-custom','edit-service','edit-custom']) test(`route targets ${name}`,async()=>{
 await withEditor(async (page,state)=>{
@@ -352,6 +375,7 @@ test('Service mixed targets share ordering and preserve endpoint and Service plu
     assert.equal(saved.endpoints.length,1);assert.equal(saved.endpoints[0].position,1);
     assert.equal(saved.service_references[0].position,0);assert.equal(saved.service_references[0].service_id,'service-secondary');
     assert.equal(saved.endpoints[0].plugins[0].name,'beta');assert.equal(saved.plugins[0].name,'beta');
+    await expect(page).toHaveURL(`${runtime.origin}/#/services`);
     await page.goto(url);await page.getByTestId('service-nav-endpoints').first().click();
     await expect(targets.getByTestId('service-reference-row')).toHaveCount(1);
     await targets.getByRole('button',{name:'编辑',exact:true}).click();
