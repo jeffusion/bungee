@@ -97,9 +97,9 @@
   function selectNavigation(event: MouseEvent) {
     if (event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) menuOpen = false;
   }
-  const headerActionClass = 'header-action flex min-h-[44px] min-w-[44px] items-center justify-center gap-2 whitespace-nowrap font-mono text-[11px] font-semibold uppercase tracking-command transition-colors hover:bg-carbon-800 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500';
-  const headerUtilityClass = `${headerActionClass} header-utility w-11 px-0`;
-  const tabClass = `${headerActionClass} header-tab relative h-full gap-[12px] px-[18px] text-zinc-300 data-[state=open]:bg-carbon-800 data-[state=open]:text-nexus-300`;
+  const headerActionClass = 'header-action flex min-h-[44px] min-w-[44px] items-center justify-center gap-2 whitespace-nowrap font-mono text-[11px] font-semibold uppercase tracking-command transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500';
+  const headerUtilityClass = `${headerActionClass} header-utility w-11 px-0 hover:bg-carbon-800 hover:text-nexus-300`;
+  const tabClass = `${headerActionClass} header-tab relative h-full gap-[12px] px-[18px] text-zinc-300 hover:bg-carbon-700 hover:text-zinc-100 data-[state=open]:bg-carbon-700 data-[state=open]:text-zinc-100`;
 </script>
 {#snippet navigationLink(item: EffectivePage)}
   <Button href={item.href} variant="ghost" aria-current={item.active ? 'page' : undefined} onclick={selectNavigation}
@@ -160,7 +160,7 @@
     <span class="hidden flex-col leading-none sm:flex"><span class="flex items-baseline gap-[8px]"><span class="nx-display text-[16px] tracking-[0.04em] text-zinc-50">BUNGEE</span><span class="font-mono text-[11px] text-zinc-400">v{version}</span></span><span class="mt-[5px] font-mono text-[9px] uppercase tracking-chiseled text-zinc-500">REVERSE PROXY</span></span>
     <span class="font-mono text-[11px] text-zinc-400 sm:hidden">v{version}</span>
   </a>
-  <SystemUpdates />
+  <SystemUpdates returnFocus={brand} />
   <nav aria-label={$_('header.navigation')} use:measureNavigation={items} class="hidden w-0 min-w-0 flex-1 border-l border-carbon-600 md:flex" data-testid="header-top-menu">
     <div class="header-tabs-viewport min-w-0 flex-1 overflow-hidden">
     <ul class="flex h-full w-max items-stretch">
@@ -173,15 +173,15 @@
     </div>
     {#if overflowItems.length}
       <DropdownMenu.Root bind:open={moreOpen} closeFocus={() => $confirmation ? null : document.getElementById('header-more-trigger') ?? brand}>
-        <DropdownMenu.Trigger id="header-more-trigger" style={`width: ${moreControlWidth}px`} class={`${tabClass} shrink-0 gap-[8px] bg-carbon-800 ${overflowActive || moreOpen ? '!text-nexus-300' : ''}`} data-active={overflowActive}>
+        <DropdownMenu.Trigger id="header-more-trigger" style={`width: ${moreControlWidth}px`} class={`${tabClass} shrink-0 gap-[8px] bg-carbon-800 ${overflowActive ? '!text-nexus-300' : ''}`} data-active={overflowActive}>
           <LayoutGrid class="h-[16px] w-[16px] shrink-0" aria-hidden="true" /><span>{$_('header.more')}</span><ChevronDown class="h-3 w-3 shrink-0" aria-hidden="true" />
         </DropdownMenu.Trigger>
-        <DropdownMenu.Content data-testid="header-more-menu" align="end" sideOffset={4} class="z-[60] w-max min-w-[160px] max-w-[min(320px,calc(100vw-24px))] max-h-[calc(100dvh-64px)] overflow-y-auto border-carbon-600 bg-carbon-900 text-zinc-200 shadow-industrial">
-          <div use:moreLifecycle>
+        <DropdownMenu.Content data-testid="header-more-menu" align="end" sideOffset={4} class="z-[60] w-max min-w-[160px] !max-w-[min(320px,calc(100vw-24px))] max-h-[calc(100dvh-64px)] overflow-y-auto border-carbon-600 bg-carbon-900 text-zinc-200 shadow-industrial">
+          <div use:moreLifecycle class="space-y-1">
             {#each overflowItems as item, index (item.id)}
               {#if item.kind === 'group'}
                 {#if index > 0}<DropdownMenu.Separator class="bg-carbon-600" />{/if}
-                <DropdownMenu.Group>
+                <DropdownMenu.Group class="space-y-1">
                   <DropdownMenu.Label class="font-mono text-[11px] font-normal text-zinc-400"><span class="min-w-0 break-words [overflow-wrap:anywhere]">{item.label}</span></DropdownMenu.Label>
                   {#each item.children as page (page.id)}
                     {@render overflowLink(page, true)}
@@ -200,7 +200,7 @@
       <DropdownMenu.Trigger id="header-language-trigger" aria-label={$_('header.language')} title={`${$_('header.language')} · ${SUPPORTED_LOCALES.find(item => item.code === $locale)?.name ?? $locale}`}
         class={`${headerUtilityClass} ${languageOpen ? 'bg-nexus-500/10 text-nexus-300' : 'text-zinc-500'}`}><Languages aria-hidden="true" class="h-4 w-4" /></DropdownMenu.Trigger>
       <DropdownMenu.Content data-testid="header-language-menu" align="end" sideOffset={4} class="z-[60] min-w-36 border-carbon-500 bg-carbon-900 text-zinc-200 shadow-industrial">
-        <DropdownMenu.RadioGroup value={$locale || ''}>{#each SUPPORTED_LOCALES as supportedLocale}<DropdownMenu.RadioItem value={supportedLocale.code} class="min-h-[44px] font-mono" onclick={() => { switchLocale(supportedLocale.code); languageOpen = false; }}>{supportedLocale.name}</DropdownMenu.RadioItem>{/each}</DropdownMenu.RadioGroup>
+        <DropdownMenu.RadioGroup value={$locale || ''} class="space-y-1">{#each SUPPORTED_LOCALES as supportedLocale}<DropdownMenu.RadioItem value={supportedLocale.code} class="min-h-[40px] font-mono" onclick={() => { switchLocale(supportedLocale.code); languageOpen = false; }}>{supportedLocale.name}</DropdownMenu.RadioItem>{/each}</DropdownMenu.RadioGroup>
       </DropdownMenu.Content>
     </DropdownMenu.Root>
   </div>
@@ -209,7 +209,7 @@
 {/if}
 
 {#snippet overflowLink(page: EffectivePage, nested = false)}
-  <DropdownMenu.Item href={page.href} aria-current={page.active ? 'page' : undefined} class={`min-h-[44px] gap-2 border-l-2 text-[11px] ${nested ? 'pl-4' : ''} ${page.active ? 'border-nexus-500 bg-nexus-500/10 text-nexus-300' : 'border-transparent'}`}>
+  <DropdownMenu.Item href={page.href} aria-current={page.active ? 'page' : undefined} class={`min-h-[40px] gap-2 text-[11px] data-[highlighted]:bg-carbon-700 ${nested ? 'pl-4' : ''} ${page.active ? 'bg-nexus-500/10 text-nexus-300 data-[highlighted]:text-nexus-300' : 'data-[highlighted]:text-zinc-100'}`}>
     <MenuIcon icon={page.icon} /><span class="min-w-0 break-words [overflow-wrap:anywhere]">{page.label}</span>
   </DropdownMenu.Item>
 {/snippet}
@@ -217,7 +217,6 @@
 <style>
   .drawer-section :global([data-menu-icon]), .drawer-page :global([data-menu-icon]) { width: 16px; height: 16px; flex-shrink: 0; }
   .header-tabs-viewport :global([data-menu-icon]) { width: 16px; height: 16px; flex-shrink: 0; }
-  .header-tabs-viewport :global(.header-tab[data-active="true"]) { color: var(--nx-accent); }
-  .header-tabs-viewport :global(.header-tab[data-active="true"])::before { content: ''; position: absolute; left: 6px; width: 3px; height: 12px; background: var(--nx-accent); }
-  .header-tabs-viewport :global(.header-tab[data-active="true"])::after { content: ''; position: absolute; bottom: 0; left: 18px; right: 18px; height: 2px; background: var(--nx-accent); }
+  nav[data-testid="header-top-menu"] :global(.header-tab[data-active="true"]) { color: var(--nx-accent); }
+  nav[data-testid="header-top-menu"] :global(.header-tab[data-active="true"])::after { content: ''; position: absolute; bottom: 0; left: 18px; right: 18px; height: 2px; background: var(--nx-accent); }
 </style>

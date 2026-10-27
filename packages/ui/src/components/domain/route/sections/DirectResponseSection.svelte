@@ -174,7 +174,7 @@
   </div>
 
   {#if rules.length === 0}
-    <PanelCard label={$_('routeEditor.noResponseRulesTitle')} tag="EMPTY" flush>
+    <PanelCard label={$_('routeEditor.noResponseRulesTitle')} tag="EMPTY" flush corners={false}>
       <div class="py-8 text-center space-y-4">
         <p class="mx-auto max-w-xl text-sm text-zinc-400">{$_('routeEditor.noResponseRules')}</p>
         <div class="flex justify-center gap-2">
@@ -213,7 +213,7 @@
       </div>
 
       {#if activeRule}
-        <PanelCard class="min-w-0 flex-[2_1_480px]" title={activeRule.type === 'direct_response' ? $_('routeEditor.directResponseMode') : $_('routeEditor.redirectMode')}>
+        <PanelCard class="min-w-0 flex-[2_1_480px]" title={activeRule.type === 'direct_response' ? $_('routeEditor.directResponseMode') : $_('routeEditor.redirectMode')} corners={false}>
           <svelte:fragment slot="actions">
             <Button variant="outline" size="sm" onclick={() => duplicateRule(activeIndex)}>{$_('routeEditor.duplicateRule')}</Button>
             <Button variant="destructive" size="sm" onclick={() => removeRule(activeIndex)}>{$_('common.delete')}</Button>

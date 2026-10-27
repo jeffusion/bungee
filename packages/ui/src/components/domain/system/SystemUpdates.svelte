@@ -9,11 +9,14 @@
   import { Button } from '$components/ui/button';
   import Download from 'lucide-svelte/icons/download';
 
+  let { returnFocus }: { returnFocus?: HTMLElement | null } = $props();
   const pendingKey = 'bungee.system-update.pending';
   const reloadKey = 'bungee.system-update.reload';
   let status = $state<SystemUpdateStatus | null>(null);
   let open = $state(false);
+  let trigger = $state<HTMLButtonElement | null>(null);
   let loading = $state(false);
+  let checkingRelease = $state(false);
   let submitting = $state(false);
   let confirming = $state(false);
   let pendingId = $state<string | null>(null);
@@ -26,6 +29,11 @@
   const blocked = $derived(submitting || confirming || !!pendingId || !!reloadIntent || active);
   const ready = $derived(status?.operation?.phase === 'awaiting_confirmation');
   const available = $derived(!!status?.latest && status.latest.version.localeCompare(status.running_version, undefined, { numeric: true }) > 0);
+  const needsAttention = $derived(available || active || !!pendingId || !!reloadIntent || !!error || !!status?.check_error
+    || status?.operation?.phase === 'failed' || status?.operation?.phase === 'cancelled');
+  $effect.pre(() => {
+    if (!needsAttention && !open && trigger && document.activeElement === trigger) returnFocus?.focus({ preventScroll: true });
+  });
   const releaseUrl = $derived.by(() => {
     try { const url = new URL(status?.latest?.url ?? ''); return url.protocol === 'https:' ? url.href : null; }
     catch { return null; }
@@ -50,6 +58,7 @@
     if (loading || submitting || destroyed) return;
     const requestGeneration = ++generation;
     loading = true;
+    checkingRelease = check;
     try {
       const value = check
         ? await api.post<SystemUpdateStatus>('/system/updates/check', {}, { signal: AbortSignal.timeout(15_000) })
@@ -58,7 +67,7 @@
     } catch (cause) {
       if (!destroyed && generation === requestGeneration) error = cause instanceof ApiError ? cause.message : 'status_unavailable';
     } finally {
-      if (!destroyed && generation === requestGeneration) loading = false;
+      if (!destroyed && generation === requestGeneration) { loading = false; checkingRelease = false; }
     }
   }
   async function upgrade(opener: HTMLElement) {
@@ -98,6 +107,7 @@
   async function submit(path: string, input: { operation_id: string; current_version: string; target_version: string }) {
     submitting = true;
     loading = false;
+    checkingRelease = false;
     ++generation;
     try {
       const value = await api.post<SystemUpdateStatus>(path, input, { signal: AbortSignal.timeout(15_000) });
@@ -136,13 +146,15 @@
 </script>
 
 {#if !$isLoading}
-  <button type="button" data-testid="system-updates-trigger" aria-label={available ? $_('updates.available', { values: { version: status?.latest?.version ?? '' } }) : $_('updates.title')} title={$_('updates.title')}
+  {#if needsAttention || open}
+  <button type="button" bind:this={trigger} data-testid="system-updates-trigger" aria-label={available ? $_('updates.available', { values: { version: status?.latest?.version ?? '' } }) : $_('updates.title')} title={$_('updates.title')}
     onclick={() => { open = true; void read(); }}
     class="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center gap-1.5 px-2 font-mono text-[11px] text-zinc-400 transition-colors hover:bg-carbon-800 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-nexus-500">
     <Download class="h-4 w-4" aria-hidden="true" />
     {#if available}<span class="h-1.5 w-1.5 bg-nexus-500" aria-hidden="true"></span><span class="hidden lg:inline">v{status?.latest?.version}</span>{/if}
   </button>
-  <IndustrialDialog bind:open busy={confirming} title={$_('updates.title')} description={$_('updates.description')} closeLabel={$_('common.close')} scrollBody width="38rem">
+  {/if}
+  <IndustrialDialog bind:open busy={confirming} returnFocus={needsAttention ? undefined : returnFocus} title={$_('updates.title')} description={$_('updates.description')} closeLabel={$_('common.close')} scrollBody width="38rem">
     {#snippet body()}
       <div data-testid="system-updates-dialog" class="space-y-4">
         <dl class="grid grid-cols-2 gap-3 border-b border-carbon-600 pb-4">
@@ -153,7 +165,7 @@
         </dl>
         {#if releaseUrl}<a href={releaseUrl} target="_blank" rel="noopener noreferrer" class="text-sm text-nexus-300 underline">{$_('updates.releaseNotes')}</a>{/if}
         {#if status?.selected_version && status.selected_version !== status.running_version}<p class="text-sm text-zinc-400">{$_('updates.selected')}: <span class="font-mono">{status.selected_version}</span></p>{/if}
-        {#if loading || status?.checking}<p role="status" class="text-sm text-zinc-400">{$_('updates.checking')}</p>{/if}
+        {#if checkingRelease || status?.checking || (loading && !status)}<p role="status" class="text-sm text-zinc-400">{$_('updates.checking')}</p>{/if}
         {#if error || status?.check_error}<p role="alert" class="text-sm text-red-400">{reason(error ?? status!.check_error!)} <span class="font-mono">({error ?? status?.check_error})</span></p>{/if}
         {#if pendingId || (reloadIntent && ready)}<p role="status" data-testid="update-unknown" class="text-sm text-amber-400">{$_('updates.unknown')}</p>{/if}
         {#if reloadIntent}<p role="status" data-testid="update-countdown" class="font-mono text-sm text-nexus-300">{$_('updates.countdown', { values: { seconds } })}</p>{/if}

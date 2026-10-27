@@ -18,9 +18,9 @@ const initial = (): SystemUpdateStatus => ({ running_version: '6.6.0', selected_
 async function scenario(run: (page: Page, state: {
   status: SystemUpdateStatus; posts: unknown[]; confirmations: unknown[]; checks: number; reads: number;
   response: 'accepted' | 'lost' | 'unauthorized'; confirmResponse: 'accepted' | 'lost' | 'unauthorized';
-}) => Promise<void>, language = 'en') {
+}) => Promise<void>, language = 'en', startOpen = true, status = initial()) {
   const context = await browser.newContext({ locale: language });
-  const state = { status: initial(), posts: [] as unknown[], confirmations: [] as unknown[], checks: 0, reads: 0,
+  const state = { status, posts: [] as unknown[], confirmations: [] as unknown[], checks: 0, reads: 0,
     response: 'accepted' as 'accepted' | 'lost' | 'unauthorized', confirmResponse: 'accepted' as 'accepted' | 'lost' | 'unauthorized' };
   try {
     const page = await context.newPage();
@@ -53,13 +53,43 @@ async function scenario(run: (page: Page, state: {
     });
     await page.goto(`${runtime.origin}/tests/fixtures/components/system-updates.html?language=${language}`);
     await expect.poll(() => state.reads).toBeGreaterThan(0);
-    await page.getByTestId('system-updates-trigger').click();
-    await expect(page.getByTestId('updates-upgrade')).toBeEnabled();
+    if (startOpen) {
+      await page.getByTestId('system-updates-trigger').click();
+      await expect(page.getByTestId('updates-upgrade')).toBeEnabled();
+    }
     await run(page, state);
     evidence.verify();
     assert(errors).toEqual([]);
   } finally { await context.close(); }
 }
+
+test('current version hides the update entry while pending and failed operations remain accessible', async () => {
+  const status = initial();
+  status.latest!.version = status.running_version;
+  status.can_upgrade = false;
+  await scenario(async (page, state) => {
+    await expect(page.getByTestId('system-updates-trigger')).toHaveCount(0);
+
+    state.status.operation = { id: '27a59927-c8ea-4b75-af70-56bd9845d833', source_version: '6.5.0',
+      target_version: '6.6.0', phase: 'awaiting_confirmation', error: null, started_at: Date.now(), updated_at: Date.now() };
+    await page.reload();
+    await page.getByTestId('system-updates-trigger').click();
+    await expect(page.getByTestId('updates-install')).toBeEnabled();
+
+    state.status.operation.phase = 'failed';
+    state.status.operation.error = 'shutdown_failed';
+    await page.reload();
+    await page.getByTestId('system-updates-trigger').click();
+    await expect(page.getByTestId('update-operation')).toHaveAttribute('data-phase', 'failed');
+
+    state.status.operation = null;
+    state.status.check_error = 'release_check_failed';
+    await page.reload();
+    await expect(page.getByTestId('system-updates-trigger')).toBeVisible();
+    assert(state.posts).toHaveLength(0);
+    assert(state.confirmations).toHaveLength(0);
+  }, 'en', false, status);
+}, 30_000);
 
 test('two confirmations separate download from restart; fixed countdown reloads once while restarting', async () => {
   await scenario(async (page, state) => {
@@ -133,11 +163,11 @@ test('lost download responses recover by querying only; other-page upgrades pres
     assert(state.confirmations).toHaveLength(0);
     await page.getByRole('button', { name: /Close|关闭/, exact: true }).click();
     await page.getByRole('textbox', { name: 'Draft' }).fill('unsaved work');
+    await page.getByTestId('system-updates-trigger').click();
     state.status.operation.phase = 'succeeded';
     state.status.running_version = '6.7.0';
     state.status.selected_version = '6.7.0';
     state.status.can_upgrade = false;
-    await page.getByTestId('system-updates-trigger').click();
     await expect(page.getByTestId('update-operation')).toHaveAttribute('data-phase', 'succeeded');
     await page.screenshot({ path: '/tmp/bungee-system-updates-zh.png' });
     await page.getByRole('button', { name: /Close|关闭/, exact: true }).click();
