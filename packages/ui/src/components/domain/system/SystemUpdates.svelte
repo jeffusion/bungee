@@ -5,9 +5,10 @@
   import { _, isLoading } from '$i18n';
   import { confirmAction } from '$stores/confirmation';
   import { getAuthStateRevision, isAuthenticationStateCurrent } from '$stores/auth';
-  import { IndustrialDialog } from '$components/industrial';
+  import { IndustrialDialog, StatusBadge } from '$components/industrial';
   import { Button } from '$components/ui/button';
   import Download from 'lucide-svelte/icons/download';
+  import { version } from '../../../../../../package.json';
 
   let { returnFocus }: { returnFocus?: HTMLElement | null } = $props();
   const pendingKey = 'bungee.system-update.pending';
@@ -132,8 +133,7 @@
     }
     catch { error = 'storage_unavailable'; }
     void read();
-    const timer = setInterval(() => { if (open || active || pendingId || status?.checking) void read(); }, 2_000);
-    const reminder = setInterval(() => { if (document.visibilityState !== 'hidden') void read(); }, 60_000);
+    const timer = setInterval(() => { if (active || pendingId) void read(); }, 2_000);
     const countdown = setInterval(() => {
       if (!reloadIntent) return;
       seconds = Math.max(0, Math.ceil((reloadIntent.at - Date.now()) / 1000));
@@ -141,19 +141,25 @@
       try { sessionStorage.removeItem(reloadKey); reloadIntent = null; window.location.reload(); }
       catch { reloadIntent = null; error = 'storage_unavailable'; }
     }, 250);
-    return () => { destroyed = true; ++generation; clearInterval(timer); clearInterval(reminder); clearInterval(countdown); };
+    return () => { destroyed = true; ++generation; clearInterval(timer); clearInterval(countdown); };
   });
 </script>
 
 {#if !$isLoading}
+  <div class="flex shrink-0 items-center pr-2 md:pr-[18px]">
+  {#if available}
+    <StatusBadge variant="online" dot>v{status?.running_version ?? version}</StatusBadge>
+  {:else}
+    <span class="font-mono text-[11px] text-zinc-400">v{status?.running_version ?? version}</span>
+  {/if}
   {#if needsAttention || open}
   <button type="button" bind:this={trigger} data-testid="system-updates-trigger" aria-label={available ? $_('updates.available', { values: { version: status?.latest?.version ?? '' } }) : $_('updates.title')} title={$_('updates.title')}
     onclick={() => { open = true; void read(); }}
     class="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center gap-1.5 px-2 font-mono text-[11px] text-zinc-400 transition-colors hover:bg-carbon-800 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-nexus-500">
     <Download class="h-4 w-4" aria-hidden="true" />
-    {#if available}<span class="h-1.5 w-1.5 bg-nexus-500" aria-hidden="true"></span><span class="hidden lg:inline">v{status?.latest?.version}</span>{/if}
   </button>
   {/if}
+  </div>
   <IndustrialDialog bind:open busy={confirming} returnFocus={needsAttention ? undefined : returnFocus} title={$_('updates.title')} description={$_('updates.description')} closeLabel={$_('common.close')} scrollBody width="38rem">
     {#snippet body()}
       <div data-testid="system-updates-dialog" class="space-y-4">
@@ -182,7 +188,7 @@
       </div>
     {/snippet}
     {#snippet footer()}
-      <Button variant="outline" disabled={loading || !!status?.checking || submitting || confirming} onclick={() => void read(true)} data-testid="updates-check">{$_('updates.check')}</Button>
+      <Button variant="outline" disabled={loading || submitting || confirming} onclick={() => void read(true)} data-testid="updates-check">{$_('updates.check')}</Button>
       {#if ready}
         <Button disabled={submitting || confirming || !!pendingId || !!reloadIntent} onclick={event => void install(event.currentTarget as HTMLElement)} data-testid="updates-install">{$_('updates.install')}</Button>
       {:else}
