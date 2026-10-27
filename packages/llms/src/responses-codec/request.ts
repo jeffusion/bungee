@@ -22,7 +22,7 @@ function definitionKey(value: unknown): string {
 }
 
 /** Converts only self-contained history. Reference resolution belongs to the caller. */
-export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol, capabilities: ResponsesCodecCapabilities = {}): DecodedResponsesRequest {
+export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol, capabilities: ResponsesCodecCapabilities = {}, options: { preserveContentOrder?: boolean } = {}): DecodedResponsesRequest {
   const body = record(raw, 'Responses request');
   if (capabilities.agentMessageDelivery !== undefined && capabilities.agentMessageDelivery !== 'plaintext') fail('invalid_payload', 'Unknown agent message delivery policy', 'agentMessageDelivery');
   const budget = limits(capabilities.limits);
@@ -218,7 +218,9 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
       if (protocol !== 'chat_completions' || !(capabilities.reasoningHistory || capabilities.reasoningEffort)) fail('unsupported_reasoning', 'Reasoning history requires an explicit compatible reasoning capability');
       if (item.content != null) fail('unsupported_reasoning', 'Reasoning content requires an explicit history mapping', `${messageParam}.content`);
       const summary = list(item.summary, 'reasoning summary');
-      pendingReasoning += summary.map(part => { const p = record(part, 'reasoning summary'); if (p.type !== 'summary_text') fail('unsupported_reasoning', 'Unknown reasoning summary'); return string(p.text, 'summary text'); }).join('');
+      const text = summary.map(part => { const p = record(part, 'reasoning summary'); if (p.type !== 'summary_text') fail('unsupported_reasoning', 'Unknown reasoning summary'); return string(p.text, 'summary text'); }).join('');
+      if (options.preserveContentOrder) addMessage({ role: 'assistant', content: null, reasoning_content: text, ...(item.id === undefined ? {} : { id: string(item.id, 'item.id', true) }) });
+      else pendingReasoning += text;
       return;
     }
     if (item.type === 'function_call' || item.type === 'custom_tool_call') {
@@ -231,7 +233,7 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
       bounded(args, budget.maxArgumentBytes, 'arguments'); argumentObject(args);
       const call = { id, type: 'function', function: { name: resolve(item, custom), arguments: args } };
       const previous = chat.at(-1);
-      if (previous?.role === 'assistant') {
+      if (previous?.role === 'assistant' && !options.preserveContentOrder) {
         previous.tool_calls = [...(previous.tool_calls as JsonRecord[] ?? []), call];
         if (pendingReasoning) previous.reasoning_content = pendingReasoning;
       } else addMessage({ role: 'assistant', content: null, tool_calls: [call], ...(pendingReasoning ? { reasoning_content: pendingReasoning } : {}) });
@@ -250,6 +252,7 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     const role = string(item.role, 'message role', true);
     if (!['user', 'assistant', 'system', 'developer'].includes(role)) fail('unsupported_content', 'Unknown message role');
     const message: JsonRecord = { role, content: normalizeContent(item.content, role) };
+    if (options.preserveContentOrder && item.id !== undefined) message.id = string(item.id, 'item.id', true);
     if (pendingReasoning) { if (role !== 'assistant') fail('unsupported_reasoning', 'Reasoning must precede an assistant item'); message.reasoning_content = pendingReasoning; pendingReasoning = ''; }
     addMessage(message);
   });

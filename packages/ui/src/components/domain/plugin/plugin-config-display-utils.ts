@@ -68,7 +68,7 @@ export function displayModelBindings(value: unknown, displayTarget: (target: { t
     const source = binding.source ?? binding.alias ?? binding.model;
     const destination = `${binding.provider}/${binding.model}`;
     const target = binding.target;
-    const protocolNames: Record<string, string> = { responses: 'Responses', chat_completions: 'Chat Completions', anthropic_messages: 'Anthropic Messages' };
+    const protocolNames: Record<string, string> = { responses: 'Responses', chat_completions: 'Chat Completions', anthropic_messages: 'Anthropic Messages', gemini_generate_content: 'Gemini GenerateContent' };
     const protocol = target?.protocol ? ` · ${protocolNames[target.protocol] ?? target.protocol}` : '';
     const forwarding = target && ['route', 'service'].includes(target.type) ? ` · ${displayTarget(target)}` : '';
     const replace = source !== binding.model;

@@ -19,7 +19,9 @@ export function protocolForPath(path: string): LLMProtocol | null {
 }
 export function targetPath(path: string, protocol: LLMProtocol, model: string, streaming: boolean): string {
     const suffix = protocol === 'responses' ? '/responses' : protocol === 'chat_completions' ? '/chat/completions' : protocol === 'anthropic_messages' ? '/messages' : `/models/${encodeURIComponent(model)}:${streaming ? 'streamGenerateContent' : 'generateContent'}`;
-    return path.replace(/\/(?:responses|chat\/completions|messages|models\/[^/]+:(?:streamGenerateContent|generateContent))$/, suffix);
+    const prefix = path.replace(/\/(?:responses|chat\/completions|messages|models\/[^/]+:(?:streamGenerateContent|generateContent))$/, '');
+    if (prefix === path) return path;
+    return (protocol === 'gemini_generate_content' ? prefix.replace(/\/v1(?:beta|alpha)?$/, '') + '/v1beta' : prefix) + suffix;
 }
 export default definePlugin(class implements Plugin {
     static readonly name = 'llm-protocol-adapter';
@@ -77,6 +79,7 @@ export default definePlugin(class implements Plugin {
                 model = protocolRequestModel(source, ctx.body, ctx.url);
                 session = this.service.createSession({ sourceProtocol: source, targetProtocol: this.options!.targetProtocol, model,
                     modelIdentity: readModelIdentity(ctx.annotations),
+                    ...(source === 'responses' && this.options!.targetProtocol === 'gemini_generate_content' ? { agentMessageDelivery: 'plaintext' as const } : {}),
                     ...(source === 'gemini_generate_content' ? { streaming: ctx.url.pathname.endsWith(':streamGenerateContent') } : {}) });
                 const result = session.convertRequest(ctx.body);
                 if (source !== this.options!.targetProtocol) {

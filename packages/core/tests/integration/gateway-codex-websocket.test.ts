@@ -107,3 +107,29 @@ test('each WS generation starts with an independent model identity declaration',
    expect(bodies.map(body=>body.model)).toEqual(['GLM-5.3','glm-5.3']);expect(bodies.every(body=>!('annotations' in body))).toBe(true);
  }finally{await env.close();upstream.stop(true);}
 });
+
+test('Gemini WS bridges signed tools and previous_response_id over HTTP SSE',async()=>{
+ const calls:any[]=[];let upgrades=0;
+ const upstream=Bun.serve({hostname:'127.0.0.1',port:0,async fetch(request){
+  if(request.headers.get('upgrade')==='websocket')upgrades++;
+  const url=new URL(request.url),body=await request.json();calls.push({url,body});
+  const parts=calls.length===1?[{functionCall:{id:'wire-call',name:'bungee_tool_0',args:{q:'first'}},thoughtSignature:'b3BhcXVlLXNpZ25hdHVyZQ=='}]:[{text:'Gemini continuation'}];
+  return sse([{candidates:[{index:0,content:{role:'model',parts},finishReason:'STOP'}]}]);
+ }});
+ const env=await setup([{protocol:'gemini_generate_content',target:'http://127.0.0.1:'+upstream.port,ws:true}]);
+ const tools=[{type:'function',name:'lookup',parameters:{type:'object',properties:{q:{type:'string'}}}}];
+ try{
+  env.client.send(JSON.stringify({type:'response.create',model:'m0',input:'hello',tools,parallel_tool_calls:true}));
+  const first=(await env.terminal()).at(-1);expect(first.type).toBe('response.completed');
+  const call=first.response.output.find((item:any)=>item.type==='function_call');
+  expect(call).toMatchObject({name:'lookup',call_id:'wire-call__thought__b3BhcXVlLXNpZ25hdHVyZQ==',arguments:'{"q":"first"}'});
+  await Bun.sleep(20);const start=env.events.length;
+  env.client.send(JSON.stringify({type:'response.create',model:'m0',previous_response_id:first.response.id,input:[{type:'function_call_output',call_id:call.call_id,output:'found'}],tools}));
+  expect((await env.terminal(start)).at(-1).type).toBe('response.completed');
+  expect(calls).toHaveLength(2);expect(upgrades).toBe(0);
+  for(const call of calls){expect(call.url.pathname).toBe('/v1beta/models/m0:streamGenerateContent');expect(call.url.searchParams.get('alt')).toBe('sse');}
+  const parts=calls[1].body.contents.flatMap((item:any)=>item.parts);
+  expect(parts).toContainEqual({functionCall:{id:'wire-call',name:'bungee_tool_0',args:{q:'first'}},thoughtSignature:'b3BhcXVlLXNpZ25hdHVyZQ=='});
+  expect(parts).toContainEqual({functionResponse:{id:'wire-call',name:'bungee_tool_0',response:{output:'found'}}});
+ }finally{await env.close();upstream.stop(true);}
+});

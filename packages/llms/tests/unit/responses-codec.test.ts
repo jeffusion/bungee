@@ -311,6 +311,13 @@ test('Codex null encrypted placeholder retains plain reasoning without enabling 
   const raw=request({input,reasoning:{effort:'high'}});
   const decoded=decodeResponsesRequest(raw,'chat_completions',{reasoningHistory:true});
   expect((decoded.body.messages as Record<string, unknown>[])[1]).toMatchObject({role:'assistant',reasoning_content:'plain thought',tool_calls:[{id:'call'}]});
+  const parallel = decodeResponsesRequest(request({input:[input[0],input[2],reasoning,{...input[2],call_id:'second'},input[3],{...input[3],call_id:'second'}]}),'chat_completions',{reasoningHistory:true});
+  expect(parallel.body.messages).toMatchObject([
+    {role:'user'},
+    {role:'assistant',reasoning_content:'plain thought',tool_calls:[{id:'call'},{id:'second'}]},
+    {role:'tool',tool_call_id:'call'},
+    {role:'tool',tool_call_id:'second'},
+  ]);
   expect(decoded.body).not.toHaveProperty('reasoning_effort');
   const {internal_chat_message_metadata_passthrough: _metadata,...canonicalReasoning}=reasoning;
   expect(decoded.canonicalInput[1]).toEqual(canonicalReasoning);

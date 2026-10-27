@@ -62,7 +62,7 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
         if(!prior)throw new DataAdmissionError(422,'codex_router_history_missing_start_new_conversation');
         const delta=typeof input.input === 'string' ? [{role:'user',content:input.input}] : input.input;
         if(!Array.isArray(delta))throw new DataAdmissionError(422,'codex_router_invalid_history');
-        if(prior.items.some((item:any)=>item.encrypted_content || item.type==='compaction')){
+        if(protocol!=='gemini_generate_content' && prior.items.some((item:any)=>item.encrypted_content || item.type==='compaction')){
           if(protocol!=='responses' || JSON.stringify(prior.target)!==JSON.stringify(binding.target) || prior.origin?.provider!==binding.provider || prior.origin?.model!==binding.model || !prior.origin?.upstreamId)throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
           requiredUpstreamId=prior.origin.upstreamId;opaqueRestored=true;
         }
@@ -72,7 +72,7 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       input.model=binding.model;
       let logicalInput=typeof input.input === 'string' ? [{role:'user',content:input.input}] : input.input;
       if(!Array.isArray(logicalInput))throw new DataAdmissionError(422,'codex_router_invalid_history');
-      if(protocol!=='responses' && !opaqueRestored && logicalInput.some((item:any)=>item?.encrypted_content || item?.type==='compaction'))throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
+      if(protocol!=='responses' && protocol!=='gemini_generate_content' && !opaqueRestored && logicalInput.some((item:any)=>item?.encrypted_content || item?.type==='compaction'))throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
       const hasTools=input.tools?.length || logicalInput.some((item:any)=>item?.type==='additional_tools' && item.tools?.length);
       if(hasTools && (!capabilities.toolCall || binding.capabilityOverrides?.tools===false))throw new DataAdmissionError(422,'codex_router_tools_unsupported');
       let relayDiagnostics:any[]=[];

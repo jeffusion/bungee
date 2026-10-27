@@ -39,7 +39,7 @@ export function parseBindings(value: unknown): readonly ModelBinding[] {
     if (!target || !['route','service'].includes(target.type) || typeof target.id !== 'string' || !target.id
       || Object.keys(target).some(key => !['type','id','protocol'].includes(key))) throw new Error('codex_router_invalid_target');
     if (target.protocol === undefined) throw new Error('codex_router_target_protocol_required');
-    if (!['responses','chat_completions','anthropic_messages'].includes(target.protocol)) throw new Error('codex_router_target_protocol_invalid');
+    if (!['responses','chat_completions','anthropic_messages','gemini_generate_content'].includes(target.protocol)) throw new Error('codex_router_target_protocol_invalid');
     const publicId = bindingSource(entry);
     if (ids.has(publicId)) throw new Error('codex_router_model_conflict');
     ids.add(publicId);

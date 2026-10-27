@@ -6,12 +6,12 @@ import { CanonicalStreamRenderer, CanonicalStreamValidator } from './stream';
 import { fields } from './validation';
 import { LLM_PROTOCOLS, type LLMProtocol, type ProtocolSession, type ProtocolSessionContext } from './types';
 export * from './types';
-export const PROTOCOL_CONVERSION_RULES_VERSION = '1.0.1';
+export const PROTOCOL_CONVERSION_RULES_VERSION = '1.0.4';
 export function describeProtocolConversion() {
   return {
     rulesVersion: PROTOCOL_CONVERSION_RULES_VERSION, protocols: [...LLM_PROTOCOLS], matrix: LLM_PROTOCOLS.flatMap(sourceProtocol => LLM_PROTOCOLS.map(targetProtocol => ({
       sourceProtocol, targetProtocol,
-      mode: sourceProtocol === targetProtocol ? 'passthrough' : (sourceProtocol === 'responses' && targetProtocol === 'gemini_generate_content') || (sourceProtocol === 'gemini_generate_content' && targetProtocol === 'responses') ? 'unsupported' : 'convert'
+      mode: sourceProtocol === targetProtocol ? 'passthrough' : sourceProtocol === 'gemini_generate_content' && targetProtocol === 'responses' ? 'unsupported' : 'convert'
     } as const)))
   };
 }
@@ -28,9 +28,9 @@ export function createProtocolSession(context: ProtocolSessionContext): Protocol
     fail('unsupported_protocol', 'Unknown protocol');
   if (typeof context.model !== 'string' || !context.model)
     fail('invalid_payload', 'Target model is required', 'model');
-  const unsupported = (context.sourceProtocol === 'responses' && context.targetProtocol === 'gemini_generate_content') || (context.sourceProtocol === 'gemini_generate_content' && context.targetProtocol === 'responses');
+  const unsupported = context.sourceProtocol === 'gemini_generate_content' && context.targetProtocol === 'responses';
   if (unsupported)
-    fail('unsupported_protocol_pair', 'Responses and Gemini direct conversion is not supported');
+    fail('unsupported_protocol_pair', 'Gemini to Responses conversion is not supported');
   const same = context.sourceProtocol === context.targetProtocol;
   let disposed = false, poisoned = false, requested = false, mode: 'json' | 'stream' | undefined, finished = false, passTerminal = false, passAnthropicStopped = false;
   let names: ResponsesToolNames = new Map();

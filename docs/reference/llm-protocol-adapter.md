@@ -21,16 +21,18 @@
 
 | 源 → 目标 | `responses` | `chat_completions` | `anthropic_messages` | `gemini_generate_content` |
 |---|---|---|---|---|
-| `responses` | 透传 | 转换 | 转换 | 不支持 |
+| `responses` | 透传 | 转换 | 转换 | 转换 |
 | `chat_completions` | 转换 | 透传 | 转换 | 转换 |
 | `anthropic_messages` | 转换 | 转换 | 透传 | 转换 |
 | `gemini_generate_content` | 不支持 | 转换 | 转换 | 透传 |
 
-矩阵中的转换表示已实现协议路径，具体输入仍需满足严格语义约束。Responses↔Gemini 在表单保存、配置编译/发布和插件初始化拒绝。配置不接受方向合并字段或旧名称、旧字段；同协议保持原生透传。
+矩阵中的转换表示已实现协议路径，具体输入仍需满足严格语义约束。Gemini→Responses 在表单保存、配置编译/发布和插件初始化拒绝。Responses→Gemini 包含请求转换及 JSON/SSE 回包，不表示反向入口也已支持。配置不接受方向合并字段或旧名称、旧字段；同协议保持原生透传。
 
 `runtimeScope: global-and-scoped` 同时支持 provider 服务和显式转换绑定。激活依赖或消费转换服务时，宿主自动初始化 global provider；`initializationKind: automatic-provider` 不要求协议对，也不注册请求变换 hook。显式绑定则需要必选协议对并执行声明的转换。这一区分防止 Codex Router 的依赖激活自动改写所有路由。
 
 转换绑定匹配 POST 的 `/responses`、`/chat/completions`、`/messages` 和 `/models/{model}:generateContent|streamGenerateContent`。实际入口协议必须与 sourceProtocol 一致；入口模型缺失、重复转换以及不支持的模型目录/count_tokens端点明确拒绝。插件改写协议路径，路由/service 继续拥有上游选择、认证、重试和转发。
+
+转换目标为 Gemini 时，插件生成 `/v1beta/models/{model}:generateContent`，流式使用 `streamGenerateContent?alt=sse`；入口已有的协议版本段会被替换，网关挂载前缀保留给路由规则处理。Responses 客户端可以使用 `/responses` 或 `/v1/responses`，不需要发送 Gemini 的版本路径。此转换的上游基址不应重复包含 `/v1beta`。
 
 ## 公共服务和进程职责
 
@@ -46,9 +48,11 @@ control 侧消费已加载目录并发布转换描述/能力服务，不执行�
 
 临时历史由 control 管理，进程重启即丢失，不写 SQL/插件存储。键由 scope 和响应 ID 组成，不同作用域不能互读。默认 TTL 10 分钟，上限 512 条、总计 32 MiB、单条 8 MiB；按最旧记录淘汰，30 秒周期清理。RPC 以不超过 8192 字符的有序片段传输，最多 1024 片，总正文仍受 8 MiB 限制；未完成上传有 30 秒期限和全局 8 MiB 限制。仅完整、成功完成的逻辑生成进入可续聊历史；失败、取消、截断/incomplete 不作为成功历史。
 
-Codex Router 负责模型目录替换、绑定选择、dispatch 和 HTTP/WS 传输决定。它消费 adapter 的公共转换与历史服务，不拥有 codec 或缓存实现。Responses WS 的目标为 Chat/Anthropic 时使用统一 HTTP/SSE 转换；原生 Responses 保持原生传输。
+Codex Router 负责模型目录替换、绑定选择、dispatch 和 HTTP/WS 传输决定。它消费 adapter 的公共转换与历史服务，不拥有 codec 或缓存实现。Responses WS 的目标为 Chat/Anthropic/Gemini 时使用统一 HTTP/SSE 转换；原生 Responses 保持原生传输。
 
 转换会话显式选择 `agentMessageDelivery: 'plaintext'` 后，可以规范化明文 `agent_message` 并为三类 collaboration 调用设置空的加密参数标记；缺省仍严格检查。实际密文必须先通过协作检查和精确字段替换，不能按字符串外观猜成明文。原生中继、缓存隔离和额外消耗见 [Codex Router](../../plugins/codex-router/README.md#agent-协作与原生中继)。
+
+直接绑定 Responses→Gemini 的适配器自动选择明文协作策略，与 Codex Router 的外部转换会话一致。协作工具的 message 参数移除原生加密声明，JSON/SSE 回包保留 encrypted_function_args=[]，明文 agent_message 以携带作者和接收方元数据的 user 消息进入 Gemini。已有真实密文仍拒绝；直接绑定不提供 Router 的原生中继配置。
 
 中继解析使用共享 BodyHandle 的 JSON/SSE 视图，要求成功完成、唯一的指定 function_call 以及只含字符串 payload 的参数；允许原生 reasoning 事件，但不把它作为任务内容。缺失参数、多个调用、普通答案、拒绝、截断、未知事件或异常终态均失败。缓存复用现有临时历史 RPC，转换正文不走控制进程 RPC；共享操作通过 provider 的后台授权帧和租约管理，dispose 取消在途工作。
 
@@ -60,9 +64,19 @@ Codex Router 负责模型目录替换、绑定选择、dispatch 和 HTTP/WS 传�
 
 Chat Completions 上游 `usage` 及其 details 对象是可扩展的辅助统计，不使用封闭字段名单作为响应准入条件。适配器校验核心 token 计数及实际读取的缓存、推理细项，接受可选细项的缺省或 `null`；未消费的统计字段不参与转换决策，不因其出现而中断正文或完成事件。原始统计仍由既有上游 BodyHandle 观察与计量链路读取，转换不修改该对象，也不向 Responses 输出新增未经目标协议定义的字段；这不表示所有上游统计细分均能无损转换。该边界参考 [OpenAI Chat usage](https://platform.openai.com/docs/api-reference/chat/object) 和 [AI SDK DeepSeek 的开放 usage schema](https://github.com/vercel/ai/blob/39aae5425e9f9a25acce413cc7e6823c2b5a73c5/packages/deepseek/src/chat/deepseek-chat-api-types.ts)，不放宽正文、工具、终态或其他协议的既有校验。
 
-Responses→Chat/Anthropic 的已知 `web_search`、`web_search_preview` 声明在 `tool_choice` 缺省、`auto` 或 `none` 时属于明确允许的降级：先校验字段、类型及资源限额，再省略整个搜索声明，记录 `optional_hosted_web_search_unavailable` 和字段位置。不把 OpenAI 缓存搜索改成目标的实时搜索，也不伪造搜索调用或引用。强制搜索及 `required` 继续拒绝；未知搜索参数、非法值、搜索执行历史继续严格报错。普通 function/namespace/custom 工具保持原转换规则，同协议 Responses 保留搜索声明透传。
+Responses→Chat/Anthropic/Gemini 的已知 `web_search`、`web_search_preview` 声明在 `tool_choice` 缺省、`auto` 或 `none` 时属于明确允许的降级：先校验字段、类型及资源限额，再省略整个搜索声明，记录 `optional_hosted_web_search_unavailable` 和字段位置。不把 OpenAI 缓存搜索改成目标的实时搜索，也不伪造搜索调用或引用。强制搜索及 `required` 继续拒绝；未知搜索参数、非法值、搜索执行历史继续严格报错。普通 function/namespace/custom 工具保持原转换规则，同协议 Responses 保留搜索声明透传。
 
 会话按请求隔离，响应结束、失败、取消及 plugin dispose 都释放。终止状态、工具参数片段和 usage 由状态机统一管理，不能仅看到任一文本片段便宣告 completed。诊断通过宿主既有请求步骤记录，保留逻辑 requestId、字段路径和原因码，不回显正文、工具参数或凭据。
+
+Responses→Gemini 的工具调用将 thoughtSignature 编入公开 call_id 的 `__thought__` 后缀；回传完整工具历史或 previous_response_id 续聊时，恢复原始 functionCall/functionResponse.id 和调用签名。未携带签名的调用不伪造签名，namespace/custom 与明文协作标记沿用现有工具映射。parallel_tool_calls=true 校验后省略并记录诊断；false 转成“每次响应至多调用一个工具”的 systemInstruction 提示并记录 gemini_serial_tool_calls_prompt_only，不能保证提供商严格串行。
+
+Responses→Gemini 按出现顺序归集所有 system/developer 消息到 systemInstruction，包括用户消息之后追加的指令。中途指令记录 gemini_mid_conversation_instructions_consolidated；正文与指令各自的相对顺序保留，但指令在原对话中的位置不再保留。规范历史保持原顺序，生成的单工具提示不写入历史。该兼容策略不放宽未知内容、原生密文、工具参数或其它协议对的校验。
+
+普通文本和推理 Part 的签名及边界通过尾部 reasoning 项的 encrypted_content 携带。`bungee_gemini:` 是网关私有 opaque 格式，包含版本、输出项引用、Part 长度、内容摘要与原始签名，不表示 OpenAI 能解析该数据。流式文本照常发送，晚到签名不修改已发 item_id。客户端须完整回传 output，包括该 reasoning 项，且保留被签名文本与项 ID；回放严格校验引用、内容摘要、编码和资源限额。只对 Responses→Gemini 恢复此格式，原生 OpenAI 密文和 compaction 仍拒绝，不新增持久化存储。
+
+Gemini usageMetadata 的辅助统计（如 promptTokensDetails、cacheTokensDetails、trafficType）不作为正文准入条件。实际消费的核心计数仍严格校验；toolUsePromptTokenCount 计入 input_tokens，thoughtsTokenCount 计入 output_tokens 及 reasoning_tokens，并核对 totalTokenCount。原始细项继续由既有上游计量链路读取，不伪造 Responses 不支持的细分字段。
+
+工具签名桥接参考 [LiteLLM 固定提交 cfe0100](https://github.com/BerriAI/litellm/tree/cfe0100e1fca613e7b1af27dd1fe4807ca4d1d1a)，只采用可表示的工具身份与签名路径，不承诺整体无损兼容。
 
 ## 推理能力来源和规则版本
 
@@ -77,9 +91,9 @@ Responses→Chat/Anthropic 的已知 `web_search`、`web_search_preview` 声明�
 
 `null` 和 `default` 是目录控制值，不是具体强度；toggle 和 budget_tokens 也不能转换成档位。未知模型、缺少有效 effort 元数据、目标协议不能表达 effort 或 reasoning 被限制时，返回空 supportedEfforts。当前消费的 models.dev API 格式没有独立默认等级字段，defaultEffort 保持 null，Codex 目录的 default_reasoning_level 同样为 null，不用具体档位 none 代替未知默认值。目录 capability 与 catalogVersion 来自同一完整快照；adapter 返回独立 rulesVersion，用于会话与出站校验。
 
-显式 effort 按原值写入 Responses 的 reasoning.effort、Chat Completions 的 reasoning_effort 或 Anthropic Messages 的 output_config.effort。未选择 effort 时不注入默认等级；适配器不因模型名称自动开启 thinking、adaptive 或设置 budget，推理开关沿用目标端默认行为。Gemini 的 thinking level/budget 不能仅凭通用 effort 列表推导。
+显式 effort 按原值写入 Responses 的 reasoning.effort、Chat Completions 的 reasoning_effort、Anthropic Messages 的 output_config.effort 或 Gemini 的 generationConfig.thinkingConfig.thinkingLevel。未选择 effort 时不注入默认等级；适配器不因模型名称自动开启 thinking、adaptive 或设置 budget，推理开关沿用目标端默认行为。Gemini 仅公布目录明确列出的 minimal/low/medium/high 交集，按原值映射 thinkingLevel；none/xhigh/max、toggle 与 budget_tokens 不生成档位，也不换算 budget。
 
-有明确目标 profile 的转换请求必须核验 selectedEffort。真正出站 attempt 再核验实际 model、协议、目录版本、规则版本及 wire effort；后续模型映射、重试/failover 改变目标不能无声丢失已选强度。不将不同档位折叠成相近值，也不从档位臆造 thinking.budget_tokens。字段映射依据 [OpenAI Responses](https://platform.openai.com/docs/api-reference/responses)、[Chat Completions](https://platform.openai.com/docs/api-reference/chat/completions) 和 [Anthropic effort](https://platform.claude.com/docs/en/build-with-claude/effort) 的协议定义；提供商的额外约束仍需实际验证，不能由兼容协议名称推断全部行为。
+有明确目标 profile 的转换请求必须核验 selectedEffort。真正出站 attempt 再核验实际 model、协议、目录版本、规则版本及 wire effort；后续模型映射、重试/failover 改变目标不能无声丢失已选强度。不将不同档位折叠成相近值，也不从档位臆造 thinking.budget_tokens。字段映射依据 [OpenAI Responses](https://platform.openai.com/docs/api-reference/responses)、[Chat Completions](https://platform.openai.com/docs/api-reference/chat/completions)、[Gemini thinking levels](https://ai.google.dev/api/generate-content#ThinkingConfig) 和 [Anthropic effort](https://platform.claude.com/docs/en/build-with-claude/effort) 的协议定义；提供商的额外约束仍需实际验证，不能由兼容协议名称推断全部行为。
 
 本地 `DataAdmissionError` 在每次 attempt 的故障分类前按公共错误契约归一化，保留安全的状态、原因和字段位置。插件独立打包导致构造器身份不同，也不得将本地协议拒绝累计为上游故障或触发熔断。
 

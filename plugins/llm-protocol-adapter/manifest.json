@@ -143,6 +143,10 @@
           "anthropic_messages"
         ],
         [
+          "responses",
+          "gemini_generate_content"
+        ],
+        [
           "chat_completions",
           "responses"
         ],

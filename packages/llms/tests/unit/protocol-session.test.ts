@@ -49,7 +49,7 @@ function code(fn: () => unknown, value: string, param?: string) {
   }
 }
 describe('pure protocol sessions, local fixtures for the complete declared matrix', () => {
-  test('description exposes 4 passthrough, 10 conversions, 2 unsupported pairs', () => { const d = describeProtocolConversion(); expect(d.rulesVersion).toBe('1.0.1'); expect(d.matrix.filter(x => x.mode === 'convert')).toHaveLength(10); expect(d.matrix.filter(x => x.mode === 'passthrough')).toHaveLength(4); expect(d.matrix.filter(x => x.mode === 'unsupported')).toHaveLength(2); });
+  test('description exposes 4 passthrough, 11 conversions, 1 unsupported pair', () => { const d = describeProtocolConversion(); expect(d.rulesVersion).toBe('1.0.4'); expect(d.matrix.filter(x => x.mode === 'convert')).toHaveLength(11); expect(d.matrix.filter(x => x.mode === 'passthrough')).toHaveLength(4); expect(d.matrix.filter(x => x.mode === 'unsupported')).toHaveLength(1); });
   for (const source of LLM_PROTOCOLS)
     for (const target of LLM_PROTOCOLS) {
       const pair = describeProtocolConversion().matrix.find(x => x.sourceProtocol === source && x.targetProtocol === target)!;
@@ -167,7 +167,7 @@ test('disposal drops retained sessions and errors are sanitized', () => {
   expect(failed.convertResponse({ type: 'error', error: { message: 'secret upstream body', code: 'private-key' } })).toEqual({ error: { code: 'upstream_error', type: 'api_error', message: 'Upstream protocol request failed' } });
 });
 
-test('all ten conversion directions keep truncation explicit in JSON and streams', () => {
+test('all declared conversion directions keep truncation explicit in JSON and streams', () => {
   for (const pair of describeProtocolConversion().matrix.filter(x => x.mode === 'convert')) {
     const context = ctx(pair.sourceProtocol, pair.targetProtocol), p = pair.targetProtocol;
     const raw = p === 'responses' ? { id: 'resp', created_at: 1, status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [{ id: 'msg', type: 'message', role: 'assistant', status: 'incomplete', content: [{ type: 'output_text', text: 'partial', annotations: [] }] }], usage: null } : p === 'chat_completions' ? { choices: [{ message: { role: 'assistant', content: 'partial' }, finish_reason: 'length' }] } : p === 'anthropic_messages' ? { content: [{ type: 'text', text: 'partial' }], stop_reason: 'max_tokens' } : { candidates: [{ content: { role: 'model', parts: [{ text: 'partial' }] }, finishReason: 'MAX_TOKENS' }] };

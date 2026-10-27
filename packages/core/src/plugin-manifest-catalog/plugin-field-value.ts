@@ -53,7 +53,7 @@ export function fieldValueSatisfies(field: ReadonlyPluginConfigField, value: Plu
       && value.every((item) => field.options?.some((option) => option.value === item) ?? false); break;
     case 'model_mapping': valid = Array.isArray(value) && modelMappings(value) && (!field.required || value.length > 0); break;
     case 'gateway_target': valid = objectValue(value) && Object.keys(value).every(key => ['type','id','protocol'].includes(key))
-      && (value.protocol === undefined || ['responses','chat_completions','anthropic_messages'].includes(value.protocol as string))
+      && (value.protocol === undefined || ['responses','chat_completions','anthropic_messages','gemini_generate_content'].includes(value.protocol as string))
       && ['route','service'].includes(value.type as string) && typeof value.id === 'string' && value.id.length > 0; break;
     case 'json': valid = typeof value !== 'string' || validJsonString(value); break;
     case 'array': valid = Array.isArray(value) && (!field.required || value.length > 0) && field.items !== undefined

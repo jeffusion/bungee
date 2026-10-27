@@ -3,6 +3,7 @@ import { ResponsesEventEncoder, encodeResponsesResult } from '../responses-codec
 import { argumentObject, fail, list, record, string, serialized, limits, type JsonRecord, type ResponsesToolNames } from '../responses-codec/common';
 import { fields, integer } from './validation';
 import type { LLMProtocol, ProtocolSessionContext } from './types';
+import { encodeGeminiCallId, checkedSignature, geminiSignatureItem, geminiTextHash, readGeminiSignatures, geminiEnvelopeBytes } from './gemini';
 export function safeProtocolError(): JsonRecord { return { code: 'upstream_error', type: 'api_error', message: 'Upstream protocol request failed' }; }
 export function validateUsage(raw: unknown, protocol: LLMProtocol): void {
   if (raw === undefined || raw === null)
@@ -114,7 +115,11 @@ export function validateCanonicalResponse(raw: unknown, context: ProtocolSession
       }
     }
     else if (t.type === 'reasoning') {
-      if (t.encrypted_content != null || t.content != null)
+      if (t.encrypted_content != null && context.sourceProtocol === 'responses' && context.targetProtocol === 'gemini_generate_content')
+        readGeminiSignatures(t, limits(context.capabilities?.limits));
+      else if (t.encrypted_content != null)
+        fail('unsupported_reasoning', 'Opaque reasoning cannot cross protocols', path);
+      if (t.content != null)
         fail('unsupported_reasoning', 'Opaque or raw reasoning output cannot cross protocols', path);
       for (const rawPart of list(t.summary, 'summary')) {
         const p = record(rawPart, 'summary');
@@ -247,12 +252,18 @@ export class GeminiCanonicalDecoder {
   private ended = false;
   private tools = false;
   private ids = new Set<string>();
-  constructor(private context: ProtocolSessionContext, names: ResponsesToolNames) { this.encoder = new ResponsesEventEncoder('chat_completions', context.responseModel ?? context.model, names, context.capabilities?.limits, { preserveContentOrder: true }); }
+  private sequence = 0;
+  private contentId?: string;
+  private partCount = 0;
+  private replayBytes = Buffer.byteLength(JSON.stringify({ version: 1, items: [] }));
+  private signedItems = 0;
+  private signed = new Map<string, { id: string; thought: boolean; metadataBytes: number; hasSignature: boolean; parts: { text: string; signature?: string; textAbsent?: boolean; metadataBytes: number }[] }>();
+  constructor(private context: ProtocolSessionContext, names: ResponsesToolNames, private streaming = true) { this.encoder = new ResponsesEventEncoder('chat_completions', context.responseModel ?? context.model, names, context.capabilities?.limits, { preserveContentOrder: true, agentMessageDelivery: context.capabilities?.agentMessageDelivery }); }
   push(raw: unknown): JsonRecord[] {
     const b = record(raw, 'Gemini response');
     fields(b, ['candidates', 'usageMetadata', 'modelVersion', 'responseId', 'promptFeedback', 'error'], '', 'unsupported_response');
     if (b.error !== undefined)
-      return this.encoder.push({ error: safeProtocolError() });
+      return this.decorate(this.encoder.push({ error: safeProtocolError() }));
     const events: JsonRecord[] = [];
     if (b.promptFeedback !== undefined) {
       const p = record(b.promptFeedback, 'promptFeedback');
@@ -270,35 +281,61 @@ export class GeminiCanonicalDecoder {
       fields(c, ['index', 'content', 'finishReason', 'safetyRatings', 'finishMessage'], 'candidates', 'unsupported_response');
       if (c.index !== undefined && c.index !== 0)
         fail('unsupported_response', 'Only candidate index zero is supported', 'candidates.index');
-      if (c.content !== undefined) {
+      if (c.content !== undefined && c.content !== null) {
         const content = record(c.content, 'content');
         fields(content, ['role', 'parts'], 'candidates.content', 'unsupported_content');
         if (content.role !== undefined && content.role !== 'model')
           fail('unsupported_response', 'Response role must be model', 'candidates.content.role');
-        const parts = list(content.parts, 'parts');
+        const parts = list(content.parts ?? [], 'parts');
         if (this.ended && parts.length)
           fail('invalid_stream', 'Content arrived after Gemini terminal');
         for (const [i, rawPart] of parts.entries()) {
           const p = record(rawPart, 'part');
           fields(p, ['text', 'thought', 'functionCall', 'thoughtSignature'], 'candidates.content.parts', 'unsupported_content');
-          if (p.thoughtSignature !== undefined)
+          if (p.thoughtSignature !== undefined && this.context.sourceProtocol !== 'responses')
             fail('unsupported_reasoning', 'Thought signatures cannot cross protocols', 'candidates.content.parts.thoughtSignature');
           if (p.functionCall !== undefined) {
             if (p.text !== undefined || p.thought !== undefined)
               fail('unsupported_content', 'Mixed Gemini part kinds', 'candidates.content.parts');
             const f = record(p.functionCall, 'functionCall');
             fields(f, ['id', 'name', 'args'], 'functionCall', 'unsupported_tool');
-            const index = this.serial++, id = f.id === undefined ? `call_gemini_${index}` : string(f.id, 'functionCall.id', true);
-            if (this.ids.has(id))
+            const index = this.serial++, originalId = f.id === undefined ? `call_gemini_${crypto.randomUUID().replaceAll("-", "")}` : string(f.id, 'functionCall.id', true);
+            if (this.ids.has(originalId))
               fail('invalid_tool_arguments', 'Duplicate Gemini call id', 'functionCall.id');
-            this.ids.add(id);
+            this.ids.add(originalId);
+            const id = this.context.sourceProtocol === 'responses' ? encodeGeminiCallId(originalId, p.thoughtSignature, limits(this.context.capabilities?.limits).maxArgumentBytes) : originalId;
             this.tools = true;
             events.push(...this.encoder.push({ choices: [{ delta: { tool_calls: [{ index, id, type: 'function', function: { name: string(f.name, 'functionCall.name', true), arguments: JSON.stringify(record(f.args ?? {}, 'functionCall.args')) } }] } }] }));
           }
           else {
             if (p.thought !== undefined && typeof p.thought !== 'boolean')
               fail('invalid_payload', 'Thought flag must be boolean', 'thought');
-            events.push(...this.encoder.push({ choices: [{ delta: { [p.thought === true ? 'reasoning_content' : 'content']: string(p.text, `parts[${i}].text`) } }] }));
+            const text = string(p.text ?? (p.thoughtSignature === undefined ? undefined : ''), `parts[${i}].text`);
+            const output = this.encoder.push({ choices: [{ delta: { [p.thought === true ? 'reasoning_content' : 'content']: text } }] });
+            const added = output.find(e => e.type === 'response.output_item.added');
+            if (added) this.contentId = record(added.item, 'item').id as string;
+            const id = this.contentId!;
+            let item = this.signed.get(id);
+            if (!item) { item = { id, thought: p.thought === true, parts: [], hasSignature: false, metadataBytes: Buffer.byteLength(JSON.stringify({ id, thought: p.thought === true, parts: [] })) }; this.signed.set(id, item); }
+            const signature = p.thoughtSignature === undefined ? undefined : checkedSignature(p.thoughtSignature, limits(this.context.capabilities?.limits).maxArgumentBytes);
+            const previous = item.parts.at(-1);
+            const merge = this.streaming && signature === undefined && previous && previous.signature === undefined && !previous.textAbsent;
+            const partBytes = Buffer.byteLength(JSON.stringify({ length: text.length + (merge ? previous.text.length : 0), hash: 'x'.repeat(43), ...(signature === undefined ? {} : { signature }), ...(p.text === undefined ? { textAbsent: true } : {}) }));
+            const metadataBytes = item.metadataBytes + partBytes - (merge ? previous.metadataBytes : 0) + (!merge && item.parts.length ? 1 : 0);
+            const hasSignature = item.hasSignature || signature !== undefined;
+            const replayBytes = this.replayBytes + (item.hasSignature ? metadataBytes - item.metadataBytes : hasSignature ? metadataBytes + (this.signedItems ? 1 : 0) : 0);
+            const budget = limits(this.context.capabilities?.limits);
+            if (hasSignature && geminiEnvelopeBytes(replayBytes) > Math.min(budget.maxArgumentBytes, budget.maxOutputBytes)) fail('resource_limit', 'Accumulated Gemini signatures exceed replay budget');
+            if (hasSignature && !item.hasSignature) this.signedItems++;
+            this.replayBytes = replayBytes; item.metadataBytes = metadataBytes; item.hasSignature = hasSignature;
+            if (merge) {
+              previous.text += text;
+              previous.metadataBytes = partBytes;
+            } else {
+              if (++this.partCount > limits(this.context.capabilities?.limits).maxItems) fail('resource_limit', 'Too many Gemini parts');
+              item.parts.push({ text, metadataBytes: partBytes, ...(signature === undefined ? {} : { signature }), ...(p.text === undefined ? { textAbsent: true } : {}) });
+            }
+            events.push(...output);
           }
         }
       }
@@ -315,23 +352,44 @@ export class GeminiCanonicalDecoder {
     }
     if (b.usageMetadata !== undefined) {
       const u = record(b.usageMetadata, 'usageMetadata');
-      fields(u, ['promptTokenCount', 'candidatesTokenCount', 'totalTokenCount', 'cachedContentTokenCount', 'thoughtsTokenCount'], 'usageMetadata', 'unsupported_response');
-      for (const [k, v] of Object.entries(u))
-        integer(v, `usageMetadata.${k}`);
-      const input = (u.promptTokenCount ?? 0) as number, thoughts = (u.thoughtsTokenCount ?? 0) as number, output = ((u.candidatesTokenCount ?? 0) as number) + thoughts;
+      for (const k of ['promptTokenCount', 'candidatesTokenCount', 'totalTokenCount', 'cachedContentTokenCount', 'thoughtsTokenCount', 'toolUsePromptTokenCount'])
+        if (u[k] !== undefined && u[k] !== null) integer(u[k], `usageMetadata.${k}`);
+      const input = ((u.promptTokenCount ?? 0) as number) + ((u.toolUsePromptTokenCount ?? 0) as number), thoughts = (u.thoughtsTokenCount ?? 0) as number, output = ((u.candidatesTokenCount ?? 0) as number) + thoughts;
       if (u.totalTokenCount !== undefined && u.totalTokenCount !== input + output)
         fail('invalid_usage', 'Gemini total does not match reported components', 'usageMetadata.totalTokenCount');
       events.push(...this.encoder.push({ choices: [], usage: { prompt_tokens: input, completion_tokens: output, prompt_tokens_details: { cached_tokens: u.cachedContentTokenCount ?? 0 }, completion_tokens_details: { reasoning_tokens: thoughts } } }));
     }
-    return events;
+    return this.decorate(events);
   }
-  finish(): JsonRecord[] { return this.encoder.finish(); }
+  private decorate(events: JsonRecord[]): JsonRecord[] {
+    const output: JsonRecord[] = [];
+    for (const event of events) {
+      if (['response.completed', 'response.incomplete', 'response.failed'].includes(event.type as string)) {
+        const signed = [...this.signed.values()].filter(item => item.parts.some(p => p.signature !== undefined));
+        if (signed.length) {
+          const budget = limits(this.context.capabilities?.limits), response = record(event.response, 'response');
+          const items = list(response.output, 'output');
+          if (items.length >= budget.maxItems) fail('resource_limit', 'Too many Gemini output items');
+          const item = geminiSignatureItem(signed.map(item => ({ id: item.id, thought: item.thought, parts: item.parts.map(p => ({ length: p.text.length, hash: geminiTextHash(p.text), ...(p.signature === undefined ? {} : { signature: p.signature }), ...(p.textAbsent ? { textAbsent: true } : {}) })) })), budget);
+          const body = { ...response, output: [...items, item] };
+          serialized(body, budget.maxOutputBytes, 'Gemini response');
+          output.push({ type: 'response.output_item.added', response_id: response.id, output_index: items.length, item },
+            { type: 'response.output_item.done', response_id: response.id, output_index: items.length, item });
+          output.push({ ...event, response: body });
+          continue;
+        }
+      }
+      output.push(event);
+    }
+    return output.map(event => ({ ...event, sequence_number: this.sequence++ }));
+  }
+  finish(): JsonRecord[] { return this.decorate(this.encoder.finish()); }
 }
 export function canonicalResponse(raw: unknown, context: ProtocolSessionContext, names: ResponsesToolNames): JsonRecord {
   if (context.targetProtocol === 'responses')
     return validateCanonicalResponse(raw, context);
   if (context.targetProtocol === 'gemini_generate_content') {
-    const decoder = new GeminiCanonicalDecoder(context, names);
+    const decoder = new GeminiCanonicalDecoder(context, names, false);
     const events = [...decoder.push(raw), ...decoder.finish()];
     return record(events.at(-1)?.response, 'response');
   }

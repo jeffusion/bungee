@@ -33,7 +33,7 @@
   const controller = new AbortController();
   const t = (key: string) => $isLoading ? '' : getPluginText(`editor.${key}`, 'codex-router', (id, options) => $_(id, options));
   let providerOptions = $derived(providers.filter(provider => provider.provider !== 'openai').map(provider => ({ value: provider.provider, label: `${provider.name} · ${provider.provider}` })));
-  const protocolOptions = [{ value: 'responses', label: 'Responses' }, { value: 'chat_completions', label: 'Chat Completions' }, { value: 'anthropic_messages', label: 'Anthropic Messages' }];
+  const protocolOptions = [{ value: 'responses', label: 'Responses' }, { value: 'chat_completions', label: 'Chat Completions' }, { value: 'anthropic_messages', label: 'Anthropic Messages' }, { value: 'gemini_generate_content', label: 'Gemini GenerateContent' }];
   const modeOptions = $derived([{ value: 'add', label: t('addModel') }, { value: 'replace', label: t('replaceModel') }]);
   $effect(() => {
     if ($isLoading) return;
