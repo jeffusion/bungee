@@ -1,3 +1,15 @@
+# [6.8.0](https://github.com/jeffusion/bungee/compare/v6.7.3...v6.8.0) (2026-10-27)
+
+
+### Bug Fixes
+
+* **ui:** refine system update entry and idle refresh behavior ([a73a3b3](https://github.com/jeffusion/bungee/commit/a73a3b3eb228f5c6d337eec16da4866fd0ebcc85))
+
+
+### Features
+
+* **llms:** support Responses to Gemini conversion ([bdb0136](https://github.com/jeffusion/bungee/commit/bdb0136d55b7442fa07859e15baf09662aedf23b))
+
 ## [6.7.3](https://github.com/jeffusion/bungee/compare/v6.7.2...v6.7.3) (2026-10-27)
 
 
