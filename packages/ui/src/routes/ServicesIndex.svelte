@@ -466,14 +466,14 @@
 
   <!-- ===== Endpoints drawer ===================================== -->
   <Sheet.Root bind:open={showEndpointsDrawer} preventScroll closeFocus={() => endpointsDrawerTrigger}>
-    {#if selectedServiceForEndpoints}
-      <Sheet.Content
-        side="right"
-        class="flex !h-dvh !w-full !max-w-5xl !gap-0 !p-0 flex-col overflow-hidden border-carbon-600 bg-carbon-950 shadow-industrial-lg"
-        closeLabel={$_('common.close')}
-        closeClass="!right-5 !top-3 flex h-8 w-8 items-center justify-center border border-carbon-500 text-zinc-400 !opacity-100"
-        aria-label={$_('services.targetsTitle')}
+    <Sheet.Content
+      side="right"
+      class="flex !h-dvh !w-full !max-w-5xl !gap-0 !p-0 flex-col overflow-hidden border-carbon-600 bg-carbon-950 shadow-industrial-lg"
+      closeLabel={$_('common.close')}
+      closeClass="!right-5 !top-3 flex h-8 w-8 items-center justify-center border border-carbon-500 text-zinc-400 !opacity-100"
+      aria-label={$_('services.targetsTitle')}
     >
+      {#if selectedServiceForEndpoints}
         <header class="flex shrink-0 items-center justify-between px-5 py-3 pr-16 border-b border-carbon-600 bg-carbon-900">
           <div class="flex min-w-0 items-center gap-2.5">
             <span class="nx-stripe" aria-hidden="true"></span>
@@ -501,8 +501,8 @@
         <footer class="shrink-0 px-5 py-3 border-t border-carbon-600 bg-carbon-900 flex justify-end">
           <Sheet.Close class="nx-btn-primary">{$_('common.close')}</Sheet.Close>
         </footer>
-      </Sheet.Content>
-    {/if}
+      {/if}
+    </Sheet.Content>
   </Sheet.Root>
 
   <!-- ===== Delete confirmation (custom modal — has friction input) ==== -->

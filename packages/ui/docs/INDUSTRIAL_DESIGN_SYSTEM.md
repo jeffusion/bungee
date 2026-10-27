@@ -773,8 +773,12 @@ and above; reserve its width before fitting navigation entries into More.
 
 The brand shows the build's package version beside BUNGEE in subdued monospace
 text. On narrow screens the compact brand retains the version beside its icon.
-The update control sits beside the version and marks an available release with the orange accent.
+The update control sits beside the version when a newer release is available or
+an update needs attention; hide it when the installed version is current and no
+operation or error needs attention. Keep it available for pending, failed or
+unknown results. Mark an available release with the orange accent.
 Its IndustrialDialog shows release metadata, checks, availability and operation progress.
+Background status polling does not replace the dialog content with a loading indicator.
 Opening or checking never downloads. Download requires confirmation; after verification,
 installation and restart require a second confirmation warning about brief downtime and
 loss of unsaved drafts on reload. Cancelling leaves the current service running. The
@@ -783,11 +787,17 @@ of service readiness or operation status. Other pages retain their drafts and re
 Pending or unknown results disable another submission; refresh and reauthentication only
 query status. Keep this flow in the system domain component, using existing tokens.
 
-Desktop navigation preserves compact 11px menu labels and 16px icons, with a short orange
-underline and slim leading marker for the current entry. Avoid per-entry boxes;
+Desktop navigation preserves compact 11px menu labels and 16px icons. The current
+entry uses orange text and icons with a short orange underline, including groups
+and More when they contain the current page. Hover and open states use a neutral
+background; keyboard focus keeps a visible outline. Avoid per-entry boxes;
 fine rules separate the brand and utility areas. More uses a raised carbon surface
-and a grid icon. Dropdowns fit their content between 160px and 320px, capped by the
-viewport; longer labels wrap. Use the shared dropdown's `p-1` content padding and
+and a grid icon. Navigation dropdowns fit their content between 160px and 320px,
+capped by the viewport; longer labels wrap. Separate dropdown options with a
+small gap and give them a 40px minimum height. The current page has accent text
+and a subtle accent background; a highlighted option uses a neutral raised
+background so hover and keyboard focus remain distinct. Enabled dropdown
+options use a pointer cursor. Use the shared dropdown's `p-1` content padding and
 `px-2` item padding without extra panel gutters. The HUD clock retains its native
 `text-xl` display size. Groups use a muted heading, a fine separator and
 indented child links instead of empty panel space.
@@ -801,7 +811,7 @@ entry in the default System group; its direct route is `/#/menus`.
 
 Use native links and the shared unsaved-changes guard; preserve keyboard
 dismissal and focus restoration for group dropdowns. Navigation controls have
-at least a 44px hit target.
+at least a 44px hit target, except desktop dropdown options, which use 40px.
 
 Menu icons use 16px fixed slots and follow text colour. Preserve original stroke,
 fill and proportions; icons supplement visible labels. Menu Management previews
