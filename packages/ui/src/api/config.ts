@@ -322,22 +322,37 @@ export async function commitConfiguration(
   options: ConfigurationCommitOptions = {},
 ): Promise<ConfigurationOperationState> {
   const mutationId = uuidv4();
-  const timeoutMs = options.timeoutMs ?? 15_000;
   const { headers, pollHeaders } = prepareNextAuthorization(snapshot, aggregate, options);
-  options.onDispatch?.(mutationId);
+  return submitConfigurationOperation(mutationId, () => api.put<AcceptedConfigurationOperation>('/config', {
+    expected_revision: snapshot.revision,
+    aggregate,
+    ...(options.managementSetup ? {managementSetup:options.managementSetup} : {}),
+    mutation_id: mutationId,
+  }, { headers }), options, pollHeaders, snapshot.revision);
+}
 
+export function duplicateConfigurationRoute(path: string, options: ConfigurationCommitOptions = {}): Promise<ConfigurationOperationState> {
+  const mutationId = uuidv4();
+  return submitConfigurationOperation(mutationId, () => api.post<AcceptedConfigurationOperation>('/routes/duplicate', {
+    path, mutation_id: mutationId,
+  }), options);
+}
+
+async function submitConfigurationOperation(
+  mutationId: string,
+  submit: () => Promise<AcceptedConfigurationOperation>,
+  options: ConfigurationCommitOptions,
+  pollHeaders?: Headers,
+  expectedRevision?: number,
+): Promise<ConfigurationOperationState> {
+  options.onDispatch?.(mutationId);
   let accepted: AcceptedConfigurationOperation;
   try {
-    accepted = await api.put<AcceptedConfigurationOperation>('/config', {
-      expected_revision: snapshot.revision,
-      aggregate,
-      ...(options.managementSetup ? {managementSetup:options.managementSetup} : {}),
-      mutation_id: mutationId,
-    }, { headers });
+    accepted = await submit();
   } catch (error) {
     if (!(error instanceof ApiError)) {
       if (options.completion !== 'committed') throw error;
-      // The PUT may have committed before its response was lost. Query its UUID;
+      // The write may have committed before its response was lost. Query its UUID;
       // never turn a transport failure into another configuration write.
       try {
         const state = await getConfigurationOperation(mutationId, pollHeaders);
@@ -353,7 +368,8 @@ export async function commitConfiguration(
       const body = apiErrorBody(error);
       const conflict = operationConflict(error.body);
       if (conflict !== null) throw conflict;
-      if (error.status === 409) throw new ConfigurationStaleError(snapshot.revision, error.body);
+      if (body.error === 'route_copy_protected') throw new Error('受保护路由不能直接复制，以免副本丢失访问限制。请创建新路由并配置访问权限。');
+      if (error.status === 409 && expectedRevision !== undefined) throw new ConfigurationStaleError(expectedRevision, error.body);
       if (error.status === 422) throw new ConfigurationValidationError(body.errors);
       throw error;
     }
@@ -366,7 +382,7 @@ export async function commitConfiguration(
   options.onOperation?.(accepted);
   if (options.completion === 'committed') return accepted;
   const terminal = inspectTerminal(accepted) ?? await waitForConfigurationOperation(mutationId, {
-    timeoutMs,
+    timeoutMs: options.timeoutMs ?? 15_000,
     pollIntervalMs: options.pollIntervalMs,
     headers: pollHeaders,
     onOperation: options.onOperation,

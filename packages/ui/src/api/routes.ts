@@ -1,4 +1,4 @@
-import { saveLogicalConfiguration } from './configuration-save';
+import { saveLogicalConfiguration, saveRouteCopy } from './configuration-save';
 import type {
   FailoverConfig,
   LoadBalancingConfig,
@@ -150,16 +150,7 @@ export class RoutesAPI {
   }
 
   static async duplicate(path: string): Promise<void> {
-    const route = await this.get(path);
-    if (route === null) throw new RouteNotFoundError(path);
-    const routes = await this.list();
-    let suffix = 1;
-    let newPath = `${path}-copy`;
-    while (routes.some((candidate) => candidate.path === newPath)) {
-      suffix += 1;
-      newPath = `${path}-copy-${suffix}`;
-    }
-    await this.create({ ...route, path: newPath });
+    await saveRouteCopy(path);
   }
 
   static async services(): Promise<Service[]> {

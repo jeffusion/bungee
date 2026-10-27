@@ -50,7 +50,7 @@ export type ConfigControlApiOptions = {
   readonly managementAuth?: ManagementAuthentication;
   readonly resourceCollection?: () => Promise<readonly unknown[]>;
   readonly resourceExtensions?: (keyId: string) => Promise<readonly unknown[]>;
-  readonly guardDataTransition?: (active: ConfigurationAggregate, next: ConfigurationAggregate) => Promise<Response | null>;
+  readonly guardDataTransition?: (active: ConfigurationAggregate, next: ConfigurationAggregate, duplicatedRouteId?: string) => Promise<Response | null>;
   readonly guardManagementTransition?: (request: Request, active: ConfigurationAggregate, next: ConfigurationAggregate, setup?: unknown) => Promise<Response | null>;
   readonly validateManagementTransition?: (request: Request, active: ConfigurationAggregate, next: ConfigurationAggregate) => Promise<Response | null>;
   readonly pluginCapability?: (request: Request) => string | null;
@@ -407,6 +407,59 @@ async function putConfig(
   });
 }
 
+async function duplicateRoute(request: Request, options: ConfigControlApiOptions): Promise<Response> {
+  const body = await readControlJson(request);
+  if (!body.ok) return json({ error: body.error }, body.status);
+  const envelope = exactObject(body.value, new Set(['path', 'mutation_id']));
+  if (envelope === null || typeof envelope.path !== 'string' || !envelope.path.startsWith('/')
+    || typeof envelope.mutation_id !== 'string' || !validateMutationId(envelope.mutation_id)) {
+    return json({ error: 'invalid_request' }, 400);
+  }
+  const { path, mutation_id: mutationId } = envelope;
+  return serializeMutation(options, async () => {
+    const active = safeSnapshot(options);
+    if (active instanceof Response) return active;
+    if (!await options.managementAuth?.recheck(request) || !matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
+    // A repeated command must never create another copy with fresh identities.
+    if (await repositoryCall(() => options.repository.getOperationState(mutationId))) {
+      return json({ error: 'idempotency_key_reused', mutation_id: mutationId }, 409);
+    }
+    const logical = active.aggregate.logical_configuration;
+    const source = logical.routes.find(route => route.path === path);
+    if (!source) return json({ error: 'route_not_found' }, 404);
+    const paths = new Set(logical.routes.map(route => route.path));
+    let copyPath = `${path}-copy`;
+    for (let suffix = 2; paths.has(copyPath); suffix++) copyPath = `${path}-copy-${suffix}`;
+    const copy = structuredClone(source);
+    const plugins = copy.plugins.map(binding => ({ ...binding, id: randomUUID() }));
+    const endpoints = copy.endpoints?.map(endpoint => {
+      const bindings = new Map(endpoint.plugins.map(binding => [binding.id, randomUUID()]));
+      return {
+        ...endpoint, id: randomUUID(),
+        plugins: endpoint.plugins.map(binding => ({ ...binding, id: bindings.get(binding.id)! })),
+        ...(endpoint.managedBy ? { managedBy: {
+          ...endpoint.managedBy, bindingId: bindings.get(endpoint.managedBy.bindingId)!,
+        } } : {}),
+      };
+    });
+    const next = options.parseAggregate({
+      ...active.aggregate,
+      logical_configuration: { ...logical, routes: [...logical.routes, {
+        ...copy, id: randomUUID(), path: copyPath,
+        position: logical.routes.reduce((maximum, route) => Math.max(maximum, route.position), -1) + 1,
+        plugins,
+        ...(endpoints ? { endpoints } : {}),
+        ...(copy.service_references ? { service_references: copy.service_references.map(reference => ({ ...reference, id: randomUUID() })) } : {}),
+      }] },
+    });
+    if (!next.ok) return json({ error: 'invalid_configuration', errors: next.errors }, 422);
+    freezeJson(next.value);
+    return commitConfigurationMutation(request, options, {
+      active, next: next.value, kind: 'config', mutationId, expectedRevision: active.revision, duplicatedRouteId: source.id,
+    });
+  });
+}
+
 type ConfigurationSnapshotEnvelope = {
   readonly format: 'bungee-config-snapshot';
   readonly format_version: 1;
@@ -540,6 +593,7 @@ function withUpstreamDisabledState(
 }
 
 type ConfigurationMutation = {
+  readonly duplicatedRouteId?: string;
   readonly active: RepositorySnapshot;
   readonly next: ConfigurationAggregate;
   readonly kind: 'config' | 'admin_state';
@@ -728,6 +782,7 @@ function isMutationRequest(
   pluginToggleMatch: RegExpExecArray | null,
 ): boolean {
   return (path === '/api/config' && method === 'PUT')
+    || (path === '/api/routes/duplicate' && method === 'POST')
     || (path === '/api/config/import' && method === 'POST')
     || (upstreamToggleMatch !== null && (method === 'POST' || method === 'PUT'))
     || (pluginToggleMatch !== null && method === 'POST');
@@ -762,7 +817,7 @@ async function commitConfigurationMutation(
       ? acceptCommitted(mutation.mutationId, result.snapshot.revision, options)
       : mapCommit(result, options, options.repository.getSnapshot());
   }
-  const dataGuard = await options.guardDataTransition?.(mutation.active.aggregate, mutation.next);
+  const dataGuard = await options.guardDataTransition?.(mutation.active.aggregate, mutation.next, mutation.duplicatedRouteId);
   if (dataGuard) return dataGuard;
   const initialReadiness = await mutationReadinessResponse(options);
   if (initialReadiness !== null) return initialReadiness;
@@ -812,7 +867,7 @@ async function commitConfigurationMutation(
     }
     return postPreflightReadiness;
   }
-  const finalDataGuard = await options.guardDataTransition?.(freshResult.aggregate, mutation.next);
+  const finalDataGuard = await options.guardDataTransition?.(freshResult.aggregate, mutation.next, mutation.duplicatedRouteId);
   if (finalDataGuard) { await rollbackControlActivations(activated, options); return finalDataGuard; }
   if (!await auth.recheck(request) || !await auth.authorized(request, capability)) {
     await rollbackControlActivations(activated, options);
@@ -1052,6 +1107,7 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
       const updatesRequest = serializedOptions.updates !== undefined && ['/api/system/updates', '/api/system/updates/check', '/api/system/updates/confirm'].includes(path);
       const mutationRequest = isMutationRequest(path, request.method, upstreamToggleMatch, pluginToggleMatch);
       const managed = path === '/api/auth/setup' || path === '/api/config' || path === '/api/config/runtime' || path === '/api/runtime/upstreams' || path === '/api/runtime/routes'
+        || path === '/api/routes/duplicate'
         || path === '/api/config/validate'
         || path === '/api/config/export' || path === '/api/config/import'
         || operationMatch !== null || retryMatch !== null
@@ -1126,6 +1182,10 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
         }
         if (path === '/api/config' && request.method === 'GET') return json(snapshotBody(snapshot));
         if (path === '/api/config' && request.method === 'PUT') return await putConfig(request, serializedOptions);
+        if (path === '/api/routes/duplicate') {
+          if (request.method !== 'POST') return methodNotAllowed('POST');
+          return await duplicateRoute(request, serializedOptions);
+        }
         if (path === '/api/config/export' && request.method === 'GET') {
           const envelope = exportConfig(snapshot, serializedOptions.clock.now());
           return new Response(JSON.stringify(envelope), {
