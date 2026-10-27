@@ -2,11 +2,11 @@ import { createProtocolSession, describeProtocolConversion, inspectAgentMessages
 import type { ModelIdentityDeclaration, ModelsDevCapabilitiesService } from '../../models-dev/contract';
 import type { CapabilityContext, ConversionService, EffectiveCapabilities, AdapterSession, HistoryClient } from '../contract';
 import {AgentRelay} from './relay';
-export const REASONING_RULES_VERSION = '2026-10-24.1';
+export const REASONING_RULES_VERSION = '2026-10-27.1';
 const concrete = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
-// Protocol-level value constraints only. Responses/Chat carry the raw labelled effort;
-// Gemini has no generic effort encoding, so it advertises no selector.
-const effortProtocols = new Set(['responses', 'chat_completions', 'anthropic_messages']);
+// Protocol-level value constraints only; the catalog must explicitly advertise each effort.
+const effortProtocols = new Set(['responses', 'chat_completions', 'anthropic_messages', 'gemini_generate_content']);
+const geminiEfforts = new Set(['minimal', 'low', 'medium', 'high']);
 const anthropicEfforts = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 function identityError(code: string, message: string): never {
     throw new ResponsesCodecError(code, message, 'modelIdentity');
@@ -34,7 +34,7 @@ export function resolveCapabilities(catalog: ModelsDevCapabilitiesService, conte
     if (!info)
         return null;
     const restrictions = context.restrictions, reasoningAllowed = info.reasoning && restrictions?.reasoning !== false;
-    const allowed = context.targetProtocol === 'anthropic_messages' ? anthropicEfforts : concrete;
+    const allowed = context.targetProtocol === 'anthropic_messages' ? anthropicEfforts : context.targetProtocol === 'gemini_generate_content' ? geminiEfforts : concrete;
     const candidates = reasoningAllowed && effortProtocols.has(context.targetProtocol) && info.reasoningOptionsStatus === 'known'
         ? info.reasoningOptions?.flatMap(option => option.type === 'effort' ? option.values.filter((value): value is Exclude<typeof value, null> => typeof value === 'string' && allowed.has(value)) : []) ?? []
         : [];

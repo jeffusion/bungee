@@ -82,11 +82,31 @@ test('an unselected effort keeps the upstream default without injecting reasonin
   session.dispose();
  }
 });
-test('Gemini targets never advertise a generic effort selector',()=>{
- const {service}=fixture();const profile=service.resolveCapabilities({provider:'zai',model:'glm-5.3',targetProtocol:'gemini_generate_content'})!;
- expect(profile.supportedEfforts).toEqual([]);expect(profile.defaultEffort).toBeNull();expect(profile.wirePolicy).toBeNull();
- const session=service.createSession({sourceProtocol:'chat_completions',targetProtocol:'gemini_generate_content',model:'glm-5.3'});
- expect(()=>session.convertRequest({model:'glm-5.3',messages:[],reasoning_effort:'high'})).toThrow('Selected reasoning effort');
+test('Gemini only publishes explicit representable efforts and validates pinned final thinking levels',()=>{
+ const {service,load}=fixture([{type:'effort',values:['none','minimal','low','medium','high','xhigh','max']}]);
+ const profile=service.resolveCapabilities({provider:'zai',model:'glm-5.3',targetProtocol:'gemini_generate_content'})!;
+ expect(profile.supportedEfforts).toEqual(['minimal','low','medium','high']);expect(profile.defaultEffort).toBeNull();
+ expect(profile.wirePolicy).toEqual({effortMap:{minimal:'minimal',low:'low',medium:'medium',high:'high'}});
+ for(const effort of profile.supportedEfforts){
+  const session=service.createSession({sourceProtocol:'responses',targetProtocol:'gemini_generate_content',model:'glm-5.3'});
+  const body=session.convertRequest({input:'hello',reasoning:{effort}}).body;
+  expect(body).toMatchObject({generationConfig:{thinkingConfig:{thinkingLevel:effort}}});
+  const identity={wireModel:'WIRE',catalogModel:{provider:'zai',model:'glm-5.3'}};
+  const attempt={model:'WIRE',protocol:'gemini_generate_content' as const,body,url:'https://host.invalid/base/v1beta/models/WIRE:generateContent',modelIdentity:identity};
+  expect(session.validateAttempt(attempt)).toMatchObject({effort,catalogVersion:1});
+  expect(()=>session.validateAttempt({...attempt,body:{...body,generationConfig:{thinkingConfig:{thinkingLevel:'max'}}}})).toThrow('Selected reasoning effort');
+  expect(()=>session.validateAttempt({...attempt,modelIdentity:{...identity,catalogModel:{provider:'zai',model:'plain'}}})).toThrow('Selected reasoning effort');
+  load(2,[]);expect(session.validateAttempt(attempt)).toMatchObject({effort,catalogVersion:1});
+  session.dispose();load(1,[{type:'effort',values:['none','minimal','low','medium','high','xhigh','max']}]);
+ }
+ for(const options of [undefined,[],[{type:'budget_tokens',min:1024,max:4096}]]){
+  const {service}=fixture(options);expect(service.resolveCapabilities({provider:'zai',model:'glm-5.3',targetProtocol:'gemini_generate_content'})!.supportedEfforts).toEqual([]);
+ }
+ const restricted=service.resolveCapabilities({provider:'zai',model:'glm-5.3',targetProtocol:'gemini_generate_content',restrictions:{reasoning:false}})!;
+ expect(restricted.supportedEfforts).toEqual([]);
+ const session=service.createSession({sourceProtocol:'responses',targetProtocol:'gemini_generate_content',model:'glm-5.3'});
+ expect(session.convertRequest({input:'hello'}).body).not.toHaveProperty('generationConfig.thinkingConfig');
+ expect(()=>session.convertRequest({input:'hello',reasoning:{effort:'max'}})).toThrow('Selected reasoning effort');session.dispose();
 });
 test('route restrictions remove effort support without inventing a default',()=>{
  const {service}=fixture();const profile=service.resolveCapabilities({provider:'zai',model:'glm-5.3',targetProtocol:'chat_completions',restrictions:{reasoning:false}})!;

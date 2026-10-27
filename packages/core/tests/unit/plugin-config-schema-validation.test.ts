@@ -18,8 +18,9 @@ describe('catalog-backed plugin option validation', () => {
     }] }, options);
     expect(valid.ok).toBe(true);
 
+    expect(parseNormalizeCompile({ plugins: [{ id: BINDING_ID, name: 'llm-protocol-adapter', options: { sourceProtocol: 'responses', targetProtocol: 'gemini_generate_content' } }] }, options).ok).toBe(true);
+
     for (const pluginOptions of [
-      { sourceProtocol: 'responses', targetProtocol: 'gemini_generate_content' },
       { sourceProtocol: 'gemini_generate_content', targetProtocol: 'responses' },
       { sourceProtocol: 'anthropic_messages' },
     ]) {

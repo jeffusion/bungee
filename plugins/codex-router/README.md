@@ -6,7 +6,7 @@
 
 原始模型和目标模型复用 models.dev 的分页搜索选择器。原始目录固定为 OpenAI，目标提供商支持过滤并排除 OpenAI；原始模型可切换为手动输入，用于目录未收录的官方模型标识。`sourceProvider` 只记录目录来源，不参与路由匹配。新增模式下，改变目标模型会同步改变 source，无需单独填写标识或别名；替换模式下，原始模型和目标模型独立。切换模式保留转发目标、协议和原始模型草稿，概览显示对应的新增或替换行为。
 
-模型匹配不依赖 Codex 客户端身份，其它 Responses 客户端也可使用此入口。插件接受 Responses 生成请求，目标支持 Responses、Chat Completions、Anthropic Messages；不提供 Chat Completions 或 Messages 生成入口。插件同时提供 Codex 模型目录适配和会话处理。
+模型匹配不依赖 Codex 客户端身份，其它 Responses 客户端也可使用此入口。插件接受 Responses 生成请求，目标支持 Responses、Chat Completions、Anthropic Messages、Gemini GenerateContent；不提供 Chat Completions 或 Messages 生成入口。插件同时提供 Codex 模型目录适配和会话处理。
 
 显式 `source` 可以替换原生目录中的同名模型，保留它的位置并使用目标能力描述；其它原生模型保持原样。新增标识则追加到目录。同一原始标识不允许多个绑定。未声明 source 时按 `alias ?? model` 匹配；`source` 与 `alias` 不允许同时设置。
 
@@ -20,7 +20,7 @@
 
 上游地址、API Key、模型映射、重试均使用目标原配置。Codex base URL 已指向入口即可；ChatGPT 登录的模型目录请求可发现新增模型，API Key 模式不承诺自动列入选择器。
 
-模型生成和协作中继均使用 Bungee 的[内部调度端点规则](../../docs/reference/plugin-api.md#内部调度与准备)。端点由目标协议确定：Responses `/responses`、Chat Completions `/v1/chat/completions`、Anthropic Messages `/v1/messages`。服务目标直接使用端点；路由目标在端点前加目标路由路径，再执行目标路由的规则。入口路由的路径及 `path_rewrite` 不用于外部目标。公共 OpenAI Responses 上游基址包含 `/v1`；ChatGPT OAuth 使用 origin，由提供商插件改写实际后端路径。Chat 和 Anthropic 的上游基址不应重复包含端点已有的 `/v1`。
+模型生成和协作中继均使用 Bungee 的[内部调度端点规则](../../docs/reference/plugin-api.md#内部调度与准备)。端点由目标协议确定：Responses `/responses`、Chat Completions `/v1/chat/completions`、Anthropic Messages `/v1/messages`、Gemini `/v1beta/models/{model}:generateContent`（流式使用 `streamGenerateContent?alt=sse`）。服务目标直接使用端点；路由目标在端点前加目标路由路径，再执行目标路由的规则。入口路由的路径及 `path_rewrite` 不用于外部目标。公共 OpenAI Responses 上游基址包含 `/v1`；ChatGPT OAuth 使用 origin，由提供商插件改写实际后端路径。Chat 和 Anthropic 的上游基址不应重复包含端点已有的 `/v1`。
 
 入口使用 WebSocket 时开启 route.websocket.enabled。目标接收协议必须在插件绑定的 `target.protocol` 中声明；Responses 目标也开启 websocket 时使用原生 WS 上游，否则使用 HTTP/SSE。缺少协议时拒绝保存，不从 route/service 推断。每个连接串行生成，断开取消活动请求。WS 实现沿用握手限流；需要未支持的逐生成硬预算时，目标生成在连接上游前拒绝。
 
@@ -72,14 +72,16 @@ OpenAI 主 Agent 已返回真实密文时，可在入口插件中配置独立的
 
 ## 转换字段与损耗
 
-原生 Responses 透传不执行转换路径的偏好降级。Chat／Anthropic 目标经共享 Responses codec 重编码，具体可表示性不同：
+原生 Responses 透传不执行转换路径的偏好降级。Chat／Anthropic／Gemini 目标经共享 Responses codec 重编码，具体可表示性不同：
 
 | 输入 | 转换行为 |
 | --- | --- |
 | tools 与 additional_tools.tools | 合并注册；namespace function/custom 使用无碰撞名称并恢复逻辑名称 |
 | 重复工具 | 同身份同定义去重，冲突拒绝；重复项仍计入工具预算 |
 | custom 工具 | 包装单个字符串 input，回程恢复原文；不承诺目标原生执行 grammar |
-| reasoning.effort | 按 models.dev 的有效档位和目标协议映射，无型号白名单；未知默认值不补 none，不猜 thinking budget |
+| reasoning.effort | 按 models.dev 的有效档位和目标协议映射，无型号白名单；Gemini 取 minimal/low/medium/high 交集写入 thinkingLevel；未知默认值不补 none，不猜 thinking budget |
+| system/developer 消息 | Gemini 按出现顺序归集到 systemInstruction，接受中途追加指令并记录诊断；规范历史保留原顺序 |
+| parallel_tool_calls | Gemini 接受 true 并诊断省略；false 转成每次响应至多调用一个工具的提示并记录诊断，不保证提供商严格串行 |
 | reasoning_summary_delivery=sequential_cutoff | 验证后省略交付偏好 |
 | reasoning.summary、context=all_turns、text.verbosity | 验证后省略目标不可表示的生成偏好 |
 | prompt_cache_key、client_metadata | 校验后不转发转换目标，不作为身份或路由依据 |
@@ -90,6 +92,8 @@ OpenAI 主 Agent 已返回真实密文时，可在入口插件中配置独立的
 | cyber=daybreak_blue/red | 拒绝，不通过外部模型降级获取该权限 |
 | 自动／none／缺省 web_search 声明 | 可省略；required 或强制指定服务端搜索拒绝 |
 | 未知字段、未知输入类型、多候选 SSE、不可还原历史 | 明确错误，不丢弃语义后伪造成功 |
+
+Gemini 工具 thoughtSignature 经公开 call_id 的 `__thought__` 后缀往返，完整历史和 previous_response_id 续聊都恢复原 functionCall/functionResponse.id 与签名；未签名调用不伪造签名。文本及推理 Part 的签名通过尾部 reasoning.encrypted_content 的网关私有载体保留；完整历史必须回传此项及未经修改的文本与项 ID。Router 将 Gemini 历史交给共享 codec 严格校验，不自行解析载体；原生 OpenAI 密文仍拒绝，不新增多模态或持久化。详见[适配器边界](../../docs/reference/llm-protocol-adapter.md#严格语义和生命周期)。
 
 工具 JSON 不完整、流截断、取消和 incomplete 不写入成功连接历史。Anthropic 不能无损表达某些结构化输出及中途 developer 指令，也不支持 Router 的签名 thinking 续聊。转换诊断只记录字段路径、mapped/omitted、稳定原因码和请求 ID，不回显正文或参数值。
 
@@ -112,6 +116,8 @@ OpenAI 主 Agent 已返回真实密文时，可在入口插件中配置独立的
 HTTP 上游经共享 SSE BodyHandle 转成 WS JSON；启用 WS 的 Responses 目标可使用原生上游连接。发送 drain、消息预算、关闭期限和连接排空使用 Bungee 的[WebSocket transport](../../docs/architecture/websocket.md)。逐生成硬预算未支持时在上游连接前拒绝，不能用统计代替授权。
 
 ## 来源与验证方法
+
+Gemini 工具签名参考 [LiteLLM 固定提交 cfe0100e1fca613e7b1af27dd1fe4807ca4d1d1a](https://github.com/BerriAI/litellm/tree/cfe0100e1fca613e7b1af27dd1fe4807ca4d1d1a)，不代表整体无损兼容。
 
 工具提取与转换约束的参考来源：cc-switch `b4a079430ce85a604e10d97d4b7530774e00e112`、new-api `7aa3531ef4c247ad4891c06cc8ed9d0ffb73fecc`、sub2api `3a6fd1c9db07203ca308aaba69e502bc1f35b307`。访问模式依据 [OpenAI Daybreak](https://developers.openai.com/api/docs/guides/daybreak)，不授予目标权限。
 

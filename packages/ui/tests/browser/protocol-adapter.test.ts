@@ -50,21 +50,18 @@ test(`adapter independent protocol fields, validation and edit round trip: ${lan
     await source.click(); await source.press('Home'); await source.press('Enter');
     await expect(source).toContainText('Responses');
     await target.click(); await page.getByRole('option', { name: 'Gemini GenerateContent', exact: true }).click();
-    await save.click();
-    await expect(dialog.getByRole('alert')).toBeVisible();
-    await expect(save).toBeDisabled();
-
-    await target.click(); await page.getByRole('option', { name: 'Chat Completions', exact: true }).click();
-    await expect(source).toContainText('Responses'); await expect(save).toBeEnabled();
+    await expect(save).toBeEnabled();
 
     await save.click(); await expect(dialog).toHaveCount(0);
-    await expect(page.getByTestId('saved-bindings')).toContainText('"sourceProtocol":"responses","targetProtocol":"chat_completions"');
+    await expect(page.getByTestId('saved-bindings')).toContainText('"sourceProtocol":"responses","targetProtocol":"gemini_generate_content"');
 
-    await expect(page.getByTestId('protocol-adapter-fixture')).toContainText('Chat Completions');
+    await expect(page.getByTestId('protocol-adapter-fixture')).toContainText('Gemini GenerateContent');
 
     await page.getByRole('button', { name: zh ? '编辑' : 'Edit', exact: true }).click();
-    await expect(source).toContainText('Responses'); await expect(target).toContainText('Chat Completions');
-    await source.click(); await source.press('Escape'); await expect(dialog).toBeVisible();
+    await expect(source).toContainText('Responses'); await expect(target).toContainText('Gemini GenerateContent');
+    await source.click(); await page.getByRole('option', { name: 'Gemini GenerateContent', exact: true }).click();
+    await target.click(); await page.getByRole('option', { name: 'Responses', exact: true }).click();
+    await save.click(); await expect(dialog.getByRole('alert')).toBeVisible(); await expect(save).toBeDisabled();
     await dialog.getByRole('button', { name: zh ? '取消' : 'Cancel', exact: true }).click();
 
     expect(errors).toEqual([]);evidence.verify();

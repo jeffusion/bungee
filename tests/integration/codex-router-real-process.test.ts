@@ -130,6 +130,24 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         // This fixture implements only accounts/config and model inference.
         if (request.method !== 'POST') return Response.json({error: 'fixture_not_found'}, {status: 404});
         const body: any = await request.json(); const call = capture(request.headers, path, body, 'http');
+        if (/\/models\/[^/]+:(?:generateContent|streamGenerateContent)$/.test(path)) {
+          expect(request.method).toBe('POST');expect(body).not.toHaveProperty('model');
+          const streaming=path.endsWith(':streamGenerateContent');
+          expect(new URL(request.url).searchParams.get('alt')).toBe(streaming?'sse':null);
+          if(JSON.stringify(body).includes('fixture-hold-gemini')){
+            pending.add(call.requestId);
+            return new Response(new ReadableStream<Uint8Array>({start(controller){controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({candidates:[{index:0,content:{role:'model',parts:[{text:'pending'}]}}]})+'\n\n'));},cancel(){pending.delete(call.requestId);aborted.add(call.requestId);}}),{headers:{'content-type':'text/event-stream'}});
+          }
+          const parts=body.contents.flatMap((item:any)=>item.parts);
+          const restored=parts.some((part:any)=>part.functionResponse?.id==='gemini-one');
+          const output=restored?[{text:'gemini answer',thoughtSignature:'c2lnbmF0dXJlLXRleHQ='}]:[
+            {text:'provider preface',thoughtSignature:'c2lnbmF0dXJlLXRleHQ='},
+            {functionCall:{id:'gemini-one',name:'bungee_tool_0',args:{q:'one'}},thoughtSignature:'c2lnbmF0dXJlLW9uZQ=='},
+            {functionCall:{id:'gemini-two',name:'bungee_tool_0',args:{q:'two'}},thoughtSignature:'c2lnbmF0dXJlLXR3bw=='},
+          ];
+          const result={candidates:[{index:0,content:{role:'model',parts:output},finishReason:'STOP'}],usageMetadata:{promptTokenCount:4,candidatesTokenCount:2,totalTokenCount:6,promptTokensDetails:[{modality:'TEXT',tokenCount:4}]}};
+          return streaming?sse([result]):Response.json(result);
+        }
         // The real DeepSeek Chat API accepts only its documented roles; other providers keep their fixtures.
         if (body.model === CODEX_DEEPSEEK_MODEL && path.endsWith('/chat/completions')) {
           const unsupported = Array.isArray(body.messages) && body.messages.find((message: any) => !['system', 'user', 'assistant', 'tool'].includes(message.role));
@@ -1203,6 +1221,66 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       await socket?.close();
       aggregate=saved;await publish();
     }
+  },90000);
+
+  test('built Gemini JSON/SSE/WS preserve signed parallel tool history, final URL mapping and cancellation',async()=>{
+    const saved=structuredClone(aggregate);let socket:Socket|undefined;
+    const model='org/gemini',wire='gemini/wire';const start=calls.length;
+    try{
+      aggregate.plugin_activations.push({plugin_name:'model-mapping'});
+      aggregate.logical_configuration.services[0].plugins=[{id:uuid(41),position:1,name:'model-mapping',enabled:true,options:{modelMappings:[{source:CODEX_CHAT_MODEL,target:wire,catalogModel:{provider:'zai',model:CODEX_CHAT_MODEL}}]}}];
+      aggregate.logical_configuration.routes[0].plugins.find((item:any)=>item.name==='codex-router').options.models.push({source:model,provider:'zai',model:CODEX_CHAT_MODEL,target:{type:'service',id:CHAT,protocol:'gemini_generate_content'}});
+      await publish();
+      const catalog=await fetch(`${proxy}/codex/models?client_version=0.162.1`,{headers:{authorization:`Bearer ${token}`}});
+      expect(catalog.status).toBe(200);
+      expect((await catalog.json() as any).models.find((item:any)=>item.slug===model)).toMatchObject({supported_reasoning_levels:[{effort:'low',description:'low'},{effort:'high',description:'high'}],default_reasoning_level:null});
+      const codex=await post({model,tools,reasoning:{effort:'high'},parallel_tool_calls:false,input:[
+        {role:'developer',content:'initial instruction'},{role:'user',content:'workspace context'},
+        {role:'developer',content:'runtime instruction'},{role:'user',content:'inspect workspace'},
+      ]});
+      expect(codex.status).toBe(200);
+      expect(calls.at(-1)!.body.systemInstruction).toEqual({parts:[{text:'initial instruction'},{text:'runtime instruction'},{text:'Call at most one tool per response.'}]});
+      expect(calls.at(-1)!.body.contents).toEqual([{role:'user',parts:[{text:'workspace context'},{text:'inspect workspace'}]}]);
+      expect(calls.at(-1)!.body).not.toHaveProperty('parallel_tool_calls');
+      const request={model,input:smallHistory,tools,reasoning:{effort:'high'},parallel_tool_calls:true};
+      const first=await post(request);expect(first.status).toBe(200);expect(first.body.model).toBe(model);
+      const toolCalls=first.body.output.filter((item:any)=>item.type==='function_call');
+      expect(toolCalls.map((item:any)=>item.call_id)).toEqual(['gemini-one__thought__c2lnbmF0dXJlLW9uZQ==','gemini-two__thought__c2lnbmF0dXJlLXR3bw==']);
+      expect(toolCalls.map((item:any)=>item.name)).toEqual(['lookup','lookup']);
+      const outputs=toolCalls.map((item:any,index:number)=>({type:'function_call_output',call_id:item.call_id,output:`result-${index}`}));
+      const checkHistory=()=>{
+        const call=calls.at(-1)!;expect(call.path).toBe('/v1beta/models/gemini%2Fwire:generateContent');
+        expect(call.body.generationConfig.thinkingConfig).toEqual({thinkingLevel:'high'});
+        const parts=call.body.contents.flatMap((item:any)=>item.parts);
+        expect(parts).toContainEqual({text:'provider preface',thoughtSignature:'c2lnbmF0dXJlLXRleHQ='});
+        for(const [index,id,signature] of [[0,'gemini-one','c2lnbmF0dXJlLW9uZQ=='],[1,'gemini-two','c2lnbmF0dXJlLXR3bw==']] as const){
+          expect(parts).toContainEqual({functionCall:{id,name:'bungee_tool_0',args:{q:index===0?'one':'two'}},thoughtSignature:signature});
+          expect(parts).toContainEqual({functionResponse:{id,name:'bungee_tool_0',response:{output:`result-${index}`}}});
+        }
+        expect(JSON.stringify(parts)).toContain('custom result');expect(JSON.stringify(parts)).toContain('file result');
+      };
+      const continued=await post({...request,previous_response_id:first.body.id,input:outputs});
+      expect(continued.status).toBe(200);expect(JSON.stringify(continued.body)).toContain('gemini answer');checkHistory();
+      const full=await post({...request,input:[...smallHistory,...first.body.output,...outputs]});expect(full.status).toBe(200);checkHistory();
+      const streamed=await fetch(`${proxy}/codex/responses`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:JSON.stringify({...request,stream:true}),signal:AbortSignal.timeout(20000)});
+      expect(streamed.status).toBe(200);const text=await streamed.text();
+      expect(text).toContain('response.completed');expect(text).toContain('gemini-two__thought__c2lnbmF0dXJlLXR3bw==');expect(text).not.toContain('response.failed');
+      expect(calls.at(-1)!.path).toBe('/v1beta/models/gemini%2Fwire:streamGenerateContent');
+      socket=await openSocket();const firstWs=await socket.create(request);
+      expect(firstWs.at(-1).type).toBe('response.completed');
+      const done=firstWs.filter((event:any)=>event.type==='response.output_item.done').map((event:any)=>event.item);
+      expect(done.filter((item:any)=>item.type==='function_call').map((item:any)=>item.call_id)).toEqual(toolCalls.map((item:any)=>item.call_id));
+      const next=await socket.create({...request,previous_response_id:firstWs.at(-1).response.id,input:outputs});
+      expect(next.at(-1).type).toBe('response.completed');expect(JSON.stringify(next.at(-1))).toContain('gemini answer');
+      expect(calls.at(-1)!.transport).toBe('http');
+      await assertMetered(calls.slice(start));
+      const before=calls.length,eventStart=socket.events.length;
+      socket.client.send(JSON.stringify({type:'response.create',model,input:'fixture-hold-gemini'}));
+      await waitUntil(()=>calls.length===before+1 && pending.size===1,'Gemini hold did not reach upstream');
+      const held=calls.at(-1)!;socket.client.send(JSON.stringify({type:'response.cancel'}));
+      await waitUntil(()=>aborted.has(held.requestId) && socket!.events.slice(eventStart).some((event:any)=>event.error?.code==='codex_router_generation_cancelled'),'Gemini cancel did not abort upstream',10000);
+      expect(socket.events.slice(eventStart).some((event:any)=>event.type==='response.completed')).toBe(false);
+    }finally{await socket?.close();aggregate=saved;await publish();}
   },90000);
 
   test('serving-revision change isolates HTTP history and old WS worker owners drain on close', async () => {

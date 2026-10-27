@@ -121,7 +121,7 @@ try {
   await page.getByRole('option', { name: 'fixture-service', exact: true }).click();
   await expect(row.getByRole('combobox', { name: '目标模型协议', exact: true })).toHaveValue('');
   await row.getByRole('combobox', { name: '目标模型协议', exact: true }).click();
-  await page.getByRole('option', { name: 'Chat Completions', exact: true }).click();
+  await page.getByRole('option', { name: 'Gemini GenerateContent', exact: true }).click();
   await row.getByRole('combobox', { name: '原始模型', exact: true }).click();
   await expect(page.getByRole('option', { name: 'gpt-original-1', exact: true })).toBeVisible();
   await row.getByRole('combobox', { name: '原始模型', exact: true }).fill('gpt-original');
@@ -158,7 +158,7 @@ try {
   await page.getByRole('option', { name: 'Anthropic Messages', exact: true }).click();
   await expect(row.getByRole('combobox', { name: '目标模型协议', exact: true })).toHaveValue('Anthropic Messages');
   await row.getByRole('combobox', { name: '目标模型协议', exact: true }).click();
-  await page.getByRole('option', { name: 'Chat Completions', exact: true }).click();
+  await page.getByRole('option', { name: 'Gemini GenerateContent', exact: true }).click();
   await row.getByRole('combobox', { name: '原始模型', exact: true }).click();
   await expect(page.getByRole('option', { name: 'gpt-original-1', exact: true })).toBeVisible();
   await row.getByRole('combobox', { name: '原始模型', exact: true }).press('Escape');
@@ -177,6 +177,7 @@ try {
 
   await page.getByTestId('section-plugins').getByRole('button', { name: '编辑', exact: true }).click();
   await expect(dialog.getByRole('combobox', { name: '原始模型', exact: true })).toHaveValue('gpt-original');
+  await expect(dialog.getByRole('combobox', { name: '目标模型协议', exact: true })).toHaveValue('Gemini GenerateContent');
   await expect(dialog.getByRole('combobox', { name: '目标模型', exact: true })).toHaveValue('org/model-1');
 
   await expect(dialog.getByRole('combobox', { name: '转发目标', exact: true })).toHaveValue('fixture-service');
@@ -192,7 +193,7 @@ try {
   await expect(dialog.getByRole('combobox', { name: '目标模型', exact: true })).toHaveValue('org/model-1');
   await dialog.getByRole('button', { name: '从目录选择', exact: true }).click();
   await expect(dialog.getByRole('combobox', { name: '原始模型', exact: true })).toBeVisible();
-  await expect(dialog.getByRole('combobox', { name: '目标模型协议', exact: true })).toHaveValue('Chat Completions');
+  await expect(dialog.getByRole('combobox', { name: '目标模型协议', exact: true })).toHaveValue('Gemini GenerateContent');
   await dialog.getByRole('button', { name: '手动输入', exact: true }).click();
   await expect(dialog.getByRole('textbox', { name: '原始模型', exact: true })).toHaveValue('custom-original');
   await dialog.getByTestId('plugin-config-save-button').click();
@@ -237,7 +238,7 @@ try {
   await added.getByRole('combobox', { name: '转发目标', exact: true }).fill('fixture');
   await page.getByRole('option', { name: 'fixture-service', exact: true }).click();
   await added.getByRole('combobox', { name: '目标模型协议', exact: true }).click();
-  await page.getByRole('option', { name: 'Chat Completions', exact: true }).click();
+  await page.getByRole('option', { name: 'Gemini GenerateContent', exact: true }).click();
   await expect(dialog.getByTestId('plugin-config-save-button')).toBeEnabled();
   // Changing the target model changes the matching ID too, with no separate field.
   await added.getByRole('combobox', { name: '目标模型', exact: true }).fill('org/model-2');
@@ -248,6 +249,7 @@ try {
   await page.getByTestId('section-plugins').getByRole('button', { name: '编辑', exact: true }).click();
   await expect(added.getByRole('radio', { name: '新增模型', exact: true })).toHaveAttribute('aria-checked', 'true');
   await expect(added.getByRole('combobox', { name: '目标模型', exact: true })).toHaveValue('org/model-2');
+  await expect(added.getByRole('combobox', { name: '目标模型协议', exact: true })).toHaveValue('Gemini GenerateContent');
   // A second addition of the same model fails validation before saving.
   await dialog.getByRole('button', { name: '新增模型', exact: true }).click();
   const duplicate = dialog.getByTestId('codex-model-binding').nth(2);
@@ -260,7 +262,7 @@ try {
   await duplicate.getByRole('combobox', { name: '转发目标', exact: true }).fill('fixture');
   await page.getByRole('option', { name: 'fixture-service', exact: true }).click();
   await duplicate.getByRole('combobox', { name: '目标模型协议', exact: true }).click();
-  await page.getByRole('option', { name: 'Chat Completions', exact: true }).click();
+  await page.getByRole('option', { name: 'Gemini GenerateContent', exact: true }).click();
   await expect(dialog.getByTestId('plugin-config-save-button')).toBeDisabled();
 
   await duplicate.getByRole('button', { name: '移除', exact: true }).click();

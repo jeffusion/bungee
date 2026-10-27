@@ -1,6 +1,7 @@
 import { validateAgentMessage } from '../responses-codec/agent-messages';
 import { decodeResponsesRequest } from '../responses-codec';
-import { argumentObject, fail, list, record, string, type JsonRecord } from '../responses-codec/common';
+import { argumentObject, fail, list, record, string, limits, type JsonRecord } from '../responses-codec/common';
+import { decodeGeminiCallId, restoreGeminiHistory } from './gemini';
 import { fields, integer, bool, textParts } from './validation';
 import { geminiSchemaToJson } from './schema';
 import type { LLMProtocol, ProtocolSessionContext, ProtocolRequestConversion } from './types';
@@ -399,6 +400,9 @@ export function convertProtocolRequest(raw: unknown, context: ProtocolSessionCon
   const b = canonicalRequest(raw, context.sourceProtocol, context.model);
   if(context.streaming!==undefined){bool(context.streaming,'context.streaming');if(b.stream!==undefined&&b.stream!==context.streaming)fail('invalid_payload','Request stream mode disagrees with transport context','stream');b.stream=context.streaming;}
   validateCanonical(b, context);
+  const geminiHistory = context.sourceProtocol === 'responses' && context.targetProtocol === 'gemini_generate_content'
+    ? restoreGeminiHistory(b.input, limits(context.capabilities?.limits)) : undefined;
+  if (geminiHistory) b.input = geminiHistory.input;
   const cap = { ...context.capabilities, agentMessageDelivery: context.agentMessageDelivery ?? context.capabilities?.agentMessageDelivery, omitOptionalWebSearch: true, preserveToolIdentityDescription: true, preserveRefusalContent: true }, policy = context.reasoningPolicy;
   const reasoning = b.reasoning === undefined ? undefined : record(b.reasoning, 'reasoning');
   const sourceThinking = b.sourceThinking;
@@ -424,10 +428,10 @@ export function convertProtocolRequest(raw: unknown, context: ProtocolSessionCon
   if (sourceThinking !== undefined && reasoning?.effort === undefined && policy?.targetEffort !== undefined)
     mappedEffort = string(policy.targetEffort, 'reasoningPolicy.targetEffort', true);
   const target = context.targetProtocol;
-  if (target === 'gemini_generate_content' && reasoning?.effort !== undefined && policy?.geminiThinkingBudget === undefined && policy?.geminiThinkingLevel === undefined)
+  if (target === 'gemini_generate_content' && reasoning?.effort !== undefined && mappedEffort === undefined && policy?.geminiThinkingBudget === undefined && policy?.geminiThinkingLevel === undefined)
     fail('unsupported_reasoning', 'Gemini requires an explicit thinking budget or level', 'reasoning.effort');
   if (sourceThinking !== undefined) {
-    const represented = target === 'responses' || target === 'chat_completions' ? mappedEffort !== undefined : target === 'anthropic_messages' ? mappedEffort !== undefined || policy?.anthropicThinkingMode !== undefined || policy?.anthropicThinkingBudget !== undefined : policy?.geminiThinkingBudget !== undefined || policy?.geminiThinkingLevel !== undefined;
+    const represented = target === 'responses' || target === 'chat_completions' ? mappedEffort !== undefined : target === 'anthropic_messages' ? mappedEffort !== undefined || policy?.anthropicThinkingMode !== undefined || policy?.anthropicThinkingBudget !== undefined : mappedEffort !== undefined || policy?.geminiThinkingBudget !== undefined || policy?.geminiThinkingLevel !== undefined;
     if (!represented)
       fail('unsupported_reasoning', 'Source thinking mode needs an explicit target wire policy', 'thinking');
   }
@@ -491,9 +495,13 @@ export function convertProtocolRequest(raw: unknown, context: ProtocolSessionCon
   const decodingTarget = target === 'gemini_generate_content' ? 'chat_completions' : target;
   if (target === 'gemini_generate_content' && reasoning)
     b.reasoning = { ...reasoning, effort: undefined };
-  const decoded = decodeResponsesRequest(b, decodingTarget, { ...cap, reasoningHistory: target !== 'anthropic_messages' && cap.reasoningHistory === true, reasoningEffort: target === 'chat_completions' && cap.reasoningEffort === true, anthropicThinkingBudget: undefined });
+  const decoded = decodeResponsesRequest(b, decodingTarget, { ...cap, reasoningHistory: target !== 'anthropic_messages' && cap.reasoningHistory === true, reasoningEffort: target === 'chat_completions' && cap.reasoningEffort === true, anthropicThinkingBudget: undefined }, { preserveContentOrder: target === 'gemini_generate_content' });
   const diagnostics = decoded.diagnostics;
-  const body = target === 'gemini_generate_content' ? renderGemini(decoded.body, cap.geminiJsonSchema === true) : decoded.body;
+  if (target === 'gemini_generate_content' && decoded.body.parallel_tool_calls === true) {
+    delete decoded.body.parallel_tool_calls;
+    diagnostics.push({ param: 'parallel_tool_calls', action: 'omitted', reason: 'gemini_parallel_tool_calls_allowed' });
+  }
+  const body = target === 'gemini_generate_content' ? renderGemini(decoded.body, context, geminiHistory?.parts, diagnostics) : decoded.body;
   if (stop !== undefined)
     body[target === 'chat_completions' ? 'stop' : target === 'anthropic_messages' ? 'stop_sequences' : 'generationConfig'] = target === 'gemini_generate_content' ? { ...record(body.generationConfig ?? {}, 'generationConfig'), stopSequences: typeof stop === 'string' ? [stop] : stop } : typeof stop === 'string' ? [stop] : stop;
   if (target === 'anthropic_messages') {
@@ -515,18 +523,24 @@ export function convertProtocolRequest(raw: unknown, context: ProtocolSessionCon
       body.thinking = { type: 'enabled', budget_tokens: budget };
     }
   }
-  if (target === 'gemini_generate_content' && (policy?.geminiThinkingBudget !== undefined || policy?.geminiThinkingLevel !== undefined)) {
-    if (policy.geminiThinkingBudget !== undefined && policy.geminiThinkingLevel !== undefined)
+  if (target === 'gemini_generate_content' && (mappedEffort !== undefined || policy?.geminiThinkingBudget !== undefined || policy?.geminiThinkingLevel !== undefined)) {
+    const level = policy?.geminiThinkingLevel ?? mappedEffort;
+    if (policy?.geminiThinkingBudget !== undefined && level !== undefined)
       fail('unsupported_reasoning', 'Choose one Gemini thinking policy', 'reasoningPolicy');
-    const thinkingConfig = policy.geminiThinkingBudget !== undefined ? { thinkingBudget: integer(policy.geminiThinkingBudget, 'reasoningPolicy.geminiThinkingBudget', -1) } : { thinkingLevel: string(policy.geminiThinkingLevel, 'reasoningPolicy.geminiThinkingLevel', true) };
+    if (level !== undefined && !['minimal', 'low', 'medium', 'high'].includes(level))
+      fail('unsupported_reasoning', 'Unknown Gemini thinking level', 'reasoning.effort');
+    if (mappedEffort !== undefined && policy?.geminiThinkingLevel !== undefined && mappedEffort !== policy.geminiThinkingLevel)
+      fail('unsupported_reasoning', 'Conflicting Gemini thinking levels', 'reasoning.effort');
+    const thinkingConfig = policy?.geminiThinkingBudget !== undefined ? { thinkingBudget: integer(policy.geminiThinkingBudget, 'reasoningPolicy.geminiThinkingBudget', -1) } : { thinkingLevel: string(level, 'reasoningPolicy.geminiThinkingLevel', true) };
     body.generationConfig = { ...record(body.generationConfig ?? {}, 'generationConfig'), thinkingConfig };
   }
   if (mappedEffort !== undefined || sourceThinking !== undefined || policy?.anthropicThinkingBudget !== undefined)
     diagnostics.push({ param: 'reasoning', action: 'mapped', reason: 'explicit_verified_wire_policy' });
-  return { body, canonicalHistory: decoded.canonicalInput, diagnostics, toolNames: decoded.toolNames,streaming:b.stream===true };
+  return { body, canonicalHistory: geminiHistory?.canonicalHistory(decoded.canonicalInput) ?? decoded.canonicalInput, diagnostics, toolNames: decoded.toolNames,streaming:b.stream===true };
 }
-function renderGemini(chat: JsonRecord, jsonSchema: boolean): JsonRecord {
+function renderGemini(chat: JsonRecord, context: ProtocolSessionContext, signedParts: Map<string, JsonRecord[]> | undefined, diagnostics: ProtocolRequestConversion['diagnostics']): JsonRecord {
   const result: JsonRecord = { contents: [] }, contents = result.contents as JsonRecord[], system: JsonRecord[] = [], calls = new Map<string, string>();
+  const nativeIds = new Set<string>();
   const append = (role: string, parts: JsonRecord[]) => {
     const prev = contents.at(-1); if (prev?.role === role)
       (prev.parts as JsonRecord[]).push(...parts);
@@ -534,13 +548,19 @@ function renderGemini(chat: JsonRecord, jsonSchema: boolean): JsonRecord {
       contents.push({ role, parts });
   };
   for (const m of chat.messages as JsonRecord[]) {
+    const signed = signedParts?.get(m.id as string);
+    if (signed) { append('model', signed); continue; }
     const parts: JsonRecord[] = m.content == null ? [] : typeof m.content === 'string' ? [{ text: m.content }] : (m.content as JsonRecord[]).map(p => {
       if (p.type !== 'text')
         fail('unsupported_content', 'This content cannot cross to Gemini', 'input'); return { text: p.text };
     });
     if (m.role === 'system' || m.role === 'developer') {
-      if (contents.length)
-        fail('unsupported_content', 'Mid-conversation instructions cannot be relocated', 'input');
+      if (contents.length) {
+        if (context.sourceProtocol !== 'responses')
+          fail('unsupported_content', 'Mid-conversation instructions cannot be relocated', 'input');
+        // LiteLLM cfe0100 transform_system_message also collects instructions across the conversation.
+        diagnostics.push({ param: 'input', action: 'mapped', reason: 'gemini_mid_conversation_instructions_consolidated' });
+      }
       system.push(...parts);
       continue;
     }
@@ -550,7 +570,8 @@ function renderGemini(chat: JsonRecord, jsonSchema: boolean): JsonRecord {
         fail('invalid_tool_history', 'Unknown tool result', 'input');
       if (m.is_error === true)
         fail('unsupported_content', 'Tool error authority cannot be represented by Gemini', 'input');
-      append('user', [{ functionResponse: { id: m.tool_call_id, name, response: { output: m.content } } }]);
+      const { id } = context.sourceProtocol === 'responses' ? decodeGeminiCallId(m.tool_call_id as string, limits(context.capabilities?.limits).maxArgumentBytes) : { id: m.tool_call_id };
+      append('user', [{ functionResponse: { id, name, response: { output: m.content } } }]);
       continue;
     }
     if (m.reasoning_content !== undefined)
@@ -558,9 +579,18 @@ function renderGemini(chat: JsonRecord, jsonSchema: boolean): JsonRecord {
     for (const c of m.tool_calls as JsonRecord[] ?? []) {
       const fn = record(c.function, 'function');
       calls.set(c.id as string, fn.name as string);
-      parts.push({ functionCall: { id: c.id, name: fn.name, args: argumentObject(fn.arguments as string) } });
+      const { id, thoughtSignature } = context.sourceProtocol === 'responses' ? decodeGeminiCallId(c.id as string, limits(context.capabilities?.limits).maxArgumentBytes) : { id: c.id, thoughtSignature: undefined };
+      if (nativeIds.has(id as string)) fail('invalid_tool_history', 'Duplicate decoded Gemini call id', 'call_id');
+      nativeIds.add(id as string);
+      parts.push({ functionCall: { id, name: fn.name, args: argumentObject(fn.arguments as string) }, ...(thoughtSignature === undefined ? {} : { thoughtSignature }) });
     }
     append(m.role === 'assistant' ? 'model' : 'user', parts);
+  }
+  if (chat.parallel_tool_calls !== undefined) {
+    if (context.sourceProtocol !== 'responses' || chat.parallel_tool_calls !== false)
+      fail('unsupported_request', 'Gemini cannot enforce parallel tool preference', 'parallel_tool_calls');
+    system.push({ text: 'Call at most one tool per response.' });
+    diagnostics.push({ param: 'parallel_tool_calls', action: 'mapped', reason: 'gemini_serial_tool_calls_prompt_only' });
   }
   if (system.length)
     result.systemInstruction = { parts: system };
@@ -570,12 +600,10 @@ function renderGemini(chat: JsonRecord, jsonSchema: boolean): JsonRecord {
       generation[to] = chat[from];
   if (chat.metadata !== undefined)
     fail('unsupported_request', 'Gemini has no compatible request metadata', 'metadata');
-  if (chat.parallel_tool_calls !== undefined)
-    fail('unsupported_request', 'Gemini cannot enforce parallel tool preference', 'parallel_tool_calls');
   if (chat.response_format !== undefined) {
     const f = record(chat.response_format, 'format');
     if (f.type === 'json_schema') {
-      if (!jsonSchema)
+      if (!context.capabilities?.geminiJsonSchema)
         fail('unsupported_request', 'Target JSON schema capability is required', 'text.format');
       const s = record(f.json_schema, 'schema');
       if (s.strict === false)

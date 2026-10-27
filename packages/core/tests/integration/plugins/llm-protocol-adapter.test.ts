@@ -46,13 +46,14 @@ const streams:any={responses:[{type:'response.completed',response:responses.resp
 const canonicalJson=conversionService(catalog,true).createSession({sourceProtocol:'responses',targetProtocol:'chat_completions',model:'m'});responses.responses=canonicalJson.convertResponse(responses.chat_completions);
 const canonicalStream=conversionService(catalog,true).createSession({sourceProtocol:'responses',targetProtocol:'chat_completions',model:'m'});streams.responses=[...streams.chat_completions.flatMap((e:any)=>canonicalStream.push(e)),...canonicalStream.finish()];
 const path=(protocol:string,stream=false)=>protocol==='responses'?'/v1/responses':protocol==='chat_completions'?'/v1/chat/completions':protocol==='anthropic_messages'?'/v1/messages':`/v1/models/m:${stream?'streamGenerateContent':'generateContent'}`;
+const wirePath=(source:string,target:string,stream=false)=>source!==target&&target==='gemini_generate_content'?`/v1beta/models/m:${stream?'streamGenerateContent':'generateContent'}`:path(target,stream);
 async function adapter(sourceProtocol:any,targetProtocol:any){const plugin=new Adapter({sourceProtocol,targetProtocol});await plugin.init({scope:{type:'route',routeId:'/v1'},initializationKind:'explicit-application',services:{consume:()=>catalog,rpc:{consume:()=>({get:async()=>null,put:async()=>null})},runBackground:(run:any)=>run(),onDispose(){}}} as any);const hooks=createPluginHooks();plugin.register(hooks);return {plugin,hooks};}
 for(const source of protocols)for(const target of protocols)for(const streaming of [false,true])test(`scoped actual request/shared body/response hooks ${source} → ${target} ${streaming?'SSE':'JSON'}`,async()=>{
-  const unsupported=(source==='responses'&&target==='gemini_generate_content')||(source==='gemini_generate_content'&&target==='responses');
+  const unsupported=(source==='gemini_generate_content'&&target==='responses');
   if(unsupported){await expect(adapter(source,target)).rejects.toThrow('invalid_protocol_pair');return;}
   const {hooks}=await adapter(source,target);const raw=structuredClone(requests[source]);if(source!=='gemini_generate_content')raw.stream=streaming;
   const context:any={requestId:crypto.randomUUID(),method:'POST',url:new URL('http://local'+path(source,streaming)),headers:{},body:raw};
-  await hooks.onBeforeRequest.promise(context);expect(context.url.pathname).toBe(path(target,streaming));
+  await hooks.onBeforeRequest.promise(context);expect(context.url.pathname).toBe(wirePath(source,target,streaming));
   if(source===target){expect(context.body).toEqual(raw);return;}
   await hooks.onValidateOutbound.promise({...context,url:context.url.href,model:context.body.model??'m',body:context.body});
   if(!streaming){let reads=0;const response=await hooks.onResponse.promise(Response.json({}),{...context,bodyHandle:{json:async()=>{reads++;return Object.freeze(structuredClone(responses[target]));}}});expect(reads).toBe(1);expect(JSON.stringify(await response.json())).toContain('answer');}
@@ -63,6 +64,33 @@ test('automatic provider publishes service without request conversion hooks; exp
   const p=new Adapter();let published=false;await p.init({scope:{type:'global'},initializationKind:'automatic-provider',services:{consume:()=>catalog,rpc:{consume:()=>({get:async()=>null,put:async()=>null})},runBackground:(run:any)=>run(),publish(id:string){published=id===CONVERSION_SERVICE_ID;},onDispose(){}}} as any);const h=createPluginHooks();p.register(h);expect(published).toBe(true);expect(p.bodyRequirements({method:'POST',url:new URL('http://local/v1/responses')})).toEqual({request:'none'});const raw:any={method:'POST',url:new URL('http://local/v1/responses'),body:{provider_secret:true}};expect(await h.onBeforeRequest.promise(raw)).toBe(raw);
   await expect(new Adapter().init({scope:{type:'route'},services:{consume:()=>catalog,rpc:{consume:()=>({get:async()=>null,put:async()=>null})},runBackground:(run:any)=>run(),onDispose(){}}} as any)).rejects.toThrow('invalid_protocol_pair');
 });
+
+for(const streaming of [false,true])test(`explicit Responses→Gemini binding preserves plaintext collaboration (${streaming?'SSE':'JSON'})`,async()=>{
+  const {hooks}=await adapter('responses','gemini_generate_content');
+  const context:any={requestId:crypto.randomUUID(),method:'POST',url:new URL('http://local/responses'),body:{model:'m',stream:streaming,input:[
+    {role:'user',content:'delegate'},
+    {type:'agent_message',author:'child',recipient:'parent',content:[{type:'input_text',text:'child result'}]},
+  ],tools:[{type:'namespace',name:'collaboration',tools:[{type:'function',name:'spawn_agent',parameters:{type:'object',properties:{message:{type:'string',encrypted:true}}}}]}]}};
+  await hooks.onBeforeRequest.promise(context);
+  expect(context.body.tools[0].functionDeclarations[0].parametersJsonSchema.properties.message).toEqual({type:'string'});
+  expect(context.body.contents.flatMap((item:any)=>item.parts)).toContainEqual({text:'child result'});
+  const chunk={candidates:[{index:0,content:{role:'model',parts:[{functionCall:{id:'spawn',name:'bungee_tool_0',args:{message:'task'}},thoughtSignature:'c2ln'}]},finishReason:'STOP'}]};
+  let items:any[];
+  if(streaming){
+    const events=[...await hooks.onStreamChunk.promise({data:JSON.stringify(chunk),json:chunk},context),...await hooks.onFlushStream.promise([],context)];
+    items=events.filter((event:any)=>event.json?.type==='response.output_item.added'||event.json?.type==='response.output_item.done').map((event:any)=>event.json.item);
+    items.push(...events.find((event:any)=>event.json?.type==='response.completed').json.response.output);
+  }else{
+    const response=await hooks.onResponse.promise(Response.json({}),{...context,bodyHandle:{json:async()=>chunk}});
+    items=(await response.json() as any).output;
+  }
+  expect(items.length).toBeGreaterThan(0);
+  for(const item of items)expect(item).toMatchObject({type:'function_call',namespace:'collaboration',name:'spawn_agent',encrypted_function_args:[],call_id:'spawn__thought__c2ln'});
+  expect(items.filter(item=>item.status==='completed').map(item=>item.arguments)).toContain('{"message":"task"}');
+  await hooks.onFinally.promise(context);
+  const encrypted=await adapter('responses','gemini_generate_content');
+  await expect(encrypted.hooks.onBeforeRequest.promise({requestId:crypto.randomUUID(),method:'POST',url:new URL('http://local/responses'),body:{model:'m',input:[{type:'agent_message',author:'child',recipient:'parent',content:[{type:'encrypted_content',encrypted_content:'native-private'}]}]}} as any)).rejects.toThrow('llm_adapter_unsupported_content');
+});
 test('strict scoped conversion rejects unknown inputs/tools/history/structured output before any response or secret leakage',async()=>{
   for(const [field,value,param] of [['secret_field','PRIVATE_REQUEST_BODY','secret_field'],['tools',[{type:'remote_execution',secret:'PRIVATE_REQUEST_BODY'}],'tools[0]'],['previous_response_id','private-id','previous_response_id']] as const){const {hooks}=await adapter('responses','chat_completions');try{await hooks.onBeforeRequest.promise({requestId:crypto.randomUUID(),method:'POST',url:new URL('http://local/v1/responses'),body:{model:'m',input:'hello',[field]:value}} as any);throw new Error('expected refusal');}catch(e:any){expect(e.status).toBe(422);expect(JSON.stringify(e)).not.toContain('PRIVATE_REQUEST_BODY');if(field!=='previous_response_id')expect(e.details?.param??e.param).toBeDefined();}}
   const {hooks}=await adapter('responses','anthropic_messages');await expect(hooks.onBeforeRequest.promise({requestId:'schema',method:'POST',url:new URL('http://local/v1/responses'),body:{model:'m',input:'hello',text:{format:{type:'json_schema',name:'test',schema:{type:'object'}}}}} as any)).rejects.toThrow('llm_adapter_unsupported_request');
@@ -72,13 +100,14 @@ import {ScopedPluginRegistry,setScopedPluginRegistry,getScopedPluginRegistry} fr
 const {handleRequest}=await import('../../../src/worker/request/handler');
 const logging={accessLogWriter:{write(){},updateBodyId(){},updateResponseBodyId(){},updateProtocolOutcome(){}},fileLogWriter:{async write(){}}};
 for(const source of protocols)for(const target of protocols)for(const streaming of [false,true])test(`Gateway scoped adapter ${source} → ${target} ${streaming?'SSE':'JSON'} final wire`,async()=>{
-  if((source==='responses'&&target==='gemini_generate_content')||(source==='gemini_generate_content'&&target==='responses'))return;
+  if((source==='gemini_generate_content'&&target==='responses'))return;
   const previous=getScopedPluginRegistry(),fetch=globalThis.fetch;const serviceHost=relayServiceHost(catalog),h=serviceHost.worker;
   const registry=new ScopedPluginRegistry(import.meta.dir,h);registry.setServiceDependencies(new Map([[ADAPTER_PLUGIN,{'models-dev':'^1.0.0'}]]));
-  const config:any={routes:[{id:'adapter',path:'/v1',path_rewrite:{'^/v1':''},plugins:[{name:ADAPTER_PLUGIN,path:new URL('../../../../../plugins/llm-protocol-adapter/server/index.ts',import.meta.url).pathname,options:{sourceProtocol:source,targetProtocol:target}}],endpoints:[{id:'mock',target:'http://upstream.test/v1'}]}]};
+  const config:any={routes:[{id:'adapter',path:'/adapter',path_rewrite:{'^/adapter':''},plugins:[{name:ADAPTER_PLUGIN,path:new URL('../../../../../plugins/llm-protocol-adapter/server/index.ts',import.meta.url).pathname,options:{sourceProtocol:source,targetProtocol:target}}],endpoints:[{id:'mock',target:'http://upstream.test'}]}]};
   let calls=0,wire:any,url='';globalThis.fetch=Object.assign(async(input:any,init:any)=>{calls++;url=String(input);wire=JSON.parse(await new Response(init.body).text());return streaming?new Response(streams[target].map((e:any)=>`data: ${JSON.stringify(e)}\n\n`).join('')+(target==='chat_completions'?'data: [DONE]\n\n':''),{headers:{'content-type':'text/event-stream'}}):Response.json(responses[target]);},{preconnect(){}}) as any;
   try{expect((await registry.initializeFromConfig(config)).failed).toBe(0);setScopedPluginRegistry(registry);const body=structuredClone(requests[source]);if(source!=='gemini_generate_content')body.stream=streaming;
-    const response=await handleRequest(new Request('http://local'+path(source,streaming),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}),config,{logging});expect(response.status).toBe(200);const text=await response.text();expect(text).toContain('answer');expect(calls).toBe(1);expect(new URL(url).pathname).toBe(path(target,streaming));if(source===target)expect(wire).toEqual(body);
+    const response=await handleRequest(new Request('http://local/adapter'+path(source,streaming),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}),config,{logging});expect(response.status).toBe(200);const text=await response.text();expect(text).toContain('answer');expect(calls).toBe(1);expect(new URL(url).pathname).toBe(wirePath(source,target,streaming));if(source===target)expect(wire).toEqual(body);
+    if(source!==target&&target==='gemini_generate_content')expect(new URL(url).searchParams.get('alt')).toBe(streaming?'sse':null);
     if(streaming&&source==='responses')expect(text).toContain('response.completed');if(streaming&&source==='anthropic_messages')expect(text).toContain('message_stop');if(streaming&&source==='chat_completions')expect(text).toContain('[DONE]');
   }finally{globalThis.fetch=fetch;setScopedPluginRegistry(previous);await registry.destroy();await serviceHost.dispose();}
 });

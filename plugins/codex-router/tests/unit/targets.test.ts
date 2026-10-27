@@ -1,3 +1,4 @@
+import {validatePluginConfig} from "../../../../packages/core/src/utils/config-validator";
 import type { PluginConfigValue } from '@jeffusion/bungee-types';
 import {fieldValueSatisfies} from '../../../../packages/core/src/plugin-manifest-catalog/plugin-field-value';
 import {expect,test} from 'bun:test';
@@ -27,7 +28,18 @@ test('binding protocol allows reuse of untyped route/service and preserves cycle
 test('gateway reference schema accepts binding protocol but rejects invalid values and extra target keys', () => {
   const field = { name: 'target', type: 'gateway_target', label: 'Target', required: true } as any;
   expect(fieldValueSatisfies(field, { type: 'route', id: 'b' })).toBe(true);
-  for (const protocol of ['responses', 'chat_completions', 'anthropic_messages']) expect(fieldValueSatisfies(field, { type: 'service', id: 's', protocol })).toBe(true);
+  for (const protocol of ['responses', 'chat_completions', 'anthropic_messages', 'gemini_generate_content']) {
+    const target = { type: 'service', id: 's', protocol };
+    expect(fieldValueSatisfies(field, target)).toBe(true);
+    expect(validatePluginConfig({ target }, [field]).valid).toBe(true);
+  }
   const invalidTargets: PluginConfigValue[] = [{ type: 'route', id: 'b', protocol: 'unknown' }, { type: 'route', id: 'b', protocol: null }, { type: 'route', id: 'b', injected: true }, { type: 'service', protocol: 'responses' }];
   for (const target of invalidTargets) expect(fieldValueSatisfies(field, target)).toBe(false);
+});
+
+import {parseBindings} from '../../server/config';
+test('router accepts Gemini receiving bindings and rejects unknown protocols',()=>{
+ const binding={provider:'fixture',model:'m',target:{type:'service',id:'s',protocol:'gemini_generate_content'}};
+ expect(parseBindings([binding])[0].target.protocol).toBe('gemini_generate_content');
+ expect(()=>parseBindings([{...binding,target:{...binding.target,protocol:'unknown'}}])).toThrow('target_protocol_invalid');
 });
