@@ -1,3 +1,10 @@
+## [6.7.3](https://github.com/jeffusion/bungee/compare/v6.7.2...v6.7.3) (2026-10-27)
+
+
+### Bug Fixes
+
+* **routes:** 使用独立接口复制路由并重建嵌套身份 ([dc4075e](https://github.com/jeffusion/bungee/commit/dc4075ec614d5de1118acdffccb862af91955bbb))
+
 ## [6.7.2](https://github.com/jeffusion/bungee/compare/v6.7.1...v6.7.2) (2026-10-27)
 
 
