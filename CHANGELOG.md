@@ -1,3 +1,10 @@
+## [6.7.1](https://github.com/jeffusion/bungee/compare/v6.7.0...v6.7.1) (2026-10-27)
+
+
+### Bug Fixes
+
+* **release:** recover completed asset uploads after API errors ([36da553](https://github.com/jeffusion/bungee/commit/36da553aae528b141323af4cd20c8daf7b0b6052))
+
 # [6.7.0](https://github.com/jeffusion/bungee/compare/v6.6.0...v6.7.0) (2026-10-26)
 
 
