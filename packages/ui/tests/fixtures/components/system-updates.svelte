@@ -1,9 +1,9 @@
 <script lang="ts">
-  import SystemUpdates from '$components/domain/system/SystemUpdates.svelte';
+  import AppHeader from '$components/shell/AppHeader.svelte';
   import ConfirmationHost from '$components/shell/ConfirmationHost.svelte';
 </script>
-<div class="min-h-screen bg-carbon-950 p-4 text-zinc-200">
-  <label>Draft<input aria-label="Draft" class="bg-carbon-800" /></label>
-  <SystemUpdates />
+<div class="min-h-screen bg-carbon-950 text-zinc-200">
+  <AppHeader items={[]} showLogout={false} onLogout={() => {}} />
+  <label class="m-4 block">Draft<input aria-label="Draft" class="bg-carbon-800" /></label>
 </div>
 <ConfirmationHost />

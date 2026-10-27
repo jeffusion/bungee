@@ -91,6 +91,46 @@ test('current version hides the update entry while pending and failed operations
   }, 'en', false, status);
 }, 30_000);
 
+test('idle status refreshes only on entry or manually; an upgrade polls until it finishes', async () => {
+  await scenario(async (page, state) => {
+    await page.clock.install();
+    await page.reload();
+    await expect(page.getByTestId('system-updates-trigger')).toBeVisible();
+    await page.clock.pauseAt(await page.evaluate(() => Date.now()));
+    const reads = state.reads;
+    await page.clock.fastForward(65_000);
+    assert(state.reads).toBe(reads);
+    await page.screenshot({ path: '/tmp/bungee-system-updates-header.png' });
+    await page.getByTestId('system-updates-trigger').hover();
+    await page.screenshot({ path: '/tmp/bungee-system-updates-header-hover.png' });
+    await page.getByTestId('system-updates-trigger').click();
+    await expect(page.getByTestId('updates-upgrade')).toBeEnabled();
+    assert(state.reads).toBe(reads + 1);
+    await page.clock.fastForward(65_000);
+    assert(state.reads).toBe(reads + 1);
+    await page.getByTestId('updates-check').click();
+    await expect.poll(() => state.checks).toBe(1);
+    await expect(page.getByTestId('updates-upgrade')).toBeEnabled();
+    await page.getByTestId('updates-upgrade').click();
+    await page.getByTestId('confirmation-accept').click();
+    await expect(page.getByTestId('update-operation')).toHaveAttribute('data-phase', 'downloading');
+    await expect(page.getByTestId('updates-check')).toBeEnabled();
+    const downloadingReads = state.reads;
+    state.status.operation!.phase = 'awaiting_confirmation';
+    await page.clock.runFor(2_000);
+    await expect(page.getByTestId('updates-install')).toBeEnabled();
+    assert(state.reads).toBeGreaterThan(downloadingReads);
+    state.status.operation!.phase = 'succeeded';
+    await page.clock.runFor(2_000);
+    await expect(page.getByTestId('update-operation')).toHaveAttribute('data-phase', 'succeeded');
+    const finishedReads = state.reads;
+    await page.clock.fastForward(65_000);
+    assert(state.reads).toBe(finishedReads);
+    assert(state.posts).toHaveLength(1);
+    assert(state.confirmations).toHaveLength(0);
+  }, 'zh-CN', false);
+}, 30_000);
+
 test('two confirmations separate download from restart; fixed countdown reloads once while restarting', async () => {
   await scenario(async (page, state) => {
     assert(state.posts).toHaveLength(0);

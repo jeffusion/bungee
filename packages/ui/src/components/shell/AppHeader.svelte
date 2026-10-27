@@ -15,7 +15,6 @@
   import MenuGroup from './MenuGroup.svelte';
   import SystemUpdates from '$components/domain/system/SystemUpdates.svelte';
   import type { EffectiveMenu, EffectivePage } from '$components/domain/menu/menu-model';
-  import { version } from '../../../../../package.json';
   const moreControlWidth = 104;
   let { items, showLogout, logoutBusy = false, onLogout }: {
     items: EffectiveMenu[]; showLogout: boolean; logoutBusy?: boolean; onLogout: (opener: HTMLElement) => void | Promise<void>;
@@ -157,8 +156,7 @@
     <span class="relative flex h-[32px] w-[32px] shrink-0 items-center justify-center border border-nexus-500/60 bg-carbon-900">
       <svg aria-hidden="true" viewBox="0 0 24 24" class="h-5 w-5 text-nexus-500" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 3L5 13h6l-1 8l8-11h-6l1-7z" /></svg>
     </span>
-    <span class="hidden flex-col leading-none sm:flex"><span class="flex items-baseline gap-[8px]"><span class="nx-display text-[16px] tracking-[0.04em] text-zinc-50">BUNGEE</span><span class="font-mono text-[11px] text-zinc-400">v{version}</span></span><span class="mt-[5px] font-mono text-[9px] uppercase tracking-chiseled text-zinc-500">REVERSE PROXY</span></span>
-    <span class="font-mono text-[11px] text-zinc-400 sm:hidden">v{version}</span>
+    <span class="hidden flex-col leading-none sm:flex"><span class="nx-display text-[16px] tracking-[0.04em] text-zinc-50">BUNGEE</span><span class="mt-[5px] font-mono text-[9px] uppercase tracking-chiseled text-zinc-500">REVERSE PROXY</span></span>
   </a>
   <SystemUpdates returnFocus={brand} />
   <nav aria-label={$_('header.navigation')} use:measureNavigation={items} class="hidden w-0 min-w-0 flex-1 border-l border-carbon-600 md:flex" data-testid="header-top-menu">
