@@ -1,6 +1,6 @@
 {
   "name": "@jeffusion/bungee-types",
-  "version": "6.7.1",
+  "version": "6.7.2",
   "description": "TypeScript type definitions for Bungee",
   "type": "module",
   "main": "./dist/index.js",

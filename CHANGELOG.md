@@ -1,3 +1,10 @@
+## [6.7.2](https://github.com/jeffusion/bungee/compare/v6.7.1...v6.7.2) (2026-10-27)
+
+
+### Bug Fixes
+
+* **ui:** refine navigation and update interactions ([8b3875d](https://github.com/jeffusion/bungee/commit/8b3875dc9616d7f2489167f9286a631a793e30af))
+
 ## [6.7.1](https://github.com/jeffusion/bungee/compare/v6.7.0...v6.7.1) (2026-10-27)
 
 
