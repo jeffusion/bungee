@@ -22,7 +22,7 @@ function definitionKey(value: unknown): string {
 }
 
 /** Converts only self-contained history. Reference resolution belongs to the caller. */
-export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol, capabilities: ResponsesCodecCapabilities = {}, options: { preserveContentOrder?: boolean } = {}): DecodedResponsesRequest {
+export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol, capabilities: ResponsesCodecCapabilities = {}, options: { preserveContentOrder?: boolean; toolOutputImages?: boolean } = {}): DecodedResponsesRequest {
   const body = record(raw, 'Responses request');
   if (capabilities.agentMessageDelivery !== undefined && capabilities.agentMessageDelivery !== 'plaintext') fail('invalid_payload', 'Unknown agent message delivery policy', 'agentMessageDelivery');
   const budget = limits(capabilities.limits);
@@ -40,11 +40,17 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
   if (body.truncation !== undefined && body.truncation !== 'disabled') fail('unsupported_request', 'Automatic input truncation cannot be represented');
   // This asks for encrypted output if available; it does not supply opaque input history.
   // Converted providers return no encrypted output. Actual encrypted input remains rejected below.
-  if (body.include !== undefined && list(body.include, 'include').some(field => field !== 'reasoning.encrypted_content')) fail('unsupported_request', 'Requested extra Responses output fields cannot be represented');
+  const diagnostics: ResponsesConversionDiagnostic[] = [];
+  if (body.include !== undefined) atParam('include', () => {
+    for (const [index, field] of list(body.include, 'include').entries()) {
+      if (field !== 'reasoning.encrypted_content' && field !== 'output.encrypted_content')
+        fail('unsupported_request', 'Requested extra Responses output fields cannot be represented', `include[${index}]`);
+      diagnostics.push({ param: `include[${index}]`, action: 'omitted', reason: 'target_encrypted_output_unavailable' });
+    }
+  });
   if (body.prompt_cache_key !== undefined) string(body.prompt_cache_key, 'prompt_cache_key');
   if (body.client_metadata !== undefined) record(body.client_metadata, 'client_metadata');
   const model = string(body.model, 'model', true);
-  const diagnostics: ResponsesConversionDiagnostic[] = [];
   const input = atParam('input', () => typeof body.input === 'string' ? [{ role: 'user', content: body.input }] : list(body.input, 'input'));
   if (input.length > budget.maxItems) fail('resource_limit', 'Too many input items', 'input');
   const canonicalInput: JsonRecord[] = [];
@@ -161,23 +167,23 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     if (toolNames.get(wire)!.custom !== custom) fail('tool_name_collision', 'Historical tool kind conflicts with its current declaration');
     return wire;
   };
-  const normalizeContent = (rawContent: unknown, role: string): unknown => {
+  const normalizeContent = (rawContent: unknown, role: string, path?: string): unknown => {
     if (typeof rawContent === 'string') return rawContent;
     const parts = list(rawContent, 'message content');
-    for (const rawPart of parts) {
+    for (const [index, rawPart] of parts.entries()) atParam(path ? `${path}[${index}]` : messageParam, () => {
       const part = record(rawPart, 'content part');
       if (part.type === 'input_text' || part.type === 'output_text' || part.type === 'text') string(part.text, 'content text');
       else if (part.type === 'refusal' && role === 'assistant') {
         string(part.refusal,'refusal');
         if (capabilities.preserveRefusalContent && protocol !== 'chat_completions') fail('unsupported_content','Target protocol cannot preserve refusal history authority');
       }
-      else if (part.type === 'input_image' && role === 'user') {
+      else if (part.type === 'input_image' && (role === 'user' || (role === 'tool' && options.toolOutputImages))) {
         if (protocol !== 'chat_completions') fail('unsupported_content', 'Anthropic image conversion requires provider-specific URL/data support');
         string(part.image_url, 'image_url', true);
-        if (part.detail !== undefined && !['auto', 'low', 'high'].includes(String(part.detail))) fail('unsupported_content', 'Unknown image detail');
+        if (part.detail !== undefined && !['auto', 'low', 'high'].includes(String(part.detail))) fail('unsupported_content', 'Unknown image detail', path ? `${path}[${index}].detail` : undefined);
       } else fail('unsupported_content', 'Unsupported message content type');
       if (part.annotations !== undefined && list(part.annotations, 'annotations').length) fail('unsupported_content', 'Output annotations cannot be represented in input history');
-    }
+    });
     // Reuse the existing text/image normalizer only after validating every part.
     const normalized = contentNormalizer.normalizeResponsesMessageContent(parts.map(raw=>{const part=raw as JsonRecord;return part.type==='refusal'?{type:'output_text',text:part.refusal}:part;})) as JsonRecord[];
     for (let i = 0; i < parts.length; i++) {
@@ -244,7 +250,7 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
       const id = string(item.call_id, 'call_id', true);
       if (!callIds.has(id) || answered.has(id)) fail('invalid_tool_history', 'Unmatched or duplicate tool result');
       answered.add(id);
-      const output = typeof item.output === 'string' ? item.output : normalizeContent(item.output, 'tool');
+      const output = typeof item.output === 'string' ? item.output : normalizeContent(item.output, 'tool', `${messageParam}.output`);
       addMessage({ role: 'tool', tool_call_id: id, content: output, ...(item.is_error === true ? { is_error: true } : {}) });
       return;
     }

@@ -15,6 +15,157 @@ const tools = [{ type: 'namespace', name: 'files', tools: [
 ] }];
 const request = { input: 'inspect files', tools, parallel_tool_calls: true };
 const chunk = (parts: unknown[], finishReason?: string) => ({ candidates: [{ index: 0, content: { role: 'model', parts }, ...(finishReason ? { finishReason } : {}) }] });
+const imageData = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5wAAAABJRU5ErkJggg==';
+const toolImage = { type: 'input_image', image_url: `data:image/png;base64,${imageData}`, detail: 'high' };
+
+for (const stream of [false, true]) test(`Gemini user images preserve ordered content, per-image preferences and signed replay (${stream ? 'SSE' : 'JSON'})`, () => {
+  const input = [
+    { type: 'additional_tools', role: 'user', tools: [] },
+    ...Array.from({ length: 4 }, () => ({ role: 'user', content: 'context' })),
+    { type: 'agent_message', author: 'agent', recipient: 'parent', content: [{ type: 'input_text', text: 'note' }] },
+    { type: 'message', id: 'user_image', role: 'user', content: [
+      { type: 'input_text', text: 'before' }, toolImage, { type: 'input_text', text: 'between' },
+      { ...toolImage, detail: 'low' }, { ...toolImage, detail: 'auto' },
+    ] },
+    { role: 'developer', content: 'later instruction' },
+  ];
+  const include = ['reasoning.encrypted_content', 'output.encrypted_content'];
+  const session = createProtocolSession(context), converted = session.convertRequest({ input, stream, include });
+  expect(converted.body).not.toHaveProperty('include');
+  for (const index of [0, 1]) expect(converted.diagnostics).toContainEqual({ param: `include[${index}]`, action: 'omitted', reason: 'target_encrypted_output_unavailable' });
+  const expected = [
+    { text: 'before' }, { inlineData: { mimeType: 'image/png', data: imageData }, mediaResolution: { level: 'MEDIA_RESOLUTION_HIGH' } },
+    { text: 'between' }, { inlineData: { mimeType: 'image/png', data: imageData }, mediaResolution: { level: 'MEDIA_RESOLUTION_LOW' } },
+    { inlineData: { mimeType: 'image/png', data: imageData } },
+  ];
+  expect((converted.body.contents as any[])[0].parts.slice(-5)).toEqual(expected);
+  expect(converted.canonicalHistory).toEqual(input.slice(1));
+  for (const index of [1, 3]) expect(converted.diagnostics).toContainEqual({ param: `input[6].content[${index}].detail`, action: 'mapped', reason: 'gemini_image_media_resolution' });
+  expect(converted.diagnostics).toContainEqual({ param: 'input[6].content[4].detail', action: 'omitted', reason: 'gemini_image_detail_auto' });
+  const answer = chunk([{ text: 'image received', thoughtSignature: signature }], 'STOP');
+  const response = stream ? [...session.push(answer), ...session.finish()].at(-1)!.response as any : session.convertResponse(answer);
+  const replay = createProtocolSession(context).convertRequest({ input: [...converted.canonicalHistory, ...response.output, { role: 'user', content: 'continue' }], include });
+  expect((replay.body.contents as any[])[0].parts.slice(-5)).toEqual(expected);
+});
+
+test('Gemini user and tool images share validation while retaining original message error paths', () => {
+  const seed = createProtocolSession(context); seed.convertRequest({ input: 'inspect' });
+  const history = seed.convertResponse(chunk([{ text: 'ready', thoughtSignature: signature }], 'STOP')).output as any[];
+  const prefix = [{ type: 'additional_tools', role: 'user', tools: [] }, ...history,
+    { type: 'agent_message', author: 'agent', recipient: 'parent', content: [{ type: 'input_text', text: 'note' }] }];
+  const path = `input[${prefix.length}].content[1]`;
+  for (const { part, code, field } of [
+    { part: { ...toolImage, image_url: 'https://example.test/image.png' }, code: 'unsupported_content', field: 'image_url' },
+    { part: { ...toolImage, image_url: 'data:image/gif;base64,aGVsbG8=' }, code: 'unsupported_content', field: 'image_url' },
+    { part: { ...toolImage, image_url: 'data:image/png;base64,Zh==' }, code: 'invalid_payload', field: 'image_url' },
+    { part: { ...toolImage, image_url: null }, code: 'invalid_payload', field: 'image_url' },
+    { part: { ...toolImage, detail: ['high'] }, code: 'unsupported_content', field: 'detail' },
+    { part: { ...toolImage, detail: 'original' }, code: 'unsupported_content', field: 'detail' },
+    { part: { ...toolImage, file_id: 'file_test' }, code: 'unsupported_content', field: 'file_id' },
+  ]) {
+    let error: unknown;
+    try { createProtocolSession(context).convertRequest({ input: [...prefix, { role: 'user', content: [{ type: 'input_text', text: 'image' }, part] }] }); } catch (caught) { error = caught; }
+    expect(error).toMatchObject({ code, param: `${path}.${field}` });
+    expect((error as Error).message).not.toContain(imageData);
+  }
+  for (const role of ['assistant', 'developer', 'system'])
+    expect(() => createProtocolSession(context).convertRequest({ input: [{ role, content: [toolImage] }] })).toThrow();
+  let refusalError: unknown;
+  try { createProtocolSession(context).convertRequest({ input: [...prefix, { role: 'assistant', content: [{ type: 'refusal', refusal: 'declined' }] }] }); } catch (caught) { refusalError = caught; }
+  expect(refusalError).toMatchObject({ code: 'unsupported_content', param: 'input' });
+  let error: unknown;
+  try { createProtocolSession({ ...context, capabilities: { limits: { maxItems: 1 } } }).convertRequest({ input: [{ role: 'user', content: [toolImage, toolImage] }] }); } catch (caught) { error = caught; }
+  expect(error).toMatchObject({ code: 'resource_limit', param: 'input[0].content' });
+});
+
+for (const stream of [false, true]) for (const custom of [false, true]) test(`Gemini image tool results preserve identity, ordered content and history (${stream ? 'SSE' : 'JSON'}, ${custom ? 'custom' : 'function'})`, () => {
+  const input: Record<string, unknown>[] = [
+    ...Array.from({ length: 9 }, () => ({ role: 'user', content: 'inspect image' })),
+    { role: 'user', content: [toolImage] },
+    { type: custom ? 'custom_tool_call' : 'function_call', call_id: signedId, name: custom ? 'shell' : 'read', namespace: 'files', ...(custom ? { input: 'view image' } : { arguments: '{}' }) },
+    { type: custom ? 'custom_tool_call_output' : 'function_call_output', call_id: signedId, output: [
+      { type: 'input_text', text: 'before' }, toolImage, { type: 'input_text', text: 'between' },
+      { ...toolImage, detail: 'low' }, { type: 'input_text', text: 'after' },
+    ] },
+  ];
+  const session = createProtocolSession(context), converted = session.convertRequest({ ...request, input, stream });
+  const declarations = (converted.body.tools as any[])[0].functionDeclarations;
+  const toolResult = (converted.body.contents as any[]).at(-1).parts[0];
+  expect((converted.body.contents as any[])[0].parts.at(-1)).toEqual({ inlineData: { mimeType: 'image/png', data: imageData }, mediaResolution: { level: 'MEDIA_RESOLUTION_HIGH' } });
+  expect(toolResult).toEqual({ functionResponse: {
+    id: 'call_first', name: declarations[custom ? 1 : 0].name,
+    response: { output: [{ type: 'text', text: 'before' }, { $ref: 'tool-image-1.png' }, { type: 'text', text: 'between' }, { $ref: 'tool-image-3.png' }, { type: 'text', text: 'after' }] },
+    parts: [1, 3].map(index => ({ inlineData: { mimeType: 'image/png', data: imageData, displayName: `tool-image-${index}.png` } })),
+  } });
+  expect((converted.body.contents as any[]).find(c => c.role === 'model').parts[0].thoughtSignature).toBe(signature);
+  expect(converted.canonicalHistory).toEqual(input);
+  expect(input[11]!.output).toEqual([{ type: 'input_text', text: 'before' }, toolImage, { type: 'input_text', text: 'between' }, { ...toolImage, detail: 'low' }, { type: 'input_text', text: 'after' }]);
+  for (const index of [1, 3]) expect(converted.diagnostics).toContainEqual({ param: `input[11].output[${index}].detail`, action: 'omitted', reason: 'gemini_tool_image_detail_unavailable' });
+  const answer = chunk([{ text: 'image received', thoughtSignature: signature }], 'STOP');
+  const response = stream ? [...session.push(answer), ...session.finish()].at(-1)!.response as any : session.convertResponse(answer);
+  expect(response.status).toBe('completed');
+  const replay = createProtocolSession(context).convertRequest({ ...request, input: [...converted.canonicalHistory, ...response.output, { role: 'user', content: 'continue' }] });
+  expect((replay.body.contents as any[]).flatMap(c => c.parts).find(p => p.functionResponse)).toEqual(toolResult);
+});
+
+test('Gemini image tool results reject unsupported media and invalid encoding at the original field', () => {
+  const seed = createProtocolSession(context);
+  const convertedSeed = seed.convertRequest({ input: 'inspect', tools: [{ type: 'function', name: 'view_image' }] });
+  const name = (convertedSeed.body.tools as any[])[0].functionDeclarations[0].name;
+  const history = seed.convertResponse(chunk([
+    { text: 'inspect image', thoughtSignature: signature }, { functionCall: { id: 'first', name, args: {} } },
+  ], 'STOP')).output as any[];
+  expect(history.at(-1).encrypted_content).toStartWith('bungee_gemini:');
+  const path = `input[${history.length}].output[0]`;
+  const cases = [
+    { part: { ...toolImage, image_url: 'https://example.test/private.png' }, code: 'unsupported_content', param: `${path}.image_url` },
+    { part: { ...toolImage, image_url: 'data:image/gif;base64,aGVsbG8=' }, code: 'unsupported_content', param: `${path}.image_url` },
+    ...['', '!', 'a', 'a===', 'Zh==', 'Zg=', 'Zg==\n'].map(data => ({ part: { ...toolImage, image_url: `data:image/png;base64,${data}` }, code: 'invalid_payload', param: `${path}.image_url` })),
+    { part: { ...toolImage, file_id: 'file_test' }, code: 'unsupported_content', param: `${path}.file_id` },
+    { part: { ...toolImage, detail: 'original' }, code: 'unsupported_content', param: `${path}.detail` },
+    { part: { ...toolImage, detail: ['high'] }, code: 'unsupported_content', param: `${path}.detail` },
+  ];
+  for (const { part, code, param } of cases) {
+    let error: unknown;
+    try { createProtocolSession(context).convertRequest({ input: [...history, { type: 'function_call_output', call_id: 'first', output: [part] }] }); } catch (caught) { error = caught; }
+    expect(error).toMatchObject({ code, param });
+    expect((error as Error).message).not.toContain(part.image_url);
+  }
+  for (const { part, code, field } of [
+    { part: { type: 'input_text', text: 5 }, code: 'invalid_payload', field: 'text' },
+    { part: { type: 'unknown' }, code: 'unsupported_content', field: 'type' },
+    { part: { type: 'input_text', text: 'text', annotations: [{}] }, code: 'unsupported_content', field: 'annotations' },
+    { part: { type: 'input_text', text: 'text', annotations: false }, code: 'invalid_payload', field: 'annotations' },
+  ]) {
+    let error: unknown;
+    try { createProtocolSession(context).convertRequest({ input: [...history, { type: 'function_call_output', call_id: 'first', output: [toolImage, part] }] }); } catch (caught) { error = caught; }
+    expect(error).toMatchObject({ code, param: `input[${history.length}].output[1].${field}` });
+  }
+  for (const mimeType of ['image/jpeg', 'image/webp']) {
+    const converted = createProtocolSession(context).convertRequest({ input: [...history, { type: 'function_call_output', call_id: 'first', output: [{ type: 'input_image', image_url: `data:${mimeType};base64,${imageData}` }] }] });
+    const response = (converted.body.contents as any[]).at(-1).parts[0].functionResponse;
+    expect(response.parts[0].inlineData).toMatchObject({ mimeType, data: imageData });
+    expect(converted.diagnostics.some(d => d.reason === 'gemini_tool_image_detail_unavailable')).toBe(false);
+  }
+});
+
+test('Gemini image tool results retain resource limits and other protocol rejection', () => {
+  const input = [
+    { type: 'function_call', call_id: 'first', name: 'view_image', arguments: '{}' },
+    { type: 'function_call_output', call_id: 'first', output: [toolImage] },
+  ];
+  for (const targetProtocol of ['chat_completions', 'anthropic_messages'] as const)
+    expect(() => createProtocolSession({ ...context, targetProtocol }).convertRequest({ input })).toThrow();
+  expect(() => createProtocolSession({ ...context, sourceProtocol: 'chat_completions' }).convertRequest({ messages: [
+    { role: 'assistant', tool_calls: [{ id: 'first', type: 'function', function: { name: 'view_image', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: 'first', content: [{ type: 'image_url', image_url: { url: toolImage.image_url } }] },
+  ] })).toThrow();
+  for (const capabilities of [{ limits: { maxRequestBytes: 256 } }, { limits: { maxItems: 2 } }]) {
+    let error: unknown;
+    try { createProtocolSession({ ...context, capabilities }).convertRequest({ input: [input[0], { ...input[1], output: [toolImage, toolImage, toolImage] }] }); } catch (caught) { error = caught; }
+    expect(error).toMatchObject({ code: 'resource_limit' });
+  }
+});
 
 for (const streaming of [false, true]) test(`Gemini signed parallel tools and custom input round trip (${streaming ? 'SSE' : 'JSON'})`, () => {
   const session = createProtocolSession(context);

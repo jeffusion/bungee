@@ -1,7 +1,7 @@
 import { validateAgentMessage } from '../responses-codec/agent-messages';
 import { decodeResponsesRequest } from '../responses-codec';
-import { argumentObject, fail, list, record, string, limits, type JsonRecord } from '../responses-codec/common';
-import { decodeGeminiCallId, restoreGeminiHistory } from './gemini';
+import { argumentObject, atParam, fail, list, record, string, limits, type JsonRecord } from '../responses-codec/common';
+import { decodeGeminiCallId, geminiInlineImage, geminiToolResponse, restoreGeminiHistory } from './gemini';
 import { fields, integer, bool, textParts } from './validation';
 import { geminiSchemaToJson } from './schema';
 import type { LLMProtocol, ProtocolSessionContext, ProtocolRequestConversion } from './types';
@@ -366,7 +366,27 @@ function validateCanonical(b: JsonRecord, context: ProtocolSessionContext): void
       for (const [j, part] of t.content.entries()) {
         const c = record(part, 'part');
         fields(c, c.type === 'input_image' ? ['type', 'image_url', 'detail'] : c.type === 'refusal' ? ['type', 'refusal'] : ['type', 'text', 'annotations'], `${p}.content[${j}]`, 'unsupported_content');
+        if (context.sourceProtocol === 'responses' && context.targetProtocol === 'gemini_generate_content' && t.role === 'user' && c.type === 'input_image') {
+          atParam(`${p}.content[${j}].image_url`, () => string(c.image_url, 'image URL', true));
+          if (c.detail !== undefined && (typeof c.detail !== 'string' || !['auto', 'low', 'high'].includes(c.detail)))
+            fail('unsupported_content', 'Unknown image detail', `${p}.content[${j}].detail`);
+        }
       }
+    if (context.sourceProtocol === 'responses' && context.targetProtocol === 'gemini_generate_content' && Array.isArray(t.output))
+      for (const [j, part] of t.output.entries()) atParam(`${p}.output[${j}]`, () => {
+        const c = record(part, 'tool output part');
+        fields(c, c.type === 'input_image' ? ['type', 'image_url', 'detail'] : ['type', 'text', 'annotations'], `${p}.output[${j}]`, 'unsupported_content');
+        if (c.type === 'input_image') {
+          atParam(`${p}.output[${j}].image_url`, () => string(c.image_url, 'image URL', true));
+          if (c.detail !== undefined && (typeof c.detail !== 'string' || !['auto', 'low', 'high'].includes(c.detail)))
+            fail('unsupported_content', 'Unknown image detail', `${p}.output[${j}].detail`);
+        } else if (c.type === 'input_text' || c.type === 'output_text' || c.type === 'text')
+          atParam(`${p}.output[${j}].text`, () => string(c.text, 'tool output text'));
+        else fail('unsupported_content', 'Unsupported tool output content type', `${p}.output[${j}].type`);
+        if (c.annotations !== undefined) atParam(`${p}.output[${j}].annotations`, () => {
+          if (list(c.annotations, 'annotations').length) fail('unsupported_content', 'Output annotations cannot be represented in tool history');
+        });
+      });
   }
   const inspectTool = (raw: unknown, path: string, nested = false): void => {
     const t = record(raw, 'tool');
@@ -398,6 +418,7 @@ function validateCanonical(b: JsonRecord, context: ProtocolSessionContext): void
 }
 export function convertProtocolRequest(raw: unknown, context: ProtocolSessionContext): ProtocolRequestConversion {
   const b = canonicalRequest(raw, context.sourceProtocol, context.model);
+  const originalInput = b.input;
   if(context.streaming!==undefined){bool(context.streaming,'context.streaming');if(b.stream!==undefined&&b.stream!==context.streaming)fail('invalid_payload','Request stream mode disagrees with transport context','stream');b.stream=context.streaming;}
   validateCanonical(b, context);
   const geminiHistory = context.sourceProtocol === 'responses' && context.targetProtocol === 'gemini_generate_content'
@@ -495,13 +516,13 @@ export function convertProtocolRequest(raw: unknown, context: ProtocolSessionCon
   const decodingTarget = target === 'gemini_generate_content' ? 'chat_completions' : target;
   if (target === 'gemini_generate_content' && reasoning)
     b.reasoning = { ...reasoning, effort: undefined };
-  const decoded = decodeResponsesRequest(b, decodingTarget, { ...cap, reasoningHistory: target !== 'anthropic_messages' && cap.reasoningHistory === true, reasoningEffort: target === 'chat_completions' && cap.reasoningEffort === true, anthropicThinkingBudget: undefined }, { preserveContentOrder: target === 'gemini_generate_content' });
+  const decoded = decodeResponsesRequest(b, decodingTarget, { ...cap, reasoningHistory: target !== 'anthropic_messages' && cap.reasoningHistory === true, reasoningEffort: target === 'chat_completions' && cap.reasoningEffort === true, anthropicThinkingBudget: undefined }, { preserveContentOrder: target === 'gemini_generate_content', toolOutputImages: context.sourceProtocol === 'responses' && target === 'gemini_generate_content' });
   const diagnostics = decoded.diagnostics;
   if (target === 'gemini_generate_content' && decoded.body.parallel_tool_calls === true) {
     delete decoded.body.parallel_tool_calls;
     diagnostics.push({ param: 'parallel_tool_calls', action: 'omitted', reason: 'gemini_parallel_tool_calls_allowed' });
   }
-  const body = target === 'gemini_generate_content' ? renderGemini(decoded.body, context, geminiHistory?.parts, diagnostics) : decoded.body;
+  const body = target === 'gemini_generate_content' ? renderGemini(decoded.body, context, originalInput, geminiHistory?.parts, diagnostics) : decoded.body;
   if (stop !== undefined)
     body[target === 'chat_completions' ? 'stop' : target === 'anthropic_messages' ? 'stop_sequences' : 'generationConfig'] = target === 'gemini_generate_content' ? { ...record(body.generationConfig ?? {}, 'generationConfig'), stopSequences: typeof stop === 'string' ? [stop] : stop } : typeof stop === 'string' ? [stop] : stop;
   if (target === 'anthropic_messages') {
@@ -538,9 +559,17 @@ export function convertProtocolRequest(raw: unknown, context: ProtocolSessionCon
     diagnostics.push({ param: 'reasoning', action: 'mapped', reason: 'explicit_verified_wire_policy' });
   return { body, canonicalHistory: geminiHistory?.canonicalHistory(decoded.canonicalInput) ?? decoded.canonicalInput, diagnostics, toolNames: decoded.toolNames,streaming:b.stream===true };
 }
-function renderGemini(chat: JsonRecord, context: ProtocolSessionContext, signedParts: Map<string, JsonRecord[]> | undefined, diagnostics: ProtocolRequestConversion['diagnostics']): JsonRecord {
+function renderGemini(chat: JsonRecord, context: ProtocolSessionContext, input: unknown, signedParts: Map<string, JsonRecord[]> | undefined, diagnostics: ProtocolRequestConversion['diagnostics']): JsonRecord {
   const result: JsonRecord = { contents: [] }, contents = result.contents as JsonRecord[], system: JsonRecord[] = [], calls = new Map<string, string>();
   const nativeIds = new Set<string>();
+  const budget = limits(context.capabilities?.limits);
+  const toolOutputParams = new Map<string, string>();
+  const userMessageParams: string[] = [];
+  let userMessageIndex = 0;
+  for (const [index, item] of (Array.isArray(input) ? input : []).entries()) {
+    if (item.type === 'function_call_output' || item.type === 'custom_tool_call_output') toolOutputParams.set(item.call_id, `input[${index}].output`);
+    if (((item.type === undefined || item.type === 'message') && item.role === 'user') || item.type === 'agent_message') userMessageParams.push(`input[${index}].content`);
+  }
   const append = (role: string, parts: JsonRecord[]) => {
     const prev = contents.at(-1); if (prev?.role === role)
       (prev.parts as JsonRecord[]).push(...parts);
@@ -550,9 +579,31 @@ function renderGemini(chat: JsonRecord, context: ProtocolSessionContext, signedP
   for (const m of chat.messages as JsonRecord[]) {
     const signed = signedParts?.get(m.id as string);
     if (signed) { append('model', signed); continue; }
-    const parts: JsonRecord[] = m.content == null ? [] : typeof m.content === 'string' ? [{ text: m.content }] : (m.content as JsonRecord[]).map(p => {
-      if (p.type !== 'text')
-        fail('unsupported_content', 'This content cannot cross to Gemini', 'input'); return { text: p.text };
+    if (m.role === 'tool') {
+      const name = calls.get(string(m.tool_call_id, 'tool_call_id'));
+      if (!name)
+        fail('invalid_tool_history', 'Unknown tool result', 'input');
+      if (m.is_error === true)
+        fail('unsupported_content', 'Tool error authority cannot be represented by Gemini', 'input');
+      const { id } = context.sourceProtocol === 'responses' ? decodeGeminiCallId(m.tool_call_id as string, budget.maxArgumentBytes) : { id: m.tool_call_id };
+      const response = geminiToolResponse(m.content, toolOutputParams.get(m.tool_call_id as string) ?? 'input', budget, diagnostics);
+      append('user', [{ functionResponse: { id, name, ...response } }]);
+      continue;
+    }
+    const contentParam = m.role === 'user' ? userMessageParams[userMessageIndex++] ?? 'input' : 'input';
+    if (Array.isArray(m.content) && m.content.some(p => p.type === 'image_url') && m.content.length > budget.maxItems)
+      fail('resource_limit', 'Too many message content parts', contentParam);
+    const parts: JsonRecord[] = m.content == null ? [] : typeof m.content === 'string' ? [{ text: m.content }] : (m.content as JsonRecord[]).map((p, index) => {
+      if (p.type === 'text') return { text: p.text };
+      const path = `${contentParam}[${index}]`;
+      if (context.sourceProtocol !== 'responses' || m.role !== 'user' || p.type !== 'image_url')
+        fail('unsupported_content', 'This content cannot cross to Gemini', contentParam);
+      const image = record(p.image_url, 'image'), part: JsonRecord = { inlineData: geminiInlineImage(image, path, budget) };
+      if (image.detail === 'low' || image.detail === 'high') {
+        part.mediaResolution = { level: image.detail === 'high' ? 'MEDIA_RESOLUTION_HIGH' : 'MEDIA_RESOLUTION_LOW' };
+        diagnostics.push({ param: `${path}.detail`, action: 'mapped', reason: 'gemini_image_media_resolution' });
+      } else if (image.detail === 'auto') diagnostics.push({ param: `${path}.detail`, action: 'omitted', reason: 'gemini_image_detail_auto' });
+      return part;
     });
     if (m.role === 'system' || m.role === 'developer') {
       if (contents.length) {
@@ -562,16 +613,6 @@ function renderGemini(chat: JsonRecord, context: ProtocolSessionContext, signedP
         diagnostics.push({ param: 'input', action: 'mapped', reason: 'gemini_mid_conversation_instructions_consolidated' });
       }
       system.push(...parts);
-      continue;
-    }
-    if (m.role === 'tool') {
-      const name = calls.get(string(m.tool_call_id, 'tool_call_id'));
-      if (!name)
-        fail('invalid_tool_history', 'Unknown tool result', 'input');
-      if (m.is_error === true)
-        fail('unsupported_content', 'Tool error authority cannot be represented by Gemini', 'input');
-      const { id } = context.sourceProtocol === 'responses' ? decodeGeminiCallId(m.tool_call_id as string, limits(context.capabilities?.limits).maxArgumentBytes) : { id: m.tool_call_id };
-      append('user', [{ functionResponse: { id, name, response: { output: m.content } } }]);
       continue;
     }
     if (m.reasoning_content !== undefined)

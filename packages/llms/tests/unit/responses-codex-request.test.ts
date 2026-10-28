@@ -39,6 +39,24 @@ test('captured Anthropic constraints remain explicit, with exact parameter locat
 });
 
 for(const protocol of protocols) {
+  test(`${protocol}: encrypted-output preferences preserve plain history and reject opaque input`,()=>{
+    const include=['reasoning.encrypted_content','output.encrypted_content'];
+    const raw=request({include});
+    const decoded=decodeResponsesRequest(raw,protocol,params);
+    expect(decoded.body).toEqual(decodeResponsesRequest(request(),protocol,params).body);
+    expect(decoded.canonicalInput).toEqual([{role:'user',content:'hello'}]);
+    expect(decoded.diagnostics).toEqual(include.map((_,index)=>({param:`include[${index}]`,action:'omitted',reason:'target_encrypted_output_unavailable'})));
+    for(const encrypted_content of ['sealed',{},0,'']) {
+      expect(errorOf(()=>decodeResponsesRequest({...raw,input:[{role:'assistant',content:'visible',encrypted_content}]},protocol,params)))
+        .toMatchObject({code:'unsupported_content',param:'input[0].encrypted_content'});
+    }
+    for(const field of ['future.encrypted_content','message.output_text.logprobs',null,42,{}]) {
+      expect(errorOf(()=>decodeResponsesRequest({...raw,include:[...include,field]},protocol,params)))
+        .toMatchObject({code:'unsupported_request',param:'include[2]'});
+    }
+    expect(errorOf(()=>decodeResponsesRequest({...raw,include:'output.encrypted_content'},protocol,params)))
+      .toMatchObject({code:'invalid_payload',param:'include'});
+  });
   test(`${protocol}: additional tools, namespace custom, forcing and complete result history`,()=>{
     const decoded=decodeResponsesRequest(request({tool_choice:{type:'custom',name:'patch',namespace:'files'}}),protocol,params);
     expect(decoded.body.tools).toHaveLength(3);

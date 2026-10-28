@@ -1,11 +1,43 @@
 import { createHash } from 'node:crypto';
-import { bounded, fail, string, record, list, serialized, type JsonRecord, type ResponsesCodecLimits } from '../responses-codec/common';
+import { atParam, bounded, fail, string, record, list, serialized, type JsonRecord, type ResponsesCodecLimits, type ResponsesConversionDiagnostic } from '../responses-codec/common';
 import { fields, integer } from './validation';
 
 // Wire convention: LiteLLM cfe0100e1fca613e7b1af27dd1fe4807ca4d1d1a,
 // litellm/litellm_core_utils/prompt_templates/factory.py (MIT).
 // Copyright (c) 2023 Berri AI. MIT permission and warranty terms: ../../../../LICENSE.
 const signatureSeparator = '__thought__';
+
+export function geminiInlineImage(image: JsonRecord, path: string, budget: ResponsesCodecLimits): { mimeType: string; data: string } {
+  const param = `${path}.image_url`;
+  const url = bounded(string(image.url, 'image URL', true), budget.maxRequestBytes, param);
+  const match = /^data:([^;,]+);base64,([\s\S]*)$/.exec(url);
+  if (!match || !['image/png', 'image/jpeg', 'image/webp'].includes(match[1]!))
+    fail('unsupported_content', 'Gemini images require inline PNG, JPEG or WebP data', param);
+  const data = match[2]!;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(data) || data.length % 4 === 1
+    || (data.includes('=') && data.length % 4 !== 0)
+    || Buffer.from(data, 'base64').toString('base64').replace(/=+$/, '') !== data.replace(/=+$/, ''))
+    fail('invalid_payload', 'Invalid image Base64 encoding', param);
+  return { mimeType: match[1]!, data };
+}
+
+export function geminiToolResponse(content: unknown, path: string, budget: ResponsesCodecLimits, diagnostics: ResponsesConversionDiagnostic[]): JsonRecord {
+  if (!Array.isArray(content) || !content.some(part => part.type === 'image_url')) return { response: { output: content } };
+  if (content.length > budget.maxItems) fail('resource_limit', 'Too many tool output parts', path);
+  const parts: JsonRecord[] = [];
+  const output = content.map((part, index) => atParam(`${path}[${index}]`, () => {
+    if (part.type === 'text') return part;
+    if (part.type !== 'image_url') fail('unsupported_content', 'Unsupported Gemini tool result content');
+    const image = record(part.image_url, 'tool image');
+    const inlineData = geminiInlineImage(image, `${path}[${index}]`, budget);
+    const displayName = `tool-image-${index}.${inlineData.mimeType.slice('image/'.length)}`;
+    parts.push({ inlineData: { ...inlineData, displayName } });
+    if (image.detail !== undefined)
+      diagnostics.push({ param: `${path}[${index}].detail`, action: 'omitted', reason: 'gemini_tool_image_detail_unavailable' });
+    return { $ref: displayName };
+  }));
+  return { response: { output }, parts };
+}
 
 export function checkedSignature(value: unknown, maxBytes: number): string {
   const signature = bounded(string(value, 'thoughtSignature', true), maxBytes, 'thoughtSignature');
