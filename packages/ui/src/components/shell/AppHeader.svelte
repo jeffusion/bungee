@@ -152,13 +152,15 @@
     </Sheet.Root>
   </div>
 
-  <a bind:this={brand} href="/#/" aria-label="BUNGEE" class="flex min-w-0 shrink-0 items-center gap-[12px] px-2 transition-colors hover:bg-carbon-800 md:px-[18px] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500">
-    <span class="relative flex h-[32px] w-[32px] shrink-0 items-center justify-center border border-nexus-500/60 bg-carbon-900">
-      <svg aria-hidden="true" viewBox="0 0 24 24" class="h-5 w-5 text-nexus-500" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 3L5 13h6l-1 8l8-11h-6l1-7z" /></svg>
-    </span>
-    <span class="hidden flex-col leading-none sm:flex"><span class="nx-display text-[16px] tracking-[0.04em] text-zinc-50">BUNGEE</span><span class="mt-[5px] font-mono text-[9px] uppercase tracking-chiseled text-zinc-500">REVERSE PROXY</span></span>
-  </a>
-  <SystemUpdates returnFocus={brand} />
+  <div class="flex shrink-0 items-stretch transition-colors hover:bg-carbon-800 focus-within:bg-carbon-800">
+    <a bind:this={brand} href="/#/" aria-label="BUNGEE" class="flex min-w-0 shrink-0 items-center gap-[12px] px-2 md:px-[18px] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-nexus-500">
+      <span class="relative flex h-[32px] w-[32px] shrink-0 items-center justify-center border border-nexus-500/60 bg-carbon-900">
+        <svg aria-hidden="true" viewBox="0 0 24 24" class="h-5 w-5 text-nexus-500" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 3L5 13h6l-1 8l8-11h-6l1-7z" /></svg>
+      </span>
+      <span class="hidden flex-col leading-none sm:flex"><span class="nx-display text-[16px] tracking-[0.04em] text-zinc-50">BUNGEE</span><span class="mt-[5px] font-mono text-[9px] uppercase tracking-chiseled text-zinc-500">REVERSE PROXY</span></span>
+    </a>
+    <SystemUpdates returnFocus={brand} />
+  </div>
   <nav aria-label={$_('header.navigation')} use:measureNavigation={items} class="hidden w-0 min-w-0 flex-1 border-l border-carbon-600 md:flex" data-testid="header-top-menu">
     <div class="header-tabs-viewport min-w-0 flex-1 overflow-hidden">
     <ul class="flex h-full w-max items-stretch">
