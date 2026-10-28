@@ -66,9 +66,15 @@ Chat Completions 上游 `usage` 及其 details 对象是可扩展的辅助统计
 
 Responses→Chat/Anthropic/Gemini 的已知 `web_search`、`web_search_preview` 声明在 `tool_choice` 缺省、`auto` 或 `none` 时属于明确允许的降级：先校验字段、类型及资源限额，再省略整个搜索声明，记录 `optional_hosted_web_search_unavailable` 和字段位置。不把 OpenAI 缓存搜索改成目标的实时搜索，也不伪造搜索调用或引用。强制搜索及 `required` 继续拒绝；未知搜索参数、非法值、搜索执行历史继续严格报错。普通 function/namespace/custom 工具保持原转换规则，同协议 Responses 保留搜索声明透传。
 
+Responses 的 `include` 接受 `reasoning.encrypted_content` 和 `output.encrypted_content` 两项输出偏好。跨协议转换不生成 OpenAI 原生加密输出，逐项记录 `target_encrypted_output_unavailable` 后省略；未知项返回原始 `include[n]` 路径，输入中的实际密文仍按历史校验规则拒绝。`output.encrypted_content` 用于 [Codex 的输出 token 重放](https://github.com/openai/codex/blob/main/codex-rs/core/src/client.rs)，不构成解密或丢弃已有密文的授权；原生 Responses 透传保持原字段。
+
 会话按请求隔离，响应结束、失败、取消及 plugin dispose 都释放。终止状态、工具参数片段和 usage 由状态机统一管理，不能仅看到任一文本片段便宣告 completed。诊断通过宿主既有请求步骤记录，保留逻辑 requestId、字段路径和原因码，不回显正文、工具参数或凭据。
 
 Responses→Gemini 的工具调用将 thoughtSignature 编入公开 call_id 的 `__thought__` 后缀；回传完整工具历史或 previous_response_id 续聊时，恢复原始 functionCall/functionResponse.id 和调用签名。未携带签名的调用不伪造签名，namespace/custom 与明文协作标记沿用现有工具映射。parallel_tool_calls=true 校验后省略并记录诊断；false 转成“每次响应至多调用一个工具”的 systemInstruction 提示并记录 gemini_serial_tool_calls_prompt_only，不能保证提供商严格串行。
+
+Responses→Gemini 的 function/custom 工具结果支持内嵌 PNG、JPEG、WebP 图片：`output` 数组中的 `input_image.image_url` 必须是对应 MIME 类型的 Base64 data URL，图片写入 `functionResponse.parts[].inlineData`，结构化结果通过 `$ref` 保持图片与文本的顺序和工具调用身份，规范历史保留原始内容。此路径要求目标支持 [Gemini 多模态工具结果](https://ai.google.dev/gemini-api/docs/generate-content/function-calling#multimodal)。外部 URL、文件引用、非法编码和未知字段明确拒绝，不下载图片；请求字节和内容项数量受既有限额约束。可选 `detail` 仅接受 auto/low/high，经校验后记录 `gemini_tool_image_detail_unavailable` 并省略，不承诺目标端采用相同的图片处理精度，图片字节不变。其它协议对的图片工具结果支持范围保持不变。
+
+Responses→Gemini 的普通 user 消息同样支持上述内嵌图片，按图文顺序生成 `contents[].parts[].inlineData`，复用相同的 MIME、Base64 和资源限额校验，保留规范历史。`detail: low/high` 映射为每张图片的 `mediaResolution.level=MEDIA_RESOLUTION_LOW/HIGH` 并记录 `gemini_image_media_resolution`；auto 或缺省沿用目标默认值，显式 auto 记录 `gemini_image_detail_auto`。此映射要求目标支持 [Gemini 逐 Part 图片精度](https://ai.google.dev/gemini-api/docs/generate-content/media-resolution)，不承诺不同提供商使用相同的 token 数。图片字段错误返回原始消息及内容项路径，不用过滤后的签名历史索引替代。
 
 Responses→Gemini 按出现顺序归集所有 system/developer 消息到 systemInstruction，包括用户消息之后追加的指令。中途指令记录 gemini_mid_conversation_instructions_consolidated；正文与指令各自的相对顺序保留，但指令在原对话中的位置不再保留。规范历史保持原顺序，生成的单工具提示不写入历史。该兼容策略不放宽未知内容、原生密文、工具参数或其它协议对的校验。
 
