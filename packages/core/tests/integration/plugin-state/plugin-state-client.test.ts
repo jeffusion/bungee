@@ -465,7 +465,10 @@ describe('bounded capability cleanup reserve',()=>{
 describe('IPC physical progress and orphan resources',()=>{
   async function fault(mode:string,options:PluginStateOpenOptions={}) {
     const dir=mkdtempSync(join(tmpdir(),'plugin-state-progress-'));dirs.push(dir);
-    const client=await PluginStateClient.open(join(dir,`${mode}.db`),{initialize:true,requestTimeoutMs:300,cleanupTimeoutMs:300,closeTimeoutMs:500,
+    const path=join(dir,`${mode}.db`),db=new Database(path);
+    // Prepare schema and WAL before the short business-progress probe deadlines begin.
+    try {db.exec('PRAGMA journal_mode=WAL;');initializePluginStateDatabase(db);}finally{db.close();}
+    const client=await PluginStateClient.open(path,{initialize:true,requestTimeoutMs:300,cleanupTimeoutMs:300,closeTimeoutMs:500,
       workerUrl:new URL('../../fixtures/plugin-state-fault-worker.ts',import.meta.url),...options});clients.push(client);return client;
   }
   test('a sent read deadline leaves healthy clients usable and retains the physical slot',async()=>{
