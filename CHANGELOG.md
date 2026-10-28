@@ -1,3 +1,10 @@
+## [6.8.2](https://github.com/jeffusion/bungee/compare/v6.8.1...v6.8.2) (2026-10-28)
+
+
+### Bug Fixes
+
+* **llms:** support Responses images and encrypted output preferences ([da88ea4](https://github.com/jeffusion/bungee/commit/da88ea458c1e06e3325a2fd3ee548b32b8007e65))
+
 ## [6.8.1](https://github.com/jeffusion/bungee/compare/v6.8.0...v6.8.1) (2026-10-28)
 
 
