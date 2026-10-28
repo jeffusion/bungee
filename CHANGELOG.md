@@ -1,3 +1,11 @@
+## [6.8.1](https://github.com/jeffusion/bungee/compare/v6.8.0...v6.8.1) (2026-10-28)
+
+
+### Bug Fixes
+
+* **test:** prepare storage before short progress probes ([26ca53d](https://github.com/jeffusion/bungee/commit/26ca53da3abb434a0786b1e7bd1b9622d202f1d3))
+* **ui:** unify brand and version hover background ([0cf505a](https://github.com/jeffusion/bungee/commit/0cf505a6dfc08f861bf10dffff585b3972ea487f))
+
 # [6.8.0](https://github.com/jeffusion/bungee/compare/v6.7.3...v6.8.0) (2026-10-27)
 
 
