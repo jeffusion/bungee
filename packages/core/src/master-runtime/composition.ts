@@ -1248,7 +1248,7 @@ export async function startMasterComposition(
     const originalPrepare = resources.admission.prepare.bind(resources.admission);
     let committedAdmission: readonly ServingConfigWorker[] = [];
     const trackedAdmission: MasterProcessAdmission = {
-      prepare(workers, signal?: AbortSignal, handoffTimeoutMs?: number) {
+      prepare(workers, signal?: AbortSignal, handoffTimeoutMs?: number, websocketMaxConnections?: number | null) {
         type AdmissionSideState =
           | 'prepared' | 'commit_sent' | 'committed' | 'aborted' | 'boot_disappeared' | 'uncertain';
         type AdmissionSide = {
@@ -1323,7 +1323,7 @@ export async function startMasterComposition(
         const operation = (async (): Promise<PreparedWorkerAdmission> => {
           try {
             checkPrepare();
-            const localPrepared = await originalPrepare(workers, admissionSignal, handoffTimeoutMs);
+            const localPrepared = await originalPrepare(workers, admissionSignal, handoffTimeoutMs, websocketMaxConnections);
             register(local, localPrepared);
             checkPrepare();
             if (abortRequested) {
@@ -1331,7 +1331,7 @@ export async function startMasterComposition(
               throw admissionSignal.reason ?? new Error('worker admission was aborted');
             }
             if (resources.ingressController !== null && workers.length === options.workerCount) {
-              const remotePrepared = await resources.ingressController.prepare(workers, admissionSignal, handoffTimeoutMs);
+              const remotePrepared = await resources.ingressController.prepare(workers, admissionSignal, handoffTimeoutMs, websocketMaxConnections);
               register(remote, remotePrepared);
               if (durableState) {
                 const prepared = resources.ingressController.trustedAdmissionRegistryIfFresh()?.prepared;

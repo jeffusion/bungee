@@ -107,14 +107,17 @@ export function replaceActiveMaterialization(db: Database, aggregate: Configurat
   const settingsColumns = new Set(db.query<{ readonly name: string }, []>('PRAGMA table_info(settings)').all().map(({ name }) => name));
   const publicationColumn = settingsColumns.has('publication_json') ? ',publication_json' : '';
   const publicationValue = settingsColumns.has('publication_json') ? ',?' : '';
+  // The frozen baseline initializes the empty aggregate before this column exists.
+  const hasWebSocketLimit = settingsColumns.has('websocket_max_connections_json');
   db.run(`INSERT INTO settings
-    (id,log_level,body_parser_limit,auth_json,logging_json${publicationColumn}) VALUES (1,?,?,?,?${publicationValue})`, [
+    (id,log_level,body_parser_limit,auth_json,logging_json${publicationColumn}${hasWebSocketLimit ? ',websocket_max_connections_json' : ''}) VALUES (1,?,?,?,?${publicationValue}${hasWebSocketLimit ? ',?' : ''})`, [
     logical.log_level ?? null,
     logical.body_parser_limit ?? null,
     logical.auth === undefined ? null : canonicalJson(logical.auth),
     logical.logging === undefined ? null : canonicalJson(logical.logging),
     ...(settingsColumns.has('publication_json')
       ? [logical.publication === undefined ? null : canonicalJson(logical.publication)] : []),
+    ...(hasWebSocketLimit ? [logical.websocket_max_connections === undefined ? null : canonicalJson(logical.websocket_max_connections)] : []),
   ]);
   writeServices(db, logical.services);
   writeRoutes(db, logical.routes);

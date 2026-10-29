@@ -329,3 +329,15 @@ describe('config worker Bun lifecycle', () => {
     await lifecycle.stop(started.handle);
   });
 });
+
+
+test('worker lifecycle leaves client admission to ingress and retains buffer budgets', async () => {
+  const testFixture = fixture();
+  const lifecycle = createConfigWorkerLifecycle({ transportSecret: TEST_WORKER_TRANSPORT_SECRET,
+    loadResources: async () => testFixture.resources });
+  const started = await lifecycle.start(config, startCurrentMessage());
+  try {
+    expect(started.handle.websocket?.limits).toMatchObject({ maxConnections: null, maxHandshakes: null,
+      maxMessageBytes: 2 * 1024 * 1024, maxBufferedBytes: 8 * 1024 * 1024, maxTotalBufferedBytes: 64 * 1024 * 1024 });
+  } finally { await lifecycle.stop(started.handle); }
+});

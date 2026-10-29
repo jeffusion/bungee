@@ -27,7 +27,7 @@ const authority: ControllerAuthority = { controller_epoch: 1, controller_id: con
 
 function admission(sequence: number): AdmissionSet {
   return {
-    master_generation: '50000000-0000-4000-8000-000000000001', admission_sequence: sequence, revision: sequence,
+    master_generation: '50000000-0000-4000-8000-000000000001', websocket_max_connections: 512, admission_sequence: sequence, revision: sequence,
     content_hash: `sha256:${'a'.repeat(64)}`, plugin_catalog_hash: `sha256:${'b'.repeat(64)}`,
     workers: [{
       master_generation: '50000000-0000-4000-8000-000000000001',

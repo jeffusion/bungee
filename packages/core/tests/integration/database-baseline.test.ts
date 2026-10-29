@@ -60,8 +60,27 @@ test('access 001 upgrades TPS storage while preserving existing rows and support
     expect(db.query('SELECT output_tokens,generation_duration_ms FROM llm_tps_samples').all()).toEqual([{output_tokens:12,generation_duration_ms:250.5}]);
     expect(()=>db.run("INSERT INTO llm_tps_samples(attempt_id,request_id,route_id,endpoint_id,finished_at_ms,output_tokens,generation_duration_ms,output_source,model) VALUES('bad','request','route','endpoint',1000,1,0,'official',NULL)")).toThrow();
     expect(()=>db.run("INSERT INTO llm_tps_samples(attempt_id,request_id,route_id,endpoint_id,finished_at_ms,output_tokens,generation_duration_ms,output_source,model) VALUES('bad','request','route','endpoint',1000,1,1,'partial',NULL)")).toThrow();
-    expect(db.query('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([{version:'001'},{version:'002'},{version:'003'},{version:'004'}]);
+    expect(db.query('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([{version:'001'},{version:'002'},{version:'003'},{version:'004'},{version:'005'}]);
   }finally{db.close();}
+});
+
+test('access transport type upgrades 004 without guessing history and constrains fresh and upgraded databases',()=>{
+ for(const upgrade of [false,true]) {
+  const db=new Database(':memory:');
+  try {
+   if(upgrade) {
+    migrateAccessDatabase(db,migrations.slice(0,4));
+    db.run("INSERT INTO access_logs(request_id,timestamp,method,path,status,duration,created_at) VALUES('history',1,'POST','/responses',200,1,1)");
+   }
+   migrateAccessDatabase(db);
+   if(upgrade)expect(db.query('SELECT request_id,transport_type FROM access_logs').all()).toEqual([{request_id:'history',transport_type:null}]);
+   const insert=db.query("INSERT INTO access_logs(request_id,timestamp,method,path,status,duration,created_at,transport_type) VALUES(?,1,'POST','/responses',200,1,1,?)");
+   for(const value of ['http','websocket',null])insert.run(String(value),value);
+   for(const value of ['HTTP','ws','https',''])expect(()=>insert.run('invalid',value)).toThrow();
+   migrateAccessDatabase(db);
+   expect(db.query("SELECT transport_type FROM access_logs WHERE request_id != 'history' ORDER BY id").all()).toEqual([{transport_type:'http'},{transport_type:'websocket'},{transport_type:null}]);
+  }finally{db.close();}
+ }
 });
 
 

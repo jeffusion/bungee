@@ -1,3 +1,6 @@
+/** Client ingress protocol, independent of the upstream transport. */
+export type TransportType = 'http' | 'websocket';
+
 /** Proxy-observed byte-stream lifecycle, independent of HTTP and application protocols. */
 export const TRANSPORT_OUTCOMES = ['pending', 'completed', 'failed', 'cancelled', 'unknown'] as const;
 export type TransportOutcome = typeof TRANSPORT_OUTCOMES[number];

@@ -7,8 +7,8 @@ import { createWebSocketMessageView } from './message';
 
 export const WEBSOCKET_BRIDGE_DEFAULTS = Object.freeze({
   maxMessageBytes: 2 * 1024 * 1024,
-  maxConnections: 64,
-  maxHandshakes: 16,
+  maxConnections: null as number | null,
+  maxHandshakes: null as number | null,
   handshakeTimeoutMs: 10_000,
   maxBufferedBytes: 8 * 1024 * 1024,
   maxTotalBufferedBytes: 64 * 1024 * 1024,
@@ -18,8 +18,11 @@ export const WEBSOCKET_BRIDGE_DEFAULTS = Object.freeze({
   closeTimeoutMs: 1000,
 });
 
-type Limits = { [K in keyof typeof WEBSOCKET_BRIDGE_DEFAULTS]: number };
-export type WebSocketBridgeOptions = Partial<Limits>;
+type Limits = { [K in keyof typeof WEBSOCKET_BRIDGE_DEFAULTS]: K extends 'maxConnections' | 'maxHandshakes' ? number | null : number };
+export type WebSocketBridgeOptions = Partial<Limits> & {
+  /** Ingress reads the active admission policy for each new client connection. */
+  readonly connectionLimit?: () => number | null;
+};
 
 /** Opaque token prevents callbacks from taking ownership of another bridge's session. */
 export interface WebSocketBridgeData { readonly connection: object }
@@ -76,7 +79,7 @@ export interface WebSocketBridgeStats {
 
 // Shared across bridge instances in one process. This accounts for bridge-held
 // early messages and sampled native send queues; parser/TLS/kernel memory is
-// separately bounded by message size and connection admission, not this counter.
+// subject to message size, public admission and OS resources, not this counter.
 interface TransportSession {
   readonly token: object;
   readonly bufferedBytes: number;
@@ -115,9 +118,11 @@ function closeReason(reason: string): string {
 }
 
 function resolveLimits(options: WebSocketBridgeOptions): Limits {
-  const limits = { ...WEBSOCKET_BRIDGE_DEFAULTS, ...options } as Limits;
+  const { connectionLimit: _connectionLimit, ...overrides } = options;
+  const limits = { ...WEBSOCKET_BRIDGE_DEFAULTS, ...overrides } as Limits;
   for (const [name, value] of Object.entries(limits)) {
-    if (!Number.isSafeInteger(value) || value <= 0 || value > 0x7fffffff) {
+    if (value === null && (name === 'maxConnections' || name === 'maxHandshakes')) continue;
+    if (!Number.isSafeInteger(value) || value === null || value <= 0 || value > 0x7fffffff) {
       throw new TypeError(`Invalid WebSocket bridge limit: ${name}`);
     }
   }
@@ -161,7 +166,7 @@ export class WebSocketBridge {
   #backpressureEvents = 0;
   #drainEvents = 0;
 
-  constructor(options: WebSocketBridgeOptions = {}) {
+  constructor(private readonly options: WebSocketBridgeOptions = {}) {
     this.limits = resolveLimits(options);
     this.websocket = {
       data: {} as WebSocketBridgeData,
@@ -193,15 +198,34 @@ export class WebSocketBridge {
     });
   }
 
+  #capacityRejection(operation: 'upgrade' | 'upgradeSession' | 'requestResponses'): Response | undefined {
+    const connections = this.#sessions.size, handshakes = this.#handshakes;
+    const maxConnections = this.options.connectionLimit ? this.options.connectionLimit() : this.limits.maxConnections;
+    const { maxHandshakes } = this.limits;
+    const exceeded = [];
+    if (maxConnections !== null && connections >= maxConnections) exceeded.push('connections');
+    if (maxHandshakes !== null && handshakes >= maxHandshakes) exceeded.push('handshakes');
+    if (exceeded.length === 0) return;
+    const role = process.env.BUNGEE_ROLE;
+    try {
+      // Worker production diagnostics use inherited stderr, not the application logger.
+      process.stderr.write(`${JSON.stringify({
+        event: 'websocket_capacity_exceeded', level: 'warn', timestamp: new Date().toISOString(),
+        role: role === 'ingress' || role === 'worker' ? role : 'standalone', pid: process.pid,
+        operation, exceeded, connections, maxConnections, handshakes, maxHandshakes,
+      })}\n`);
+    } catch { /* Diagnostics must not replace the admission refusal. */ }
+    return new Response('WebSocket bridge capacity exceeded', { status: 503 });
+  }
+
   /** Call only for upgrade candidates; ordinary HTTP returns undefined without taking ownership. */
   upgrade(request: Request, server: WebSocketUpgradeServer, options: WebSocketUpgradeOptions): Promise<Response | undefined> {
     if (!isWebSocketUpgradeRequest(request)) return Promise.resolve(undefined);
     const invalid = validateWebSocketRequest(request);
     if (invalid) return Promise.resolve(invalid);
     if (!this.#accepting) return Promise.resolve(new Response('WebSocket bridge is stopping', { status: 503 }));
-    if (this.#sessions.size >= this.limits.maxConnections || this.#handshakes >= this.limits.maxHandshakes) {
-      return Promise.resolve(new Response('WebSocket bridge capacity exceeded', { status: 503 }));
-    }
+    const capacityRejection = this.#capacityRejection('upgrade');
+    if (capacityRejection) return Promise.resolve(capacityRejection);
     if (options.signal?.aborted) return Promise.resolve(new Response('WebSocket handshake cancelled', { status: 499 }));
     let url: URL;
     try {
@@ -225,9 +249,8 @@ export class WebSocketBridge {
     const invalid = validateWebSocketRequest(request);
     if (invalid) return Promise.resolve(invalid);
     if (!this.#accepting) return Promise.resolve(new Response('WebSocket bridge is stopping', { status: 503 }));
-    if (this.#sessions.size >= this.limits.maxConnections || this.#handshakes >= this.limits.maxHandshakes) {
-      return Promise.resolve(new Response('WebSocket bridge capacity exceeded', { status: 503 }));
-    }
+    const capacityRejection = this.#capacityRejection('upgradeSession');
+    if (capacityRejection) return Promise.resolve(capacityRejection);
     if (options.signal?.aborted) return Promise.resolve(new Response('WebSocket handshake cancelled', { status: 499 }));
     const headers = new Headers(options.headers);
     const protocol = headers.get('sec-websocket-protocol');
@@ -252,9 +275,8 @@ export class WebSocketBridge {
   /** One native Responses generation, exposed to the normal HTTP body pipeline as SSE. */
   requestResponses(options: WebSocketResponsesRequestOptions): Promise<Response> {
     if (!this.#accepting) return Promise.resolve(new Response('WebSocket bridge is stopping', { status: 503 }));
-    if (this.#sessions.size >= this.limits.maxConnections || this.#handshakes >= this.limits.maxHandshakes) {
-      return Promise.resolve(new Response('WebSocket bridge capacity exceeded', { status: 503 }));
-    }
+    const capacityRejection = this.#capacityRejection('requestResponses');
+    if (capacityRejection) return Promise.resolve(capacityRejection);
     if (options.signal.aborted) return Promise.resolve(new Response('WebSocket request cancelled', { status: 499 }));
     let url: URL;
     let message: string;
@@ -448,8 +470,15 @@ class ResponsesSession implements TransportSession {
     const chunk = new TextEncoder().encode(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
     // Account for SSE expansion, not just the incoming JSON payload. pause()
     // cannot retract other frames already decoded from the same native chunk.
-    if (this.#queue.length >= this.#bridge.limits.maxEarlyMessages || !this.#canBuffer(chunk.byteLength)) {
-      this.#fail('WebSocket Responses receive budget exceeded'); return;
+    if (!this.#canBuffer(chunk.byteLength)) {
+      const scope = this.#bufferedBytes + chunk.byteLength > this.#bridge.limits.maxBufferedBytes ? 'session' : 'process';
+      let limit = this.#bridge.limits.maxBufferedBytes;
+      if (scope === 'process') {
+        limit = this.processLimit;
+        for (const session of PROCESS_SESSIONS) limit = Math.min(limit, session.processLimit);
+      }
+      const bufferedBytes = scope === 'session' ? this.#bufferedBytes : processBufferedBytes;
+      this.#fail(`WebSocket Responses ${scope} receive budget exceeded (queuedMessages=${this.#queue.length}, queuedBytes=${this.#queueBytes}, bufferedBytes=${bufferedBytes}, incomingBytes=${chunk.byteLength}, limitBytes=${limit})`); return;
     }
     this.#queue.push(chunk); this.#queueBytes += chunk.byteLength; this.refreshBuffered();
     this.#socket?.pause();

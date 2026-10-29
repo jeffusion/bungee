@@ -3,7 +3,7 @@ import { bodyRecordingEvidence, chainTransportOutcome, diagnosticExport, parseSt
 import type { ChainEntry, LogEntry } from '../../../../../src/api/logs';
 
 const entry = (data: Partial<LogEntry> = {}): LogEntry => ({ id: 1, requestId: 'fixture', timestamp: 1,
-  method: 'POST', path: '/test', status: 200, duration: 1, authSuccess: true, success: true, ...data });
+  method: 'POST', transportType: null, path: '/test', status: 200, duration: 1, authSuccess: true, success: true, ...data });
 
 describe('independent request outcomes', () => {
   for (const [status, outcome] of [[200, 'completed'], [200, 'cancelled'], [200, 'failed'], [500, 'completed']] as const) {
@@ -22,8 +22,9 @@ describe('independent request outcomes', () => {
     expect(chainTransportOutcome({ ...chain, chainTransportOutcome: undefined })).toBe('unknown');
   });
   test('JSON diagnostics preserve independent protocol result and raw codes', () => {
-    expect(diagnosticExport(entry({ transportOutcome: 'completed', transportCode: 'RAW_CODE', protocolOutcome: 'failed', protocolCode: 'PROTOCOL_CODE' })))
-      .toEqual({ transportOutcome: 'completed', transportCode: 'RAW_CODE', protocolOutcome: 'failed', protocolCode: 'PROTOCOL_CODE' });
+    expect(diagnosticExport(entry({ transportType: 'websocket', transportOutcome: 'completed', transportCode: 'RAW_CODE', protocolOutcome: 'failed', protocolCode: 'PROTOCOL_CODE' })))
+      .toEqual({ transportType: 'websocket', transportOutcome: 'completed', transportCode: 'RAW_CODE', protocolOutcome: 'failed', protocolCode: 'PROTOCOL_CODE' });
+    expect(diagnosticExport(entry()).transportType).toBeNull();
   });
 });
 

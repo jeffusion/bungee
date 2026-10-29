@@ -27,6 +27,7 @@ type SettingsRow = {
   readonly auth_json: string | null;
   readonly logging_json: string | null;
   readonly publication_json: string | null;
+  readonly websocket_max_connections_json: string | null;
 };
 type ServiceRow = { readonly id: string; readonly position: number; readonly name: string; readonly policy_json: string };
 type RouteRow = { readonly id: string; readonly position: number; readonly path: string; readonly policy_json: string };
@@ -40,10 +41,19 @@ function readSettings(db: Database): JsonObject {
   const hasPublication = sqliteAll<{ readonly name: string }, []>(db, 'PRAGMA table_info(settings)')
     .some(({ name }) => name === 'publication_json');
   const rows = sqliteAll<SettingsRow, []>(db,
-    `SELECT log_level,body_parser_limit,auth_json,logging_json${hasPublication ? ',publication_json' : ',NULL AS publication_json'} FROM settings`);
+    `SELECT log_level,body_parser_limit,auth_json,logging_json${hasPublication ? ',publication_json' : ',NULL AS publication_json'},websocket_max_connections_json FROM settings`);
   const row = rows[0];
   if (rows.length !== 1 || row === undefined) throw new ConfigRepositoryError('schema_corrupt', 'settings singleton is broken');
+  let websocketLimit: unknown;
+  if (row.websocket_max_connections_json !== null) {
+    try { websocketLimit = JSON.parse(row.websocket_max_connections_json); }
+    catch { throw new ConfigRepositoryError('schema_corrupt', 'WebSocket connection limit is invalid'); }
+    if (JSON.stringify(websocketLimit) !== row.websocket_max_connections_json) {
+      throw new ConfigRepositoryError('schema_corrupt', 'WebSocket connection limit is not canonical');
+    }
+  }
   return {
+    ...(row.websocket_max_connections_json === null ? {} : { websocket_max_connections: websocketLimit }),
     ...(row.log_level === null ? {} : { log_level: requireOptionalGlobalScalar(row.log_level, 'log_level') }),
     ...(row.body_parser_limit === null ? {} : {
       body_parser_limit: requireOptionalGlobalScalar(row.body_parser_limit, 'body_parser_limit'),

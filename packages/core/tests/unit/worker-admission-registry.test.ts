@@ -54,7 +54,7 @@ describe('WorkerAdmissionRegistry', () => {
       const registry = new WorkerAdmissionRegistry();
       await (await registry.prepare([worker])).commit();
       expect(registry.snapshot()[0]?.boot_nonce).toBe(nonce);
-      const remote = { master_generation: MASTER_GENERATION, admission_sequence: 1,
+      const remote = { master_generation: MASTER_GENERATION, websocket_max_connections: 512, admission_sequence: 1,
         revision: worker.revision, content_hash: worker.content_hash, plugin_catalog_hash: worker.plugin_catalog_hash,
         workers: [{ ...worker.process.identity, boot_nonce: nonce, private_port: worker.private_port }] };
       registry.adoptCommitted([worker], remote);

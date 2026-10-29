@@ -319,7 +319,7 @@ test('composition retains ACKed serving/draining snapshots and installs the peer
             publicationOrder.push('ingress-commit');
             const firstWorker = workers[0]!;
             activeAdmission = {
-              master_generation: firstWorker.process.identity.master_generation, admission_sequence: ++admissionSequence,
+              master_generation: firstWorker.process.identity.master_generation, websocket_max_connections: 512, admission_sequence: ++admissionSequence,
               revision: firstWorker.revision, content_hash: firstWorker.content_hash,
               plugin_catalog_hash: firstWorker.plugin_catalog_hash,
               workers: workers.map((worker) => ({ ...worker.process.identity, boot_nonce: worker.boot_nonce, private_port: worker.private_port })),
@@ -345,7 +345,7 @@ test('composition retains ACKed serving/draining snapshots and installs the peer
       resolveAuthToken: () => undefined,
     } as unknown as MasterProcessDependencies;
     activeAdmission = {
-      master_generation: first.process.identity.master_generation, admission_sequence: 1,
+      master_generation: first.process.identity.master_generation, websocket_max_connections: 512, admission_sequence: 1,
       revision: current.revision, content_hash: current.content_hash, plugin_catalog_hash: catalog.hash,
       workers: [{ ...first.process.identity, boot_nonce: first.process.boot_nonce, private_port: 41_234 }],
     };
@@ -684,7 +684,7 @@ test('does not create an in-memory retry loop without a durable recovery row', a
   let runtimeStateVersion = 0;
   const admission = {
     prepare: async (workers: readonly ServingConfigWorker[]) => ({
-      commit: async () => { activeAdmission = { workers, revision: current.revision, content_hash: current.content_hash, plugin_catalog_hash: HASH, master_generation: MASTER_GENERATION, admission_sequence: 1 }; },
+      commit: async () => { activeAdmission = { workers, revision: current.revision, content_hash: current.content_hash, plugin_catalog_hash: HASH, master_generation: MASTER_GENERATION, websocket_max_connections: 512, admission_sequence: 1 }; },
       abort: async () => undefined,
       releaseRetiredAfterExitProof: async () => undefined, handoffStatus: async () => ({ retired_id: `sha256:${'a'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 }),
     }),
@@ -833,7 +833,7 @@ test.each(['scheduled', 'running', 'stopped'] as const)(
       const oldServing = evidence(old.process, oldSnapshot, catalog.hash);
       const remoteAdmission = {
         master_generation: old.process.identity.master_generation,
-        admission_sequence: 1,
+        websocket_max_connections: 512, admission_sequence: 1,
         revision: oldServing.revision,
         content_hash: oldServing.content_hash,
         plugin_catalog_hash: catalog.hash,

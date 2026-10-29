@@ -6,6 +6,7 @@ import { parseWorkerTransportSecret } from '../config-worker/private-transport';
 import { privateRequestHeaders, publicResponseHeaders, requestsUpgrade } from './headers';
 
 export interface AdmittedWorkerSelector {
+  readonly websocketMaxConnections?: number | null;
   acquire(): {
     readonly worker: Pick<ServingConfigWorker, 'private_port'> | null;
     release(): void;

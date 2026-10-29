@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite';
 import path from 'path';
 import fs from 'fs';
 import { initializeAccessDatabaseConnection } from '../access-database';
-import type { TransportOutcome } from './transport-outcome';
+import type { TransportOutcome, TransportType } from './transport-outcome';
 
 export interface ProcessingStep {
   step: string;
@@ -16,6 +16,7 @@ export interface AccessLogEntry {
   requestId: string;
   timestamp: number;
   method: string;
+  transportType?: TransportType | null;
   path: string;
   query?: string;
   status: number;
@@ -169,8 +170,8 @@ export class AccessLogWriter {
           error_message, req_body_id, resp_body_id, req_header_id, resp_header_id,
           original_req_header_id, original_req_body_id, transformed_path, success, created_at,
           is_failover_attempt, parent_request_id, attempt_number, attempt_upstream, request_type,
-          protocol_outcome, protocol_code, transport_outcome, transport_code
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          protocol_outcome, protocol_code, transport_outcome, transport_code, transport_type
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(request_id) DO UPDATE SET
           timestamp = excluded.timestamp,
           method = excluded.method,
@@ -202,7 +203,8 @@ export class AccessLogWriter {
           protocol_outcome = excluded.protocol_outcome,
           protocol_code = excluded.protocol_code,
           transport_outcome = excluded.transport_outcome,
-          transport_code = excluded.transport_code
+          transport_code = excluded.transport_code,
+          transport_type = excluded.transport_type
         WHERE ? = 1
       `);
 
@@ -264,6 +266,7 @@ export class AccessLogWriter {
             entry.protocolCode || null,
             entry.transportOutcome ?? null,
             entry.transportCode ?? null,
+            entry.transportType ?? null,
             entry.replacePendingTransport ? 1 : 0
           );
           this.db.run('RELEASE SAVEPOINT access_log_entry');

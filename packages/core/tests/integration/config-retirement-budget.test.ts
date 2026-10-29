@@ -103,6 +103,7 @@ test('migration 2 rollback and reopen preserve multiple operation, worker and re
     repository.close();
     db = new Database(path, { readwrite: true, strict: true });
     // Remove the later schema additions around unchanged baseline business rows.
+    db.run('ALTER TABLE settings DROP COLUMN websocket_max_connections_json');
     db.run('DROP TABLE service_references');
     db.run('DROP TABLE routes');
     db.run(CONFIG_SCHEMA_STATEMENTS.find(statement=>statement.startsWith('CREATE TABLE routes'))!);

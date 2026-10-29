@@ -54,8 +54,12 @@ async function transport(page:Page,name:string) {
   await page.getByRole('button',{name:/^Transport outcome/}).click();
   await page.getByRole('menuitem',{name,exact:true}).click();
 }
+async function typeFilter(page: Page, name: string) {
+  await page.getByTestId('logs-filter-type-select').getByRole('button').click();
+  await page.getByRole('menuitem', { name, exact: true }).click();
+}
 async function status(page:Page,value:string) {
-  await page.getByRole('button',{name:/^HTTP status/}).click();
+  await page.getByRole('button',{name:/^Status code/}).click();
   await page.getByPlaceholder('200, 404, 5xx').first().fill(value);
   await page.keyboard.press('Escape');
 }
@@ -70,9 +74,9 @@ test('real Logs rows split HTTP, final transport and retries; filters and reset 
   await withLogs(async()=>Response.json({data:rows,total:5,totalPages:1,page:1,limit:50}),async(page,queries)=>{
     await rendered(page.locator('table tbody tr')).toHaveCount(5);
     const cells=await page.locator('table tbody tr').evaluateAll(rows=>rows.map(row=>[...row.querySelectorAll('td')].map(cell=>cell.textContent?.trim())));
-    expect(cells.map(row=>row[3])).toEqual(['200','200','200','500','200']);
-    expect(cells.map(row=>row[4])).toEqual(['Completed','Cancelled','Transport failed','Completed','Unknown']);
-    expect(cells[0][6]).toContain('3');
+    expect(cells.map(row=>row[4])).toEqual(['200','200','200','500','200']);
+    expect(cells.map(row=>row[5])).toEqual(['Completed','Cancelled','Transport failed','Completed','Unknown']);
+    expect(cells[0][7]).toContain('3');
     await transport(page,'Cancelled');
     await rendered.poll(()=>queries.at(-1)?.searchParams.get('transportOutcome')).toBe('cancelled');
     await status(page,'200,500');
@@ -98,28 +102,45 @@ test('browser filters and CSV exports match the real SQLite chain API', async ()
     const dbPath = resolve(root, 'access.db');
     expect((await new MigrationManager(dbPath).migrate()).success).toBeTrue();
     db = new Database(dbPath);
-    const insert = db.query(`INSERT INTO access_logs (request_id,timestamp,method,path,status,duration,created_at,request_type,parent_request_id,attempt_number,transport_outcome)
-      VALUES (?,?, 'POST', ?, ?, 10, ?, ?, ?, ?, ?)`);
+    const insert = db.query(`INSERT INTO access_logs (request_id,timestamp,method,path,status,duration,created_at,request_type,parent_request_id,attempt_number,transport_outcome,transport_type)
+      VALUES (?,?, 'POST', ?, ?, 10, ?, ?, ?, ?, ?, ?)`);
     const now = Date.now() - 1000;
-    insert.run('actual-retry', now, '/actual/retry', 503, now / 1000, 'retry', 'actual-chain', 1, 'failed');
-    insert.run('actual-final', now + 10, '/actual/final', 200, now / 1000, 'final', 'actual-chain', 2, 'completed');
-    insert.run('actual-cancel', now, '/actual/cancel', 200, now / 1000, 'final', null, null, 'cancelled');
-    insert.run('actual-http500', now, '/actual/http500', 500, now / 1000, 'final', null, null, 'completed');
+    insert.run('actual-retry', now, '/actual/retry', 503, now / 1000, 'retry', 'actual-chain', 1, 'failed', 'websocket');
+    insert.run('actual-final', now + 10, '/actual/final', 200, now / 1000, 'final', 'actual-chain', 2, 'completed', 'websocket');
+    insert.run('actual-cancel', now, '/actual/cancel', 200, now / 1000, 'final', null, null, 'cancelled', 'http');
+    insert.run('actual-http500', now, '/actual/http500', 500, now / 1000, 'final', null, null, 'completed', 'http');
+    insert.run('actual-history', now, '/actual/history', 200, now / 1000, 'final', null, null, 'completed', null);
     const handler = new LogsHandler({ logQueryService: new LogQueryService(db), bodyStorage: {} as any,
       headerStorage: {} as any, cleanupService: {} as any });
 
     await withLogs(request => new URL(request.url).pathname.endsWith('/export') ? handler.export(request) : handler.query(request),async(page)=>{
-      await rendered(page.locator('table tbody tr')).toHaveCount(3);
+      await rendered(page.locator('table tbody tr')).toHaveCount(4);
       const rows=await page.locator('table tbody tr').allTextContents();
       expect(rows.find(row=>row.includes('/actual/retry'))).toContain('Completed');
-      await transport(page,'Completed');await rendered(page.locator('table tbody tr')).toHaveCount(2);
+      await typeFilter(page, 'WS');
+      await rendered(page.locator('table tbody tr')).toHaveCount(1);
+      await rendered(page.locator('table tbody')).toContainText('/actual/retry');
+      await page.getByRole('button', {name:'Export',exact:true}).click();
+      const [wsDownload] = await Promise.all([page.waitForEvent('download'), page.getByRole('menuitem',{name:'JSON',exact:true}).click()]);
+      const wsRows = JSON.parse(await Bun.file((await wsDownload.path())!).text());
+      expect(wsRows).toHaveLength(1);
+      expect(wsRows[0]).toMatchObject({ transportType:'websocket', chainAttempts:2, chainStatus:200 });
+      await page.getByRole('button', {name:'Clear type filter',exact:true}).click();
+      await rendered(page.locator('table tbody tr')).toHaveCount(4);
+      await typeFilter(page, 'HTTP');
+      await rendered(page.locator('table tbody tr')).toHaveCount(2);
+      await transport(page,'Completed');await rendered(page.locator('table tbody tr')).toHaveCount(1);
       await status(page,'500');await rendered(page.locator('table tbody tr')).toHaveCount(1);
       await rendered(page.locator('table tbody')).toContainText('/actual/http500');
       await page.getByRole('button',{name:'Export',exact:true}).click();
       const [download]=await Promise.all([page.waitForEvent('download'),page.getByRole('menuitem',{name:'CSV',exact:true}).click()]);
       const csv=await Bun.file((await download.path())!).text();
       expect(csv).toContain('actual-http500');expect(csv).toContain(',completed,');
-      expect(csv).not.toContain('actual-retry');expect(csv).not.toContain('actual-cancel');
+      expect(csv).not.toContain('actual-retry');expect(csv).not.toContain('actual-cancel');expect(csv).not.toContain('actual-history');
+      await typeFilter(page, 'WS');
+      await rendered(page.getByTestId('logs-empty-state')).toBeVisible();
+      await page.getByRole('button', {name:'Reset filters',exact:true}).click();
+      await rendered(page.locator('table tbody tr')).toHaveCount(4);
     });
   } finally {try {db?.close();} finally {rmSync(root,{recursive:true,force:true});}}
 },60_000);

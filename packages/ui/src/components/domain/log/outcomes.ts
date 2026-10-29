@@ -1,6 +1,9 @@
 import type { ChainEntry, LogEntry, TransportOutcome } from '../../../api/logs';
 
 export const TRANSPORT_OUTCOMES: TransportOutcome[] = ['pending', 'completed', 'failed', 'cancelled', 'unknown'];
+export function transportTypeLabel(value: LogEntry['transportType']): string {
+  return value === 'http' ? 'HTTP' : value === 'websocket' ? 'WS' : '—';
+}
 export function transportOutcome(value: unknown): TransportOutcome {
   return TRANSPORT_OUTCOMES.includes(value as TransportOutcome) ? value as TransportOutcome : 'unknown';
 }
@@ -59,6 +62,6 @@ export function bodyRecordingEvidence(log: LogEntry, tab: BodyTab): { key: strin
   return { key: step.step === 'body_recording_skipped' ? 'logs.detail.bodySkipped' : 'logs.detail.bodyIncomplete', reason };
 }
 export function diagnosticExport(log: LogEntry): Record<string, unknown> {
-  return { transportOutcome: transportOutcome(log.transportOutcome), transportCode: log.transportCode,
+  return { transportType: log.transportType, transportOutcome: transportOutcome(log.transportOutcome), transportCode: log.transportCode,
     protocolOutcome: log.protocolOutcome, protocolCode: log.protocolCode };
 }

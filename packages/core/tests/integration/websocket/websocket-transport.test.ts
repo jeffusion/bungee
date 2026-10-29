@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import WebSocket, { WebSocketServer } from '@bungee/ws-client';
 import { createServer, type IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
@@ -304,17 +304,31 @@ describe('bounded WebSocket bridge with the real npm ws client', () => {
   });
 
   test('admission bounds sockets and handshakes; stopAccepting cancels pending and rejects late commits', async () => {
+    const output = spyOn(process.stderr, 'write').mockImplementation(() => true);
+    cleanups.push(() => output.mockRestore());
     const stalled = new Set<Socket>();
     const up = await upstream({ upgrade: (_request, socket) => { stalled.add(socket); socket.on('close', () => stalled.delete(socket)); return false; } });
     cleanups.push(() => { for (const socket of stalled) socket.destroy(); });
     const gate = gateway(up.url, { maxHandshakes: 1, maxConnections: 2 });
     const first = rejected(gate.url); await until(() => gate.bridge.stats.handshakes === 1);
-    expect((await rejected(gate.url)).status).toBe(503);
+    const refusal = await rejected(gate.url, { headers: { Authorization: 'Bearer private-admission-token' } });
+    expect(refusal.status).toBe(503); expect(refusal.body).toBe('WebSocket bridge capacity exceeded');
+    expect(JSON.parse(String(output.mock.calls[0]![0]))).toEqual({
+      event: 'websocket_capacity_exceeded', level: 'warn', timestamp: expect.any(String),
+      role: 'standalone', pid: process.pid, operation: 'upgrade', exceeded: ['handshakes'],
+      connections: 1, maxConnections: 2, handshakes: 1, maxHandshakes: 1,
+    });
     gate.bridge.stopAccepting(); expect((await first).status).toBe(503);
     expect((await rejected(gate.url)).status).toBe(503);
     await gate.bridge.stop(); expect(gate.bridge.stats.connections).toBe(0);
     const normal = await upstream(); const socketGate = gateway(normal.url, { maxConnections: 1, maxHandshakes: 2 });
     await client(socketGate.url); expect((await rejected(socketGate.url)).status).toBe(503);
+    expect(output).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(output.mock.calls[1]![0]))).toMatchObject({
+      operation: 'upgrade', exceeded: ['connections'], connections: 1, maxConnections: 1, handshakes: 0, maxHandshakes: 2,
+    });
+    output.mockImplementationOnce(() => { throw new Error('diagnostic sink unavailable'); });
+    expect((await rejected(socketGate.url)).status).toBe(503);
   });
 
   test('rejection bodies are bounded and handshake refusal does not leave a socket slot', async () => {

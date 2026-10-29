@@ -61,7 +61,8 @@ test.each(['success','credential','http-error','network-error','cancel','deadlin
   expect(restored.ok).toBe(true);if(!restored.ok)throw new Error('restore failed');
   try{
     const retainedBefore=bodyMetrics.retainedBytes;
-    const pending=handleRequest(restored.request,config,{logging,servingRevision:7});
+    const transportType=mode==='success'?'websocket':'http';
+    const pending=handleRequest(restored.request,config,{logging,servingRevision:7,logTransportType:transportType});
     if(mode==='cancel'){await secondReady;controller.abort();await expect(pending).rejects.toThrow();}
     else{
       const response=await pending;const body=await response.json();
@@ -92,6 +93,7 @@ test.each(['success','credential','http-error','network-error','cancel','deadlin
     expect(state.events.filter(event=>event.phase==='end')).toHaveLength(2);expect(state.admissionResults).toHaveLength(2);
     expect(state.events.filter(event=>event.phase==='response').map(event=>event.body.usage.output_tokens)).toEqual(success||mode==='http-error'?[7,9]:[7]);
     expect(entries.map(entry=>entry.status)).toEqual([400,success?200:mode==='http-error'?502:503]);
+    for(const entry of [...entries,...fileEntries])expect(entry.transportType).toBe(transportType);
     if(mode!=='cancel'){
       const returned=entries.find(entry=>entry.status===(success?200:400));
       expect(transports.get(returned.requestId)?.outcome).toBe('completed');

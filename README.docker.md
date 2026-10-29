@@ -57,6 +57,8 @@ No JSON/YAML configuration file is mounted or read. Configuration, plugin state 
 | `BUNGEE_CONFIG_DB_PATH` | `/usr/app/data/bungee.db` | Absolute configuration DB path |
 | `BUNGEE_ACCESS_DB_PATH` | `/usr/app/logs/access.db` | Absolute telemetry DB path |
 
+Set the maximum client WebSocket connections in System Settings (default 512), or select no additional limit. Publish the configuration to apply it; container recreation is not required. Existing worker drain behavior may cause clients to reconnect. See [WebSocket resource limits](./docs/architecture/websocket.md#资源与关闭).
+
 Standalone Docker deployments must inject `BUNGEE_PLUGIN_SECRETS_KEY` and keep it stable. This key is separate from administrator authentication and proxy API Keys. Never publish the private master control listener.
 
 ## Operations

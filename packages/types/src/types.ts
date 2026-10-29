@@ -347,7 +347,11 @@ export type InterceptResult =
   | { action: 'failover'; reason?: string }
   | undefined;
 
+export const DEFAULT_WEBSOCKET_MAX_CONNECTIONS = 512;
+
 export interface AppConfig {
+  /** Public client connections, including pending handshakes; null disables the count limit. */
+  websocket_max_connections?: number | null;
   config_version?: number;
   log_level?: string;
   body_parser_limit?: string;

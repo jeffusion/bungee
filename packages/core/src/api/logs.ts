@@ -1,4 +1,5 @@
 import type { ProcessingStep } from '../logger/access-log-writer';
+import type { TransportType } from '../logger/transport-outcome';
 import type { Database } from 'bun:sqlite';
 import { TRANSPORT_OUTCOMES, emptyHttpCounts, emptyTransportCounts, emptyRequestCounts, type RequestCounts, type HttpStatusCounts, type TransportCounts, type TransportOutcome } from '../logger/transport-outcome';
 
@@ -19,6 +20,7 @@ export interface LogQueryParams {
   transformer?: string;
   success?: boolean;
   transportOutcome?: TransportOutcome;
+  transportType?: TransportType;
   searchTerm?: string; // search in path, error_message
   requestType?: 'final' | 'retry' | 'recovery'; // request type classification
 
@@ -39,6 +41,7 @@ export interface LogEntry {
   requestId: string;
   timestamp: number;
   method: string;
+  transportType: TransportType | null;
   path: string;
   query?: string;
   status: number;
@@ -253,6 +256,7 @@ export class LogQueryService {
       transformer,
       success,
       transportOutcome,
+      transportType,
       searchTerm,
       requestType,
       sortBy = 'timestamp',
@@ -270,6 +274,11 @@ export class LogQueryService {
     if (endTime !== undefined) {
       whereClauses.push('timestamp < ?');
       whereParams.push(endTime);
+    }
+    if (transportType !== undefined) {
+      if (transportType !== 'http' && transportType !== 'websocket') throw new Error('Invalid transport type');
+      whereClauses.push('transport_type = ?');
+      whereParams.push(transportType);
     }
     if (method) {
       whereClauses.push('method = ?');
@@ -393,6 +402,7 @@ export class LogQueryService {
       transformer,
       success,
       transportOutcome,
+      transportType,
       searchTerm,
       requestType,
       sortBy = 'timestamp',
@@ -408,6 +418,11 @@ export class LogQueryService {
     const rowWhereClauses: string[] = [];
     const rowWhereParams: any[] = [];
 
+    if (transportType !== undefined) {
+      if (transportType !== 'http' && transportType !== 'websocket') throw new Error('Invalid transport type');
+      rowWhereClauses.push('transport_type = ?');
+      rowWhereParams.push(transportType);
+    }
     if (method) {
       rowWhereClauses.push('method = ?');
       rowWhereParams.push(method);
@@ -783,7 +798,7 @@ export class LogQueryService {
     }
 
     const headers = [
-      'requestId', 'timestamp', 'method', 'path', 'query', 'status', 'duration',
+      'requestId', 'timestamp', 'transportType', 'method', 'path', 'query', 'status', 'duration',
       'routePath', 'upstream', 'transformer', 'authSuccess', 'authLevel',
       'errorMessage', 'success', 'requestType', 'transportOutcome', 'transportCode', 'protocolOutcome', 'protocolCode',
       ...(params.groupBy === 'chain' ? ['chainId', 'chainStatus', 'chainDurationMs', 'chainTransportOutcome', 'chainTransportCode'] : [])
@@ -796,6 +811,7 @@ export class LogQueryService {
         return [
           entry.requestId,
           new Date(entry.timestamp).toISOString(),
+          entry.transportType ?? '',
           entry.method,
           `"${entry.path}"`,
           entry.query ? `"${entry.query}"` : '',
@@ -1150,6 +1166,7 @@ export class LogQueryService {
       requestId: row.request_id,
       timestamp: row.timestamp,
       method: row.method,
+      transportType: row.transport_type,
       path: row.path,
       query: row.query || undefined,
       status: row.status,

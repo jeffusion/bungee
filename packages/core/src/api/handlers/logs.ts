@@ -18,10 +18,14 @@ function getSingleParam(url: URL, name: string): string | undefined | null {
   return values.length === 0 ? undefined : values.length === 1 && values[0] !== '' ? values[0] : null;
 }
 
-function getOutcomeFilters(url: URL): Pick<LogQueryParams, 'status' | 'transportOutcome'> | Response {
+function getLogFilters(url: URL): Pick<LogQueryParams, 'status' | 'transportOutcome' | 'transportType'> | Response {
   const values = url.searchParams.getAll('status');
   const statuses = values.map(value => /^\d{3}$/.test(value) ? Number(value) : NaN);
   const transport = getSingleParam(url, 'transportOutcome');
+  const transportType = getSingleParam(url, 'transportType');
+  if (transportType !== undefined && transportType !== 'http' && transportType !== 'websocket') {
+    return Response.json({ error: 'transportType must be http or websocket' }, { status: 400 });
+  }
   if (statuses.some(value => !Number.isInteger(value) || value < 100 || value > 599)) {
     return Response.json({ error: 'status must contain HTTP status codes between 100 and 599' }, { status: 400 });
   }
@@ -29,7 +33,7 @@ function getOutcomeFilters(url: URL): Pick<LogQueryParams, 'status' | 'transport
     return Response.json({ error: 'transportOutcome must be one of pending, completed, failed, cancelled, unknown' }, { status: 400 });
   }
   return { status: statuses.length === 0 ? undefined : statuses.length === 1 ? statuses[0] : [...new Set(statuses)],
-    transportOutcome: transport as TransportOutcome | undefined };
+    transportType, transportOutcome: transport as TransportOutcome | undefined };
 }
 
 function getPollInterval(url: URL): number | null {
@@ -77,7 +81,7 @@ export class LogsHandler {
       const url = new URL(req.url);
       const groupBy = url.searchParams.get('groupBy');
 
-      const outcomeFilters = getOutcomeFilters(url);
+      const outcomeFilters = getLogFilters(url);
       if (outcomeFilters instanceof Response) return outcomeFilters;
       const params: LogQueryParams = {
         ...outcomeFilters,
@@ -372,7 +376,7 @@ export class LogsHandler {
       const format = (url.searchParams.get('format') || 'json') as 'json' | 'csv';
       if (format !== 'json' && format !== 'csv') return Response.json({ error: 'format must be json or csv' }, { status: 400 });
 
-      const outcomeFilters = getOutcomeFilters(url);
+      const outcomeFilters = getLogFilters(url);
       if (outcomeFilters instanceof Response) return outcomeFilters;
       const params: LogQueryParams = {
         ...outcomeFilters,

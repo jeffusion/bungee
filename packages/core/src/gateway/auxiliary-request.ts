@@ -35,6 +35,7 @@ export async function executeAuxiliaryRequest(parent:Request,config:AppConfig,_e
   let reused:unknown;
   let completion:Promise<RawResponseCompletion>|undefined;
   const response=await runGatewayRequest(request,config,{servingRevision:runtime?.servingRevision,logging:{...runtime?.logging,captureBody:false},
+    logTransportType:runtime?.logTransportType ?? runtime?.transport ?? 'http',
     auxiliary:{target:input.target,parentRequestId:runtime?.parentRequestId,onIdentity:async actual=>{identity=actual;reused=await input.reuse?.(actual);return reused!==undefined;}},
     onCompletion:value=>{completion=value;}});
   if(!identity){await response.body?.cancel();throw new DataAdmissionError(response.status>=400?response.status:503,'auxiliary_request_rejected');}

@@ -76,7 +76,7 @@ export interface PreparedWorkerAdmission {
 }
 
 export interface WorkerAdmissionController {
-  prepare(workers: readonly ServingConfigWorker[], signal?: AbortSignal, handoffTimeoutMs?: number): Promise<PreparedWorkerAdmission>;
+  prepare(workers: readonly ServingConfigWorker[], signal?: AbortSignal, handoffTimeoutMs?: number, websocketMaxConnections?: number | null): Promise<PreparedWorkerAdmission>;
 }
 
 export interface ConfigPublicationRepository {

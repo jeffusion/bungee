@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { createWebSocketBridge, type WebSocketBridge, type WebSocketBridgeOptions } from '../../../src/websocket';
 
@@ -134,9 +134,18 @@ describe('native WebSocket Responses upstream as bounded SSE', () => {
   });
 
   test('handshake deadline, abort and pending handshake capacity free only after native close', async () => {
+    const output = spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const role = process.env.BUNGEE_ROLE;
+    process.env.BUNGEE_ROLE = 'worker';
+    cleanups.push(() => { output.mockRestore(); if (role === undefined) delete process.env.BUNGEE_ROLE; else process.env.BUNGEE_ROLE = role; });
     const url = rawUpstream(() => {}); const gate = bridge({ maxHandshakes: 1, handshakeTimeoutMs: 50 });
     const pending = request(gate, url); expect(gate.stats.handshakes).toBe(1);
     expect((await request(gate, url)).status).toBe(503);
+    expect(JSON.parse(String(output.mock.calls[0]![0]))).toEqual({
+      event: 'websocket_capacity_exceeded', level: 'warn', timestamp: expect.any(String),
+      role: 'worker', pid: process.pid, operation: 'requestResponses', exceeded: ['handshakes'],
+      connections: 1, maxConnections: null, handshakes: 1, maxHandshakes: 1,
+    });
     expect((await pending).status).toBe(504); await until(() => gate.stats.connections === 0);
     const controller = new AbortController(); const cancelled = request(gate, url, controller); controller.abort();
     expect((await cancelled).status).toBe(499); await until(() => gate.stats.connections === 0);
@@ -144,11 +153,16 @@ describe('native WebSocket Responses upstream as bounded SSE', () => {
   });
 
   test.each(['stream', 'signal', 'stop'])('%s cancellation closes the native socket and releases all resources', async (kind) => {
+    const output = spyOn(process.stderr, 'write').mockImplementation(() => true);
+    cleanups.push(() => output.mockRestore());
     const up = upstream((socket) => { send(socket, { type: 'response.created' }); });
     const gate = bridge({ maxConnections: 1 }); const controller = new AbortController();
     const response = await request(gate, up.url, controller); const reader = response.body!.getReader();
     expect((await reader.read()).done).toBe(false);
     expect((await request(gate, up.url)).status).toBe(503);
+    expect(JSON.parse(String(output.mock.calls[0]![0]))).toMatchObject({
+      operation: 'requestResponses', exceeded: ['connections'], connections: 1, maxConnections: 1, handshakes: 0, maxHandshakes: null,
+    });
     if (kind === 'stream') await reader.cancel();
     else if (kind === 'signal') { controller.abort(); await expect(reader.read()).rejects.toThrow('cancelled'); }
     else { const pending = reader.read().then(() => { throw new Error('Unexpected stream success'); }, (error: Error) => error); await gate.stop(); expect((await pending).message).toContain('restarting'); }
@@ -169,6 +183,28 @@ describe('native WebSocket Responses upstream as bounded SSE', () => {
     await until(() => gate.stats.connections === 0); expect(gate.stats.processBufferedBytes).toBe(0);
   });
 
+  for (const count of [18, 40, 1024]) {
+    test.each([false, true])(`${count} small messages preserve every event with paused consumer=%s`, async (paused) => {
+      const events = Array.from({ length: count - 1 }, (_, index) => ({ type: 'response.output_text.delta', delta: 'x', index }));
+      const expected = [...events, terminal()];
+      const up = upstream((socket) => { for (const event of expected) send(socket, event); });
+      const gate = bridge();
+      const reader = (await request(gate, up.url)).body!.getReader();
+      const chunks: string[] = [];
+      const first = await reader.read(); expect(first.done).toBe(false);
+      chunks.push(new TextDecoder().decode(first.value));
+      if (paused) {
+        // Deliberate consumer stall: already decoded frames must fit the byte budget.
+        await delay(50);
+        expect(gate.stats.bufferedBytes).toBeLessThanOrEqual(gate.limits.maxBufferedBytes);
+      }
+      for (;;) { const chunk = await reader.read(); if (chunk.done) break; chunks.push(new TextDecoder().decode(chunk.value)); }
+      expect(chunks).toEqual(expected.map(sse));
+      await until(() => gate.stats.connections === 0);
+      expect(gate.stats.handshakes).toBe(0); expect(gate.stats.bufferedBytes).toBe(0); expect(gate.stats.processBufferedBytes).toBe(0);
+    });
+  }
+
   test('already decoded same-packet frames obey SSE expansion and process receive budgets', async () => {
     const events = Array.from({ length: 3 }, () => ({ type: 'response.output_text.delta', delta: 'x'.repeat(320) }));
     const up = upstream((socket) => { for (const event of events) send(socket, event); });
@@ -177,7 +213,7 @@ describe('native WebSocket Responses upstream as bounded SSE', () => {
     await reader.read(); await delay(20);
     expect(gate.stats.bufferedBytes).toBeLessThanOrEqual(600);
     // The decoder may emit multiple messages from one native read after pause.
-    await expect(reader.read()).rejects.toThrow('budget');
+    await expect(reader.read()).rejects.toThrow(/session receive budget exceeded \(queuedMessages=\d+, queuedBytes=\d+, bufferedBytes=\d+, incomingBytes=\d+, limitBytes=600\)/);
     await until(() => gate.stats.connections === 0); expect(gate.stats.processBufferedBytes).toBe(0);
   });
   test('pending request JSON shares the process send budget across bridges', async () => {
@@ -206,7 +242,7 @@ describe('native WebSocket Responses upstream as bounded SSE', () => {
     const secondReader = (await request(second, up.url)).body!.getReader(); await secondReader.read();
     await until(() => second.stats.bufferedBytes > 300);
     expect(first.stats.processBufferedBytes).toBeGreaterThan(700);
-    await expect((await request(third, up.url)).text()).rejects.toThrow('budget');
+    await expect((await request(third, up.url)).text()).rejects.toThrow(/process receive budget exceeded \(queuedMessages=\d+, queuedBytes=\d+, bufferedBytes=\d+, incomingBytes=\d+, limitBytes=900\)/);
     await until(() => third.stats.connections === 0);
     await firstReader.cancel(); await secondReader.cancel();
     await until(() => first.stats.processBufferedBytes === 0);

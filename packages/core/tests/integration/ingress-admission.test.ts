@@ -10,7 +10,7 @@ const catalog = 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 function admission(sequence: number, revision = sequence): AdmissionSet {
   return {
     master_generation: generation,
-    admission_sequence: sequence,
+    websocket_max_connections: 512, admission_sequence: sequence,
     revision,
     content_hash: hash,
     plugin_catalog_hash: catalog,
@@ -30,6 +30,10 @@ describe('ingress admission set and registry', () => {
     expect(Object.isFrozen(parsed)).toBeTrue();
     expect(Object.isFrozen(parsed.workers)).toBeTrue();
     expect(Object.isFrozen(parsed.workers[0])).toBeTrue();
+    expect(parseAdmissionSet({ ...admission(1), websocket_max_connections: null }).websocket_max_connections).toBeNull();
+    for (const value of [undefined, 0, -1, 1.5, 2147483648, '512', true]) {
+      expect(() => parseAdmissionSet({ ...admission(1), websocket_max_connections: value })).toThrow();
+    }
     expect(() => parseAdmissionSet({ ...admission(1), extra: true })).toThrow();
     expect(() => parseAdmissionSet({ ...admission(1), workers: [admission(1).workers[0], { ...admission(1).workers[1], worker_slot: 2 }] })).toThrow();
     expect(() => parseAdmissionSet({ ...admission(1), workers: [{ ...admission(1).workers[0], master_generation: '90000000-0000-4000-8000-000000000002' }, admission(1).workers[1]] })).toThrow();
@@ -64,7 +68,7 @@ describe('ingress admission set and registry', () => {
     expect(() => registry.abort(first)).not.toThrow();
     expect(registry.status().prepared).toBeNull();
     registry.prepare(first);
-    expect(() => registry.prepare({ ...first, admission_sequence: 1, revision: 2 })).toThrow(AdmissionRegistryError);
+    expect(() => registry.prepare({ ...first, websocket_max_connections: 512, admission_sequence: 1, revision: 2 })).toThrow(AdmissionRegistryError);
     registry.commit(first);
     expect(() => registry.commit(first)).not.toThrow();
     expect(() => registry.prepare(first)).toThrow(AdmissionRegistryError);
@@ -154,3 +158,70 @@ describe('ingress admission set and registry', () => {
     }
   });
 });
+
+test('public WS admission defaults to 512 and applies committed count changes without evicting sockets', async () => {
+  const { default: WebSocket } = await import('@bungee/ws-client');
+  const worker = Bun.serve({ hostname: '127.0.0.1', port: 0,
+    fetch(request, server) { if (server.upgrade(request)) return; return new Response('upgrade required', { status: 426 }); },
+    websocket: { message(socket, message) { socket.send(message); } },
+  });
+  const registry = new IngressAdmissionRegistry();
+  expect(registry.websocketMaxConnections).toBe(512);
+  const first = { ...admission(1), workers: [{ ...admission(1).workers[0]!, private_port: worker.port! }] };
+  registry.prepare(first); registry.commit(first);
+  const listener = createIngressPublicListener({ hostname: '127.0.0.1', port: 0,
+    transportSecret: generateWorkerTransportSecret(), admission: registry });
+  const clients: InstanceType<typeof WebSocket>[] = [];
+  listener.start();
+  const connect = () => new Promise<InstanceType<typeof WebSocket>>((resolve, reject) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${listener.port}/echo`);
+    clients.push(socket); socket.on('error', () => {});
+    socket.once('open', () => resolve(socket)); socket.once('error', reject);
+  });
+  const refused = () => new Promise<number>((resolve, reject) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${listener.port}/echo`);
+    clients.push(socket); socket.on('error', () => {});
+    socket.once('unexpected-response', (_, response) => { response.resume(); resolve(response.statusCode!); socket.terminate(); });
+    socket.once('open', () => reject(new Error('capacity unexpectedly admitted')));
+  });
+  const echo = (socket: InstanceType<typeof WebSocket>) => new Promise<void>((resolve, reject) => {
+    socket.once('message', data => { try { expect(data.toString()).toBe('still-open'); resolve(); } catch (error) { reject(error); } });
+    socket.send('still-open');
+  });
+  try {
+    const open = await Promise.all(Array.from({ length: 512 }, connect));
+    expect(await refused()).toBe(503);
+    const lower = { ...first, admission_sequence: 2, revision: 2, websocket_max_connections: 1 };
+    registry.prepare(lower);
+    expect(registry.websocketMaxConnections).toBe(512);
+    registry.commit(lower);
+    expect(registry.websocketMaxConnections).toBe(1);
+    await echo(open[0]!);
+    expect(await refused()).toBe(503);
+    const unlimited = { ...lower, admission_sequence: 3, revision: 3, websocket_max_connections: null };
+    registry.prepare(unlimited); registry.commit(unlimited);
+    await echo(await connect());
+    // After native close callbacks, the same listener reuses its released capacity.
+    await Promise.all(clients.map(socket => new Promise<void>(resolve => {
+      if (socket.readyState === WebSocket.CLOSED) return resolve();
+      socket.once('close', resolve); socket.close();
+    })));
+    registry.releaseRetired(first);
+    const one = { ...lower, admission_sequence: 4, revision: 4 };
+    registry.prepare(one); registry.commit(one);
+    // A client close callback can precede ingress's corresponding native close callback.
+    const deadline = Date.now() + 3000;
+    let reopened: InstanceType<typeof WebSocket> | undefined;
+    while (!reopened) {
+      try { reopened = await connect(); } catch (error) {
+        if (Date.now() >= deadline) throw error;
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    }
+    await echo(reopened);
+    expect(await refused()).toBe(503);
+  } finally {
+    for (const socket of clients) socket.terminate();
+    await listener.stop(); await worker.stop(true);
+  }
+}, 30_000);

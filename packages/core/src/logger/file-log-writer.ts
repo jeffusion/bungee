@@ -1,11 +1,12 @@
 import fs from 'fs';
 import path from 'path';
-import type { TransportOutcome } from './transport-outcome';
+import type { TransportOutcome, TransportType } from './transport-outcome';
 
 export interface FileLogEntry {
   requestId: string;
   timestamp: number;
   method: string;
+  transportType?: TransportType | null;
   path: string;
   query?: string;
   status: number;

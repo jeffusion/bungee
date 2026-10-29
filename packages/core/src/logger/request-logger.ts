@@ -4,7 +4,7 @@ import type { AccessLogWriter } from './access-log-writer';
 import type { BodyStorageManager } from './body-storage';
 import type { HeaderStorageManager } from './header-storage';
 import type { RawResponseError } from '../plugin-control/contracts';
-import type { TransportOutcome } from './transport-outcome';
+import type { TransportOutcome, TransportType } from './transport-outcome';
 import { captureBody, trackBodyLogTask, type BodyCapture, type BodyCaptureOptions } from './body-capture';
 
 type BodyType = 'request' | 'response' | 'original-request';
@@ -26,6 +26,7 @@ export type RequestLoggerDependencies = {
 };
 
 export interface FailoverAttemptOptions {
+  transportType?: TransportType;
   isFailoverAttempt?: boolean;   // 是否是故障转移尝试
   parentRequestId?: string;      // 父请求 ID
   attemptNumber?: number;        // 尝试序号
@@ -72,6 +73,7 @@ export class RequestLogger {
   private requestId: string;
   private startTime: number;
   private method: string;
+  private readonly transportType: TransportType;
   private path: string;
   private query: string;
   private transformedPath: string | null = null;  // 转换后的路径（经过 pathRewrite）
@@ -128,6 +130,7 @@ export class RequestLogger {
     this.startTime = Date.now();
     const url = new URL(req.url);
     this.method = req.method;
+    this.transportType = failoverOptions?.transportType ?? 'http';
     this.path = url.pathname;
     this.query = url.search;
     this.requestAccept = req.headers.get('accept') ?? '';
@@ -474,6 +477,7 @@ export class RequestLogger {
       requestId: this.requestId,
       timestamp: this.startTime,
       method: this.method,
+      transportType: this.transportType,
       path: this.path,
       query: this.query || undefined,
       status,
@@ -506,6 +510,7 @@ export class RequestLogger {
       requestId: this.requestId,
       timestamp: this.startTime,
       method: this.method,
+      transportType: this.transportType,
       path: this.path,
       query: this.query || undefined,
       status,
@@ -631,6 +636,7 @@ export class RequestLogger {
     this.transportStarted = true;
     this.dependencies.accessLogWriter.write({
       requestId: this.requestId, timestamp: this.startTime, method: this.method, path: this.path,
+      transportType: this.transportType,
       query: this.query || undefined, status, duration: Date.now() - this.startTime,
       processingSteps: this.steps.length ? this.steps : undefined,
       requestType: this.requestType, isFailoverAttempt: this.isFailoverAttempt,

@@ -64,7 +64,7 @@ test('orphan-inventory returns authenticated overlapping workers while exact-adm
     const exact = await discoverSupervisedWorkers({
       runtimeWorkersDirectory: directory, rootKey: ROOT, authority: AUTHORITY, masterControlPort: 3011, mode: 'exact-admission',
       expectedAdmission: {
-        master_generation: GENERATION, admission_sequence: 1, revision: 1, content_hash: HASH, plugin_catalog_hash: CATALOG,
+        master_generation: GENERATION, websocket_max_connections: 512, admission_sequence: 1, revision: 1, content_hash: HASH, plugin_catalog_hash: CATALOG,
         workers: [{ master_generation: GENERATION, worker_instance_id: a.status.worker_instance_id, worker_slot: 0,
           boot_nonce: a.status.boot_nonce, private_port: a.status.private_port! }],
       }, clientFor,
@@ -80,7 +80,7 @@ test('orphan-inventory returns authenticated overlapping workers while exact-adm
       const result = await discoverSupervisedWorkers({
         runtimeWorkersDirectory: directory, rootKey: ROOT, authority: AUTHORITY, masterControlPort: 3011, mode: 'exact-admission',
         expectedAdmission: {
-          master_generation: GENERATION, admission_sequence: 1, revision: 1, content_hash: HASH, plugin_catalog_hash: CATALOG,
+          master_generation: GENERATION, websocket_max_connections: 512, admission_sequence: 1, revision: 1, content_hash: HASH, plugin_catalog_hash: CATALOG,
           workers: [{ master_generation: GENERATION, worker_instance_id: a.status.worker_instance_id, worker_slot: 0,
             boot_nonce: a.status.boot_nonce, private_port: a.status.private_port! }],
         },
