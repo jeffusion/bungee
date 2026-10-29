@@ -51,8 +51,10 @@ async function scenario(run: (page: Page, state: {
       errors.push(`Unexpected API ${request.method()} ${path}`);
       return route.fulfill({ status: 501, json: { error: 'unexpected_fixture_request' } });
     });
+    const initialRead = page.waitForEvent('requestfinished', request => request.method() === 'GET'
+      && new URL(request.url()).pathname === '/api/system/updates');
     await page.goto(`${runtime.origin}/tests/fixtures/components/system-updates.html?language=${language}`);
-    await expect.poll(() => state.reads).toBeGreaterThan(0);
+    await initialRead;
     if (startOpen) {
       await page.getByTestId('system-updates-trigger').click();
       await expect(page.getByTestId('updates-upgrade')).toBeEnabled();
@@ -76,12 +78,15 @@ test('current version hides the update entry while pending and failed operations
     await page.getByTestId('system-updates-trigger').click();
     await expect(page.getByTestId('updates-install')).toBeEnabled();
 
+    // Opening the dialog refreshes status; finish that read before navigating away.
+    await expect(page.getByTestId('updates-check')).toBeEnabled();
     state.status.operation.phase = 'failed';
     state.status.operation.error = 'shutdown_failed';
     await page.reload();
     await page.getByTestId('system-updates-trigger').click();
     await expect(page.getByTestId('update-operation')).toHaveAttribute('data-phase', 'failed');
 
+    await expect(page.getByTestId('updates-check')).toBeEnabled();
     state.status.operation = null;
     state.status.check_error = 'release_check_failed';
     await page.reload();
