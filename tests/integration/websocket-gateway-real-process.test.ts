@@ -18,17 +18,17 @@ let handshakeCount=0;
 let generation=0;
 const sockets=new Set<WebSocket>();
 const SERVICE='10000000-0000-4000-8000-000000000021';
-const aggregate=(enabled=true)=>({plugin_activations:[{plugin_name:'token-metering'},{plugin_name:'token-stats'}],logical_configuration:{publication:{drain_start_timeout_ms:5000,drain_timeout_ms:10000,worker_exit_timeout_ms:10000},plugins:[],
+const aggregate=(enabled=true,limit:number|null=2)=>({plugin_activations:[{plugin_name:'token-metering'},{plugin_name:'token-stats'}],logical_configuration:{websocket_max_connections:limit,publication:{drain_start_timeout_ms:5000,drain_timeout_ms:10000,worker_exit_timeout_ms:10000},plugins:[],
   services:[{id:SERVICE,position:1,name:'ws-fixture',plugins:[],endpoints:[{id:'20000000-0000-4000-8000-000000000021',position:1,target:`http://127.0.0.1:${upstream.port}`,weight:100,priority:1,is_disabled:false,plugins:[]}]}],
   routes:[{id:'30000000-0000-4000-8000-000000000021',position:1,path:'/v1/responses',service_references: [{ id: crypto.randomUUID(), position: 0, service_id: SERVICE, weight: 100, priority: 1, is_disabled: false }],plugins:[],websocket:{enabled}},
     {id:'30000000-0000-4000-8000-000000000022',position:2,path:'/disabled',service_references: [{ id: crypto.randomUUID(), position: 0, service_id: SERVICE, weight: 100, priority: 1, is_disabled: false }],plugins:[]}],
 }});
 const management=()=>`http://127.0.0.1:${lease.base}`;
 const proxy=()=>`ws://127.0.0.1:${lease.block.ports[1]}`;
-async function publish(enabled=true,wait=true) {
+async function publish(enabled=true,wait=true,limit:number|null=2) {
   const snapshot=await requestJson(`${management()}/api/config`,{},fixture);
   const mutation=randomUUID();
-  const result=await requestJson(`${management()}/api/config`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({expected_revision:(snapshot.body as any).revision,mutation_id:mutation,aggregate:aggregate(enabled)})},fixture);
+  const result=await requestJson(`${management()}/api/config`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({expected_revision:(snapshot.body as any).revision,mutation_id:mutation,aggregate:aggregate(enabled,limit)})},fixture);
   expect(result.response.status).toBe(202);
   if (wait) await waitUntil(async()=>{
     const result=await requestJson(`${management()}/api/config/operations/${mutation}`,{},fixture);
@@ -112,6 +112,51 @@ test('real ingress + worker preserves messages and persists each generation befo
   await waitUntil(async()=>(await stats()).logicalRequests===3,'unfinished generation was not recorded',8000);
   const final=await stats();expect(final.officialInputTokens).toBe(34);expect(final.officialOutputTokens).toBe(14);expect(final.estimatedInputTokens).toBe(0);
 },20_000);
+
+test('published ingress limits reject excess connections and release slots after close', async () => {
+  const first = await connect(), second = await connect();
+  try {
+    expect(await rejected('/v1/responses')).toBe(503);
+    await waitUntil(async () => {
+      const diagnostics = await master!.diagnostics!();
+      const events = diagnostics.split('\n')
+        .filter(line => line.startsWith('{"event":"websocket_capacity_exceeded"'))
+        .map(line => JSON.parse(line));
+      return events.some(event => event.role === 'ingress' && event.operation === 'upgrade'
+        && event.connections === 2 && event.maxConnections === 2
+        && event.handshakes === 0 && event.maxHandshakes === null
+        && event.exceeded.length === 1 && event.exceeded[0] === 'connections'
+        && Number.isInteger(event.pid));
+    }, 'ingress capacity diagnostic did not reach process stderr', 3000);
+    const closed = new Promise<void>(resolve => first.once('close', () => resolve()));
+    first.close(); await closed;
+    // Wait for close to propagate through both hops before expecting the next admission.
+    await waitUntil(async () => {
+      try { const next = await connect(); next.close(); return true; } catch { return false; }
+    }, 'closed WebSocket slot was not released', 5000);
+  } finally {
+    for (const socket of [first, second]) if (socket.readyState === WebSocket.OPEN) {
+      const closed = new Promise<void>(resolve => socket.once('close', () => resolve())); socket.close(); await closed;
+    }
+  }
+}, 15_000);
+
+test('publishing unlimited admission removes both ingress and worker count bottlenecks', async () => {
+  await publish(true, true, null);
+  const snapshot = await requestJson(`${management()}/api/config`, {}, fixture);
+  expect((snapshot.body as any).config.logical_configuration.websocket_max_connections).toBeNull();
+  const opened: WebSocket[] = [];
+  try {
+    await Promise.all(Array.from({ length: 65 }, async () => { opened.push(await connect()); }));
+    expect(opened).toHaveLength(65);
+  } finally {
+    await Promise.all(opened.map(socket => new Promise<void>(resolve => {
+      if (socket.readyState === WebSocket.CLOSED) return resolve();
+      socket.once('close', resolve); socket.close();
+    })));
+    await publish();
+  }
+}, 90_000);
 
 test('publication drains an existing socket finitely and new disabled revision refuses Upgrade',async()=>{
   const socket=await connect();

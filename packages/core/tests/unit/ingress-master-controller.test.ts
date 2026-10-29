@@ -103,7 +103,7 @@ test('readiness expires from the injected lease clock before the renewal timer r
   let monotonicNow = 1_000;
   const controller = new MasterIngressController({ ...options(), now: () => wallNow, monotonicNow: () => monotonicNow });
   const active = {
-    master_generation: GENERATION, admission_sequence: 1, revision: 1,
+    master_generation: GENERATION, websocket_max_connections: 512, admission_sequence: 1, revision: 1,
     content_hash: HASH, plugin_catalog_hash: CATALOG,
     workers: [{ master_generation: GENERATION, worker_instance_id: worker().process.identity.worker_instance_id,
       boot_nonce: worker().boot_nonce!, worker_slot: 0, private_port: 40_000 }],
@@ -154,7 +154,7 @@ test('publication cannot postpone renewal beyond the existing lease cadence', as
 
 test('reports every mutation readiness reason in contract order', async () => {
   const active = {
-    master_generation: GENERATION, admission_sequence: 1, revision: 1,
+    master_generation: GENERATION, websocket_max_connections: 512, admission_sequence: 1, revision: 1,
     content_hash: HASH, plugin_catalog_hash: CATALOG,
     workers: [{ master_generation: GENERATION, worker_instance_id: worker().process.identity.worker_instance_id,
       boot_nonce: worker().boot_nonce!, worker_slot: 0, private_port: 40_000 }],
@@ -228,7 +228,7 @@ test('trusted active admission requires attached state, current authority, and u
   let monotonicNow = 1_000;
   const controller = new MasterIngressController({ ...options(), monotonicNow: () => monotonicNow });
   const admission = {
-    master_generation: GENERATION, admission_sequence: 1, revision: 1,
+    master_generation: GENERATION, websocket_max_connections: 512, admission_sequence: 1, revision: 1,
     content_hash: HASH, plugin_catalog_hash: CATALOG,
     workers: [{ ...worker().process.identity, boot_nonce: worker().boot_nonce!, private_port: 40_000 }],
   };
@@ -321,7 +321,7 @@ test('ambiguous signed commit status enters recovery before throwing', async () 
 
 test('reuses an identical uncertain admission instead of replacing it', async () => {
   const controller = new MasterIngressController(options());
-  const target = (controller as unknown as { toAdmissionSet(workers: readonly ServingConfigWorker[]): AdmissionSet }).toAdmissionSet([worker()]);
+  const target = (controller as unknown as { toAdmissionSet(workers: readonly ServingConfigWorker[], limit: number): AdmissionSet }).toAdmissionSet([worker()], 512);
   const internal = controller as unknown as {
     beginUncertainAdmission(set: AdmissionSet): void;
     uncertainAdmission: { readonly target: AdmissionSet; readonly identity: string } | null;
@@ -335,7 +335,7 @@ test('reuses an identical uncertain admission instead of replacing it', async ()
 
 test('rejects a conflicting prepared handle without overwriting uncertain identity', async () => {
   const controller = new MasterIngressController(options());
-  const target = (controller as unknown as { toAdmissionSet(workers: readonly ServingConfigWorker[]): AdmissionSet }).toAdmissionSet([worker()]);
+  const target = (controller as unknown as { toAdmissionSet(workers: readonly ServingConfigWorker[], limit: number): AdmissionSet }).toAdmissionSet([worker()], 512);
   const conflicting = { ...target, admission_sequence: target.admission_sequence + 1 };
   const internal = controller as unknown as {
     beginUncertainAdmission(set: AdmissionSet): void;
@@ -442,7 +442,7 @@ test('generation cancellation acknowledges quiescence before the next queue item
 
 test('short queue deadline aborts, quiesces, fences first, and disambiguates without late commit', async () => {
   const target = {
-    master_generation: GENERATION, admission_sequence: 1, revision: 1,
+    master_generation: GENERATION, websocket_max_connections: 512, admission_sequence: 1, revision: 1,
     content_hash: HASH, plugin_catalog_hash: CATALOG,
     workers: [{ ...worker().process.identity, boot_nonce: worker().boot_nonce!, private_port: 40_000 }],
   } as AdmissionSet;
@@ -517,7 +517,7 @@ test('short queue deadline aborts, quiesces, fences first, and disambiguates wit
 
 test('prepared commit execution deadline recovers the original promise without a late commit', async () => {
   const target = {
-    master_generation: GENERATION, admission_sequence: 1, revision: 1,
+    master_generation: GENERATION, websocket_max_connections: 512, admission_sequence: 1, revision: 1,
     content_hash: HASH, plugin_catalog_hash: CATALOG,
     workers: [{ ...worker().process.identity, boot_nonce: worker().boot_nonce!, private_port: 40_000 }],
   } as AdmissionSet;
@@ -571,7 +571,7 @@ test('prepared commit execution deadline recovers the original promise without a
 
 test('prepare execution deadline recovers the original promise from signed prepared, active, or absent state', async () => {
   const target = {
-    master_generation: GENERATION, admission_sequence: 1, revision: 1,
+    master_generation: GENERATION, websocket_max_connections: 512, admission_sequence: 1, revision: 1,
     content_hash: HASH, plugin_catalog_hash: CATALOG,
     workers: [{ ...worker().process.identity, boot_nonce: worker().boot_nonce!, private_port: 40_000 }],
   } as AdmissionSet;
@@ -616,7 +616,7 @@ test('prepare execution deadline recovers the original promise from signed prepa
 });
 
 test.each(['prepared', 'active'] as const)('prepare deadline recovery retains the old handoff identity from %s', async (kind) => {
-  const previous = { master_generation: GENERATION, admission_sequence: 1, revision: 1,
+  const previous = { master_generation: GENERATION, websocket_max_connections: 512, admission_sequence: 1, revision: 1,
     content_hash: HASH, plugin_catalog_hash: CATALOG,
     workers: [{ ...worker().process.identity, boot_nonce: worker().boot_nonce!, private_port: 40000 }],
   } as AdmissionSet;
@@ -645,7 +645,7 @@ test.each(['prepared', 'active'] as const)('prepare deadline recovery retains th
 
 test('prepare deadline fences while an abort-ignoring first operation is still pending', async () => {
   const target = {
-    master_generation: GENERATION, admission_sequence: 1, revision: 1,
+    master_generation: GENERATION, websocket_max_connections: 512, admission_sequence: 1, revision: 1,
     content_hash: HASH, plugin_catalog_hash: CATALOG,
     workers: [{ ...worker().process.identity, boot_nonce: worker().boot_nonce!, private_port: 40_000 }],
   } as AdmissionSet;
@@ -701,7 +701,7 @@ test('prepare deadline fences while an abort-ignoring first operation is still p
 
 test('recovery fences first and resolves active, prepared, and absent uncertain states', async () => {
   const target = {
-    master_generation: GENERATION, admission_sequence: 9, revision: 9,
+    master_generation: GENERATION, websocket_max_connections: 512, admission_sequence: 9, revision: 9,
     content_hash: HASH, plugin_catalog_hash: CATALOG,
     workers: [{ ...worker().process.identity, boot_nonce: worker().boot_nonce!, private_port: 40_000 }],
   } as AdmissionSet;
@@ -732,7 +732,7 @@ test('recovery fences first and resolves active, prepared, and absent uncertain 
 
 test('uncertain admission callback is concurrent at-most-once and retries after callback failure', async () => {
   const admission = {
-    master_generation: GENERATION, admission_sequence: 1, revision: 1,
+    master_generation: GENERATION, websocket_max_connections: 512, admission_sequence: 1, revision: 1,
     content_hash: HASH, plugin_catalog_hash: CATALOG,
     workers: [{ master_generation: GENERATION, worker_instance_id: worker().process.identity.worker_instance_id,
       boot_nonce: worker().boot_nonce!, worker_slot: 0, private_port: 40_000 }],
@@ -1007,7 +1007,7 @@ test('timed-out discovery never spawns ingress', async () => {
 test('a new ingress boot drops old pending, uncertain, and retired state without resolving it', () => {
   const controller = new MasterIngressController(options());
   const target = {
-    master_generation: GENERATION, admission_sequence: 1, revision: 1,
+    master_generation: GENERATION, websocket_max_connections: 512, admission_sequence: 1, revision: 1,
     content_hash: HASH, plugin_catalog_hash: CATALOG,
     workers: [{ ...worker().process.identity, boot_nonce: worker().boot_nonce!, private_port: 40_000 }],
   };
@@ -1166,7 +1166,7 @@ test('scheduled admission-resolution callback rejection retries without reviving
       finishRetry();
     },
   });
-  const target = (controller as unknown as { toAdmissionSet(workers: readonly ServingConfigWorker[]): AdmissionSet }).toAdmissionSet([worker()]);
+  const target = (controller as unknown as { toAdmissionSet(workers: readonly ServingConfigWorker[], limit: number): AdmissionSet }).toAdmissionSet([worker()], 512);
   attachFake(controller, {
     fence: async () => status({ active: target, prepared: null, retired: [] }),
     status: async () => status({ active: target, prepared: null, retired: [] }),
@@ -1247,7 +1247,7 @@ test('scheduled recovery does not restart after stop or disconnect', async () =>
 test('release uses the exact previous active admission and confirms it is gone', async () => {
   const calls: string[] = [];
   const old = {
-    master_generation: GENERATION, admission_sequence: 1, revision: 1,
+    master_generation: GENERATION, websocket_max_connections: 512, admission_sequence: 1, revision: 1,
     content_hash: HASH, plugin_catalog_hash: CATALOG,
     workers: [{ master_generation: GENERATION, worker_instance_id: '60000000-0000-4000-8000-000000000001',
       boot_nonce: '70000000-0000-4000-8000-000000000001', worker_slot: 0, private_port: 40_001 }],
@@ -1273,7 +1273,7 @@ test('release uses the exact previous active admission and confirms it is gone',
 
 test('release ACK loss is resolved by signed status, while loss of both stays pending until recovery', async () => {
   const old = {
-    master_generation: GENERATION, admission_sequence: 1, revision: 1,
+    master_generation: GENERATION, websocket_max_connections: 512, admission_sequence: 1, revision: 1,
     content_hash: HASH, plugin_catalog_hash: CATALOG,
     workers: [{ master_generation: GENERATION, worker_instance_id: '60000000-0000-4000-8000-000000000001',
       boot_nonce: '70000000-0000-4000-8000-000000000001', worker_slot: 0, private_port: 40_001 }],
@@ -1354,7 +1354,7 @@ test('lifecycle cleanup is safe before connect', async () => {
 
 test('startup failure cleanup follows ingress ownership evidence', async () => {
   const active = {
-    master_generation: GENERATION, admission_sequence: 1, revision: 1,
+    master_generation: GENERATION, websocket_max_connections: 512, admission_sequence: 1, revision: 1,
     content_hash: HASH, plugin_catalog_hash: CATALOG,
     workers: [{ ...worker().process.identity, boot_nonce: worker().boot_nonce!, private_port: 40_000 }],
   };

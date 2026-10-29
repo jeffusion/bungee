@@ -18,6 +18,11 @@ export function validateGlobalPolicies(object: JsonObject, context: ValidationCo
     context.add(typeof object.body_parser_limit === 'string' ? 'invalid_value' : 'invalid_type',
       'body_parser_limit', 'Invalid body parser limit');
   }
+  const maxConnections = object.websocket_max_connections;
+  if (maxConnections !== undefined && maxConnections !== null
+    && (!Number.isSafeInteger(maxConnections) || (maxConnections as number) < 1 || (maxConnections as number) > 0x7fffffff)) {
+    context.add('invalid_value', 'websocket_max_connections', 'Expected null or an integer between 1 and 2147483647');
+  }
   validateAuth(object.auth, 'auth', context);
   if (object.publication !== undefined) {
     for (const error of validatePublicationPolicy(object.publication)) {

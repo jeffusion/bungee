@@ -165,7 +165,7 @@ test('native and managed credential scopes are stable across independently initi
   }
 });
 
-test('configured body logging records ordinary bodies but never auxiliary request or response bodies',async()=>{
+test.each([undefined,'websocket'] as const)('configured body logging preserves ingress type %s without auxiliary bodies or transport changes',async transport=>{
   const {flushBodyCaptures}=await import('../../src/logger/body-capture');
   const saved:{requestId:string;value:unknown;type:string}[]=[];const access:any[]=[];const files:any[]=[];
   const cipher='fixture-private-cipher';const payload='fixture-private-tool-arguments';let parentId='';
@@ -178,11 +178,14 @@ test('configured body logging records ordinary bodies but never auxiliary reques
       const result=await input.executeAuxiliary({...auxiliary,body:{input:cipher}});if(result.kind!=='response')throw Error('expected response');
       try{expect(await result.bodyHandle.json()).toMatchObject({output:[{arguments:payload}]});expect((await result.completion).status).toBe('completed');}finally{result.dispose();}return {};
     }});
-  try{const response=await env.send();expect(response.status).toBe(200);await response.text();await flushBodyCaptures();
+  env.config.routes.find((route:any)=>route.id==='aux').websocket={enabled:true};
+  try{const response=await env.send(transport);expect(response.status).toBe(200);await response.text();await flushBodyCaptures();
     expect(saved.length).toBeGreaterThan(0);expect(saved.some(value=>JSON.stringify(value.value).includes('hello'))).toBe(true);
     const auxiliaryAccess=access.filter(value=>value.parentRequestId===parentId);
     const auxiliaryFiles=files.filter(value=>value.parentRequestId===parentId);
     expect(auxiliaryAccess.length).toBeGreaterThan(0);expect(auxiliaryFiles.length).toBeGreaterThan(0);
+    expect(access.length).toBeGreaterThan(auxiliaryAccess.length);expect(files.length).toBeGreaterThan(auxiliaryFiles.length);
+    for(const entry of [...access,...files])expect(entry.transportType).toBe(transport??'http');
     for(const entry of [...auxiliaryAccess,...auxiliaryFiles]){expect(entry.reqBodyId).toBeUndefined();expect(entry.originalReqBodyId).toBeUndefined();expect(entry.respBodyId).toBeUndefined();}
     expect(auxiliaryAccess.some(value=>value.status===200&&value.protocolOutcome==='completed')).toBe(true);
     for(const sink of [saved,access,files]){const serialized=JSON.stringify(sink);expect(serialized).not.toContain(cipher);expect(serialized).not.toContain(payload);}

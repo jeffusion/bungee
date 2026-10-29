@@ -1,3 +1,4 @@
+import { DEFAULT_WEBSOCKET_MAX_CONNECTIONS } from '@jeffusion/bungee-types';
 import { createWebSocketBridge, isWebSocketUpgradeRequest } from '../websocket';
 import { forwardPublicWebSocket } from './websocket';
 import type { DataPrincipal } from '../plugin-extensions';
@@ -27,7 +28,8 @@ export function createIngressPublicListener(options: IngressPublicListenerOption
     || options.port < 0 || options.port > 65_535) {
     throw new PublicListenerLifecycleError('public listener address is invalid');
   }
-  const bridge = createWebSocketBridge();
+  const bridge = createWebSocketBridge({ connectionLimit: () => options.admission.websocketMaxConnections === undefined
+    ? DEFAULT_WEBSOCKET_MAX_CONNECTIONS : options.admission.websocketMaxConnections });
   const forward = createPublicRequestForwarder(options);
   let server: ReturnType<typeof Bun.serve> | null = null;
   let started = false;

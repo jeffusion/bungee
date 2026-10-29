@@ -158,7 +158,7 @@ describe('access database SQLite contract', () => {
   test('MigrationManager rejects an unknown journal mode and status does not create a database', async () => {
     expect((await new MigrationManager(':memory:').migrate()).success).toBeFalse();
     const path=join(tmpdir(),'bungee-status-'+crypto.randomUUID()+'.db');
-    expect(await new MigrationManager(path).status()).toEqual([{version:'001',name:'current_access_baseline',applied:false},{version:'002',name:'llm_tps_samples',applied:false},{version:'003',name:'llm_tps_model',applied:false},{version:'004',name:'llm_tps_upstream_host',applied:false}]);
+    expect(await new MigrationManager(path).status()).toEqual([{version:'001',name:'current_access_baseline',applied:false},{version:'002',name:'llm_tps_samples',applied:false},{version:'003',name:'llm_tps_model',applied:false},{version:'004',name:'llm_tps_upstream_host',applied:false},{version:'005',name:'access_log_transport_type',applied:false}]);
     await expect(readFile(path)).rejects.toThrow();
   });
 });

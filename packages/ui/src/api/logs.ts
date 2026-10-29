@@ -10,6 +10,7 @@ export interface ProcessingStep {
 }
 
 export type TransportOutcome = 'pending' | 'completed' | 'failed' | 'cancelled' | 'unknown';
+export type TransportType = 'http' | 'websocket';
 export type ProtocolOutcome = 'completed' | 'failed' | 'incomplete' | 'cancelled';
 
 export interface LogEntry {
@@ -17,6 +18,7 @@ export interface LogEntry {
   requestId: string;
   timestamp: number;
   method: string;
+  transportType: TransportType | null;
   path: string;
   query?: string;
   status: number;
@@ -88,6 +90,7 @@ export interface LogQueryParams {
   transformer?: string;
   success?: boolean;
   transportOutcome?: TransportOutcome;
+  transportType?: TransportType;
   searchTerm?: string;
   sortBy?: 'timestamp' | 'duration' | 'status';
   sortOrder?: 'asc' | 'desc';

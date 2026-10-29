@@ -419,6 +419,34 @@ describe('configuration schema migration definition', () => {
 
 describe('ConfigRepository initialization and migration', () => {
 
+  test.each([512, 1024, null])('persists WebSocket admission %p through revision snapshots and reopening', (limit) => {
+    const { repository, dbPath } = openRepository();
+    const aggregate = { ...EMPTY_AGGREGATE, logical_configuration: {
+      ...EMPTY_AGGREGATE.logical_configuration, websocket_max_connections: limit,
+    } };
+    expect(repository.commit(command('ws-limit', 1, aggregate)).kind).toBe('committed');
+    const expected = { revision: 2, content_hash: hashConfigurationContent(aggregate), aggregate };
+    expect(repository.getSnapshot()).toEqual(expected);
+    const reopened = ConfigRepository.open(dbPath);
+    try { expect(reopened.getSnapshot()).toEqual(expected); } finally { reopened.close(); }
+  });
+
+  test('upgrades the prior schema without rewriting its active snapshot and rejects illegal stored WS limits', () => {
+    const db = new Database(':memory:', { strict: true });
+    try {
+      migrateConfigurationDatabase(db, CONFIG_MIGRATIONS.filter(migration => migration.version <= 5));
+      const before = db.query('SELECT * FROM configuration_revisions').all();
+      migrateConfigurationDatabase(db);
+      expect(db.query('SELECT * FROM configuration_revisions').all()).toEqual(before);
+      expect(readRepositorySnapshot(db).aggregate).toEqual(EMPTY_AGGREGATE);
+      expect(db.query('SELECT websocket_max_connections_json FROM settings').get()).toEqual({ websocket_max_connections_json: null });
+      for (const value of ['0', '-1', '1.5', '2147483648', '"512"', 'true', '{}', ' 512', '1e2']) {
+        expect(() => db.run('UPDATE settings SET websocket_max_connections_json=?', [value])).toThrow();
+      }
+      migrateConfigurationDatabase(db);
+    } finally { db.close(); }
+  });
+
   test('persists publication policy as part of the revision and content hash', () => {
     const { repository } = openRepository();
     const aggregate: ConfigurationAggregate = {

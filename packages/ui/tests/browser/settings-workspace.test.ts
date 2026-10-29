@@ -131,6 +131,7 @@ test('review, cancellation, publication and export preserve the current draft an
 
 test('a config loaded without logging stays without logging when publishing an unrelated edit',async()=>{
   await withSettings(async(page,model)=>{
+    await page.locator('#config-websocket-max-connections').focus();
     await page.getByRole('combobox',{name:/^(Log Level|日志级别)$/}).click();
     await page.getByRole('option',{name:'Debug',exact:true}).click();
     await review(page);await page.getByTestId('config-confirm-publish').click();
@@ -139,6 +140,7 @@ test('a config loaded without logging stays without logging when publishing an u
     const saved=model.writes[0]!.body.aggregate.logical_configuration;
     expect(saved.log_level).toBe('debug');
     expect(Object.hasOwn(saved,'logging')).toBe(false);
+    expect(Object.hasOwn(saved,'websocket_max_connections')).toBe(false);
   },1440,'en','config',model=>{ delete (model.saved.logical_configuration as { logging?: unknown }).logging; });
 },60_000);
 
@@ -339,5 +341,57 @@ test('a missing accepted operation remains locked across reload and never author
     expect(model.writes).toHaveLength(1);
     model.queryStatus=0;model.queryState='degraded';await page.getByRole('button',{name:'Check this publication',exact:true}).click();
     await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','terminal');expect(model.writes).toHaveLength(1);
+  });
+},60_000);
+
+
+test('WebSocket connection limits publish an integer or explicit null through review and snapshot CAS',async()=>{
+  for (const limit of [128,null]) await withSettings(async(page,model)=>{
+    if(limit === null) await page.getByRole('switch',{name:'No additional WebSocket connection limit',exact:true}).click();
+    else await page.getByRole('spinbutton',{name:'Maximum client WebSocket connections',exact:true}).fill(String(limit));
+    await review(page);
+    expect(model.validations.at(-1).aggregate.logical_configuration.websocket_max_connections).toBe(limit);
+    await closeReview(page);expect(model.writes).toHaveLength(0);
+    await review(page);await page.getByTestId('config-confirm-publish').click();
+    await expect(page.getByTestId('config-review')).toHaveCount(0);
+    expect(model.writes).toHaveLength(1);
+    expect(model.writes[0]!.body.expected_revision).toBe(42);
+    expect(model.writes[0]!.body.aggregate.logical_configuration.websocket_max_connections).toBe(limit);
+  });
+},60_000);
+
+test('empty and out-of-range WebSocket limits cannot validate or publish a retained valid draft',async()=>{
+  await withSettings(async(page,model)=>{
+    const input=page.getByRole('spinbutton',{name:'Maximum client WebSocket connections',exact:true});
+    for(const invalid of ['', '0', '2147483648', '999999999999999999999999999']) {
+      await input.fill(invalid);
+      await expect(page.getByTestId('config-save-button')).toBeDisabled();
+      expect(model.validations).toHaveLength(0);expect(model.writes).toHaveLength(0);
+    }
+    await input.fill('2147483647');await review(page);await page.getByTestId('config-confirm-publish').click();
+    await expect(page.getByTestId('config-review')).toHaveCount(0);
+    expect(model.writes).toHaveLength(1);
+    expect(model.writes[0]!.body.aggregate.logical_configuration.websocket_max_connections).toBe(2147483647);
+  });
+},60_000);
+
+test('imported WebSocket limits are read-only and publish the import while cancellation retains the local draft',async()=>{
+  for(const limit of [321,null]) await withSettings(async(page,model)=>{
+    const input=page.getByRole('spinbutton',{name:'Maximum client WebSocket connections',exact:true});
+    await input.fill('600');
+    const next=aggregate();next.logical_configuration.websocket_max_connections=limit;
+    await upload(page,envelope(next));await expect(page.getByTestId('import-preview')).toBeVisible();
+    const unlimited=page.getByRole('switch',{name:'No additional WebSocket connection limit',exact:true});
+    await expect(unlimited).toBeDisabled();
+    if(limit === null) await expect(unlimited).toHaveAttribute('aria-checked','true');
+    else {await expect(input).toBeDisabled();await expect(input).toHaveValue(String(limit));}
+    await page.getByRole('button',{name:'Cancel import',exact:true}).click();
+    await expect(input).toHaveValue('600');expect(model.writes).toHaveLength(0);
+    await upload(page,envelope(next));await expect(page.getByTestId('import-preview')).toBeVisible();
+    await review(page);await page.getByTestId('config-confirm-publish').click();
+    await expect(page.getByTestId('config-review')).toHaveCount(0);
+    expect(model.writes).toHaveLength(1);
+    expect(model.writes[0]!.path).toBe('/api/config/import');
+    expect(model.writes[0]!.body.envelope.aggregate.logical_configuration.websocket_max_connections).toBe(limit);
   });
 },60_000);

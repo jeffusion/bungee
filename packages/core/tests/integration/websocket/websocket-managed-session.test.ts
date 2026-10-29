@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import WebSocket from '@bungee/ws-client';
 import type { IncomingMessage } from 'node:http';
 import type { WebSocketSessionMetrics } from '../../../src/gateway/websocket-contracts';
@@ -159,6 +159,8 @@ describe('managed WebSocket sessions', () => {
   });
 
   test('validates requests, admission and handshake-only cancellation', async () => {
+    const output = spyOn(process.stderr, 'write').mockImplementation(() => true);
+    cleanups.push(() => output.mockRestore());
     const bridge = createWebSocketBridge(); let upgrades = 0;
     const server = { upgrade() { upgrades++; return false; } };
     expect(await bridge.upgradeSession(new Request('http://localhost'), server, { onMessage() {} })).toBeUndefined();
@@ -173,6 +175,10 @@ describe('managed WebSocket sessions', () => {
     const gate = gateway({ signal: signal.signal, onOpen(value) { session = value; }, onMessage() {} }, { maxConnections: 1 });
     await client(gate.url); signal.abort(); expect(session!.signal.aborted).toBe(false);
     expect(await rejected(gate.url)).toBe(503); await gate.bridge.stop(); expect(await rejected(gate.url)).toBe(503);
+    expect(output).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(output.mock.calls[0]![0]))).toMatchObject({
+      operation: 'upgradeSession', exceeded: ['connections'], connections: 1, maxConnections: 1, handshakes: 0, maxHandshakes: null,
+    });
   });
 
   test('queued -1 sends wait for drain and do not resend; closing rejects drain waiters', async () => {
@@ -189,18 +195,25 @@ describe('managed WebSocket sessions', () => {
     expect(fake.bridge.stats.connections).toBe(0);
   });
 
-  test('pending native commit reserves handshake capacity and rechecks abort or stop', async () => {
+  test.each([64, 1])('pending native commit reserves handshake capacity with %i connection slots and rechecks abort or stop', async (maxConnections) => {
+    const output = spyOn(process.stderr, 'write').mockImplementation(() => true);
+    cleanups.push(() => output.mockRestore());
     let upgrades = 0;
     const server = { upgrade() { upgrades++; return true; } };
-    const bridge = createWebSocketBridge({ maxHandshakes: 1 });
+    const bridge = createWebSocketBridge({ maxConnections, maxHandshakes: 1 });
     const controller = new AbortController();
     const pending = bridge.upgradeSession(request(), server, { signal: controller.signal, onMessage() {} });
     expect(bridge.stats.handshakes).toBe(1);
     expect((await bridge.upgradeSession(request(), server, { onMessage() {} }))?.status).toBe(503);
+    expect(JSON.parse(String(output.mock.calls[0]![0]))).toMatchObject({
+      operation: 'upgradeSession', exceeded: maxConnections === 1 ? ['connections', 'handshakes'] : ['handshakes'],
+      connections: 1, maxConnections, handshakes: 1, maxHandshakes: 1,
+    });
     controller.abort(); expect((await pending)?.status).toBe(499);
     expect(upgrades).toBe(0); expect(bridge.stats.handshakes).toBe(0); expect(bridge.stats.connections).toBe(0);
     const stopping = bridge.upgradeSession(request(), server, { onMessage() {} });
     bridge.stopAccepting(); expect((await stopping)?.status).toBe(503); await bridge.stop();
+    expect(output).toHaveBeenCalledTimes(1);
     expect(upgrades).toBe(0); expect(bridge.stats.processBufferedBytes).toBe(0);
   });
 

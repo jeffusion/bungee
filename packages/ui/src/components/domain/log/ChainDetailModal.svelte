@@ -3,7 +3,7 @@
   import { _ } from '$i18n';
   import type { ChainEntry, LogEntry } from '$api/logs';
   import { getChainDetail } from '$api/logs';
-  import { httpStatusLabel, transportOutcome, transportTone } from './outcomes';
+  import { httpStatusLabel, transportOutcome, transportTone, transportTypeLabel } from './outcomes';
   import LogDetailContent from './LogDetailContent.svelte';
   import { LoadingIndicator } from '$components/industrial';
 
@@ -111,6 +111,10 @@
             <div>
               <div class="text-xs opacity-60 mb-1">{$_('logs.detail.status')}</div>
               <span class={chipClass(getStatusToneClass(c.chainStatus))}>{httpStatusLabel(c.chainStatus)}</span>
+            </div>
+            <div>
+              <div class="text-xs opacity-60 mb-1">{$_('logs.transportType')}</div>
+              <span class={chipClass()} title={c.transportType === null ? $_('logs.transportTypeUnrecorded') : undefined}>{transportTypeLabel(c.transportType)}</span>
             </div>
             <div>
               <div class="text-xs opacity-60 mb-1">{$_('logs.detail.method')}</div>

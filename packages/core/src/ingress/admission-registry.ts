@@ -1,4 +1,4 @@
-import { DEFAULT_PUBLICATION_POLICY } from '@jeffusion/bungee-types';
+import { DEFAULT_PUBLICATION_POLICY, DEFAULT_WEBSOCKET_MAX_CONNECTIONS } from '@jeffusion/bungee-types';
 import { admissionSetIdentity, admissionSetRetiredId, parseAdmissionSet, type AdmissionSet, type AdmissionWorker } from './admission-set';
 import type { RateLimitWorkerAuthorization, RateLimitWorkerIdentity } from '../rate-limit';
 
@@ -121,6 +121,10 @@ export class IngressAdmissionRegistry {
     while (this.releasedRetired.size > this.retiredCapacity) {
       this.releasedRetired.delete(this.releasedRetired.keys().next().value!);
     }
+  }
+
+  get websocketMaxConnections(): number | null {
+    return this.active === null ? DEFAULT_WEBSOCKET_MAX_CONNECTIONS : this.active.websocket_max_connections;
   }
 
   select(): Pick<AdmissionWorker, 'private_port'> | null {

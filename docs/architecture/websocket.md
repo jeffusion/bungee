@@ -54,9 +54,19 @@ token-metering 识别 `/v1/responses` 与 `/backend-api/codex/responses`，消�
 
 ## 资源与关闭
 
-使用 Bun native server 和 npm `ws@8.22.0` 客户端（安装别名 `@bungee/ws-client`，避开 Bun 的 `ws` 内建替代）。默认每桥接实例最多 64 连接、16 并发握手，握手 10 秒；单消息 2 MiB，单连接发送积压 8 MiB，进程共享发送积压 64 MiB，上游提前消息最多 16 条，拒绝 HTTP body 最多 64 KiB。发送积压预算不等于进程 RSS 上限；parser、JSON 对象、TLS 和内核缓冲还需考虑连接/消息上限。
+使用 Bun native server 和 npm `ws@8.22.0` 客户端（安装别名 `@bungee/ws-client`，避开 Bun 的 `ws` 内建替代）。系统设置中的「最大客户端 WS 连接数」默认 **512**，可设为 1 至 2147483647 的整数，或选择「不额外限制」。对应逻辑配置 `websocket_max_connections`，缺省采用 512，`null` 表示不额外限制。设置保存在配置数据库，经校验、预览和发布生效，无需重建容器。
+
+公共 ingress 对全实例、所有路由的客户端连接统一计数，不随 worker 数量增长；握手中及关闭尚未确认的连接也占用额度。worker 不再另设连接或并发握手数量门槛，原生 Responses 上游连接不会重复占用客户端额度。额度随 admission commit 与 worker 集合一起切换，prepare 阶段不改变现行限制；降额只拒绝新连接，不按额度驱逐已有连接。保存仍沿用配置发布和旧 worker 排空流程，已有连接可能以 1012 关闭并需要客户端重连。
+
+握手超时 10 秒；单消息 2 MiB，单连接缓冲 8 MiB，进程共享缓冲 64 MiB，上游提前消息最多 16 条，拒绝 HTTP body 最多 64 KiB。选择「不额外限制」只关闭连接数量准入，不关闭这些保护，也不等于无限容量。缓冲预算不等于进程 RSS 上限，socket、parser、JSON、TLS、内核内存及文件描述符仍受实例与操作系统资源约束。超过客户端连接限额时返回 503，不排队等待。
+
+容量拒绝向进程 stderr 输出 `websocket_capacity_exceeded` JSON 事件，容器可通过 Docker 日志采集。事件包含进程角色 `role`（ingress／worker；独立使用为 standalone）、PID、接入操作 `operation`、触发项 `exceeded`、当前连接数 `connections` 与上限 `maxConnections`、当前握手数 `handshakes` 与上限 `maxHandshakes`。未启用的计数上限记录为 `null`；不记录 URL、header、消息正文或凭据。客户端仍收到相同的 503 文本，服务排空拒绝不记为容量超限。
+
+调整连接数不自动扩大单消息、单连接或进程字节预算。连接上限是准入保护，不代表经过压测的稳定生成并发；容量还受活跃请求、慢消费者、进程资源及上游限制影响。请求日志以入口的 HTTP／WS 类型展示和筛选，列表与导出使用相同类型条件；历史未记录类型的行只包含在未限定类型的结果中。
 
 慢下游暂停 npm ws 读取，在 Bun drain 后恢复；Bun send 返回 -1 代表已排队，不能再次发送。Bun 无接收 pause 时，慢上游触及发送预算以 1013 关闭，不能无限排队。控制帧由两跳协议栈分别处理，普通关闭码/原因安全转发。
+
+Responses 上游转换为 SSE 时，接收队列按转换后的 SSE 字节数纳入单连接 8 MiB 和进程共享 64 MiB 缓冲预算，不使用握手早期消息的 16 条限制。消费者先排空队列，再按需恢复上游读取；暂停不能撤回当前网络数据块中已解码的消息，这些消息在字节预算内按序保留。入队将超过预算时终止流，内部错误区分单连接与进程预算，并记录队列条数、队列字节数、已用缓冲、待入队字节和限制值，不记录消息正文或凭据。取消、终态及关闭完成后释放相应缓冲。
 
 旧 worker 停止新握手，已有会话继续使用旧配置；仍使用 publication.drain_timeout_ms（默认 300000）。在窗口结束前预留 close 确认与观察清理时间，以 1012 关闭剩余会话；1 秒后强制结束未确认 peer。真实 native close 及观察清理完成后才释放 owner/admission lease；worker 的清理屏障包括 WS 生命周期。
 

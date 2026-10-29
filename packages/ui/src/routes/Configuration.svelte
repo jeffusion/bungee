@@ -3,7 +3,7 @@
   import { get } from 'svelte/store';
   import { _ } from '$i18n';
   import { isLoading } from 'svelte-i18n';
-  import type { LogicalConfiguration } from '@jeffusion/bungee-types';
+  import { DEFAULT_WEBSOCKET_MAX_CONNECTIONS, type LogicalConfiguration } from '@jeffusion/bungee-types';
   import { ApiError } from '$api/client';
   import { getToken } from '$stores/auth';
   import { publicationRecovery } from '$stores/runtime';
@@ -16,7 +16,8 @@
     ConfigurationOperationTimeoutError, ConfigurationValidationError,
     type ConfigurationSnapshot, type ConfigurationImportEnvelope, type ConfigurationImportPreview, type ConfigurationOperationState,
   } from '$api/config';
-  import { PanelCard, StatusBadge, SystemAlertBar, IndustrialDialog, LoadingIndicator } from '$components/industrial';
+  import { PanelCard, StatusBadge, SystemAlertBar, IndustrialDialog, LoadingIndicator, IndustrialToggle } from '$components/industrial';
+  import { NumberInput } from '$components/ui/number-input';
   import { Input } from '$components/ui/input';
   import { Button } from '$components/ui/button';
   import * as Select from '$components/ui/select';
@@ -37,12 +38,20 @@
   type Draft = { -readonly [K in keyof LogicalConfiguration]: LogicalConfiguration[K] };
   let snapshot = $state<ConfigurationSnapshot | null>(null);
   let draft = $state<Draft | null>(null);
+  let websocketValue = $state<number | undefined>(DEFAULT_WEBSOCKET_MAX_CONNECTIONS);
+  const websocketConfig = $derived(imported ? importPreview?.aggregate.logical_configuration : draft);
+  const websocketUnlimited = $derived(websocketConfig?.websocket_max_connections === null);
+  const websocketDisplay = $derived(imported ? websocketConfig?.websocket_max_connections ?? DEFAULT_WEBSOCKET_MAX_CONNECTIONS : websocketValue);
+  const websocketInvalid = $derived(!imported && !websocketUnlimited && (websocketValue === undefined
+    || !Number.isSafeInteger(websocketValue) || websocketValue < 1 || websocketValue > 2147483647));
   let publicationRaw = $state<PublicationInputs>(publicationInputs());
   let publicationEdited = $state(false);
   let publicationBackendErrors = $state<PublicationErrors>({});
   const parsedPublication = $derived(parsePublicationInputs(publicationRaw));
   const publicationErrors = $derived({ ...publicationBackendErrors, ...(!imported && publicationEdited ? parsedPublication.errors : {}) });
   const publicationInvalid = $derived(Object.keys(publicationErrors).length > 0);
+  const draftInvalid = $derived(publicationInvalid || websocketInvalid);
+  const invalidDraftMessage = $derived(t(websocketInvalid ? 'websocket.invalidDraft' : 'publication.invalidDraft'));
   let imported = $state<ConfigurationImportEnvelope | null>(null);
   let importPreview = $state<ConfigurationImportPreview | null>(null);
   let reviewOpen = $state(false), busy = $state(false), validating = $state(false), loading = $state(true);
@@ -76,7 +85,7 @@
     return [field, value];
   })) as PublicationInputs : publicationRaw);
   const diff = $derived(snapshot && candidate ? configurationDiff(snapshot.config, candidate, [$authToken ?? '', nextAuthToken]) : []);
-  const dirty = $derived(diff.length > 0 || publicationEdited && !parsedPublication.policy || imported !== null);
+  const dirty = $derived(diff.length > 0 || websocketInvalid || publicationEdited && !parsedPublication.policy || imported !== null);
   const changeCount = $derived($isLoading ? '' : $_('settings.changeCount', { values: { count: diff.length } }));
   const signature = $derived(candidate ? JSON.stringify(candidate) : '');
   const nextAuthRequired = false;
@@ -91,7 +100,7 @@
     : !fresh || !publication ? 'unknown' : publication.operation ? publication.operation.state ?? 'unknown' : 'none');
   const detailsForced = $derived(!!pendingId || publicationBusy(publication) || runtimeHealthFault(runtime?.health, fresh));
   const authNeedsLogin = $derived(phase === 'terminal' && !!proofForRead && proofForRead.replace(/^Bearer /, '') !== $authToken);
-  const canPublish = $derived(reviewOpen && !locked && !validating && !publicationInvalid && !!snapshot && !!candidate && diff.length > 0
+  const canPublish = $derived(reviewOpen && !locked && !validating && !draftInvalid && !!snapshot && !!candidate && diff.length > 0
     && validSignature === signature && fresh && !!publication && !conflict && !staleBaseline && !authNeedsLogin
     && (!nextAuthRequired || nextAuthToken.trim() !== ''));
   const importCounts = $derived(imported ? aggregateCounts(imported.aggregate) : null);
@@ -116,7 +125,7 @@
       const loaded = await getConfigSnapshot(accepted ? readHeaders() : undefined);
       if (disposed) return;
       snapshot = loaded; draft = JSON.parse(JSON.stringify(loaded.config.logical_configuration));
-      imported = null; conflict = false; validSignature = ''; nextAuthToken = ''; resetPublicationInputs();
+      imported = null; conflict = false; validSignature = ''; nextAuthToken = ''; resetSettingsInputs();
     } catch { if (!disposed) notice = 'loadError'; }
     finally { if (!disposed) loading = false; }
   }
@@ -129,7 +138,7 @@
     if (locked || !snapshot || !await confirmAction({ title: t('discard'), message: t('discardWarning'), confirmText: t('discard'), cancelText: t('stay') })) return;
     if (disposed) return;
     draft = JSON.parse(JSON.stringify(snapshot.config.logical_configuration)); imported = null;
-    nextAuthToken = ''; validSignature = ''; notice = ''; resetPublicationInputs();
+    nextAuthToken = ''; validSignature = ''; notice = ''; resetSettingsInputs();
     await focusEditor();
   }
   async function focusEditor() {
@@ -156,7 +165,7 @@
   }
   function cancelReview() { reviewOpen = false; reviewGeneration++; validSignature = ''; validation = ''; }
   async function review() {
-    if (!candidate || !diff.length || locked || publicationInvalid) return;
+    if (!candidate || !diff.length || locked || draftInvalid) return;
     rejectionSummary = ''; notice = '';
     const invalid = [...document.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-testid="page-config"] input, [data-testid="page-config"] select')]
       .find(input => !input.disabled && !input.checkValidity());
@@ -265,7 +274,7 @@
             notice = 'snapshotReadRuntimeUnknown'; return;
           }
           snapshot = loaded; draft = JSON.parse(JSON.stringify(loaded.config.logical_configuration));
-          imported = null; conflict = false; nextAuthToken = ''; proofForRead = undefined; resetPublicationInputs();
+          imported = null; conflict = false; nextAuthToken = ''; proofForRead = undefined; resetSettingsInputs();
           tracked = null; cancelReview(); releaseIdentity('rejected'); notice = 'notSubmittedReloaded';
           await focusEditor();
         } catch { if (current()) notice = 'loadError'; }
@@ -294,7 +303,21 @@
     if (value === '') { const next = { ...draft }; delete next[key]; draft = next; }
     else draft = { ...draft, [key]: value };
   }
-  function resetPublicationInputs() {
+  function websocketField(value: number | undefined) {
+    if (value === websocketValue) return;
+    websocketValue = value;
+    validSignature = '';
+    if (draft && value !== undefined && Number.isSafeInteger(value) && value >= 1 && value <= 2147483647)
+      draft = { ...draft, websocket_max_connections: value };
+  }
+  function websocketLimitDisabled(unlimited: boolean) {
+    if (!draft) return;
+    websocketValue = draft.websocket_max_connections ?? DEFAULT_WEBSOCKET_MAX_CONNECTIONS;
+    draft = { ...draft, websocket_max_connections: unlimited ? null : websocketValue };
+    validSignature = '';
+  }
+  function resetSettingsInputs() {
+    websocketValue = draft?.websocket_max_connections ?? DEFAULT_WEBSOCKET_MAX_CONNECTIONS;
     publicationRaw = publicationInputs(draft?.publication);
     publicationEdited = false; publicationBackendErrors = {};
   }
@@ -361,7 +384,7 @@
   <section class="grid gap-3 border-y border-carbon-600 py-3 sm:grid-cols-3" aria-label={t('threeFacts')}>
     <div data-testid="settings-draft-state">
       <p class="nx-field-label">{t('localEdits')}</p>
-      <p class="mt-1 text-sm text-zinc-200">{t('baseline')} <strong class="nx-display">{snapshot ? `r${snapshot.revision}` : '—'}</strong> · {publicationInvalid ? t('publication.invalidDraft') : diff.length ? changeCount : t('clean')}</p>
+      <p class="mt-1 text-sm text-zinc-200">{t('baseline')} <strong class="nx-display">{snapshot ? `r${snapshot.revision}` : '—'}</strong> · {draftInvalid ? invalidDraftMessage : diff.length ? changeCount : t('clean')}</p>
     </div>
     <div data-testid="settings-publication-state">
       <p class="nx-field-label">{t('lastPublication')}</p>
@@ -462,6 +485,24 @@
               oninput={(e) => globalField('body_parser_limit', e.currentTarget.value)} />
             <p id="config-request-limit-help" class="text-sm text-zinc-400">{t('requestLimitHelp')} {t('defaultHelp')}</p>
           </div>
+          <div class="min-w-0 space-y-3 sm:col-span-2">
+            <div class="flex items-center justify-between gap-3">
+              <Label for="config-websocket-unlimited">{t('websocket.unlimited')}</Label>
+              <IndustrialToggle id="config-websocket-unlimited" checked={websocketUnlimited}
+                disabled={locked || reviewOpen || !!imported} label={t('websocket.unlimited')} onchange={websocketLimitDisabled} />
+            </div>
+            {#if !websocketUnlimited}
+              <div class="settings-integer-control max-w-sm space-y-1.5">
+                <Label for="config-websocket-max-connections">{t('websocket.label')}</Label>
+                <NumberInput id="config-websocket-max-connections" min={1} max={2147483647} required
+                  bind:value={() => websocketDisplay, websocketField} disabled={locked || reviewOpen || !!imported}
+                  increaseLabel={t('websocket.increase')} decreaseLabel={t('websocket.decrease')} invalidMessage={t('websocket.invalid')}
+                  aria-describedby={`config-websocket-help${websocketInvalid ? ' config-websocket-error' : ''}`} />
+                {#if websocketInvalid}<p id="config-websocket-error" role="alert" class="text-sm text-red-400">{t('websocket.invalid')}</p>{/if}
+              </div>
+            {/if}
+            <p id="config-websocket-help" class="text-sm text-zinc-400">{t('websocket.help')}</p>
+          </div>
         </fieldset>
       </PanelCard>
     </section>
@@ -493,10 +534,10 @@
     </section>
     {#if dirty || pendingId || busy || submissionLocked(phase) || publicationBusy(publication)}
     <footer class="sticky bottom-0 z-20 flex flex-wrap items-center justify-between gap-3 border-2 border-carbon-500 bg-carbon-900 p-3" data-testid="settings-change-bar">
-       <p class="text-sm text-zinc-300" id="publication-review-disabled-reason">{publicationInvalid ? t('publication.invalidDraft') : diff.length ? `${changeCount} · r${snapshot.revision}` : t('clean')}</p>
+       <p class="text-sm text-zinc-300" id="publication-review-disabled-reason">{draftInvalid ? invalidDraftMessage : diff.length ? `${changeCount} · r${snapshot.revision}` : t('clean')}</p>
       <div class="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto">
         <Button variant="outline" disabled={!dirty || locked} onclick={discard}>{t('discard')}</Button>
-        <Button disabled={!diff.length || locked || publicationInvalid} aria-describedby={publicationInvalid ? 'publication-review-disabled-reason' : undefined} onclick={review} data-testid="config-save-button">{t('reviewPublish')}</Button>
+        <Button disabled={!diff.length || locked || draftInvalid} aria-describedby={draftInvalid ? 'publication-review-disabled-reason' : undefined} onclick={review} data-testid="config-save-button">{t('reviewPublish')}</Button>
       </div>
     </footer>
     {/if}
@@ -510,7 +551,7 @@
       <p class="text-sm text-zinc-300">{t('baseline')} r{snapshot?.revision} · {changeCount}</p>
       <p class="text-sm text-zinc-400">{t('redactionHelp')}</p>
        <ConfigurationDiff changes={diff} />
-       {#if publicationInvalid}<p role="alert" class="text-sm text-red-400">{t('publication.invalidDraft')}</p>{/if}
+       {#if draftInvalid}<p role="alert" class="text-sm text-red-400">{invalidDraftMessage}</p>{/if}
       {#if validating}<LoadingIndicator label={t('validating')} size="sm" centered={false} />
       {:else if validation}<p role="alert" class="text-sm text-red-400">{t(validation)}</p>
       {:else if validSignature === signature}<p class="text-sm text-zinc-300">{t('validated')}</p>{/if}
@@ -533,6 +574,7 @@
     transition-property: color, background-color, border-color, box-shadow, transform;
     transition-duration: 150ms;
   }
+  .settings-workspace .settings-integer-control :global(button) { min-height: 0; }
   :global(.settings-menu-item) { min-height: 44px; }
   .settings-workspace :global(button), .settings-workspace :global(a) { white-space: normal; }
   .settings-workspace :global(button:not([role="switch"])), .settings-workspace :global(a) { gap: 0.5rem; }

@@ -79,3 +79,14 @@ test('object key ordering is not a configuration change; array ordering is a saf
   before.plugin_activations = [{ plugin_name: 'alpha' }, { plugin_name: 'beta' }]; after.plugin_activations = [...before.plugin_activations].reverse();
   expect(configurationDiff(before, after)).toMatchObject([{ label: 'activations', action: 'reordered', count: 2 }]);
 });
+
+
+test('WebSocket review shows only valid connection limits and distinguishes default from no additional limit', () => {
+  const before = base();
+  const changed = (value: unknown) => ({ ...before, logical_configuration: { ...before.logical_configuration, websocket_max_connections: value } });
+  expect(configurationDiff(before, changed(128))).toEqual([{ label: 'websocketMaxConnections', action: 'added', before: 'websocketDefault', after: '128' }]);
+  expect(configurationDiff(changed(128), changed(null))).toEqual([{ label: 'websocketMaxConnections', action: 'changed', before: '128', after: 'websocketUnlimited' }]);
+  for (const value of [0, -1, 1.5, 2147483648, 'private-value']) {
+    expect(configurationDiff(before, changed(value))).toEqual([{ label: 'websocketMaxConnections', action: 'added', before: 'websocketDefault', after: 'hidden' }]);
+  }
+});

@@ -50,6 +50,7 @@ function isStreamingResponse(response: Response): boolean { return response.body
 
 import type { RawResponseCompletion } from '../plugin-control/contracts';
 import { observeTransportResponse } from './body-observation-stream';
+import type { TransportType } from '../logger/transport-outcome';
 
 export interface HandleRequestRuntimeContext {
   servingRevision?: number;
@@ -60,6 +61,8 @@ export interface HandleRequestRuntimeContext {
   onCompletion?:(completion:Promise<RawResponseCompletion>)=>void;
   /** Host-only session context, never accepted from client fields. */
   transport?: 'websocket';
+  /** Inherited ingress protocol for logs; does not select the upstream transport. */
+  logTransportType?: TransportType;
   websocketBridge?: import('../websocket').WebSocketBridge;
   skipEntryRate?: boolean;
   /** Host session receives the codec's logical history without re-reading the request body. */
@@ -378,8 +381,11 @@ async function executeHttpRequestInternal(
   const requestLoggers: RequestLogger[] = [];
   transport.loggers = requestLoggers;
   const fileLogReleases: Array<() => void> = [];
+  const transportType: TransportType = runtimeContext?.logTransportType ?? runtimeContext?.transport ?? 'http';
   const createRequestLogger = async (request: Request, options?: ConstructorParameters<typeof RequestLogger>[1]): Promise<RequestLogger> => {
-    const requestLogger = requireGatewayResult(requireGatewayResult(await gatewayHooks().onGatewayLog.promise({phase:'create',request,options:runtimeContext?.auxiliary ? {...options,parentRequestId:options?.parentRequestId??runtimeContext.auxiliary.parentRequestId} : options,dependencies:runtimeContext?.logging}), 'onGatewayLog').logger, 'onGatewayLog');
+    const logOptions = {...options, transportType,
+      ...(runtimeContext?.auxiliary ? {parentRequestId:options?.parentRequestId ?? runtimeContext.auxiliary.parentRequestId} : {})};
+    const requestLogger = requireGatewayResult(requireGatewayResult(await gatewayHooks().onGatewayLog.promise({phase:'create',request,options:logOptions,dependencies:runtimeContext?.logging}), 'onGatewayLog').logger, 'onGatewayLog');
     requestLogger.deferFileLogUntilTransportObserved();
     transport.logger = requestLogger;
     requestLoggers.push(requestLogger);

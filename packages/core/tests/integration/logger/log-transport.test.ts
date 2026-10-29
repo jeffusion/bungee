@@ -1,10 +1,12 @@
 import { afterEach, expect, test, spyOn } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { MigrationManager } from '../../../src/migrations';
 import { AccessLogWriter } from '../../../src/logger/access-log-writer';
+import { FileLogWriter } from '../../../src/logger/file-log-writer';
+import { RequestLogger } from '../../../src/logger/request-logger';
 import { LogQueryService } from '../../../src/api/logs';
 import { LogsHandler } from '../../../src/api/handlers/logs';
 import { StatsHandler } from '../../../src/api/handlers/stats';
@@ -20,10 +22,48 @@ async function fixture() {
   const dbPath = join(root, 'access.db');
   expect((await new MigrationManager(dbPath).migrate()).success).toBeTrue();
   const writer = new AccessLogWriter(dbPath); writers.push(writer);
-  return { writer, db: writer.getDatabase(), query: new LogQueryService(writer.getDatabase()) };
+  return { root, writer, db: writer.getDatabase(), query: new LogQueryService(writer.getDatabase()) };
 }
 const row = (requestId: string, extra: Record<string, any> = {}) => ({ requestId, timestamp: 60_000, method: 'POST', path: '/test',
   status: 200, duration: 10, upstream: 'http://upstream', ...extra });
+
+test('ingress types survive pending and terminal writes, JSONL, details and exports while history stays null', async () => {
+  const { root, writer, query } = await fixture();
+  const logsDir = join(root, 'files');
+  const files = new FileLogWriter(logsDir);
+  try {
+    for (const transportType of ['http', 'websocket'] as const) for (const outcome of ['completed', 'failed', 'cancelled'] as const) {
+      const logger = new RequestLogger(new Request('https://localhost/responses', { method: 'POST' }), { transportType },
+        { accessLogWriter: writer, fileLogWriter: files });
+      const requestId = logger.getRequestId();
+      logger.beginTransport(200);
+      await writer.flush();
+      expect(await query.getById(requestId)).toMatchObject({ transportType, transportOutcome: 'pending' });
+      await logger.complete(200);
+      logger.updateTransportOutcome(outcome);
+      await logger.complete(200);
+      await writer.flush();
+      expect(await query.getById(requestId)).toMatchObject({ method: 'POST', path: '/responses', transportType, transportOutcome: outcome });
+      const detail = await query.getChainDetail(requestId);
+      expect(detail?.chain.transportType).toBe(transportType);
+      expect(detail?.attempts.map(entry => entry.transportType)).toEqual([transportType]);
+    }
+    writer.write(row('history')); await writer.flush(); await files.flush();
+    const jsonl = readdirSync(logsDir).flatMap(name => readFileSync(join(logsDir, name), 'utf8').trim().split('\n').map(line => JSON.parse(line)));
+    expect(jsonl).toHaveLength(6);
+    const entries = JSON.parse(await query.exportLogs());
+    expect(entries).toHaveLength(7);
+    for (const entry of jsonl) expect(entries.find((value: any) => value.requestId === entry.requestId))
+      .toMatchObject({ transportType: entry.transportType, transportOutcome: entry.transportOutcome });
+    expect(jsonl.map(entry => entry.transportType)).toEqual(['http', 'http', 'http', 'websocket', 'websocket', 'websocket']);
+    expect(entries.find((entry: any) => entry.requestId === 'history').transportType).toBeNull();
+    const [headers, ...lines] = (await query.exportLogs({}, 'csv')).split('\n').map(line => line.split(','));
+    for (const entry of entries) {
+      const line = lines.find(line => line[headers.indexOf('requestId')] === entry.requestId)!;
+      expect(line[headers.indexOf('transportType')]).toBe(entry.transportType ?? '');
+    }
+  } finally { await files.close(); }
+});
 
 test('transport updates survive before enqueue, queued, persisted and provisional final replacement', async () => {
   const { writer, db } = await fixture();
@@ -46,9 +86,9 @@ test('transport updates survive before enqueue, queued, persisted and provisiona
 
 test('final chain filtering, details, exports and stats share independent HTTP and transport outcomes', async () => {
   const { writer, query } = await fixture();
-  writer.write(row('retry', { parentRequestId: 'chain', requestType: 'retry', attemptNumber: 1, status: 503, success: false, transportOutcome: 'failed',
+  writer.write(row('retry', { transportType: 'websocket', parentRequestId: 'chain', requestType: 'retry', attemptNumber: 1, status: 503, success: false, transportOutcome: 'failed',
     transportCode: 'request_timeout', protocolOutcome: 'failed', protocolCode: 'request_timeout' }));
-  writer.write(row('final', { parentRequestId: 'chain', requestType: 'final', attemptNumber: 2, transportOutcome: 'completed' }));
+  writer.write(row('final', { transportType: 'websocket', parentRequestId: 'chain', requestType: 'final', attemptNumber: 2, transportOutcome: 'completed' }));
   writer.write(row('cancel', { transportOutcome: 'cancelled', protocolOutcome: 'failed', success: false }));
   writer.write(row('http500', { status: 500, transportOutcome: 'completed', protocolOutcome: 'failed', success: false }));
   writer.write(row('business', { transportOutcome: 'completed', protocolOutcome: 'failed', success: false }));
@@ -58,14 +98,14 @@ test('final chain filtering, details, exports and stats share independent HTTP a
   const window = { startTime: 60_000, endTime: 120_000 };
   const chains = await query.queryChains({ ...window, transportOutcome: 'completed' });
   expect(chains.total).toBe(3);
-  expect(chains.data.find(entry => entry.chainId === 'chain')).toMatchObject({ status: 503, chainStatus: 200, chainTransportOutcome: 'completed' });
+  expect(chains.data.find(entry => entry.chainId === 'chain')).toMatchObject({ transportType: 'websocket', status: 503, chainStatus: 200, chainTransportOutcome: 'completed' });
   expect((await query.getChainDetail('chain'))?.chain.chainTransportOutcome).toBe('completed');
   const exported = JSON.parse(await query.exportLogs({ ...window, transportOutcome: 'completed', groupBy: 'chain' }));
   expect(exported.map((entry: any) => entry.chainId).sort()).toEqual(chains.data.map(entry => entry.chainId).sort());
   const chainCsv = await query.exportLogs({ ...window, transportOutcome: 'completed', groupBy: 'chain' }, 'csv');
   const [header, ...lines] = chainCsv.split('\n').map(line => line.split(','));
   const retry = Object.fromEntries(header.map((key, index) => [key, lines.find(line => line[0] === 'retry')![index]]));
-  expect(retry).toMatchObject({ requestId: 'retry', status: '503', requestType: 'retry', transportOutcome: 'failed',
+  expect(retry).toMatchObject({ requestId: 'retry', transportType: 'websocket', status: '503', requestType: 'retry', transportOutcome: 'failed',
     transportCode: 'request_timeout', protocolOutcome: 'failed', protocolCode: 'request_timeout',
     chainId: 'chain', chainStatus: '200', chainTransportOutcome: 'completed', chainTransportCode: '' });
   const csv = await query.exportLogs({ ...window, transportOutcome: 'cancelled' }, 'csv');
@@ -100,7 +140,7 @@ test('HTTP multi-value and transport filter validation is identical for query an
   writer.write(row('ok', { transportOutcome: 'completed' })); await writer.flush();
   const handler = new LogsHandler({ logQueryService: query, bodyStorage: {} as any, headerStorage: {} as any, cleanupService: {} as any });
   for (const method of [handler.query.bind(handler), handler.export.bind(handler)]) {
-    for (const invalid of ['transportOutcome=', 'transportOutcome=failed&transportOutcome=completed', 'transportOutcome=business_error', 'status=200junk', 'status=999']) {
+    for (const invalid of ['transportOutcome=', 'transportOutcome=failed&transportOutcome=completed', 'transportOutcome=business_error', 'status=200junk', 'status=999', 'transportType=', 'transportType=WS', 'transportType=unknown', 'transportType=http&transportType=websocket', 'transportType=http&transportType=http']) {
       expect((await method(new Request(`http://localhost/api/logs?${invalid}`))).status).toBe(400);
     }
     const response = await method(new Request('http://localhost/api/logs?status=200&status=500&transportOutcome=cancelled'));
@@ -153,4 +193,42 @@ test('request counts combine HTTP and completed transport while excluding cancel
   } finally { clock.mockRestore(); }
   const snapshot = await (await handler.getSnapshot()).json();
   expect(snapshot.requestCounts).toEqual({ success: 4, failed: 11 });
+});
+
+
+test('type filters distinguish identical POST paths and preserve full retry chains and export counts', async () => {
+  const { writer, query } = await fixture();
+  writer.write(row('http', { transportType: 'http', transportOutcome: 'completed' }));
+  writer.write(row('ws-retry', { transportType: 'websocket', parentRequestId: 'ws-chain', requestType: 'retry',
+    attemptNumber: 1, status: 503, transportOutcome: 'failed' }));
+  writer.write(row('ws-final', { transportType: 'websocket', parentRequestId: 'ws-chain', requestType: 'final',
+    attemptNumber: 2, transportOutcome: 'completed' }));
+  writer.write(row('history'));
+  await writer.flush();
+  const handler = new LogsHandler({ logQueryService: query, bodyStorage: {} as any, headerStorage: {} as any, cleanupService: {} as any });
+  for (const group of ['', '&groupBy=chain']) {
+    const all = await (await handler.query(new Request(`http://localhost/api/logs?method=POST${group}`))).json();
+    expect(all.total).toBe(group ? 3 : 4);
+    expect(all.data.find((entry: any) => entry.requestId === 'history').transportType).toBeNull();
+    for (const type of ['http', 'websocket']) {
+      const params = `method=POST&path=/test&transportType=${type}${group}`;
+      const response = await handler.query(new Request(`http://localhost/api/logs?${params}&limit=1`));
+      expect(response.status).toBe(200);
+      const result = await response.json();
+      expect(result.total).toBe(type === 'websocket' && !group ? 2 : 1);
+      expect(result.totalPages).toBe(result.total);
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0].transportType).toBe(type);
+      if (group && type === 'websocket') expect(result.data[0]).toMatchObject({ chainAttempts: 2, chainStatus: 200 });
+      const exported = await (await handler.export(new Request(`http://localhost/api/logs/export?${params}`))).json();
+      expect(exported).toHaveLength(result.total);
+      expect(exported.every((entry: any) => entry.transportType === type)).toBeTrue();
+      const csv = await (await handler.export(new Request(`http://localhost/api/logs/export?${params}&format=csv`))).text();
+      expect(csv).not.toContain('history');
+      expect(csv.split('\n')).toHaveLength(result.total + 1);
+    }
+  }
+  const filtered = await query.queryChains({ transportType: 'websocket', transportOutcome: 'completed', status: 200, requestType: 'retry' });
+  expect(filtered.total).toBe(1);
+  expect(filtered.data[0].chainAttempts).toBe(2);
 });

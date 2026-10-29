@@ -1,9 +1,9 @@
 <script lang="ts">
   import { defaultLogFilters, countLogFilters } from '$components/domain/log/filter-state';
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import { _ } from '$i18n';
-  import { queryChains, exportLogs, type ChainEntry, type LogQueryParams, type TransportOutcome } from '$api/logs';
-  import { TRANSPORT_OUTCOMES, chainTransportOutcome, transportTone, httpStatusLabel, parseStatusFilter } from '$components/domain/log/outcomes';
+  import { queryChains, exportLogs, type ChainEntry, type LogQueryParams, type TransportOutcome, type TransportType } from '$api/logs';
+  import { TRANSPORT_OUTCOMES, chainTransportOutcome, transportTone, transportTypeLabel, httpStatusLabel, parseStatusFilter } from '$components/domain/log/outcomes';
   import ChainDetailModal from '$components/domain/log/ChainDetailModal.svelte';
   import { BSwitch, LoadingIndicator, PanelCard, BDropdownAction } from '$components/industrial';
   import { BSelect as Select } from '$components/industrial';
@@ -14,37 +14,16 @@
   // ---- Select option arrays (i18n-safe, constructed in reactive blocks) ----
 import { isLoading } from 'svelte-i18n';
 
-$: methodOptions = $isLoading ? [] : [
-  { value: '', label: $_('logs.allMethods') },
-  { value: 'GET', label: 'GET' },
-  { value: 'POST', label: 'POST' },
-  { value: 'PUT', label: 'PUT' },
-  { value: 'DELETE', label: 'DELETE' },
-  { value: 'PATCH', label: 'PATCH' },
-];
-
-$: transportOptions = $isLoading ? [] : [
-  { value: '__all', label: $_('logs.allResults') },
-  ...TRANSPORT_OUTCOMES.map(value => ({ value, label: $_(`logs.transport.${value}`) })),
-];
-
-$: methodQuickFilterItems = $isLoading ? [] : [
-  { value: '', label: $_('logs.allMethods') },
-  { value: 'GET', label: 'GET' },
-  { value: 'POST', label: 'POST' },
-  { value: 'PUT', label: 'PUT' },
-  { value: 'DELETE', label: 'DELETE' },
-  { value: 'PATCH', label: 'PATCH' },
-];
-
-$: resultQuickFilterItems = transportOptions;
+function onTransportTypeChange(value: string | string[]) {
+  if (Array.isArray(value)) return;
+  transportTypeFilter = value === 'http' || value === 'websocket' ? value : undefined;
+}
 
 const exportItems = [
   { value: 'json', label: 'JSON' },
   { value: 'csv', label: 'CSV' },
 ];
 
-$: transportSelectValue = transportFilter ?? '__all';
 function onTransportSelectChange(value: string | string[]) {
   if (Array.isArray(value)) return;
   transportFilter = TRANSPORT_OUTCOMES.includes(value as TransportOutcome) ? value as TransportOutcome : undefined;
@@ -56,73 +35,43 @@ function onExportSelect(format: string) {
   }
 }
 
-$: requestTypeOptions = $isLoading ? [] : [
-  { value: '', label: $_('logs.requestType_all') },
-  { value: 'final', label: $_('logs.requestType_final') },
-  { value: 'retry', label: $_('logs.requestType_retry') },
-  { value: 'recovery', label: $_('logs.requestType_recovery') },
-];
-
-$: timeRangeOptions = $isLoading ? [] : [
-  { value: 'all', label: $_('logs.allTime') },
-  { value: 'recent', label: $_('logs.recentTime') },
-  { value: 'custom', label: $_('logs.customTime') },
-];
-
-$: sortByOptions = $isLoading ? [] : [
-  { value: 'timestamp', label: $_('logs.sortByTimestamp') },
-  { value: 'duration', label: $_('logs.sortByDuration') },
-  { value: 'status', label: $_('logs.sortByStatus') },
-];
-
-$: sortOrderOptions = $isLoading ? [] : [
-  { value: 'desc', label: $_('logs.desc') },
-  { value: 'asc', label: $_('logs.asc') },
-];
-
-$: refreshIntervalOptions = $isLoading ? [] : [
-  { value: '5s', label: $_('logs.refreshEvery5s') },
-  { value: '10s', label: $_('logs.refreshEvery10s') },
-  { value: '30s', label: $_('logs.refreshEvery30s') },
-  { value: '60s', label: $_('logs.refreshEvery60s') },
-];
-
   // 查询参数
-  let page = 1;
+  let page = $state(1);
   let limit = 50;
-  let searchTerm = '';
-  let method = '';
-  let statusFilter = '';
-  let transportFilter: TransportOutcome | undefined = undefined;
-  let requestTypeFilter = '';
-  let sortBy: 'timestamp' | 'duration' | 'status' = 'timestamp';
-  let sortOrder: 'asc' | 'desc' = 'desc';
-  let hasRetryFilter: boolean | undefined = undefined;
+  let searchTerm = $state('');
+  let method = $state('');
+  let statusFilter = $state('');
+  let transportFilter: TransportOutcome | undefined = $state(undefined);
+  let transportTypeFilter: TransportType | undefined = $state(undefined);
+  let requestTypeFilter = $state('');
+  let sortBy: 'timestamp' | 'duration' | 'status' = $state('timestamp');
+  let sortOrder: 'asc' | 'desc' = $state('desc');
+  let hasRetryFilter: boolean | undefined = $state(undefined);
 
   // 时间范围过滤
-  let timeRangeType: 'all' | 'recent' | 'custom' = 'recent';
-  let recentHours = 1;
-  let customStartTime = '';
-  let customEndTime = '';
+  let timeRangeType: 'all' | 'recent' | 'custom' = $state('recent');
+  let recentHours = $state(1);
+  let customStartTime = $state('');
+  let customEndTime = $state('');
 
   // 数据
-  let logs: ChainEntry[] = [];
-  let total = 0;
-  let totalPages = 0;
-  let loading = true;
-  let error: string | null = null;
+  let logs: ChainEntry[] = $state([]);
+  let total = $state(0);
+  let totalPages = $state(0);
+  let loading = $state(true);
+  let error: string | null = $state(null);
 
   // 详情模态框
-  let selectedChain: ChainEntry | null = null;
-  let showDetailModal = false;
-  let mobileActionsOpen = false;
+  let selectedChain: ChainEntry | null = $state(null);
+  let showDetailModal = $state(false);
+  let mobileActionsOpen = $state(false);
 
   // 自动刷新配置
-  let autoRefreshEnabled = true;
-  let refreshInterval: '5s' | '10s' | '30s' | '60s' = '30s';
+  let autoRefreshEnabled = $state(true);
+  let refreshInterval: '5s' | '10s' | '30s' | '60s' = $state('30s');
   let refreshTimer: number | null = null;
-  let lastRefreshTime: number = 0;
-  let showRefreshHint = false;
+  let lastRefreshTime: number = $state(0);
+  let showRefreshHint = $state(false);
 
   // 刷新间隔映射（毫秒）
   const REFRESH_INTERVALS = {
@@ -134,10 +83,12 @@ $: refreshIntervalOptions = $isLoading ? [] : [
 
   // 用于追踪过滤条件是否改变（避免响应式依赖冲突）
   let lastFilters = '';
-  let lastCustomTime = '';
+  let mounted = $state(false);
+  let loadSerial = 0;
 
   // 加载日志
   async function loadLogs() {
+    const serial = ++loadSerial;
     try {
       loading = true;
       error = null;
@@ -165,6 +116,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
       }
 
       // 传输结果过滤
+      if (transportTypeFilter !== undefined) params.transportType = transportTypeFilter;
       if (transportFilter !== undefined) {
         params.transportOutcome = transportFilter;
       }
@@ -193,13 +145,15 @@ $: refreshIntervalOptions = $isLoading ? [] : [
       }
 
       const result = await queryChains(params);
+      if (serial !== loadSerial) return;
       logs = result.data;
       total = result.total;
       totalPages = result.totalPages;
     } catch (e: any) {
+      if (serial !== loadSerial) return;
       error = e.message === 'logs.invalidStatus' ? $_('logs.invalidStatus') : e.message;
     } finally {
-      loading = false;
+      if (serial === loadSerial) loading = false;
     }
   }
 
@@ -217,6 +171,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
       if (statusFilter) {
         params.status = parseStatusFilter(statusFilter);
       }
+      if (transportTypeFilter !== undefined) params.transportType = transportTypeFilter;
       if (transportFilter !== undefined) {
         params.transportOutcome = transportFilter;
       }
@@ -270,7 +225,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
 
   // 清除所有筛选
   function clearAllFilters() {
-    ({ searchTerm, method, statusFilter, transportFilter, requestTypeFilter,
+    ({ searchTerm, method, statusFilter, transportFilter, transportTypeFilter, requestTypeFilter,
       hasRetryFilter, timeRangeType, recentHours, customStartTime, customEndTime,
       sortBy, sortOrder, page } = defaultLogFilters());
   }
@@ -282,6 +237,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
       method ||
       statusFilter ||
       transportFilter !== undefined ||
+      transportTypeFilter !== undefined ||
       requestTypeFilter ||
       hasRetryFilter !== undefined
     );
@@ -346,7 +302,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
   onMount(() => {
     // 恢复刷新配置
     const savedInterval = localStorage.getItem('logsRefreshInterval');
-    if (savedInterval) {
+    if (savedInterval && savedInterval in REFRESH_INTERVALS) {
       refreshInterval = savedInterval as typeof refreshInterval;
     }
 
@@ -355,63 +311,101 @@ $: refreshIntervalOptions = $isLoading ? [] : [
       autoRefreshEnabled = savedAutoRefresh === 'true';
     }
 
-    // 初始加载
-    loadLogs();
-
-    // 启动自动刷新
-    startAutoRefresh();
+    mounted = true;
 
     // 监听页面可见性变化
     document.addEventListener('visibilitychange', handleVisibilityChange);
   });
 
   onDestroy(() => {
+    loadSerial++;
     stopAutoRefresh();
     document.removeEventListener('visibilitychange', handleVisibilityChange);
   });
 
-  // 响应式启动/停止刷新
-  $: {
-    if (autoRefreshEnabled) {
-      startAutoRefresh();
-    } else {
-      stopAutoRefresh();
-    }
-  }
-
-  // 保存配置到 localStorage
-  $: {
+let transportTypeOptions = $derived($isLoading ? [] : [
+  { value: '__all', label: $_('logs.allTransportTypes') },
+  { value: 'http', label: 'HTTP' },
+  { value: 'websocket', label: 'WS' },
+]);
+let transportTypeSelectValue = $derived(transportTypeFilter ?? '__all');
+let methodOptions = $derived($isLoading ? [] : [
+  { value: '', label: $_('logs.allMethods') },
+  { value: 'GET', label: 'GET' },
+  { value: 'POST', label: 'POST' },
+  { value: 'PUT', label: 'PUT' },
+  { value: 'DELETE', label: 'DELETE' },
+  { value: 'PATCH', label: 'PATCH' },
+]);
+let transportOptions = $derived($isLoading ? [] : [
+  { value: '__all', label: $_('logs.allResults') },
+  ...TRANSPORT_OUTCOMES.map(value => ({ value, label: $_(`logs.transport.${value}`) })),
+]);
+let methodQuickFilterItems = $derived($isLoading ? [] : [
+  { value: '', label: $_('logs.allMethods') },
+  { value: 'GET', label: 'GET' },
+  { value: 'POST', label: 'POST' },
+  { value: 'PUT', label: 'PUT' },
+  { value: 'DELETE', label: 'DELETE' },
+  { value: 'PATCH', label: 'PATCH' },
+]);
+let resultQuickFilterItems = $derived(transportOptions);
+let transportSelectValue = $derived(transportFilter ?? '__all');
+let requestTypeOptions = $derived($isLoading ? [] : [
+  { value: '', label: $_('logs.requestType_all') },
+  { value: 'final', label: $_('logs.requestType_final') },
+  { value: 'retry', label: $_('logs.requestType_retry') },
+  { value: 'recovery', label: $_('logs.requestType_recovery') },
+]);
+let timeRangeOptions = $derived($isLoading ? [] : [
+  { value: 'all', label: $_('logs.allTime') },
+  { value: 'recent', label: $_('logs.recentTime') },
+  { value: 'custom', label: $_('logs.customTime') },
+]);
+let sortByOptions = $derived($isLoading ? [] : [
+  { value: 'timestamp', label: $_('logs.sortByTimestamp') },
+  { value: 'duration', label: $_('logs.sortByDuration') },
+  { value: 'status', label: $_('logs.sortByStatus') },
+]);
+let sortOrderOptions = $derived($isLoading ? [] : [
+  { value: 'desc', label: $_('logs.desc') },
+  { value: 'asc', label: $_('logs.asc') },
+]);
+let refreshIntervalOptions = $derived($isLoading ? [] : [
+  { value: '5s', label: $_('logs.refreshEvery5s') },
+  { value: '10s', label: $_('logs.refreshEvery10s') },
+  { value: '30s', label: $_('logs.refreshEvery30s') },
+  { value: '60s', label: $_('logs.refreshEvery60s') },
+]);
+  $effect(() => {
+    if (!mounted) return;
+    if (autoRefreshEnabled) startAutoRefresh();
+    else stopAutoRefresh();
+    return stopAutoRefresh;
+  });
+  $effect(() => {
+    if (!mounted) return;
     localStorage.setItem('logsRefreshInterval', refreshInterval);
     localStorage.setItem('logsAutoRefresh', String(autoRefreshEnabled));
-  }
-
+  });
   // 计算激活的筛选条件数量
-  $: activeFiltersCount = countLogFilters({ searchTerm, method, statusFilter, transportFilter,
+  let activeFiltersCount = $derived(countLogFilters({ searchTerm, method, statusFilter, transportFilter, transportTypeFilter,
     requestTypeFilter, hasRetryFilter, timeRangeType, recentHours, customStartTime, customEndTime,
-    sortBy, sortOrder, page });
-
-  // 响应式查询 - 当任何查询参数改变时加载日志
-  $: page, limit, searchTerm, method, statusFilter, transportFilter, requestTypeFilter, hasRetryFilter, sortBy, sortOrder, timeRangeType, recentHours, customStartTime, customEndTime, loadLogs();
-
-  // 当过滤条件改变时，重置到第一页（使用字符串对比避免依赖 page）
-  $: {
-    const currentFilters = JSON.stringify({ limit, searchTerm, method, statusFilter, transportFilter, requestTypeFilter, hasRetryFilter, sortBy, sortOrder, timeRangeType, recentHours });
-
-    if (lastFilters && currentFilters !== lastFilters) {
-      page = 1;
-    }
-    lastFilters = currentFilters;
-  }
-
-  // 当自定义时间改变时，重置到第一页
-  $: {
-    const currentCustomTime = JSON.stringify({ customStartTime, customEndTime });
-
-    if (timeRangeType === 'custom' && lastCustomTime && currentCustomTime !== lastCustomTime) {
-      page = 1;
-    }
-    lastCustomTime = currentCustomTime;
-  }
+    sortBy, sortOrder, page }));
+  // Reset pagination before dispatch, so a changed filter never queries a stale page.
+  $effect(() => {
+    if (!mounted) return;
+    const filters = JSON.stringify({ limit, searchTerm, method, statusFilter, transportFilter, transportTypeFilter,
+      requestTypeFilter, hasRetryFilter, sortBy, sortOrder, timeRangeType, recentHours,
+      customStartTime: timeRangeType === 'custom' ? customStartTime : '',
+      customEndTime: timeRangeType === 'custom' ? customEndTime : '' });
+    const changed = lastFilters !== '' && lastFilters !== filters;
+    lastFilters = filters;
+    if (changed && page !== 1) { page = 1; return; }
+    // Track page even when the filters did not change.
+    page;
+    untrack(() => { void loadLogs(); });
+  });
 </script>
 
 <div class="nx-page py-5 space-y-5" data-testid="page-logs">
@@ -432,7 +426,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
         <span class="nx-dot-accent"></span>
         <span class="font-mono text-[11px] uppercase tracking-command text-nexus-200">{$_('logs.newDataAvailable')}</span>
       </div>
-      <button class="nx-btn-ghost nx-btn-md" on:click={manualRefresh}>
+      <button class="nx-btn-ghost nx-btn-md" onclick={manualRefresh}>
         {$_('common.refresh')}
       </button>
     </div>
@@ -457,6 +451,17 @@ $: refreshIntervalOptions = $isLoading ? [] : [
       <div class="hidden md:flex min-w-0 items-center gap-2 flex-wrap flex-[2_1_36rem]">
         <!-- 左侧：过滤按钮组 -->
         <div class="flex items-center gap-2 flex-wrap">
+          <div data-testid="logs-filter-type-select">
+            <BDropdownAction items={transportTypeOptions} onselect={onTransportTypeChange}
+              triggerClass={`${transportTypeFilter ? 'nx-btn-primary' : 'nx-btn-ghost'} nx-btn-md`}>
+              {#snippet trigger()}
+                {$_('logs.transportType')}{#if transportTypeFilter}: {transportTypeLabel(transportTypeFilter)}{/if}
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                </svg>
+              {/snippet}
+            </BDropdownAction>
+          </div>
           <!-- Method 下拉 -->
           <div data-testid="logs-filter-method-select">
             <BDropdownAction
@@ -616,7 +621,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
             <button
               type="button"
               class="nx-btn-ghost nx-btn-md focus-visible:ring-2 focus-visible:ring-nexus-500"
-              on:click={clearAllFilters}
+              onclick={clearAllFilters}
             >
               {$_('logs.resetFilters')}
             </button>
@@ -684,7 +689,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
           <button
             type="button"
             class="nx-btn-outline nx-btn-md"
-            on:click={manualRefresh}
+            onclick={manualRefresh}
             disabled={loading}
           >
             {#if loading}
@@ -738,6 +743,11 @@ $: refreshIntervalOptions = $isLoading ? [] : [
             <div class="min-h-0 overflow-y-auto overscroll-contain px-4 py-3" data-testid="logs-mobile-actions-scroll">
               <div class="grid grid-cols-2 gap-x-3 gap-y-3">
                 <div class="min-w-0 space-y-1">
+                  <span class="nx-field-label !text-xs !tracking-normal">{$_('logs.transportType')}</span>
+                  <Select options={transportTypeOptions} value={transportTypeSelectValue} onchange={onTransportTypeChange}
+                    placeholder={$_('logs.allTransportTypes')} ariaLabel={$_('logs.transportType')} />
+                </div>
+                <div class="min-w-0 space-y-1">
                   <span class="nx-field-label !text-xs !tracking-normal">{$_('logs.method')}</span>
                   <Select options={methodOptions} bind:value={method} placeholder={$_('logs.allMethods')} ariaLabel={$_('logs.method')} />
                 </div>
@@ -758,7 +768,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
                   <Select options={timeRangeOptions} bind:value={timeRangeType} placeholder={$_('logs.allTime')} ariaLabel={$_('logs.timeRange')} />
                 </div>
                 {#if timeRangeType === 'recent'}
-                  <div class="min-w-0 space-y-1">
+                  <div class="col-span-2 min-w-0 space-y-1">
                     <label for="logs-mobile-hours" class="nx-field-label !text-xs !tracking-normal">{$_('logs.recentHours')}</label>
                     <input id="logs-mobile-hours" type="number" bind:value={recentHours} min="1" class="nx-input w-full" />
                   </div>
@@ -794,14 +804,14 @@ $: refreshIntervalOptions = $isLoading ? [] : [
             <div class="shrink-0 border-t border-carbon-600 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]" data-testid="logs-mobile-actions-footer">
               <div class="grid grid-cols-2 gap-2">
                 {#if activeFiltersCount > 0}
-                  <button type="button" class="nx-btn-ghost nx-btn-md w-full focus-visible:ring-2 focus-visible:ring-nexus-500" on:click={clearAllFilters}>{$_('logs.resetFilters')}</button>
+                  <button type="button" class="nx-btn-ghost nx-btn-md w-full focus-visible:ring-2 focus-visible:ring-nexus-500" onclick={clearAllFilters}>{$_('logs.resetFilters')}</button>
                 {/if}
-                <button type="button" class="nx-btn-primary nx-btn-md w-full" class:col-span-2={activeFiltersCount === 0} on:click={manualRefresh} disabled={loading}>
+                <button type="button" class="nx-btn-primary nx-btn-md w-full" class:col-span-2={activeFiltersCount === 0} onclick={manualRefresh} disabled={loading}>
                   {#if loading}<LoadingIndicator label="" size="xs" centered={false} />{/if}
                   {$_('common.refresh')}
                 </button>
-                <button type="button" class="nx-btn-ghost nx-btn-md w-full" on:click={() => handleExport('json')}>JSON</button>
-                <button type="button" class="nx-btn-ghost nx-btn-md w-full" on:click={() => handleExport('csv')}>CSV</button>
+                <button type="button" class="nx-btn-ghost nx-btn-md w-full" onclick={() => handleExport('json')}>JSON</button>
+                <button type="button" class="nx-btn-ghost nx-btn-md w-full" onclick={() => handleExport('csv')}>CSV</button>
               </div>
             </div>
           </Sheet.Content>
@@ -819,7 +829,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
             <button
               type="button"
               class="inline-flex items-center justify-center h-4 w-4 text-zinc-500 hover:text-red-300 transition-colors"
-              on:click={() => searchTerm = ''}
+              onclick={() => searchTerm = ''}
               aria-label={$_('logs.clearFilters')}
             >
               <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -829,6 +839,18 @@ $: refreshIntervalOptions = $isLoading ? [] : [
           </div>
         {/if}
 
+        {#if transportTypeFilter}
+          <div class="inline-flex items-center gap-1.5 border border-nexus-500/60 bg-nexus-500/10 px-2.5 py-0.5 font-mono text-[11px] uppercase tracking-command text-nexus-300">
+            <span class="text-xs opacity-70">{$_('logs.transportType')}:</span>
+            <span class="font-medium">{transportTypeLabel(transportTypeFilter)}</span>
+            <button type="button" class="inline-flex h-6 w-6 items-center justify-center text-zinc-400 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-nexus-500"
+              onclick={() => transportTypeFilter = undefined} aria-label={$_('logs.clearTransportType')}>
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        {/if}
         {#if method}
           <div class="inline-flex items-center gap-1.5 border border-nexus-500/60 bg-nexus-500/10 px-2.5 py-0.5 font-mono text-[11px] uppercase tracking-command text-nexus-300">
             <span class="text-xs opacity-70">{$_('logs.method')}:</span>
@@ -836,7 +858,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
             <button
               type="button"
               class="inline-flex items-center justify-center h-4 w-4 text-zinc-500 hover:text-red-300 transition-colors"
-              on:click={() => method = ''}
+              onclick={() => method = ''}
               aria-label={$_('logs.clearFilters')}
             >
               <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -853,7 +875,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
             <button
               type="button"
               class="inline-flex items-center justify-center h-4 w-4 text-zinc-500 hover:text-red-300 transition-colors"
-              on:click={() => statusFilter = ''}
+              onclick={() => statusFilter = ''}
               aria-label={$_('logs.clearFilters')}
             >
               <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -870,7 +892,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
             <button
               type="button"
               class="inline-flex items-center justify-center h-4 w-4 text-zinc-500 hover:text-red-300 transition-colors"
-              on:click={() => transportFilter = undefined}
+              onclick={() => transportFilter = undefined}
               aria-label={$_('logs.clearFilters')}
             >
               <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -887,7 +909,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
             <button
               type="button"
               class="inline-flex items-center justify-center h-4 w-4 text-zinc-500 hover:text-red-300 transition-colors"
-              on:click={() => requestTypeFilter = ''}
+              onclick={() => requestTypeFilter = ''}
               aria-label={$_('logs.clearFilters')}
             >
               <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -904,7 +926,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
             <button
               type="button"
               class="inline-flex items-center justify-center h-4 w-4 text-zinc-500 hover:text-red-300 transition-colors"
-              on:click={() => hasRetryFilter = undefined}
+              onclick={() => hasRetryFilter = undefined}
               aria-label={$_('logs.clearFilters')}
             >
               <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -917,7 +939,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
         <button
           type="button"
           class="inline-flex items-center gap-1.5 border px-2.5 py-0.5 font-mono text-[11px] uppercase tracking-command transition-colors {hasRetryFilter === true ? 'border-amber-500/60 bg-amber-500/10 text-amber-300' : 'border-carbon-500 bg-carbon-800 text-zinc-400 hover:text-zinc-200'}"
-          on:click={() => hasRetryFilter = hasRetryFilter === true ? undefined : true}
+          onclick={() => hasRetryFilter = hasRetryFilter === true ? undefined : true}
         >
           {$_('logs.chain.onlyRetries')}
         </button>
@@ -929,7 +951,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
             <button
               type="button"
               class="inline-flex items-center justify-center h-4 w-4 text-zinc-500 hover:text-red-300 transition-colors"
-              on:click={() => recentHours = 1}
+              onclick={() => recentHours = 1}
               aria-label={$_('logs.clearFilters')}
             >
               <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -946,7 +968,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
             <button
               type="button"
               class="inline-flex items-center justify-center h-4 w-4 text-zinc-500 hover:text-red-300 transition-colors"
-              on:click={() => { timeRangeType = 'recent'; customStartTime = ''; customEndTime = ''; }}
+              onclick={() => { timeRangeType = 'recent'; customStartTime = ''; customEndTime = ''; }}
               aria-label={$_('logs.clearFilters')}
             >
               <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -963,7 +985,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
             <button
               type="button"
               class="inline-flex items-center justify-center h-4 w-4 text-zinc-500 hover:text-red-300 transition-colors"
-              on:click={() => timeRangeType = 'recent'}
+              onclick={() => timeRangeType = 'recent'}
               aria-label={$_('logs.clearFilters')}
             >
               <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -980,7 +1002,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
             <button
               type="button"
               class="inline-flex items-center justify-center h-4 w-4 text-zinc-500 hover:text-red-300 transition-colors"
-              on:click={() => { sortBy = 'timestamp'; sortOrder = 'desc'; }}
+              onclick={() => { sortBy = 'timestamp'; sortOrder = 'desc'; }}
               aria-label={$_('logs.clearFilters')}
             >
               <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1013,9 +1035,10 @@ $: refreshIntervalOptions = $isLoading ? [] : [
   {:else}
     <PanelCard title="REQUEST LOG" tag={`N=${logs.length}/${total}`} flush>
       <div class="w-full min-w-0 overflow-x-auto" data-testid="logs-table-scroll">
-        <table class="w-full min-w-[1120px] whitespace-nowrap">
+        <table class="w-full min-w-[1200px] whitespace-nowrap">
           <colgroup>
             <col class="w-44" />
+            <col class="w-20" />
             <col class="w-[88px]" />
             <col class="w-56" />
             <col class="w-[100px]" />
@@ -1027,6 +1050,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
           <thead class="border-b border-carbon-600 bg-carbon-900/60">
             <tr>
               <th class="text-left nx-label py-2.5 px-4">{$_('logs.time')}</th>
+              <th class="text-left nx-label py-2.5 px-4">{$_('logs.transportType')}</th>
               <th class="text-left nx-label py-2.5 px-4">{$_('logs.method')}</th>
               <th class="text-left nx-label py-2.5 px-4">{$_('logs.path')}</th>
               <th class="text-left nx-label py-2.5 px-4">{$_('logs.status')}</th>
@@ -1040,6 +1064,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
             {#each logs.slice(0, 1) as firstLog (firstLog.chainId)}
               <tr class="group border-b border-carbon-600/60 hover:bg-carbon-700/40 transition-colors" data-testid="logs-row-first">
                 <td class="py-2.5 px-4 font-mono text-[11px] text-zinc-400">{formatTime(firstLog.chainStartTs)}</td>
+                <td class="py-2.5 px-4"><span class="nx-feature-tag" title={firstLog.transportType === null ? $_('logs.transportTypeUnrecorded') : undefined}>{transportTypeLabel(firstLog.transportType)}</span></td>
                 <td class="py-2.5 px-4"><span class="nx-feature-tag">{firstLog.method}</span></td>
                 <td class="py-2.5 px-4 font-mono text-[12px] text-zinc-200 truncate max-w-xs" title={firstLog.path}>
                   {firstLog.path}
@@ -1057,7 +1082,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
                   <button
                     class="nx-btn-ghost nx-btn-sm"
 
-                    on:click={() => viewDetail(firstLog)}
+                    onclick={() => viewDetail(firstLog)}
                   >
                     {$_('logs.viewDetail')}
                   </button>
@@ -1067,6 +1092,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
             {#each logs.slice(1) as log (log.chainId)}
               <tr class="group border-b border-carbon-600/60 hover:bg-carbon-700/40 transition-colors">
                 <td class="py-2.5 px-4 font-mono text-[11px] text-zinc-400">{formatTime(log.chainStartTs)}</td>
+                <td class="py-2.5 px-4"><span class="nx-feature-tag" title={log.transportType === null ? $_('logs.transportTypeUnrecorded') : undefined}>{transportTypeLabel(log.transportType)}</span></td>
                 <td class="py-2.5 px-4"><span class="nx-feature-tag">{log.method}</span></td>
                 <td class="py-2.5 px-4 font-mono text-[12px] text-zinc-200 truncate max-w-xs" title={log.path}>
                   {log.path}
@@ -1084,7 +1110,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
                   <button
                     class="nx-btn-ghost nx-btn-sm"
 
-                    on:click={() => viewDetail(log)}
+                    onclick={() => viewDetail(log)}
                   >
                     {$_('logs.viewDetail')}
                   </button>
@@ -1104,7 +1130,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
           <button
             class="nx-pager-btn"
             disabled={page <= 1}
-            on:click={() => (page = page - 1)}
+            onclick={() => (page = page - 1)}
           >«</button>
           <span class="nx-pager-btn pointer-events-none">
             {$_('logs.page', { values: { page, totalPages } })}
@@ -1112,7 +1138,7 @@ $: refreshIntervalOptions = $isLoading ? [] : [
           <button
             class="nx-pager-btn"
             disabled={page >= totalPages}
-            on:click={() => (page = page + 1)}
+            onclick={() => (page = page + 1)}
           >»</button>
         </div>
       </div>

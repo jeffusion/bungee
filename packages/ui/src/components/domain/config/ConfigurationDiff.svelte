@@ -6,7 +6,7 @@
   const t = (key: string) => $isLoading ? '' : $_(`settings.diff.${key}`);
   const value = (v: string) => /^(defaultSeconds|seconds):\d+$/.test(v)
     ? $_(`settings.publication.${v.startsWith('defaultSeconds:') ? 'defaultSeconds' : 'seconds'}`, { values: { value: Number(v.split(':')[1]) } })
-    : ['hidden', 'unset', 'on', 'off'].includes(v) ? t(v) : v;
+    : ['hidden', 'unset', 'on', 'off', 'websocketDefault', 'websocketUnlimited'].includes(v) ? t(v) : v;
   const label = (key: ConfigDiff['label']) => key.endsWith('_timeout_ms') ? $_(`settings.publication.${key}.label`)
     : key === 'publicationHidden' ? $_('settings.publication.otherSettings') : t(key);
 </script>

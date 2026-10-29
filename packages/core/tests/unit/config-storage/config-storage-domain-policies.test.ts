@@ -1,6 +1,20 @@
 import { describe, expect, test } from 'bun:test';
 import { parseNormalizeCompile } from '../../../src/config-storage/compiler';
 
+test('validates the public WebSocket connection setting without rewriting omitted defaults', () => {
+  const empty = { services: [], routes: [], plugins: [] };
+  expect(parseNormalizeCompile(empty)).toEqual({ ok: true, value: empty });
+  for (const value of [null, 1, 512, 2147483647]) {
+    const config = { ...empty, websocket_max_connections: value };
+    expect(parseNormalizeCompile(config)).toEqual({ ok: true, value: config });
+  }
+  for (const value of [0, -1, 1.5, 2147483648, '512', true, {}, []]) {
+    const result = parseNormalizeCompile({ ...empty, websocket_max_connections: value });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors).toContainEqual(expect.objectContaining({ path: 'websocket_max_connections' }));
+  }
+});
+
 const IDs = {
   service: '10000000-0000-4000-8000-000000000020',
   route: '20000000-0000-4000-8000-000000000020',

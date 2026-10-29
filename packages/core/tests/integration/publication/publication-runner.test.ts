@@ -56,7 +56,7 @@ function publicationHarness(oldWorkers: readonly any[], options: {
 } = {}) {
   const active = {
     operation: { mutation_id: 'mutation-1', state: 'committed', drain_recovery_generation: 0 },
-    snapshot: { revision: 7, content_hash: HASH, aggregate: { plugin_activations: [] } },
+    snapshot: { revision: 7, content_hash: HASH, aggregate: { plugin_activations: [], logical_configuration: { services: [], routes: [], plugins: [] } } },
     targets: [],
   } as any;
   const factoryOwned = new Set(oldWorkers.map(({ process }) => process));
@@ -110,7 +110,7 @@ describe('publication phase diagnostics', () => {
       mutation_id: 'mutation-1', state: 'committed', drain_recovery_generation: 0,
     };
     const active = () => ({
-      operation, snapshot: { revision: 7, content_hash: HASH, aggregate: {} }, targets: [],
+      operation, snapshot: { revision: 7, content_hash: HASH, aggregate: { plugin_activations: [], logical_configuration: { services: [], routes: [], plugins: [] } } }, targets: [],
     }) as any;
     const repository = {
       beginPublication: () => { operation = { ...operation, state: 'publishing' }; },

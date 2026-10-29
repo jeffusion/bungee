@@ -48,6 +48,7 @@ describe('durable management protection', () => {
     previous.close(); backends.splice(backends.indexOf(previous), 1);
     const db = new Database(dbPath, { strict: true });
     // Reconstruct and validate the published prefix around real repository history.
+    db.run('ALTER TABLE settings DROP COLUMN websocket_max_connections_json');
     db.run('DROP TABLE service_references');
     db.run('DROP TABLE routes');
     db.run(CONFIG_SCHEMA_STATEMENTS.find(statement=>statement.startsWith('CREATE TABLE routes'))!);

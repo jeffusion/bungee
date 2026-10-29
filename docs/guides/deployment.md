@@ -89,6 +89,8 @@ Set `BUNGEE_MANAGEMENT_PUBLISH_PORT` if host port `8089` is occupied, or set
 
 Configuration comes from SQLite and validated memory snapshots. `CONFIG_PATH` does not select a runtime JSON/YAML file.
 
+WebSocket client admission is configured in System Settings, not environment variables. The default is 512 client connections across the instance; `websocket_max_connections: null` removes the additional count limit. Publish the configuration to apply it without recreating the container. Worker drain during publication may require clients to reconnect. Message and buffer budgets remain in force; see [WebSocket resource limits](../architecture/websocket.md#资源与关闭).
+
 ## Health
 
 ```bash

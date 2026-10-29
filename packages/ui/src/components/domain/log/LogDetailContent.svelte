@@ -1,6 +1,6 @@
 <script lang="ts">
   import { _ } from '$i18n';
-  import { httpStatusLabel, diagnosticExport } from './outcomes';
+  import { httpStatusLabel, diagnosticExport, transportTypeLabel } from './outcomes';
   import JsonBodyViewer from './JsonBodyViewer.svelte';
   import type { LogEntry } from '$api/logs';
   import { loadBodyById, loadHeaderById } from '$api/logs';
@@ -595,6 +595,10 @@
       <div class={embedded ? '' : 'nx-panel-sunken p-4'}>
           <h4 class="mb-3 font-mono text-xs font-bold uppercase tracking-command text-zinc-100">{$_('logs.detail.requestInfo')}</h4>
           <div class="space-y-2">
+            <div>
+              <div class="text-xs opacity-60 mb-1">{$_('logs.transportType')}</div>
+              <span class={chipClass()} title={log.transportType === null ? $_('logs.transportTypeUnrecorded') : undefined}>{transportTypeLabel(log.transportType)}</span>
+            </div>
             {#if log.transformedPath && log.transformedPath !== log.path}
               <!-- 显示原始路径和转换后的路径 -->
               <div>

@@ -15,6 +15,7 @@ export type AdmissionWorker = {
 };
 
 export type AdmissionSet = {
+  readonly websocket_max_connections: number | null;
   /** PID is deliberately absent: identity/fencing uses generation, instance, boot nonce and slot. */
   readonly master_generation: string;
   readonly admission_sequence: number;
@@ -26,7 +27,7 @@ export type AdmissionSet = {
 
 const SET_FIELDS = new Set([
   'master_generation', 'admission_sequence', 'revision', 'content_hash',
-  'plugin_catalog_hash', 'workers',
+  'plugin_catalog_hash', 'workers', 'websocket_max_connections',
 ]);
 const WORKER_FIELDS = new Set([
   'master_generation', 'worker_instance_id', 'boot_nonce', 'worker_slot', 'private_port',
@@ -79,6 +80,9 @@ export function parseAdmissionSet(input: unknown): AdmissionSet {
   }
   const root = plainObject(snapshot);
   exact(root, SET_FIELDS);
+  const maxConnections = root.websocket_max_connections;
+  if (maxConnections !== null && (!Number.isSafeInteger(maxConnections)
+    || (maxConnections as number) < 1 || (maxConnections as number) > 0x7fffffff)) fail('WebSocket connection limit is invalid');
   const generation = uuid(root.master_generation);
   const workersValue = root.workers;
   if (!Array.isArray(workersValue) || workersValue.length === 0) fail('workers must be non-empty');
@@ -113,6 +117,7 @@ export function parseAdmissionSet(input: unknown): AdmissionSet {
     fail('worker slots must be complete and sorted', 'duplicate_slot');
   }
   return Object.freeze({
+    websocket_max_connections: maxConnections as number | null,
     master_generation: generation,
     admission_sequence: integer(root.admission_sequence, 1),
     revision: integer(root.revision, 1),
