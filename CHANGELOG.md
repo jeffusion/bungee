@@ -1,3 +1,10 @@
+# [6.9.0](https://github.com/jeffusion/bungee/compare/v6.8.2...v6.9.0) (2026-10-29)
+
+
+### Features
+
+* **websocket:** configure connection limits and expose request transport ([2e5feac](https://github.com/jeffusion/bungee/commit/2e5feac155867926dcd6e56d2cf6c76a60b9b56c))
+
 ## [6.8.2](https://github.com/jeffusion/bungee/compare/v6.8.1...v6.8.2) (2026-10-28)
 
 
