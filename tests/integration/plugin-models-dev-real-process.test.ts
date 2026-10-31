@@ -160,6 +160,7 @@ describe('models-dev catalog real-process integration (explicit chain activation
       // metered best-effort with an UNKNOWN price.
       const db = new Database(pluginStateFixturePath(currentFixture.configDbPath));
       try {
+        db.run('PRAGMA busy_timeout = 5000');
         const settings = new SQLitePluginStorage(db, 'models-dev');
         await settings.set(MODELS_DEV_SETTINGS_KEY, { autoRefresh: false, intervalHours: 24, timeoutSeconds: 30 });
       } finally { db.close(); }
@@ -395,7 +396,10 @@ async function getClientModels(management: string, fixture: GatewayFixture, sear
 async function postChat(proxy: string, fixture: GatewayFixture, model: string): Promise<void> {
   const attempts = (): number => {
     const database = new Database(fixture.accessDbPath, { readonly: true });
-    try { return database.query<{count:number}, []>('SELECT COUNT(*) AS count FROM token_stats_attempts').get()!.count; }
+    try {
+      database.run('PRAGMA busy_timeout = 5000');
+      return database.query<{count:number}, []>('SELECT COUNT(*) AS count FROM token_stats_attempts').get()!.count;
+    }
     finally { database.close(); }
   };
   const before = attempts();

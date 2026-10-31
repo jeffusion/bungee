@@ -599,13 +599,11 @@ describe('proxy credential regressions', () => {
       fetchCalls++;
       return new Promise<Response>((_resolve, reject) => {
         init?.signal?.addEventListener('abort', () => reject('private client reason'), { once: true });
+        controller.abort('private client reason');
       });
     }) as unknown as typeof fetch;
 
-    const pending = run({ signal: controller.signal });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    controller.abort('private client reason');
-    const error = await pending.catch((caught: unknown) => caught);
+    const error = await run({ signal: controller.signal }).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toBe('Request cancelled');
     expect((error as Error).message).not.toContain('private client reason');
