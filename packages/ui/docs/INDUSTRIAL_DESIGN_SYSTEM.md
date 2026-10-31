@@ -73,8 +73,17 @@ Always use the named token, never a hex literal.
   blue, purple, etc. as a second "brand colour".
 - Status colours are *only* for status. Don't paint a button red because
   it looks cool; red means failure.
-- For chart series prefer `nexus → sky → emerald → amber → red` in that
-  order of priority.
+- Categorical bar chart series use a fixed, data-only palette based on the
+  design-page signals and existing chart families, in dataset order:
+  `#f97316 → #38bdf8 → #8b5cf6 → #f472b6 → #34d399 → #f6c445 → #2563eb →
+  #a3e635 → #ff8f7a`, cycling after the ninth series. Remove the near
+  sky/cyan and emerald/teal duplicates, and separate violet/rose and
+  sky/deep-blue by lightness, so nine series stay distinct.
+  Keep them bright on carbon; these are data channels, not UI accents, and
+  categorical charts are the exception that may reuse a status hue. Do not
+  use alarm reds such as `#ef4444` / `#ff0000` for ordinary categories.
+  Unknown/other series stay neutral (`#71717a` / `#373d4a`). The design
+  page's COLOR SYSTEM exposes this shared `BarChart` palette.
 
 ### 2.2 Typography
 

@@ -2,19 +2,17 @@
   import { isLoading, locale } from 'svelte-i18n';
   import { getPluginText } from '$utils/plugin-i18n';
   import * as Tooltip from '$components/ui/tooltip';
-  import { Bar, ChartJS, BarElement, CategoryScale, LinearScale, Tooltip as ChartTooltip, _, formatCompactNumber, type ChartData, type ChartOptions } from '@bungee/plugin-sdk';
-  import type { Plugin, TooltipModel } from 'chart.js';
-  import { buildTimeSeries, formatTokenCount, modelColorIndex, OTHER_MODEL, timeAxisLabels, type TimeBucket, type TokenStatsRange } from './labels';
+  import { BarChart, _, barSeriesColor, formatCompactNumber, type ChartData, type ChartOptions } from '@bungee/plugin-sdk';
+  import type { Chart, Plugin, TooltipModel } from 'chart.js';
+  import { buildTimeSeries, formatTokenCount, OTHER_MODEL, timeAxisLabels, type TimeBucket, type TokenStatsRange } from './labels';
   import type { StatsResponse } from './stats-resource';
-
-  ChartJS.register(BarElement, CategoryScale, LinearScale, ChartTooltip);
   let { stats, range, refreshedAt, pluginName = 'token-stats', presentation = 'dashboard' }:
     { stats: StatsResponse; range: TokenStatsRange; refreshedAt: number; pluginName?: string; presentation?: 'dashboard' | 'page' } = $props();
   const pageChart = $derived(presentation === 'page');
   const t = (key: string) => $isLoading ? '' : getPluginText(key, pluginName, (id, options) => $_(id, options));
   const display = formatCompactNumber;
   const fullCount = (value: unknown) => formatTokenCount(value, $locale ?? undefined);
-  let chart = $state.raw<ChartJS<'bar'> | null>(null);
+  let chart = $state.raw<Chart<'bar'> | null>(null);
   let bucketTriggers: HTMLDivElement | undefined = $state();
   const trend = $derived(buildTimeSeries(stats.data, range, stats.bucketMs ?? 0, stats.asOfMs ?? refreshedAt, stats.bucketStarts));
   const dayBuckets = $derived(['7d', '30d', 'week', 'month'].includes(range));
@@ -34,15 +32,20 @@
     : Math.max(1, Math.ceil((trend.buckets.length - 1) / Math.max(1, Math.floor(plotWidth / (dayBuckets ? 56 : 110)) - 1))));
   const showTick = (index: number) => index === 0 || index === trend.buckets.length - 1
     || index % tickStep === 0 && index <= trend.buckets.length - 1 - tickStep;
-  const tones = ['bg-nexus-500', 'bg-sky-400', 'bg-emerald-400', 'bg-amber-400', 'bg-red-400'] as const;
-  // Match the original Tailwind palette, including carbon-500 and zinc-500.
-  const palette = ['#f97316', '#38bdf8', '#34d399', '#fbbf24', '#f87171'];
+  const OTHER_COLOR = '#373d4a';
+  const UNKNOWN_COLOR = '#71717a';
+  const modelColors = $derived(new Map(trend.models.map((id, index) => [id,
+    barSeriesColor(index, id === OTHER_MODEL ? OTHER_COLOR : id === 'unknown' ? UNKNOWN_COLOR : undefined)])));
+  const seriesColor = (id: string) =>
+    modelColors.get(id) ?? modelColors.get(OTHER_MODEL) ?? OTHER_COLOR;
   const data: ChartData<'bar'> = $derived({
     labels: trend.buckets.map(bucket => bucket.startMs),
     datasets: trend.models.map(id => ({
       label: modelLabel(id),
       data: trend.buckets.map(bucket => bucket.parts.find(part => part.id === id)?.tokens ?? 0),
-      backgroundColor: id === OTHER_MODEL ? '#373d4a' : id === 'unknown' ? '#71717a' : palette[modelColorIndex(id)],
+      ...(id === OTHER_MODEL ? { backgroundColor: OTHER_COLOR }
+        : id === 'unknown' ? { backgroundColor: UNKNOWN_COLOR }
+        : {}),
       borderWidth: 0, borderRadius: 0, inflateAmount: 0,
     })),
   });
@@ -81,9 +84,6 @@
   $effect(() => { if (selectedBucket) tooltipBucket = selectedBucket; });
   function modelLabel(id: string): string {
     return id === OTHER_MODEL ? t('ui.otherModels') : id === 'unknown' ? t('ui.unknownModel') : id;
-  }
-  function modelTone(id: string): string {
-    return id === OTHER_MODEL ? 'bg-carbon-500' : id === 'unknown' ? 'bg-zinc-500' : tones[modelColorIndex(id)];
   }
   function timeLabel(startMs: number, full = false): string {
     return new Intl.DateTimeFormat($locale ?? undefined, {
@@ -154,7 +154,7 @@
     <div class="flex min-h-0 min-w-0 flex-1 flex-col">
       <div class="relative min-h-0 flex-1 border-b border-carbon-500">
         <div class="pointer-events-none absolute inset-y-0 z-10 {pageChart ? 'inset-x-0' : '-left-[6px] -right-[6px]'}">
-          <Bar {data} {options} plugins={chartPlugins} bind:chart aria-hidden="true" />
+          <BarChart {data} {options} plugins={chartPlugins} bind:chart aria-hidden="true" />
         </div>
         <div class="h-full {pageChart ? 'grid' : 'flex items-end gap-[12px]'}" style:grid-template-columns={pageChart ? `repeat(${trend.buckets.length}, minmax(0, 1fr))` : undefined}
           bind:this={bucketTriggers} role="group" aria-label={t('ui.timeChart')}>
@@ -221,7 +221,7 @@
         {#each tooltipBucket.details as part (part.id)}
           <div class="flex items-start justify-between gap-3">
             <span class="flex min-w-0 items-start gap-1.5">
-              <span class="mt-1 h-2 w-2 shrink-0 {modelTone(part.id)}" aria-hidden="true"></span>
+              <span class="mt-1 h-2 w-2 shrink-0" style:background={seriesColor(part.id)} aria-hidden="true"></span>
               <span class="break-all">{modelLabel(part.id)}</span>
             </span>
             <strong class="shrink-0 font-normal text-zinc-50" title={fullCount(part.tokens)} aria-label={fullCount(part.tokens)}>{display(part.tokens)}</strong>
@@ -235,7 +235,7 @@
   <div class="mt-2 flex shrink-0 flex-wrap gap-x-3 gap-y-1 font-mono {pageChart ? 'text-xs' : 'text-[10px]'} text-zinc-300" data-testid="token-stats-chart-legend">
     {#each trend.models as id (id)}
       <span class="inline-flex min-w-0 items-center gap-1" title={modelLabel(id)}>
-        <span class="h-2 w-2 shrink-0 {modelTone(id)}" aria-hidden="true"></span>
+        <span class="h-2 w-2 shrink-0" style:background={seriesColor(id)} aria-hidden="true"></span>
         <span class={pageChart ? 'min-w-0 break-all' : 'max-w-28 truncate'}>{modelLabel(id)}</span>
       </span>
     {/each}
