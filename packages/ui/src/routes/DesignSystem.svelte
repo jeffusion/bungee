@@ -43,6 +43,7 @@ import {
   import ConfirmDialog from '$components/shell/ConfirmDialog.svelte';
   import PluginIcon from '$components/shell/PluginIcon.svelte';
   import { toast } from '$stores/toast';
+  import { BAR_PALETTE } from '$components/charts/bar-colors';
 
   // Toggle demo state
   let toggleA = $state(true);
@@ -279,6 +280,21 @@ const bSelectOptions = [
         </div>
       </PanelCard>
     </div>
+
+    <PanelCard title="Chart Series" tag="CATEGORICAL">
+      <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+        {#each BAR_PALETTE as value, index}
+          <div class="flex items-center gap-3 border border-carbon-600">
+            <span class="h-10 w-12 border-r border-carbon-600" style:background-color={value}></span>
+            <div class="flex-1 px-2">
+              <div class="font-mono text-xs text-zinc-200">series-{String(index + 1).padStart(2, '0')}</div>
+              <div class="font-mono text-[10px] uppercase tracking-command text-zinc-500">DATASET ORDER</div>
+            </div>
+            <span class="px-3 font-mono text-[10px] text-zinc-500">{value}</span>
+          </div>
+        {/each}
+      </div>
+    </PanelCard>
   </section>
 
   <!-- ===== 3. Typography & Spacing ===================================== -->

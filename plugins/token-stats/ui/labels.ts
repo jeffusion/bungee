@@ -121,13 +121,6 @@ export function rankedModels(rows: readonly ModelUsageRow[]): RankedModel[] {
   }).sort((a, b) => (b.tokens ?? -1) - (a.tokens ?? -1) || a.id.localeCompare(b.id));
 }
 
-/** Stable across tabs and ranges; the actual palette is declared in the widget for Tailwind's scanner. */
-export function modelColorIndex(id: string): number {
-  let hash = 2_166_136_261;
-  for (let i = 0; i < id.length; i++) hash = Math.imul(hash ^ id.charCodeAt(i), 16_777_619);
-  return (hash >>> 0) % 5;
-}
-
 /** Only counted tokens make a bar; empty buckets have no visible segments. */
 export function buildTimeSeries(rows: readonly ModelUsageRow[], range: TokenStatsRange, bucketMs: number, nowMs: number, bucketStarts?: readonly number[]): TimeSeries {
   if (!Number.isSafeInteger(bucketMs) || bucketMs <= 0) return { buckets: [], models: [], maxTokens: 0 };

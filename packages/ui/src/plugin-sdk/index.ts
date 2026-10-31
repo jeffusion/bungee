@@ -45,7 +45,9 @@ export type { ManagementLoginContext } from './management-login';
 export { isManagementLoginStaleError } from './management-login';
 
 // Svelte 组件库
-export { Bar, Line, Pie, Doughnut } from 'svelte-chartjs';
+export { default as BarChart } from '$components/charts/BarChart.svelte';
+export { BAR_PALETTE, barSeriesColor } from '$components/charts/bar-colors';
+export { Line, Pie, Doughnut } from 'svelte-chartjs';
 export {
   Chart as ChartJS,
   BarElement,
