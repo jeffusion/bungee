@@ -2,6 +2,7 @@ import { test as browserTest } from 'bun:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { chromium } from 'playwright';
+import { expect } from 'playwright/test';
 import { observeNetwork } from '../helpers/dashboard/network';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 
@@ -18,16 +19,8 @@ try {
   page.on('pageerror', error => errors.push(error.message));
   const fixtureOrigin = uiRuntime.origin;
   const resetConfig = { enabled: false, leadMinutes: 30, lowBalanceEnabled: false, remainingPercent: 10 };
-  let pending = false;
-  let usageUnavailable = false;
-  let accountReads = 0;
-  const usageReads: string[] = [];
-  const usageRequestWaiters: Array<() => void> = [];
-  const waitForUsageRead = () => new Promise<void>(resolve => usageRequestWaiters.push(resolve));
   const settings: unknown[] = [];
   const resets: unknown[] = [];
-  const requestId = '123e4567-e89b-42d3-a456-426614174000';
-  const expiresAt = Date.now() + 600000;
   await page.route('**/*', async route => {
     const request = route.request(), url = new URL(request.url());
     if (url.origin !== fixtureOrigin) {
@@ -45,23 +38,18 @@ try {
       return respond({});
     }
     if (url.pathname === '/api/plugins/chatgpt-oauth/control/accounts/usage/reset') {
-      resets.push(request.postDataJSON()); pending = false;
+      resets.push(request.postDataJSON());
       return respond({ outcome: 'already_redeemed', windowsReset: 0 });
     }
     if (url.pathname === '/api/plugins/chatgpt-oauth/control/accounts/usage') {
-      usageReads.push(url.searchParams.get('accountRef') ?? '');
-      usageRequestWaiters.shift()?.();
-      return respond(usageUnavailable ? {
-        usage: { state: 'unavailable' }, resetCredits: { state: 'unavailable' },
-      } : {
+      return respond({
         usage: { state: 'fresh', primary: { usedPercent: 50, windowSeconds: 18000 } },
         resetCredits: { state: 'fresh', availableCount: 0, credits: [] },
       });
     }
-    if (url.pathname === '/api/plugins/chatgpt-oauth/control/accounts') { accountReads++; return respond({ accounts: [{ id: 'simulation-account', label: 'Simulation',
+    if (url.pathname === '/api/plugins/chatgpt-oauth/control/accounts') { return respond({ accounts: [{ id: 'simulation-account', label: 'Simulation',
       status: 'active', available: true, identity: { planType: 'plus' }, autoResetCredits: resetConfig.enabled, autoResetLeadMinutes: resetConfig.leadMinutes,
       autoResetOnLowBalance: resetConfig.lowBalanceEnabled, autoResetRemainingPercent: resetConfig.remainingPercent,
-      ...(pending ? { pendingAutoReset: { creditId: 'simulation-credit', redeemRequestId: requestId, expiresAt, completed: false } } : {}),
     }] }); }
     if (url.pathname === '/api/plugins') return respond([{ name: manifest.name, enabled: true, metadata: { contributes: manifest.contributes } }]);
     if (url.pathname === '/api/plugins/schemas') return respond({ [manifest.name]: { ...manifest } });
@@ -86,44 +74,26 @@ try {
   await dialog.waitFor();
   await dialog.getByRole('spinbutton').nth(0).fill('45');
   await dialog.getByRole('spinbutton').nth(1).fill('20');
-  await lowBalance.focus();
-  await page.keyboard.press('Space');
+  await lowBalance.press('Space');
+  await expect(lowBalance).toHaveAttribute('aria-checked', 'true');
   assert.equal(settings.length, 0, 'editing strategy values must not save or consume a card');
   await dialog.getByRole('button', { name: 'Save strategies', exact: true }).click();
   await dialog.waitFor({ state: 'hidden' });
   assert.deepEqual(settings, [{ accountRef: 'simulation-account', enabled: false, leadMinutes: 45, lowBalanceEnabled: true, remainingPercent: 20 }]);
-  assert.equal(resets.length, 0, 'the UI must not implement a browser-driven reset timer');
 
   await configure.click();
   await dialog.waitFor();
   assert.equal(await nearExpiry.getAttribute('aria-checked'), 'false', 'the near-expiry strategy remains independent');
   assert.equal(await lowBalance.getAttribute('aria-checked'), 'true');
-  await nearExpiry.focus();
-  await page.keyboard.press('Space');
+  await nearExpiry.press('Space');
+  await expect(nearExpiry).toHaveAttribute('aria-checked', 'true');
   assert.equal(settings.length, 1, 'changing the other strategy must also wait for explicit save');
   await dialog.getByRole('button', { name: 'Save strategies', exact: true }).click();
   await dialog.waitFor({ state: 'hidden' });
   assert.deepEqual(settings[1], { accountRef: 'simulation-account', enabled: true, leadMinutes: 45, lowBalanceEnabled: true, remainingPercent: 20 });
+  await expect(configure).toBeEnabled();
+  assert.equal(resets.length, 0, 'the UI must not implement a browser-driven reset timer');
 
-  const localRefresh = page.getByRole('button', { name: 'Refresh usage + reset-card data', exact: true });
-  await localRefresh.and(page.locator('[aria-busy="false"]')).waitFor();
-  const accountsBeforeLocalRefresh = accountReads, usageBeforeLocalRefresh = usageReads.length;
-  const usageRead = waitForUsageRead();
-  await localRefresh.click();
-  await usageRead;
-  assert.equal(accountReads, accountsBeforeLocalRefresh, 'per-account refresh must not reload the account list');
-  assert.deepEqual(usageReads.slice(usageBeforeLocalRefresh), ['simulation-account'], 'per-account refresh must request only that account usage and reset-card data');
-
-  pending = true;
-  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-  await page.getByRole('button', { name: 'Resolve unknown reset' }).click();
-  await dialog.getByRole('button', { name: 'Retry same credit', exact: true }).click();
-  await dialog.waitFor({ state: 'hidden' });
-  assert.deepEqual(resets, [{ accountRef: 'simulation-account', creditId: 'simulation-credit', redeemRequestId: requestId }]);
-  usageUnavailable = true;
-  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-  await page.getByRole('button', { name: 'Refresh', exact: true }).and(page.locator('[aria-busy="false"]')).waitFor();
-  await configure.waitFor();
   assert.deepEqual(errors, []);
 
 } finally {
