@@ -153,6 +153,43 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
           const unsupported = Array.isArray(body.messages) && body.messages.find((message: any) => !['system', 'user', 'assistant', 'tool'].includes(message.role));
           if (unsupported) return Response.json({error: 'fixture_deepseek_unsupported_role', role: unsupported.role}, {status: 422});
         }
+        // Observed legal Chat stream: text, then tool calls, then more text. The follow-up
+        // rejects a tool result that does not directly follow its assistant tool_calls.
+        if (path.endsWith('/chat/completions') && JSON.stringify(body.messages).includes('fixture-chat-text-before-tool')) {
+          const messages: any[] = body.messages;
+          const textOf = (content: any): string => typeof content === 'string' ? content
+            : Array.isArray(content) ? content.map((part: any) => part.text ?? '').join('') : '';
+          const toolMessage = messages.find((message: any) => message.role === 'tool');
+          if (toolMessage) {
+            const index = messages.indexOf(toolMessage);
+            const assistant = messages[index - 1];
+            const paired = assistant?.role === 'assistant' && assistant.tool_calls?.some((call: any) => call.id === 'fixture_image_call');
+            if (!paired || toolMessage.tool_call_id !== 'fixture_image_call' || !textOf(assistant.content).includes("I'll start by retrieving the image."))
+              return Response.json({error: 'fixture_tool_result_not_adjacent'}, {status: 400});
+            const projected = messages.slice(index + 1).find((message: any) => message.role === 'user'
+              && Array.isArray(message.content) && message.content.some((part: any) => part.type === 'image_url'));
+            if (!projected) return Response.json({error: 'fixture_projected_image_missing'}, {status: 400});
+            return body.stream ? sse(chatEvents('image follow-up answer')) : Response.json({
+              id: `chat-image-${calls.length}`, object: 'chat.completion', model: body.model,
+              choices: [{index: 0, message: {role: 'assistant', content: 'image follow-up answer'}, finish_reason: 'stop', provider_specific_fields: {}}],
+              usage: {prompt_tokens: 4, completion_tokens: 2, total_tokens: 6},
+            });
+          }
+          const declared = (body.tools ?? []).map((tool: any) => tool.function).find((tool: any) => tool?.name);
+          if (!declared) return Response.json({error: 'fixture_tool_declaration_missing'}, {status: 400});
+          const call = {index: 0, id: 'fixture_image_call', type: 'function', function: {name: declared.name, arguments: '{"q":"image"}'}};
+          return body.stream ? sse([
+            {choices: [{index: 0, delta: {content: "I'll "}, finish_reason: null}]},
+            {choices: [{index: 0, delta: {tool_calls: [call]}, finish_reason: null}]},
+            {choices: [{index: 0, delta: {content: 'start by retrieving the image.'}, finish_reason: 'tool_calls'}]},
+            {choices: [], usage: {prompt_tokens: 4, completion_tokens: 2, total_tokens: 6}},
+          ]) : Response.json({
+            id: `chat-image-${calls.length}`, object: 'chat.completion', model: body.model,
+            choices: [{index: 0, message: {role: 'assistant', content: "I'll start by retrieving the image.", tool_calls: [call]},
+              finish_reason: 'tool_calls', provider_specific_fields: {}}],
+            usage: {prompt_tokens: 4, completion_tokens: 2, total_tokens: 6},
+          });
+        }
         if (body.tools?.[0]?.name === 'relay_external_agent_payload') {
           if (path !== '/v1/responses') return Response.json({error:'unsupported_relay_path'}, {status:404});
           expect(body.tools).toHaveLength(1);
@@ -755,6 +792,146 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     console.info(`codex_router_catalog_effort ${JSON.stringify({model: 'org/deepseek-flash', levels: ['low', 'high', 'max'], defaultEffort: null,
       protocols: ['chat_completions', 'anthropic_messages'], unmappedEffortRejected: true,
       nonstreamUsage: nonstream.body.usage, streamUsage: completed[0]!.response.usage})}`);
+  }, 60000);
+
+  test('built Chat tool images keep parallel pairing across HTTP JSON, SSE, WS and previous_response_id replay', async () => {
+    // Existing committed PNG bytes: the fixture upstream is not a real provider.
+    const png = async (name: string) => `data:image/png;base64,${(await readFile(join(import.meta.dir, '../../packages/ui/public', name))).toString('base64')}`;
+    const [imageA, imageB] = [await png('favicon-16x16.png'), await png('favicon-32x32.png')];
+    expect(Buffer.from(imageA.split(',')[1]!, 'base64').subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    // Real parallel batch shape: every call first, then every tool result.
+    const request = {model: 'org/deepseek-flash', tools, input: [
+      {role: 'user', content: 'inspect the tool images'},
+      {type: 'function_call', call_id: 'image_call_a', name: 'lookup', arguments: '{}'},
+      {type: 'function_call', call_id: 'image_call_b', name: 'lookup', arguments: '{}'},
+      {type: 'function_call_output', call_id: 'image_call_a', output: [
+        {type: 'input_text', text: 'first tool text'}, {type: 'input_image', image_url: imageA, detail: 'high'}]},
+      {type: 'function_call_output', call_id: 'image_call_b', output: [{type: 'input_image', image_url: imageB, detail: 'low'}]},
+    ]};
+    const textOf = (content: unknown) => typeof content === 'string' ? content
+      : Array.isArray(content) ? content.map((part: any) => part.text ?? '').join(' ') : '';
+    const assertProjection = (call: Call) => {
+      expect(call.path).toBe('/v1/chat/completions');
+      const messages: any[] = call.body.messages;
+      const toolMessages = messages.filter((message: any) => message.role === 'tool');
+      expect(toolMessages.map((message: any) => message.tool_call_id)).toEqual(['image_call_a', 'image_call_b']);
+      expect(messages.flatMap((message: any) => message.tool_calls ?? []).map((tool: any) => tool.id)).toEqual(['image_call_a', 'image_call_b']);
+      // Text stays on the tool message; a pure-image result points at the following user message.
+      expect(textOf(toolMessages[0].content)).toContain('first tool text');
+      const pureText = textOf(toolMessages[1].content).trim();
+      expect(pureText.length).toBeGreaterThan(0);
+      expect(pureText).not.toContain('base64');
+      const isImageMessage = (message: any) => message.role === 'user' && Array.isArray(message.content)
+        && message.content.some((part: any) => part.type === 'image_url');
+      const imageMessages = messages.filter(isImageMessage);
+      expect(imageMessages).toHaveLength(2);
+      const images = imageMessages.flatMap((message: any) => message.content.filter((part: any) => part.type === 'image_url'));
+      expect(images.map((part: any) => part.image_url.url)).toEqual([imageA, imageB]);
+      expect(images.map((part: any) => part.image_url.detail)).toEqual(['high', 'low']);
+      // The whole batch's tool results precede every projected image message.
+      expect(messages.findIndex(isImageMessage)).toBeGreaterThan(messages.map((message: any) => message.role).lastIndexOf('tool'));
+      // Each image message names its own source call and never its sibling.
+      expect(textOf(imageMessages[0].content)).toContain('image_call_a');
+      expect(JSON.stringify(imageMessages[0].content)).not.toContain('image_call_b');
+      expect(textOf(imageMessages[1].content)).toContain('image_call_b');
+      expect(JSON.stringify(imageMessages[1].content)).not.toContain('image_call_a');
+      // Canonical history replay regenerates each projection once instead of accumulating it.
+      expect(JSON.stringify(messages).split(imageA).length - 1).toBe(1);
+      expect(JSON.stringify(messages).split(imageB).length - 1).toBe(1);
+    };
+    const start = calls.length;
+    const json = await post(request); expect(json.status).toBe(200); assertProjection(calls.at(-1)!);
+    const streamed = await fetch(`${proxy}/codex/responses`, {method: 'POST', headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
+      body: JSON.stringify({...request, stream: true}), signal: AbortSignal.timeout(20000)});
+    expect(streamed.status).toBe(200); expect(await streamed.text()).toContain('response.completed');
+    assertProjection(calls.at(-1)!);
+    const socket = await openSocket();
+    try {
+      const events = await socket.create(request); expect(events.at(-1).type).toBe('response.completed');
+      assertProjection(calls.at(-1)!);
+    } finally {await socket.close();}
+    const continued = await post({model: 'org/deepseek-flash', previous_response_id: json.body.id, input: [{role: 'user', content: 'after the images'}]});
+    expect(continued.status).toBe(200); assertProjection(calls.at(-1)!);
+    expect(JSON.stringify(calls.at(-1)!.body.messages)).toContain('after the images');
+    expect(calls.slice(start)).toHaveLength(4);
+    console.info(`codex_router_chat_tool_images ${JSON.stringify({inbound: ['JSON', 'SSE', 'WS'], parallelCalls: 2,
+      imageBytes: [imageA.length, imageB.length], details: ['high', 'low'], continuationRequestId: calls.at(-1)!.requestId})}`);
+  }, 60000);
+
+  test('built Chat replay keeps interleaved assistant text and tool calls adjacent before the projected tool image', async () => {
+    const image = `data:image/png;base64,${(await readFile(join(import.meta.dir, '../../packages/ui/public/favicon-32x32.png'))).toString('base64')}`;
+    const marker = 'fixture-chat-text-before-tool';
+    const prompt = 'A tool will return an image; keep the whole answer.';
+    const output = [{type: 'function_call_output', call_id: 'fixture_image_call', output: [
+      {type: 'input_text', text: 'tool image text'}, {type: 'input_image', image_url: image, detail: 'high'}]}];
+    const textOf = (content: unknown) => typeof content === 'string' ? content
+      : Array.isArray(content) ? content.map((part: any) => part.text ?? '').join('') : '';
+    const totalStart = calls.length;
+    for (const inbound of ['sse', 'ws'] as const) {
+      const start = calls.length;
+      let responseId = '';
+      if (inbound === 'sse') {
+        const result = await fetch(`${proxy}/codex/responses`, {method: 'POST', headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
+          body: JSON.stringify({model: 'org/deepseek-flash', input: `${marker}: ${prompt}`, tools, stream: true}), signal: AbortSignal.timeout(20000)});
+        expect(result.status).toBe(200);
+        const events = (await result.text()).split('\n').filter(line => line.startsWith('data:'))
+          .map(line => line.slice(5).trim()).filter(data => data && data !== '[DONE]').map(data => JSON.parse(data));
+        const completed = events.find(event => event.type === 'response.completed');
+        expect(completed.response.output.map((item: any) => item.type)).toEqual(['message', 'function_call', 'message']);
+        expect(completed.response.output[0].content.map((part: any) => part.text).join('')).toBe("I'll ");
+        expect(completed.response.output[2].content.map((part: any) => part.text).join('')).toBe('start by retrieving the image.');
+        responseId = completed.response.id;
+      } else {
+        const socket = await openSocket();
+        try {
+          const events = await socket.create({model: 'org/deepseek-flash', input: `${marker}: ${prompt}`, tools});
+          const completed = events.find(event => event.type === 'response.completed');
+          expect(completed.response.output.map((item: any) => item.type)).toEqual(['message', 'function_call', 'message']);
+          responseId = completed.response.id;
+        } finally {await socket.close();}
+      }
+      expect(calls.slice(start)).toHaveLength(1);
+      const origin = calls[start]!;
+      expect(origin.path).toBe('/v1/chat/completions');
+      expect(origin.body.stream).toBe(true);
+      let replay: Call | undefined;
+      // The shared canonical history crosses the real worker RPC instead of being sent by the client.
+      for (let attempt = 0; attempt < 24; attempt++) {
+        const prior = calls.length;
+        const result = await post({model: 'org/deepseek-flash', previous_response_id: responseId, input: output});
+        expect(result.status).toBe(200);
+        expect(calls.length).toBe(prior + 1);
+        replay = calls.at(-1)!;
+        if (replay.pid !== origin.pid) break;
+      }
+      expect(replay?.pid).not.toBe(origin.pid);
+      expect(replay!.path).toBe('/v1/chat/completions');
+      const messages: any[] = replay.body.messages;
+      expect(JSON.stringify(messages)).toContain(marker);
+      const toolIndex = messages.findIndex((message: any) => message.role === 'tool');
+      expect(toolIndex).toBeGreaterThan(0);
+      const assistant = messages[toolIndex - 1];
+      expect(assistant.role).toBe('assistant');
+      expect(assistant.tool_calls.map((call: any) => call.id)).toEqual(['fixture_image_call']);
+      expect(textOf(assistant.content)).toBe("I'll start by retrieving the image.");
+      expect(messages[toolIndex]).toMatchObject({tool_call_id: 'fixture_image_call', content: [{type: 'text', text: 'tool image text'}]});
+      const projection = messages.findIndex((message: any, index: number) => index > toolIndex && message.role === 'user'
+        && Array.isArray(message.content) && message.content.some((part: any) => part.type === 'image_url'));
+      expect(projection).toBeGreaterThan(toolIndex);
+      expect(JSON.stringify(messages[projection].content)).toContain('fixture_image_call');
+      expect(messages[projection].content.find((part: any) => part.type === 'image_url')).toEqual({type: 'image_url', image_url: {url: image, detail: 'high'}});
+      expect(messages.filter((message: any) => message.role === 'user' && Array.isArray(message.content)
+        && message.content.some((part: any) => part.type === 'image_url'))).toHaveLength(1);
+      const serialized = JSON.stringify(messages);
+      expect(serialized.split(image).length - 1).toBe(1);
+      expect(messages.filter((message: any) => message.role === 'assistant' && textOf(message.content).includes("I'll "))).toHaveLength(1);
+    }
+    // Non-stream Chat JSON carrying the observed empty choice metadata and positional tool index.
+    const json = await post({model: 'org/deepseek-flash', input: `${marker}: ${prompt}`, tools});
+    expect(json.status).toBe(200);
+    expect(json.body.output).toContainEqual(expect.objectContaining({type: 'function_call', call_id: 'fixture_image_call'}));
+    console.info(`codex_router_chat_text_tool_text ${JSON.stringify({inbound: ['SSE', 'WS'], replayedAcrossWorker: true,
+      assistantText: "I'll start by retrieving the image.", toolCallId: 'fixture_image_call', upstreamCalls: calls.length - totalStart})}`);
   }, 60000);
 
   async function openSocket(credential = token): Promise<Socket> {

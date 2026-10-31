@@ -47,14 +47,21 @@ export function validateProviderResponse(raw: unknown, protocol: LLMProtocol): J
     fields(b, ['id', 'object', 'created', 'model', 'choices', 'usage', 'system_fingerprint', 'service_tier'], '', 'unsupported_response');
     for (const rawChoice of list(b.choices, 'choices')) {
       const c = record(rawChoice, 'choice');
-      fields(c, ['index', 'message', 'finish_reason', 'logprobs'], 'choices', 'unsupported_response');
+      fields(c, ['index', 'message', 'finish_reason', 'logprobs', 'provider_specific_fields'], 'choices', 'unsupported_response');
+      if (c.provider_specific_fields !== undefined) {
+        const providerFields = c.provider_specific_fields;
+        if (providerFields === null || typeof providerFields !== 'object' || Array.isArray(providerFields) || Object.keys(providerFields).length)
+          fail('unsupported_response', 'Only empty provider-specific choice fields are portable', 'choices.provider_specific_fields');
+      }
       if (c.logprobs != null)
         fail('unsupported_response', 'Log probabilities cannot cross protocols', 'choices.logprobs');
       const m = record(c.message, 'message');
       fields(m, ['role', 'content', 'refusal', 'reasoning_content', 'reasoning', 'tool_calls', 'annotations'], 'message', 'unsupported_content');
-      for (const rawCall of m.tool_calls === undefined ? [] : list(m.tool_calls, 'tool_calls')) {
+      for (const [callIndex, rawCall] of (m.tool_calls === undefined ? [] : list(m.tool_calls, 'tool_calls')).entries()) {
         const call = record(rawCall, 'call');
-        fields(call, ['id', 'type', 'function'], 'tool_calls', 'unsupported_tool');
+        fields(call, ['id', 'type', 'function', 'index'], 'tool_calls', 'unsupported_tool');
+        if (call.index !== undefined && integer(call.index, `tool_calls[${callIndex}].index`) !== callIndex)
+          fail('invalid_payload', 'Tool call index must match its array position', `tool_calls[${callIndex}].index`);
         fields(record(call.function, 'function'), ['name', 'arguments'], 'tool_calls.function', 'unsupported_tool');
       }
     }
