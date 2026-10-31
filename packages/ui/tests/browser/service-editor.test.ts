@@ -38,8 +38,11 @@ test('service navigation follows seven visible sections and respects field and d
       if(route.request().method() !== 'PUT') return route.fallback();
       submissions++;evidence.expectStatus(route,422);return route.fulfill({status:422,json:{errors:[{path:'service',message:'fixture rejection'}]}});
     });
+    const rejection = page.waitForResponse(response => response.request().method() === 'PUT'
+      && new URL(response.url()).pathname === '/api/config');
     await page.getByTestId('service-nav-identity').first().click();await name.focus();await name.press('ControlOrMeta+s');
     await expect.poll(()=>submissions).toBe(1);
+    await (await rejection).finished();
   });
 }, 60_000);
 
