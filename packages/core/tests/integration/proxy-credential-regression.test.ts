@@ -595,15 +595,18 @@ describe('proxy credential regressions', () => {
     installProvider();
     const controller = new AbortController();
     let fetchCalls = 0;
+    let fetchStarted!: () => void;
+    const started = new Promise<void>((resolve) => { fetchStarted = resolve; });
     global.fetch = ((_input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
       fetchCalls++;
       return new Promise<Response>((_resolve, reject) => {
         init?.signal?.addEventListener('abort', () => reject('private client reason'), { once: true });
+        fetchStarted();
       });
     }) as unknown as typeof fetch;
 
-    const pending = run({ signal: controller.signal });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    const pending = run({ route: { ...route, timeouts: { request_ms: 60_000 } }, signal: controller.signal });
+    await started;
     controller.abort('private client reason');
     const error = await pending.catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(Error);

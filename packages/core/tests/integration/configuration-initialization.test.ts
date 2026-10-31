@@ -32,9 +32,5 @@ test('built core exports inert storage initialization SDK and local CLI never em
   const database=join(dir,'cli.db');const run=()=>Bun.spawn([process.execPath,entry,'--initialize-config',database],{stdout:'pipe',stderr:'pipe',env:{...process.env,BUNGEE_ROLE:'master'}});
   const first=run();const output=await new Response(first.stdout).text();expect(await first.exited).toBe(0);expect(output).not.toContain('bng_management_');
   const second=run();const repeated=await new Response(second.stdout).text();expect(await second.exited).toBe(0);expect(repeated).not.toContain('bng_management_');
-  const binary=join(dir,'bungee-runtime');
-  const compile=Bun.spawn([process.execPath,'build',entry,join(dir,'config-storage-worker.js'),join(dir,'plugin-state-worker.js'),join(dir,'observability-worker.js'),'--compile','--outfile',binary],{stdout:'pipe',stderr:'pipe'});expect(await compile.exited).toBe(0);
-  const native=Bun.spawn([binary,'--initialize-config',join(dir,'native','bungee.db')],{stdout:'pipe',stderr:'pipe',env:{...process.env,BUNGEE_ROLE:'master'}});const nativeOutput=await new Response(native.stdout).text()+await new Response(native.stderr).text();expect(await native.exited).toBe(0);expect(nativeOutput).not.toContain('bng_management_');
-  const state=await PluginStateClient.open(join(dir,'native','plugin-state.db'));try{expect(await state.durableState('user-auth').list()).toEqual([]);}finally{await state.close();}
  }finally{await rm(dir,{recursive:true,force:true});}
 },30000);

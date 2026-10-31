@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, it, expect } from 'bun:test';
+import { afterEach, beforeEach, describe, it, expect, spyOn } from 'bun:test';
 import { selectUpstream } from '../../src/worker/upstream/selector';
 import { cleanupRuntimeState, runtimeState, tryAcquireHalfOpenSlot, releaseHalfOpenSlot } from '../../src/worker/state/runtime-state';
 import type { EffectiveRouteConfig, RuntimeUpstream } from '../../src/worker/types';
@@ -111,29 +111,37 @@ describe('selectUpstream', () => {
   });
 
   it('should handle upstreams with default weight (100)', () => {
+    const withoutWeight = createUpstream({ target: 'http://server1:3000' });
+    delete (withoutWeight as { weight?: number }).weight;
+
     const upstreams: RuntimeUpstream[] = [
-      createUpstream({
-        target: 'http://server1:3000',
-        // No weight specified, should default to 100
-      }),
+      withoutWeight,
       createUpstream({
         target: 'http://server2:3000',
         weight: 100,
       })
     ];
 
-    const result = selectUpstream(upstreams);
-    expect(result).toBeDefined();
-    expect([upstreams[0], upstreams[1]]).toContain(result!);
+    expect(withoutWeight).not.toHaveProperty('weight');
+
+    // Omitted weight must behave as 100: 0.49 picks the first, 0.51 the second.
+    const random = spyOn(Math, 'random');
+    try {
+      random.mockReturnValue(0.49);
+      expect(selectUpstream(upstreams)).toBe(upstreams[0]);
+      random.mockReturnValue(0.51);
+      expect(selectUpstream(upstreams)).toBe(upstreams[1]);
+    } finally {
+      random.mockRestore();
+    }
   });
 
   it('should handle upstreams with default priority (1)', () => {
+    const withoutPriority = createUpstream({ target: 'http://server1:3000', weight: 100 });
+    delete (withoutPriority as { priority?: number }).priority;
+
     const upstreams: RuntimeUpstream[] = [
-      createUpstream({
-        target: 'http://server1:3000',
-        weight: 100
-        // No priority specified, should default to 1
-      }),
+      withoutPriority,
       createUpstream({
         target: 'http://server2:3000',
         weight: 100,
@@ -141,8 +149,18 @@ describe('selectUpstream', () => {
       })
     ];
 
-    const result = selectUpstream(upstreams);
-    expect(result).toBeDefined();
+    expect(withoutPriority).not.toHaveProperty('priority');
+
+    // Omitted priority must join the explicit priority-1 group: both peers are selectable.
+    const random = spyOn(Math, 'random');
+    try {
+      random.mockReturnValue(0.49);
+      expect(selectUpstream(upstreams)).toBe(upstreams[0]);
+      random.mockReturnValue(0.51);
+      expect(selectUpstream(upstreams)).toBe(upstreams[1]);
+    } finally {
+      random.mockRestore();
+    }
   });
 
   it('should skip priority groups with zero total weight', () => {
@@ -322,6 +340,8 @@ describe('consistent_hash (formerly stickySession)', () => {
         const result = selectUpstream(upstreams, route);
         expect(result?.status).not.toBe('UNHEALTHY');
       }
+
+      expect(selectUpstream([upstreams[1]], route)).toBeUndefined();
     });
 
     it('consistent_hash should NOT select UNHEALTHY upstream', () => {

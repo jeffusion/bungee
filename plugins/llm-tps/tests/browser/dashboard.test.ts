@@ -60,14 +60,10 @@ test('dashboard displays observed upstream hosts independently of endpoint confi
   await expect(page.getByTestId('tps-model-row')).toHaveCount(3);
   await expect(page.getByTestId('tps-model-row').first().getByText('/v1/chat/completions', { exact: true })).toBeVisible();
   assert(reads).toBe(1);
-  await page.setViewportSize({ width: 1304, height: 820 });
-  await page.screenshot({ path: '/tmp/bungee-tps-redesign-wide.png', fullPage: true, animations: 'disabled' });
   await page.setViewportSize({ width: 320, height: 820 });
   const navigation = page.locator('#header-menu-trigger');
-  await page.screenshot({ path: '/tmp/bungee-tps-redesign-narrow.png', fullPage: true, animations: 'disabled' });
   await navigation.click();
   await expect(page.getByTestId('header-menu').getByRole('link', { name: '用户管理', exact: true })).toBeVisible();
-  await page.screenshot({ path: '/tmp/bungee-tps-redesign-menu.png', animations: 'disabled' });
   await page.keyboard.press('Escape');
   await expect(page.getByTestId('header-menu')).toHaveCount(0);
   fixture.network.assertSettled(); assert(fixture.pageErrors).toEqual([]);

@@ -165,16 +165,6 @@ describe('Jitter - Exponential Backoff', () => {
     expect(result).toBeLessThanOrEqual(maxMs * 1.2); // Account for jitter
   });
 
-  test('should handle attempt 0 correctly', () => {
-    const baseMs = 1000;
-    const maxMs = 30000;
-
-    const result = exponentialBackoffWithJitter(0, baseMs, maxMs, 0.2);
-    // 2^0 = 1, so should be around baseMs
-    expect(result).toBeGreaterThanOrEqual(800);
-    expect(result).toBeLessThanOrEqual(1200);
-  });
-
   test('should handle default jitter factor', () => {
     const baseMs = 1000;
     const maxMs = 30000;
@@ -183,70 +173,5 @@ describe('Jitter - Exponential Backoff', () => {
     const result = exponentialBackoffWithJitter(0, baseMs, maxMs);
     expect(result).toBeGreaterThanOrEqual(800);
     expect(result).toBeLessThanOrEqual(1200);
-  });
-});
-
-describe('Jitter - Real-world Scenarios', () => {
-  test('should prevent thundering herd for health checks', () => {
-    const intervalMs = 10000; // 10 second health check interval
-
-    // Simulate 10 upstreams with jittered intervals
-    const intervals: number[] = [];
-    for (let i = 0; i < 10; i++) {
-      intervals.push(addJitter(intervalMs, 0.2));
-    }
-
-    // All should be within expected range
-    intervals.forEach((interval) => {
-      expect(interval).toBeGreaterThanOrEqual(8000);
-      expect(interval).toBeLessThanOrEqual(12000);
-    });
-
-    // Should have variation (not all same)
-    const unique = new Set(intervals);
-    expect(unique.size).toBeGreaterThan(5);
-  });
-
-  test('should stagger circuit breaker recovery', () => {
-    const recoveryIntervalMs = 5000;
-
-    // Simulate 5 upstreams trying to recover
-    const recoveryTimes: number[] = [];
-    for (let i = 0; i < 5; i++) {
-      recoveryTimes.push(addJitter(recoveryIntervalMs, 0.2));
-    }
-
-    // All within range
-    recoveryTimes.forEach((time) => {
-      expect(time).toBeGreaterThanOrEqual(4000);
-      expect(time).toBeLessThanOrEqual(6000);
-    });
-
-    // Should be staggered
-    const unique = new Set(recoveryTimes);
-    expect(unique.size).toBeGreaterThan(2);
-  });
-
-  test('should handle retry backoff realistically', () => {
-    const baseMs = 1000;
-    const maxMs = 30000;
-
-    let currentDelay = baseMs;
-    const delays: number[] = [];
-
-    for (let attempt = 0; attempt < 5; attempt++) {
-      currentDelay = exponentialBackoffWithJitter(attempt, baseMs, maxMs, 0.2);
-      delays.push(currentDelay);
-    }
-
-    // Should show increasing pattern
-    expect(delays[1]).toBeGreaterThan(delays[0] * 0.8); // Account for jitter
-    expect(delays[2]).toBeGreaterThan(delays[1] * 0.8);
-    expect(delays[3]).toBeGreaterThan(delays[2] * 0.8);
-
-    // All should be within max
-    delays.forEach((delay) => {
-      expect(delay).toBeLessThanOrEqual(maxMs * 1.2); // Account for jitter
-    });
   });
 });

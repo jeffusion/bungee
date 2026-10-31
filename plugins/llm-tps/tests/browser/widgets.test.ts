@@ -75,7 +75,6 @@ test('all three cards share reads, range changes, refreshes and the polling time
     await page.clock.runFor(60_000);
     await expect.poll(() => calls.length).toBe(beforePoll + 1);
     await expect(page.getByTestId('overview-refresh')).toBeEnabled();
-    await page.screenshot({ path: '/tmp/llm-tps-widgets-wide.png', fullPage: true });
     await page.getByRole('button', { name: 'Toggle widgets' }).click();
     await expect(page.getByTestId('headers-reset')).toHaveText('reset');
     const afterUnmount = calls.length;
@@ -119,7 +118,6 @@ test('failed reads clear all cards; model-only empty results remain distinct; ev
     await expect(page.getByTestId('tps-error')).toHaveCount(3);
     await expect(page.getByTestId('tps-endpoint-row')).toHaveCount(0);
     expect(await page.getByTestId('tps-total-value').innerText()).not.toBe(readyTotal);
-    await page.screenshot({ path: '/tmp/llm-tps-widgets-failure.png', fullPage: true });
     mode = 'empty'; await page.getByTestId('overview-refresh').click();
     await expect(page.getByTestId('tps-empty')).toHaveCount(3);
     await expect(page.getByTestId('tps-error')).toHaveCount(0);
