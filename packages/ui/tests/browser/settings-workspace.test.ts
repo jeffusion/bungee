@@ -101,14 +101,17 @@ async function closeReview(page:Page) {
 async function upload(page:Page,value:unknown) {
   await page.getByTestId('config-import-input').setInputFiles({name:'snapshot.json',mimeType:'application/json',buffer:Buffer.from(typeof value==='string'?value:JSON.stringify(value))});
 }
-async function reloadSettings(page:Page) {
+async function waitForSettingsReads(page:Page) {
   // A terminal operation can precede both its snapshot and follow-up runtime read.
   for (const path of ['/api/config','/api/config/runtime']) {
     const requestId: number | undefined = await page.evaluate(path => (window as any).editorResponseDelivery.requests
       .findLast((entry: { method: string; url: string }) => entry.method === 'GET' && new URL(entry.url).pathname === path)?.id, path);
-    if (requestId === undefined) throw new Error(`Missing ${path} read before settings reload`);
+    if (requestId === undefined) throw new Error(`Missing ${path} settings read`);
     await waitForResponseDelivery(page,requestId);
   }
+}
+async function reloadSettings(page:Page) {
+  await waitForSettingsReads(page);
   await page.reload();
 }
 
@@ -413,6 +416,9 @@ test('message size validates the visible draft and publishes larger sizes throug
     expect(model.writes).toHaveLength(1);
     expect(model.writes[0]!.body.expected_revision).toBe(42);
     expect(model.writes[0]!.body.aggregate.logical_configuration.websocket_max_message_bytes).toBe(64 * 1024 * 1024);
+    await waitForSettingsReads(page);
+    await expect(input).toHaveValue('64');
+    await expect(input).toBeEnabled();
   });
 }, 60_000);
 
@@ -430,5 +436,8 @@ test('message size import is read-only and cancellation preserves the local draf
     await expect(page.getByTestId('config-review')).toHaveCount(0);
     expect(model.writes).toHaveLength(1);
     expect(model.writes[0]!.body.envelope.aggregate.logical_configuration.websocket_max_message_bytes).toBe(128 * 1024 * 1024);
+    await waitForSettingsReads(page);
+    await expect(input).toHaveValue('128');
+    await expect(input).toBeEnabled();
   });
 }, 60_000);
