@@ -282,7 +282,7 @@ function fixture(
                   registry: {
                     active: {
                       master_generation: '30000000-0000-4000-8000-000000000001',
-                      websocket_max_connections: 512, admission_sequence: 1,
+                      websocket_max_connections: 512, websocket_max_message_bytes: 16 * 1024 * 1024, admission_sequence: 1,
                       revision: 1,
                       content_hash: HASH,
                       plugin_catalog_hash: HASH,
@@ -390,7 +390,7 @@ describe('master process composition', () => {
     const { dependencies } = fixture(undefined, true, true);
     const serving = recoveryWorker({ identity: { master_generation: '10000000-0000-4000-8000-000000000001',
       worker_instance_id: '20000000-0000-4000-8000-000000000001', worker_slot: 0 } } as ConfigPublicationWorkerProcess);
-    const active = { websocket_max_connections: 512, admission_sequence: 2, master_generation: serving.process.identity.master_generation,
+    const active = { websocket_max_connections: 512, websocket_max_message_bytes: 16 * 1024 * 1024, admission_sequence: 2, master_generation: serving.process.identity.master_generation,
       revision: serving.revision, content_hash: serving.content_hash, plugin_catalog_hash: serving.plugin_catalog_hash,
       workers: [{ ...serving.process.identity, boot_nonce: serving.boot_nonce!, private_port: serving.private_port }] };
     let reads = 0, changeMembership = false;
@@ -2185,7 +2185,7 @@ test('retains exact historical catalog snapshots for ingress handoff and removes
   const preparedSnapshot = changedSnapshot(8), retiredSnapshot = changedSnapshot(9);
   const historicalCatalog: Sha256Digest = `sha256:${'b'.repeat(64)}`;
   const admissionFor = (snapshot: RepositorySnapshot) => ({
-    master_generation: '10000000-0000-4000-8000-000000000001', websocket_max_connections: 512, admission_sequence: snapshot.revision,
+    master_generation: '10000000-0000-4000-8000-000000000001', websocket_max_connections: 512, websocket_max_message_bytes: 16 * 1024 * 1024, admission_sequence: snapshot.revision,
     revision: snapshot.revision, content_hash: snapshot.content_hash, plugin_catalog_hash: historicalCatalog, workers: [],
   });
   let prepared: ReturnType<typeof admissionFor> | null = admissionFor(preparedSnapshot);

@@ -3,7 +3,7 @@
   import { get } from 'svelte/store';
   import { _ } from '$i18n';
   import { isLoading } from 'svelte-i18n';
-  import { DEFAULT_WEBSOCKET_MAX_CONNECTIONS, type LogicalConfiguration } from '@jeffusion/bungee-types';
+  import { DEFAULT_WEBSOCKET_MAX_CONNECTIONS, DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES, MAX_WEBSOCKET_MAX_MESSAGE_BYTES, type LogicalConfiguration } from '@jeffusion/bungee-types';
   import { ApiError } from '$api/client';
   import { getToken } from '$stores/auth';
   import { publicationRecovery } from '$stores/runtime';
@@ -39,6 +39,12 @@
   let snapshot = $state<ConfigurationSnapshot | null>(null);
   let draft = $state<Draft | null>(null);
   let websocketValue = $state<number | undefined>(DEFAULT_WEBSOCKET_MAX_CONNECTIONS);
+  let websocketMessageValue = $state(String(DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES / 1024 / 1024));
+  const websocketMessageBytes = $derived(Number(websocketMessageValue) * 1024 * 1024);
+  const websocketMessageInvalid = $derived(!imported && (!websocketMessageValue.trim()
+    || !Number.isSafeInteger(websocketMessageBytes) || websocketMessageBytes < 1 || websocketMessageBytes > MAX_WEBSOCKET_MAX_MESSAGE_BYTES));
+  const websocketMessageDisplay = $derived(imported
+    ? String((websocketConfig?.websocket_max_message_bytes ?? DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES) / 1024 / 1024) : websocketMessageValue);
   const websocketConfig = $derived(imported ? importPreview?.aggregate.logical_configuration : draft);
   const websocketUnlimited = $derived(websocketConfig?.websocket_max_connections === null);
   const websocketDisplay = $derived(imported ? websocketConfig?.websocket_max_connections ?? DEFAULT_WEBSOCKET_MAX_CONNECTIONS : websocketValue);
@@ -50,8 +56,8 @@
   const parsedPublication = $derived(parsePublicationInputs(publicationRaw));
   const publicationErrors = $derived({ ...publicationBackendErrors, ...(!imported && publicationEdited ? parsedPublication.errors : {}) });
   const publicationInvalid = $derived(Object.keys(publicationErrors).length > 0);
-  const draftInvalid = $derived(publicationInvalid || websocketInvalid);
-  const invalidDraftMessage = $derived(t(websocketInvalid ? 'websocket.invalidDraft' : 'publication.invalidDraft'));
+  const draftInvalid = $derived(publicationInvalid || websocketInvalid || websocketMessageInvalid);
+  const invalidDraftMessage = $derived(t(websocketMessageInvalid ? 'websocket.messageInvalidDraft' : websocketInvalid ? 'websocket.invalidDraft' : 'publication.invalidDraft'));
   let imported = $state<ConfigurationImportEnvelope | null>(null);
   let importPreview = $state<ConfigurationImportPreview | null>(null);
   let reviewOpen = $state(false), busy = $state(false), validating = $state(false), loading = $state(true);
@@ -85,7 +91,7 @@
     return [field, value];
   })) as PublicationInputs : publicationRaw);
   const diff = $derived(snapshot && candidate ? configurationDiff(snapshot.config, candidate, [$authToken ?? '', nextAuthToken]) : []);
-  const dirty = $derived(diff.length > 0 || websocketInvalid || publicationEdited && !parsedPublication.policy || imported !== null);
+  const dirty = $derived(diff.length > 0 || websocketInvalid || websocketMessageInvalid || publicationEdited && !parsedPublication.policy || imported !== null);
   const changeCount = $derived($isLoading ? '' : $_('settings.changeCount', { values: { count: diff.length } }));
   const signature = $derived(candidate ? JSON.stringify(candidate) : '');
   const nextAuthRequired = false;
@@ -316,8 +322,15 @@
     draft = { ...draft, websocket_max_connections: unlimited ? null : websocketValue };
     validSignature = '';
   }
+  function websocketMessageField(value: string) {
+    websocketMessageValue = value; validSignature = '';
+    const bytes = Number(value) * 1024 * 1024;
+    if (draft && value.trim() && Number.isSafeInteger(bytes) && bytes >= 1 && bytes <= MAX_WEBSOCKET_MAX_MESSAGE_BYTES)
+      draft = { ...draft, websocket_max_message_bytes: bytes };
+  }
   function resetSettingsInputs() {
     websocketValue = draft?.websocket_max_connections ?? DEFAULT_WEBSOCKET_MAX_CONNECTIONS;
+    websocketMessageValue = String((draft?.websocket_max_message_bytes ?? DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES) / 1024 / 1024);
     publicationRaw = publicationInputs(draft?.publication);
     publicationEdited = false; publicationBackendErrors = {};
   }
@@ -486,22 +499,36 @@
             <p id="config-request-limit-help" class="text-sm text-zinc-400">{t('requestLimitHelp')} {t('defaultHelp')}</p>
           </div>
           <div class="min-w-0 space-y-3 sm:col-span-2">
-            <div class="flex items-center justify-between gap-3">
-              <Label for="config-websocket-unlimited">{t('websocket.unlimited')}</Label>
-              <IndustrialToggle id="config-websocket-unlimited" checked={websocketUnlimited}
-                disabled={locked || reviewOpen || !!imported} label={t('websocket.unlimited')} onchange={websocketLimitDisabled} />
-            </div>
-            {#if !websocketUnlimited}
-              <div class="settings-integer-control max-w-sm space-y-1.5">
-                <Label for="config-websocket-max-connections">{t('websocket.label')}</Label>
-                <NumberInput id="config-websocket-max-connections" min={1} max={2147483647} required
-                  bind:value={() => websocketDisplay, websocketField} disabled={locked || reviewOpen || !!imported}
-                  increaseLabel={t('websocket.increase')} decreaseLabel={t('websocket.decrease')} invalidMessage={t('websocket.invalid')}
-                  aria-describedby={`config-websocket-help${websocketInvalid ? ' config-websocket-error' : ''}`} />
-                {#if websocketInvalid}<p id="config-websocket-error" role="alert" class="text-sm text-red-400">{t('websocket.invalid')}</p>{/if}
+            <div class="grid gap-4 sm:grid-cols-2">
+              <div class="min-w-0 space-y-1.5">
+                <Label for="config-websocket-max-message">{t('websocket.messageLabel')}</Label>
+                <Input id="config-websocket-max-message" type="number" inputmode="decimal" step="any"
+                  min={1 / 1024 / 1024} max={MAX_WEBSOCKET_MAX_MESSAGE_BYTES / 1024 / 1024}
+                  value={websocketMessageDisplay} aria-invalid={websocketMessageInvalid}
+                  aria-describedby={`config-websocket-message-help${websocketMessageInvalid ? ' config-websocket-message-error' : ''}`}
+                  oninput={(e) => websocketMessageField(e.currentTarget.value)} />
+                <p id="config-websocket-message-help" class="text-sm text-zinc-400">{t('websocket.messageHelp')}</p>
+                {#if websocketMessageInvalid}<p id="config-websocket-message-error" role="alert" class="text-sm text-red-400">{t('websocket.messageInvalid')}</p>{/if}
               </div>
-            {/if}
-            <p id="config-websocket-help" class="text-sm text-zinc-400">{t('websocket.help')}</p>
+              <div class="min-w-0 space-y-3">
+              <div class="flex items-center justify-between gap-3">
+                <Label for="config-websocket-unlimited">{t('websocket.unlimited')}</Label>
+                <IndustrialToggle id="config-websocket-unlimited" checked={websocketUnlimited}
+                  disabled={locked || reviewOpen || !!imported} label={t('websocket.unlimited')} onchange={websocketLimitDisabled} />
+              </div>
+              {#if !websocketUnlimited}
+                <div class="settings-integer-control max-w-sm space-y-1.5">
+                  <Label for="config-websocket-max-connections">{t('websocket.label')}</Label>
+                  <NumberInput id="config-websocket-max-connections" min={1} max={2147483647} required
+                    bind:value={() => websocketDisplay, websocketField} disabled={locked || reviewOpen || !!imported}
+                    increaseLabel={t('websocket.increase')} decreaseLabel={t('websocket.decrease')} invalidMessage={t('websocket.invalid')}
+                    aria-describedby={`config-websocket-help${websocketInvalid ? ' config-websocket-error' : ''}`} />
+                  {#if websocketInvalid}<p id="config-websocket-error" role="alert" class="text-sm text-red-400">{t('websocket.invalid')}</p>{/if}
+                </div>
+              {/if}
+              <p id="config-websocket-help" class="text-sm text-zinc-400">{t('websocket.help')}</p>
+              </div>
+            </div>
           </div>
         </fieldset>
       </PanelCard>

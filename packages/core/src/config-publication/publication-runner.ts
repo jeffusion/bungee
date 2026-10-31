@@ -405,8 +405,8 @@ export async function runPublication(
       publicationPhase(options, refreshed, 'admission.prepare', 'enter');
       try {
         preparedAdmission = options.signal === undefined
-          ? await options.admission.prepare(options.owned.serving(), undefined, publicationPolicy.drain_timeout_ms, refreshed.snapshot.aggregate.logical_configuration.websocket_max_connections)
-          : await options.admission.prepare(options.owned.serving(), options.signal, publicationPolicy.drain_timeout_ms, refreshed.snapshot.aggregate.logical_configuration.websocket_max_connections);
+          ? await options.admission.prepare(options.owned.serving(), undefined, publicationPolicy.drain_timeout_ms, refreshed.snapshot.aggregate.logical_configuration.websocket_max_connections, refreshed.snapshot.aggregate.logical_configuration.websocket_max_message_bytes)
+          : await options.admission.prepare(options.owned.serving(), options.signal, publicationPolicy.drain_timeout_ms, refreshed.snapshot.aggregate.logical_configuration.websocket_max_connections, refreshed.snapshot.aggregate.logical_configuration.websocket_max_message_bytes);
       } finally {
         publicationPhase(options, refreshed, 'admission.prepare', 'exit');
       }

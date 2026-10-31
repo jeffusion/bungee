@@ -1,5 +1,5 @@
-import { DEFAULT_WEBSOCKET_MAX_CONNECTIONS } from '@jeffusion/bungee-types';
-import { createWebSocketBridge, isWebSocketUpgradeRequest } from '../websocket';
+import { DEFAULT_WEBSOCKET_MAX_CONNECTIONS, DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES } from '@jeffusion/bungee-types';
+import { createWebSocketBridge, isWebSocketUpgradeRequest, type WebSocketBridgeData } from '../websocket';
 import { forwardPublicWebSocket } from './websocket';
 import type { DataPrincipal } from '../plugin-extensions';
 import { createPublicRequestForwarder, type AdmittedWorkerSelector } from './forwarding';
@@ -28,16 +28,28 @@ export function createIngressPublicListener(options: IngressPublicListenerOption
     || options.port < 0 || options.port > 65_535) {
     throw new PublicListenerLifecycleError('public listener address is invalid');
   }
-  const bridge = createWebSocketBridge({ connectionLimit: () => options.admission.websocketMaxConnections === undefined
+  let server: ReturnType<typeof Bun.serve> | null = null;
+  const bridge = createWebSocketBridge({
+    // Bun only applies parser options to future connections, using a fresh handler.
+    onNativeLimitsChanged: () => server?.reload({ fetch: handleRequest, websocket: { ...bridge.websocket } }),
+    messageLimit: () => options.admission.websocketMaxMessageBytes ?? DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES,
+    connectionLimit: () => options.admission.websocketMaxConnections === undefined
     ? DEFAULT_WEBSOCKET_MAX_CONNECTIONS : options.admission.websocketMaxConnections });
   const forward = createPublicRequestForwarder(options);
-  let server: ReturnType<typeof Bun.serve> | null = null;
+  let unsubscribe: (() => void) | undefined;
   let started = false;
+  function handleRequest(request: Request, currentServer: Bun.Server<WebSocketBridgeData>) {
+    const peer = currentServer.requestIP(request)?.address;
+    return isWebSocketUpgradeRequest(request)
+      ? forwardPublicWebSocket(request, currentServer, bridge, options, peer)
+      : forward(request, peer);
+  }
   return {
     get port() { return server?.port ?? null; },
     start() {
       if (started) throw new PublicListenerLifecycleError('public listener can only start once');
       started = true;
+      bridge.refreshMessagePolicy();
       server = Bun.serve({
         hostname: options.hostname,
         port: options.port,
@@ -47,12 +59,12 @@ export function createIngressPublicListener(options: IngressPublicListenerOption
         // the stream, so Bun's transport default must not reject it first.
         maxRequestBodySize: Number.MAX_SAFE_INTEGER,
         websocket: bridge.websocket,
-        fetch: (request, server) => isWebSocketUpgradeRequest(request)
-          ? forwardPublicWebSocket(request,server,bridge,options,server.requestIP(request)?.address)
-          : forward(request, server.requestIP(request)?.address),
+        fetch: handleRequest,
       });
+      unsubscribe = options.admission.subscribeWebSocketMessagePolicy?.(maxMessageBytes => bridge.refreshMessagePolicy(maxMessageBytes));
     },
     async stop() {
+      unsubscribe?.(); unsubscribe = undefined;
       const current = server;
       server = null;
       if (current !== null) { await bridge.stop(); await current.stop(false); }

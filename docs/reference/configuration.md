@@ -210,6 +210,8 @@ Configuration values may reference environment variables with `{{ env.NAME }}`. 
 
 ## Strict scalar domains
 
+`websocket_max_message_bytes` is a positive integer byte count, defaulting to 16 MiB when omitted. It applies to complete messages in both directions and is independent of the HTTP body limit. The maximum representable value is 2147483647 bytes; buffer budgets grow with the setting. See [WebSocket resource limits](../architecture/websocket.md#资源与关闭).
+
 `log_level` accepts trace, debug, info, warn, error or fatal. `body_parser_limit` uses canonical lowercase positive integer units: b, kb, mb or gb; leading zeroes, decimals, whitespace, uppercase suffixes and zero are rejected. Ordered objects have stable lowercase UUIDs and explicit positions; runtime bindings reference catalog names, not installation paths.
 
 Initialization and future database upgrades follow the [storage baseline](../architecture/storage.md#数据库基线与升级). Ordinary reads use validated immutable memory projections and do not scan SQL history.

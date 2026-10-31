@@ -1,4 +1,4 @@
-import { DEFAULT_PUBLICATION_POLICY, DEFAULT_WEBSOCKET_MAX_CONNECTIONS } from '@jeffusion/bungee-types';
+import { DEFAULT_PUBLICATION_POLICY, DEFAULT_WEBSOCKET_MAX_CONNECTIONS, DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES } from '@jeffusion/bungee-types';
 import { admissionSetIdentity, admissionSetRetiredId, parseAdmissionSet, type AdmissionSet, type AdmissionWorker } from './admission-set';
 import type { RateLimitWorkerAuthorization, RateLimitWorkerIdentity } from '../rate-limit';
 
@@ -19,6 +19,7 @@ export class AdmissionRegistryError extends Error {
 const EMPTY: readonly AdmissionSet[] = Object.freeze([]);
 
 export class IngressAdmissionRegistry {
+  private readonly messagePolicyListeners = new Set<(maxMessageBytes: number) => void>();
   private active: AdmissionSet | null = null;
   private activeRetiredId: string | null = null;
   private prepared: { readonly identity: string; readonly set: AdmissionSet; readonly handoffTimeoutMs: number } | null = null;
@@ -80,6 +81,8 @@ export class IngressAdmissionRegistry {
       throw new AdmissionRegistryError('capacity', 'retired admission capacity is exhausted');
     }
     const nextRetired = old === null ? this.retired : Object.freeze([old, ...this.retired]);
+    // Native parser policy must be ready before this admission becomes observable.
+    for (const listener of this.messagePolicyListeners) listener(set.websocket_max_message_bytes);
     this.active = this.prepared.set;
     this.activeRetiredId = admissionSetRetiredId(this.active);
     this.handoff = old === null ? null : {
@@ -125,6 +128,15 @@ export class IngressAdmissionRegistry {
 
   get websocketMaxConnections(): number | null {
     return this.active === null ? DEFAULT_WEBSOCKET_MAX_CONNECTIONS : this.active.websocket_max_connections;
+  }
+
+  subscribeWebSocketMessagePolicy(listener: (maxMessageBytes: number) => void): () => void {
+    this.messagePolicyListeners.add(listener);
+    return () => { this.messagePolicyListeners.delete(listener); };
+  }
+
+  get websocketMaxMessageBytes(): number {
+    return this.active?.websocket_max_message_bytes ?? DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES;
   }
 
   select(): Pick<AdmissionWorker, 'private_port'> | null {

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { generateWorkerTransportSecret } from '../../src/config-worker/private-transport';
 import { admissionSetRetiredId, IngressAdmissionRegistry, AdmissionRegistryError, parseAdmissionSet, type AdmissionSet } from '../../src/ingress';
 import { createIngressPublicListener } from '../../src/public-listener';
+import { createWebSocketBridge } from '../../src/websocket';
 
 const generation = '90000000-0000-4000-8000-000000000001';
 const hash = 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const;
@@ -10,7 +11,7 @@ const catalog = 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 function admission(sequence: number, revision = sequence): AdmissionSet {
   return {
     master_generation: generation,
-    websocket_max_connections: 512, admission_sequence: sequence,
+    websocket_max_connections: 512, websocket_max_message_bytes: 16 * 1024 * 1024, admission_sequence: sequence,
     revision,
     content_hash: hash,
     plugin_catalog_hash: catalog,
@@ -33,6 +34,9 @@ describe('ingress admission set and registry', () => {
     expect(parseAdmissionSet({ ...admission(1), websocket_max_connections: null }).websocket_max_connections).toBeNull();
     for (const value of [undefined, 0, -1, 1.5, 2147483648, '512', true]) {
       expect(() => parseAdmissionSet({ ...admission(1), websocket_max_connections: value })).toThrow();
+    }
+    for (const value of [undefined, null, 0, -1, 1.5, 2147483648, '16']) {
+      expect(() => parseAdmissionSet({ ...admission(1), websocket_max_message_bytes: value })).toThrow();
     }
     expect(() => parseAdmissionSet({ ...admission(1), extra: true })).toThrow();
     expect(() => parseAdmissionSet({ ...admission(1), workers: [admission(1).workers[0], { ...admission(1).workers[1], worker_slot: 2 }] })).toThrow();
@@ -68,7 +72,7 @@ describe('ingress admission set and registry', () => {
     expect(() => registry.abort(first)).not.toThrow();
     expect(registry.status().prepared).toBeNull();
     registry.prepare(first);
-    expect(() => registry.prepare({ ...first, websocket_max_connections: 512, admission_sequence: 1, revision: 2 })).toThrow(AdmissionRegistryError);
+    expect(() => registry.prepare({ ...first, websocket_max_connections: 512, websocket_max_message_bytes: 16 * 1024 * 1024, admission_sequence: 1, revision: 2 })).toThrow(AdmissionRegistryError);
     registry.commit(first);
     expect(() => registry.commit(first)).not.toThrow();
     expect(() => registry.prepare(first)).toThrow(AdmissionRegistryError);
@@ -225,3 +229,93 @@ test('public WS admission defaults to 512 and applies committed count changes wi
     await listener.stop(); await worker.stop(true);
   }
 }, 30_000);
+
+test('published message limits reach the native listener and retain each live connection policy', async () => {
+  const { default: WebSocket } = await import('@bungee/ws-client');
+  const MiB = 1024 * 1024;
+  let release!: () => void, started!: () => void;
+  const pending = new Promise<void>(resolve => { started = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const worker = Bun.serve({ hostname: '127.0.0.1', port: 0,
+    async fetch(request, server) {
+      if (new URL(request.url).pathname === '/pending') { started(); await gate; }
+      if (server.upgrade(request)) return;
+      return new Response('upgrade required', { status: 426 });
+    }, websocket: { maxPayloadLength: 40 * MiB, backpressureLimit: 80 * MiB,
+      message(socket, message) { socket.send(message); } },
+  });
+  const registry = new IngressAdmissionRegistry();
+  const first = { ...admission(1), websocket_max_message_bytes: MiB,
+    workers: [{ ...admission(1).workers[0]!, private_port: worker.port! }] };
+  registry.prepare(first); registry.commit(first);
+  const listener = createIngressPublicListener({ hostname: '127.0.0.1', port: 0,
+    transportSecret: generateWorkerTransportSecret(), admission: registry });
+  const clients: InstanceType<typeof WebSocket>[] = [];
+  listener.start();
+  const connect = (path = '/echo') => new Promise<InstanceType<typeof WebSocket>>((resolve, reject) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${listener.port}${path}`, { maxPayload: 40 * MiB });
+    clients.push(socket); socket.on('error', () => {});
+    socket.once('open', () => resolve(socket)); socket.once('error', reject);
+  });
+  const echo = (socket: InstanceType<typeof WebSocket>, payload: string) => new Promise<void>((resolve, reject) => {
+    socket.once('close', code => reject(new Error(`closed before echo: ${code}`)));
+    socket.once('message', data => { try { expect(data.toString()).toBe(payload); resolve(); } catch (error) { reject(error); } });
+    socket.send(payload);
+  });
+  const rejectLarge = (socket: InstanceType<typeof WebSocket>) => new Promise<number>(resolve => {
+    socket.once('close', resolve); socket.send('x'.repeat(2 * MiB));
+  });
+  try {
+    const old = await connect();
+    const connecting = connect('/pending'); await pending;
+    const larger = { ...first, admission_sequence: 2, revision: 2, websocket_max_message_bytes: 40 * MiB };
+    registry.prepare(larger); registry.commit(larger);
+    // Start a new handshake before resolving the old handshake.
+    const fresh = await connect(); release(); const delayed = await connecting;
+    expect([1006, 1009]).toContain(await rejectLarge(old));
+    expect([1006, 1009]).toContain(await rejectLarge(delayed));
+    await echo(fresh, 'large-'.repeat(6 * MiB));
+    const lower = { ...first, admission_sequence: 3, revision: 3 };
+    registry.prepare(lower); registry.commit(lower);
+    const small = await connect();
+    expect(await rejectLarge(small)).toBe(1009);
+    await echo(fresh, 'still-'.repeat(MiB));
+    await echo(fresh, 'continued');
+  } finally {
+    release(); for (const socket of clients) socket.terminate();
+    await listener.stop(); await worker.stop(true);
+  }
+}, 30_000);
+
+
+test('native policy failure keeps the prepared admission retryable without publishing or enlarging budgets', async () => {
+  const registry = new IngressAdmissionRegistry();
+  let nativeLimit = 16 * 1024 * 1024, calls = 0, fail = false;
+  const bridge = createWebSocketBridge({ messageLimit: () => registry.websocketMaxMessageBytes,
+    onNativeLimitsChanged() {
+      calls++;
+      if (fail) { fail = false; throw new Error('native reload failed'); }
+      nativeLimit = bridge.websocket.maxPayloadLength!;
+    },
+  });
+  const unsubscribe = registry.subscribeWebSocketMessagePolicy(limit => bridge.refreshMessagePolicy(limit));
+  try {
+    const first = { ...admission(1), websocket_max_message_bytes: 1024 * 1024 };
+    registry.prepare(first); registry.commit(first);
+    const beforeCalls = calls, beforeBudget = bridge.processBufferLimit;
+    const larger = { ...admission(2), websocket_max_message_bytes: 128 * 1024 * 1024 };
+    registry.prepare(larger); fail = true;
+    expect(() => registry.commit(larger)).toThrow('native reload failed');
+    expect(registry.status().active).toEqual(first);
+    expect(registry.status().prepared).toEqual(larger);
+    expect(nativeLimit).toBe(1024 * 1024);
+    expect(bridge.websocket.maxPayloadLength).toBe(nativeLimit);
+    expect(bridge.processBufferLimit).toBe(beforeBudget);
+    registry.commit(larger);
+    expect(calls).toBe(beforeCalls + 2);
+    expect(registry.status().active).toEqual(larger);
+    expect(registry.status().prepared).toBeNull();
+    expect(nativeLimit).toBe(128 * 1024 * 1024);
+    expect(bridge.processBufferLimit).toBeGreaterThan(beforeBudget);
+  } finally { unsubscribe(); await bridge.stop(); }
+});

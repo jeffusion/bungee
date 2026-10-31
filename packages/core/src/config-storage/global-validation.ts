@@ -1,4 +1,4 @@
-import { validatePublicationPolicy } from '@jeffusion/bungee-types';
+import { MAX_WEBSOCKET_MAX_MESSAGE_BYTES, validatePublicationPolicy } from '@jeffusion/bungee-types';
 import { validateAuth } from './domain-validation';
 import { isBodyParserLimit, isLogLevel } from './global-scalars';
 import {
@@ -22,6 +22,11 @@ export function validateGlobalPolicies(object: JsonObject, context: ValidationCo
   if (maxConnections !== undefined && maxConnections !== null
     && (!Number.isSafeInteger(maxConnections) || (maxConnections as number) < 1 || (maxConnections as number) > 0x7fffffff)) {
     context.add('invalid_value', 'websocket_max_connections', 'Expected null or an integer between 1 and 2147483647');
+  }
+  const maxMessageBytes = object.websocket_max_message_bytes;
+  if (maxMessageBytes !== undefined && (!Number.isSafeInteger(maxMessageBytes)
+    || (maxMessageBytes as number) < 1 || (maxMessageBytes as number) > MAX_WEBSOCKET_MAX_MESSAGE_BYTES)) {
+    context.add('invalid_value', 'websocket_max_message_bytes', `Expected an integer between 1 and ${MAX_WEBSOCKET_MAX_MESSAGE_BYTES}`);
   }
   validateAuth(object.auth, 'auth', context);
   if (object.publication !== undefined) {

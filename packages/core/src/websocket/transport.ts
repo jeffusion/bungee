@@ -1,16 +1,17 @@
 /// <reference path="./vendor.d.ts" />
 import WebSocket from '@bungee/ws-client';
+import { DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES, MAX_WEBSOCKET_MAX_MESSAGE_BYTES } from '@jeffusion/bungee-types';
 import type { IncomingMessage } from 'node:http';
 import type { WebSocketMessageView, WebSocketSessionMetrics } from '../gateway/websocket-contracts';
 import { downstreamHeaders, isWebSocketUpgradeRequest, offeredProtocols, upstreamHeaders, validateWebSocketRequest } from './headers';
 import { createWebSocketMessageView } from './message';
 
 export const WEBSOCKET_BRIDGE_DEFAULTS = Object.freeze({
-  maxMessageBytes: 2 * 1024 * 1024,
+  maxMessageBytes: DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES,
   maxConnections: null as number | null,
   maxHandshakes: null as number | null,
   handshakeTimeoutMs: 10_000,
-  maxBufferedBytes: 8 * 1024 * 1024,
+  maxBufferedBytes: 2 * DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES + 64 * 1024,
   maxTotalBufferedBytes: 64 * 1024 * 1024,
   maxEarlyMessages: 16,
   maxFragments: 1024,
@@ -22,6 +23,10 @@ type Limits = { [K in keyof typeof WEBSOCKET_BRIDGE_DEFAULTS]: K extends 'maxCon
 export type WebSocketBridgeOptions = Partial<Limits> & {
   /** Ingress reads the active admission policy for each new client connection. */
   readonly connectionLimit?: () => number | null;
+  /** Captured synchronously with worker selection, then fixed for the session. */
+  readonly messageLimit?: () => number;
+  /** Publish a fresh native handler before accepting connections with changed limits. */
+  readonly onNativeLimitsChanged?: () => void;
 };
 
 /** Opaque token prevents callbacks from taking ownership of another bridge's session. */
@@ -84,6 +89,7 @@ interface TransportSession {
   readonly token: object;
   readonly bufferedBytes: number;
   readonly processLimit: number;
+  readonly maxMessageBytes: number;
   refreshBuffered(): void;
   cancelHandshake(status: number, reason: string): void;
   downstreamOpen(socket: Bun.ServerWebSocket<WebSocketBridgeData>): void;
@@ -117,12 +123,32 @@ function closeReason(reason: string): string {
   return result;
 }
 
+/** A full input and output may overlap while the generation job remains active. */
+export function webSocketMessageLimits(maxMessageBytes = DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES) {
+  if (!Number.isSafeInteger(maxMessageBytes) || maxMessageBytes < 1 || maxMessageBytes > MAX_WEBSOCKET_MAX_MESSAGE_BYTES) {
+    throw new TypeError('Invalid WebSocket message limit');
+  }
+  const maxBufferedBytes = Math.max(8 * 1024 * 1024, 2 * maxMessageBytes + 64 * 1024);
+  return { maxMessageBytes, maxBufferedBytes, maxTotalBufferedBytes: Math.max(64 * 1024 * 1024, maxBufferedBytes) };
+}
+
+function transportDiagnostic(event: 'websocket_message_too_large' | 'websocket_abnormal_close', direction: string,
+  limitBytes: number, messageBytes: number | null = null): void {
+  const role = process.env.BUNGEE_ROLE;
+  try {
+    process.stderr.write(`${JSON.stringify({ event, level: 'warn', timestamp: new Date().toISOString(),
+      role: role === 'ingress' || role === 'worker' ? role : 'standalone', pid: process.pid,
+      direction, limitBytes, messageBytes, ...(event === 'websocket_abnormal_close' ? { closeCode: 1006 } : {}) })}\n`);
+  } catch { /* Diagnostics never own transport. */ }
+}
+
 function resolveLimits(options: WebSocketBridgeOptions): Limits {
-  const { connectionLimit: _connectionLimit, ...overrides } = options;
+  const { connectionLimit: _connectionLimit, messageLimit: _messageLimit, onNativeLimitsChanged: _onNativeLimitsChanged, ...overrides } = options;
   const limits = { ...WEBSOCKET_BRIDGE_DEFAULTS, ...overrides } as Limits;
   for (const [name, value] of Object.entries(limits)) {
     if (value === null && (name === 'maxConnections' || name === 'maxHandshakes')) continue;
-    if (!Number.isSafeInteger(value) || value === null || value <= 0 || value > 0x7fffffff) {
+    if (!Number.isSafeInteger(value) || value === null || value <= 0
+      || value > (name === 'maxBufferedBytes' || name === 'maxTotalBufferedBytes' ? Number.MAX_SAFE_INTEGER : 0x7fffffff)) {
       throw new TypeError(`Invalid WebSocket bridge limit: ${name}`);
     }
   }
@@ -158,6 +184,8 @@ function validateUpstreamHandshake(response: IncomingMessage, protocols: readonl
 export class WebSocketBridge {
   readonly limits: Readonly<Limits>;
   readonly websocket: Bun.WebSocketHandler<WebSocketBridgeData>;
+  private nativeMessageBytes: number;
+  private processBufferBudget: number;
   readonly #sessions = new Map<object, TransportSession>();
   readonly #waiters = new Set<() => void>();
   #accepting = true;
@@ -168,11 +196,14 @@ export class WebSocketBridge {
 
   constructor(private readonly options: WebSocketBridgeOptions = {}) {
     this.limits = resolveLimits(options);
+    const policy = options.messageLimit === undefined ? this.limits : webSocketMessageLimits(options.messageLimit());
+    this.nativeMessageBytes = policy.maxMessageBytes;
+    this.processBufferBudget = policy.maxTotalBufferedBytes;
     this.websocket = {
       data: {} as WebSocketBridgeData,
       perMessageDeflate: false,
-      maxPayloadLength: this.limits.maxMessageBytes,
-      backpressureLimit: this.limits.maxBufferedBytes,
+      maxPayloadLength: this.nativeMessageBytes,
+      backpressureLimit: Math.min(0xffffffff, policy.maxBufferedBytes),
       closeOnBackpressureLimit: false,
       // Sessions own their lifecycle; the HTTP timeout and AbortSignal do not.
       idleTimeout: 0,
@@ -186,6 +217,34 @@ export class WebSocketBridge {
       close: (socket, code, reason) => { this.#session(socket)?.downstreamClose(code, reason); },
     };
   }
+
+  /** @internal */ sessionLimits(): Readonly<Limits> {
+    return this.options.messageLimit === undefined ? this.limits
+      : resolveLimits({ ...this.limits, ...webSocketMessageLimits(this.options.messageLimit()) });
+  }
+
+  /** @internal Old sessions keep their budget while new handshakes adopt the published policy. */
+  refreshMessagePolicy(maxMessageBytes = this.options.messageLimit?.()): void {
+    if (maxMessageBytes === undefined) return;
+    for (const session of this.#sessions.values()) maxMessageBytes = Math.max(maxMessageBytes, session.maxMessageBytes);
+    const policy = webSocketMessageLimits(maxMessageBytes);
+    if (this.nativeMessageBytes !== maxMessageBytes) {
+      const previousPayload = this.websocket.maxPayloadLength;
+      const previousBackpressure = this.websocket.backpressureLimit;
+      this.websocket.maxPayloadLength = maxMessageBytes;
+      this.websocket.backpressureLimit = Math.min(0xffffffff, policy.maxBufferedBytes);
+      try { this.options.onNativeLimitsChanged?.(); }
+      catch (error) {
+        this.websocket.maxPayloadLength = previousPayload;
+        this.websocket.backpressureLimit = previousBackpressure;
+        throw error;
+      }
+      this.nativeMessageBytes = maxMessageBytes;
+    }
+    this.processBufferBudget = policy.maxTotalBufferedBytes;
+  }
+
+  /** @internal */ get processBufferLimit(): number { return this.processBufferBudget; }
 
   get stats(): WebSocketBridgeStats {
     let bufferedBytes = 0;
@@ -235,6 +294,7 @@ export class WebSocketBridge {
       if (url.protocol !== 'ws:' && url.protocol !== 'wss:') throw new Error('Invalid protocol');
       if (url.hash) throw new Error('WebSocket URL cannot contain a fragment');
     } catch { return Promise.resolve(new Response('Invalid WebSocket upstream URL', { status: 502 })); }
+    this.refreshMessagePolicy();
     const session = new BridgeSession(this, request, server, options, url);
     this.#sessions.set(session.token, session);
     PROCESS_SESSIONS.add(session);
@@ -262,6 +322,7 @@ export class WebSocketBridge {
       if (name.startsWith('sec-websocket-') && name !== 'sec-websocket-protocol') denied.push(name);
     });
     for (const name of denied) headers.delete(name);
+    this.refreshMessagePolicy();
     const session = new ManagedSession(this, options);
     this.#sessions.set(session.token, session);
     PROCESS_SESSIONS.add(session);
@@ -287,9 +348,13 @@ export class WebSocketBridge {
       if (!['ws:', 'wss:'].includes(url.protocol) || url.hash) throw new Error('Invalid URL');
       message = JSON.stringify({ ...options.body, type: 'response.create' });
     } catch { return Promise.resolve(new Response('Invalid WebSocket Responses request', { status: 502 })); }
-    if (Buffer.byteLength(message) > this.limits.maxMessageBytes) {
+    const messageBytes = Buffer.byteLength(message);
+    const maxMessageBytes = this.sessionLimits().maxMessageBytes;
+    if (messageBytes > maxMessageBytes) {
+      transportDiagnostic('websocket_message_too_large', 'upstream-send', maxMessageBytes, messageBytes);
       return Promise.resolve(new Response('WebSocket Responses request too large', { status: 413 }));
     }
+    this.refreshMessagePolicy();
     const session = new ResponsesSession(this, options, url, message);
     this.#sessions.set(session.token, session); PROCESS_SESSIONS.add(session); this.#handshakes++;
     session.start();
@@ -329,6 +394,7 @@ export class WebSocketBridge {
   /** @internal */ confirmGone(session: TransportSession): void {
     if (!this.#sessions.delete(session.token)) return;
     PROCESS_SESSIONS.delete(session);
+    this.refreshMessagePolicy();
     if (this.#sessions.size === 0) { for (const resolve of this.#waiters) resolve(); this.#waiters.clear(); }
   }
 
@@ -353,6 +419,7 @@ class ResponsesSession implements TransportSession {
   readonly token = Object.freeze({});
   readonly response: Promise<Response>;
   readonly #bridge: WebSocketBridge;
+  readonly #limits: Readonly<Limits>;
   readonly #options: Pick<WebSocketResponsesRequestOptions, 'headers' | 'signal'>;
   readonly #url: URL;
   #message: string | undefined;
@@ -377,7 +444,7 @@ class ResponsesSession implements TransportSession {
   readonly #abort: () => void;
 
   constructor(bridge: WebSocketBridge, options: WebSocketResponsesRequestOptions, url: URL, message: string) {
-    this.#bridge = bridge; this.#options = { headers: new Headers(options.headers), signal: options.signal };
+    this.#bridge = bridge; this.#limits = bridge.sessionLimits(); this.#options = { headers: new Headers(options.headers), signal: options.signal };
     this.#url = url; this.#message = message; this.#pendingBytes = Buffer.byteLength(message) + 14;
     this.response = new Promise((resolve) => { this.#resolve = resolve; });
     this.#abort = () => {
@@ -387,17 +454,18 @@ class ResponsesSession implements TransportSession {
   }
 
   get bufferedBytes(): number { return this.#bufferedBytes; }
-  get processLimit(): number { return this.#bridge.limits.maxTotalBufferedBytes; }
+  get processLimit(): number { return this.#bridge.processBufferLimit; }
+  get maxMessageBytes(): number { return this.#limits.maxMessageBytes; }
 
   start(): void {
     this.refreshBuffered();
     if (!this.#canBuffer(0)) { this.cancelHandshake(503, 'WebSocket send budget exceeded'); return; }
     if (this.#options.signal.aborted) { this.cancelHandshake(499, 'WebSocket request cancelled'); return; }
-    this.#handshakeTimer = setTimeout(() => this.cancelHandshake(504, 'WebSocket upstream handshake timed out'), this.#bridge.limits.handshakeTimeoutMs);
+    this.#handshakeTimer = setTimeout(() => this.cancelHandshake(504, 'WebSocket upstream handshake timed out'), this.#limits.handshakeTimeoutMs);
     this.#handshakeTimer.unref?.();
     this.#options.signal.addEventListener('abort', this.#abort, { once: true });
     try {
-      const socket = this.#socket = createUpstream(this.#url, this.#options.headers, [], this.#bridge.limits);
+      const socket = this.#socket = createUpstream(this.#url, this.#options.headers, [], this.#limits);
       this.#gone = false;
       socket.on('upgrade', (response) => {
         if (!this.#handshakeFinished && !validateUpstreamHandshake(response, [])) {
@@ -412,11 +480,13 @@ class ResponsesSession implements TransportSession {
         const buffer = Array.isArray(data) ? Buffer.concat(data) : Buffer.isBuffer(data) ? data : Buffer.from(data);
         this.#messageReceived(buffer);
       });
-      socket.on('error', () => {
+      socket.on('error', (error: Error & { code?: string }) => {
+        if (error.code === 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH') transportDiagnostic('websocket_message_too_large', 'upstream', this.#limits.maxMessageBytes);
         if (!this.#handshakeFinished) this.cancelHandshake(502, 'WebSocket upstream handshake failed');
         else this.#fail('WebSocket Responses upstream failed');
       });
-      socket.on('close', () => {
+      socket.on('close', (code) => {
+        if (code === 1006 && !this.#closing) transportDiagnostic('websocket_abnormal_close', 'upstream', this.#limits.maxMessageBytes);
         this.#gone = true;
         if (!this.#handshakeFinished) this.cancelHandshake(502, 'WebSocket upstream closed before upgrade');
         else if (!this.#terminal && !this.#streamDone) this.#fail('WebSocket Responses stream truncated before terminal event');
@@ -459,7 +529,10 @@ class ResponsesSession implements TransportSession {
   }
 
   #messageReceived(buffer: Buffer): void {
-    if (buffer.byteLength > this.#bridge.limits.maxMessageBytes) { this.#fail('WebSocket Responses message too large'); return; }
+    if (buffer.byteLength > this.#limits.maxMessageBytes) {
+      transportDiagnostic('websocket_message_too_large', 'upstream', this.#limits.maxMessageBytes, buffer.byteLength);
+      this.#fail('WebSocket Responses message too large'); return;
+    }
     let event: Record<string, unknown>;
     try {
       const value: unknown = JSON.parse(buffer.toString('utf8'));
@@ -471,8 +544,8 @@ class ResponsesSession implements TransportSession {
     // Account for SSE expansion, not just the incoming JSON payload. pause()
     // cannot retract other frames already decoded from the same native chunk.
     if (!this.#canBuffer(chunk.byteLength)) {
-      const scope = this.#bufferedBytes + chunk.byteLength > this.#bridge.limits.maxBufferedBytes ? 'session' : 'process';
-      let limit = this.#bridge.limits.maxBufferedBytes;
+      const scope = this.#bufferedBytes + chunk.byteLength > this.#limits.maxBufferedBytes ? 'session' : 'process';
+      let limit = this.#limits.maxBufferedBytes;
       if (scope === 'process') {
         limit = this.processLimit;
         for (const session of PROCESS_SESSIONS) limit = Math.min(limit, session.processLimit);
@@ -511,7 +584,7 @@ class ResponsesSession implements TransportSession {
     const chunks: Buffer[] = [];
     response.on('data', (chunk: Buffer) => {
       if (this.#handshakeFinished) return;
-      if (this.#rejectionBytes + chunk.byteLength > this.#bridge.limits.maxRejectedBodyBytes || !this.#canBuffer(chunk.byteLength)) {
+      if (this.#rejectionBytes + chunk.byteLength > this.#limits.maxRejectedBodyBytes || !this.#canBuffer(chunk.byteLength)) {
         response.destroy(); this.cancelHandshake(502, 'WebSocket upstream rejection body exceeded limit'); return;
       }
       chunks.push(chunk); this.#rejectionBytes += chunk.byteLength; this.refreshBuffered();
@@ -545,7 +618,7 @@ class ResponsesSession implements TransportSession {
   #canBuffer(bytes: number): boolean {
     let processLimit = this.processLimit;
     for (const session of PROCESS_SESSIONS) { session.refreshBuffered(); processLimit = Math.min(processLimit, session.processLimit); }
-    return this.#bufferedBytes + bytes <= this.#bridge.limits.maxBufferedBytes && processBufferedBytes + bytes <= processLimit;
+    return this.#bufferedBytes + bytes <= this.#limits.maxBufferedBytes && processBufferedBytes + bytes <= processLimit;
   }
 
   refreshBuffered(): void {
@@ -565,7 +638,7 @@ class ResponsesSession implements TransportSession {
   #beginClose(code: number, reason: string): void {
     if (this.#closing || this.#finished) return;
     this.#closing = true;
-    this.#closeTimer = setTimeout(() => this.#terminateNative(), this.#bridge.limits.closeTimeoutMs);
+    this.#closeTimer = setTimeout(() => this.#terminateNative(), this.#limits.closeTimeoutMs);
     this.#closeTimer.unref?.();
     try {
       if (this.#socket?.readyState === WebSocket.CONNECTING) this.#socket.terminate();
@@ -598,6 +671,7 @@ class ResponsesSession implements TransportSession {
 class ManagedSession implements TransportSession {
   readonly token = Object.freeze({});
   readonly #bridge: WebSocketBridge;
+  readonly #limits: Readonly<Limits>;
   readonly #options: ManagedWebSocketSessionOptions;
   readonly #controller = new AbortController();
   readonly #session: ManagedWebSocketSession;
@@ -625,7 +699,7 @@ class ManagedSession implements TransportSession {
   #sentBytes = 0;
 
   constructor(bridge: WebSocketBridge, options: ManagedWebSocketSessionOptions) {
-    this.#bridge = bridge; this.#options = options;
+    this.#bridge = bridge; this.#limits = bridge.sessionLimits(); this.#options = options;
     this.#session = Object.freeze({
       signal: this.#controller.signal,
       send: (message: string) => this.#send(message),
@@ -634,7 +708,8 @@ class ManagedSession implements TransportSession {
   }
 
   get bufferedBytes(): number { return this.#bufferedBytes; }
-  get processLimit(): number { return this.#bridge.limits.maxTotalBufferedBytes; }
+  get processLimit(): number { return this.#bridge.processBufferLimit; }
+  get maxMessageBytes(): number { return this.#limits.maxMessageBytes; }
 
   upgrade(request: Request, server: WebSocketUpgradeServer, headers: Headers): Response | undefined {
     if (this.#options.signal?.aborted) this.cancelHandshake(499, 'WebSocket handshake cancelled');
@@ -678,8 +753,11 @@ class ManagedSession implements TransportSession {
   fromClient(message: Message): void {
     if (this.#closing || !this.#socket) return;
     const bytes = typeof message === 'string' ? Buffer.byteLength(message) : message.byteLength;
-    if (bytes > this.#bridge.limits.maxMessageBytes) { this.close(1009, 'Message too large'); return; }
-    if (this.#jobs >= this.#bridge.limits.maxEarlyMessages || !this.#canBuffer(bytes + 14)) {
+    if (bytes > this.#limits.maxMessageBytes) {
+      transportDiagnostic('websocket_message_too_large', 'client', this.#limits.maxMessageBytes, bytes);
+      this.close(1009, 'Message too large'); return;
+    }
+    if (this.#jobs >= this.#limits.maxEarlyMessages || !this.#canBuffer(bytes + 14)) {
       this.close(1013, 'WebSocket message-job budget exceeded'); return;
     }
     this.#clientMessages++; this.#clientBytes += bytes;
@@ -704,10 +782,11 @@ class ManagedSession implements TransportSession {
     if (this.#closing || !this.#socket || this.#socket.readyState !== 1) throw new Error('WebSocket session closed');
     if (typeof message !== 'string') throw new TypeError('Managed WebSocket messages must be strings');
     const bytes = Buffer.byteLength(message);
-    if (bytes > this.#bridge.limits.maxMessageBytes) {
+    if (bytes > this.#limits.maxMessageBytes) {
+      transportDiagnostic('websocket_message_too_large', 'downstream', this.#limits.maxMessageBytes, bytes);
       this.close(1009, 'Message too large'); throw new Error('WebSocket message too large');
     }
-    if (this.#pendingSends >= this.#bridge.limits.maxEarlyMessages || !this.#canBuffer(bytes + 14)) {
+    if (this.#pendingSends >= this.#limits.maxEarlyMessages || !this.#canBuffer(bytes + 14)) {
       this.close(1013, 'WebSocket send budget exceeded'); throw new Error('WebSocket send budget exceeded');
     }
     let reserved = bytes + 14;
@@ -756,7 +835,7 @@ class ManagedSession implements TransportSession {
     for (const session of PROCESS_SESSIONS) {
       session.refreshBuffered(); processLimit = Math.min(processLimit, session.processLimit);
     }
-    return this.#bufferedBytes + bytes <= this.#bridge.limits.maxBufferedBytes
+    return this.#bufferedBytes + bytes <= this.#limits.maxBufferedBytes
       && processBufferedBytes + bytes <= processLimit;
   }
 
@@ -776,7 +855,7 @@ class ManagedSession implements TransportSession {
     this.#controller.abort(error);
     for (const waiter of this.#drainWaiters) waiter.reject(error);
     this.#drainWaiters.clear();
-    this.#closeTimer = setTimeout(() => this.terminate(), this.#bridge.limits.closeTimeoutMs);
+    this.#closeTimer = setTimeout(() => this.terminate(), this.#limits.closeTimeoutMs);
     this.#closeTimer.unref?.();
     try { this.#socket?.close(wireCloseCode(code), this.#reason); } catch { this.#socket?.terminate(); }
     this.refreshBuffered();
@@ -789,6 +868,7 @@ class ManagedSession implements TransportSession {
   }
 
   downstreamClose(code: number, reason: string): void {
+    if (code === 1006 && !this.#closing) transportDiagnostic('websocket_abnormal_close', 'client', this.#limits.maxMessageBytes);
     this.close(code, reason);
     this.#gone = true; this.#code = code; this.#reason = reason;
     this.refreshBuffered(); this.#maybeFinish();
@@ -814,6 +894,7 @@ class BridgeSession {
   readonly token = Object.freeze({});
   readonly response: Promise<Response | undefined>;
   readonly #bridge: WebSocketBridge;
+  readonly #limits: Readonly<Limits>;
   readonly #request: Request;
   readonly #server: WebSocketUpgradeServer;
   readonly #options: WebSocketUpgradeOptions;
@@ -846,21 +927,22 @@ class BridgeSession {
   #upstreamBytes = 0;
 
   constructor(bridge: WebSocketBridge, request: Request, server: WebSocketUpgradeServer, options: WebSocketUpgradeOptions, url: URL) {
-    this.#bridge = bridge; this.#request = request; this.#server = server; this.#options = options; this.#url = url;
+    this.#bridge = bridge; this.#limits = bridge.sessionLimits(); this.#request = request; this.#server = server; this.#options = options; this.#url = url;
     this.#protocols = offeredProtocols(request);
     this.response = new Promise((resolve) => { this.#resolveResponse = resolve; });
   }
 
   get bufferedBytes(): number { return this.#bufferedBytes; }
-  get processLimit(): number { return this.#bridge.limits.maxTotalBufferedBytes; }
+  get processLimit(): number { return this.#bridge.processBufferLimit; }
+  get maxMessageBytes(): number { return this.#limits.maxMessageBytes; }
 
   start(): void {
-    this.#handshakeTimer = setTimeout(() => this.cancelHandshake(504, 'WebSocket upstream handshake timed out'), this.#bridge.limits.handshakeTimeoutMs);
+    this.#handshakeTimer = setTimeout(() => this.cancelHandshake(504, 'WebSocket upstream handshake timed out'), this.#limits.handshakeTimeoutMs);
     this.#handshakeTimer.unref?.();
     this.#abort = () => this.cancelHandshake(499, 'WebSocket handshake cancelled');
     this.#options.signal?.addEventListener('abort', this.#abort, { once: true });
     try {
-      const socket = this.#upstream = createUpstream(this.#url, this.#options.headers, this.#protocols, this.#bridge.limits);
+      const socket = this.#upstream = createUpstream(this.#url, this.#options.headers, this.#protocols, this.#limits);
       socket.on('upgrade', (response) => this.#upgraded(response));
       socket.on('unexpected-response', (_request, response) => this.#rejected(response));
       socket.on('open', () => this.#upstreamOpen());
@@ -869,6 +951,7 @@ class BridgeSession {
         this.#fromUpstream(binary ? buffer : buffer.toString('utf8'));
       });
       socket.on('error', (error: Error & { code?: string }) => {
+        if (error.code === 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH') transportDiagnostic('websocket_message_too_large', 'upstream', this.#limits.maxMessageBytes);
         if (!this.#handshakeFinished) this.cancelHandshake(502, 'WebSocket upstream handshake failed');
         else this.close(error.code === 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH' ? 1009
           : error.code === 'WS_ERR_TOO_MANY_BUFFERED_PARTS' ? 1008 : 1011, 'WebSocket upstream failed');
@@ -929,7 +1012,7 @@ class BridgeSession {
     let bytes = 0;
     response.on('data', (chunk: Buffer) => {
       bytes += chunk.byteLength;
-      if (bytes > this.#bridge.limits.maxRejectedBodyBytes) {
+      if (bytes > this.#limits.maxRejectedBodyBytes) {
         response.destroy();
         this.cancelHandshake(502, 'WebSocket upstream rejection body exceeded limit');
       } else chunks.push(chunk);
@@ -985,7 +1068,10 @@ class BridgeSession {
   fromClient(message: Message): void {
     if (this.#closing) return;
     const bytes = this.#messageBytes(message);
-    if (bytes > this.#bridge.limits.maxMessageBytes) { this.close(1009, 'Message too large'); return; }
+    if (bytes > this.#limits.maxMessageBytes) {
+      transportDiagnostic('websocket_message_too_large', 'client', this.#limits.maxMessageBytes, bytes);
+      this.close(1009, 'Message too large'); return;
+    }
     this.#clientMessages++; this.#clientBytes += bytes;
     const view = createWebSocketMessageView(message);
     observe(this.#options.onMessage ? () => this.#options.onMessage!('client', view) : undefined);
@@ -1006,10 +1092,13 @@ class BridgeSession {
   #fromUpstream(message: Message): void {
     if (this.#closing) return;
     const bytes = this.#messageBytes(message);
-    if (bytes > this.#bridge.limits.maxMessageBytes) { this.close(1009, 'Message too large'); return; }
+    if (bytes > this.#limits.maxMessageBytes) {
+      transportDiagnostic('websocket_message_too_large', 'upstream', this.#limits.maxMessageBytes, bytes);
+      this.close(1009, 'Message too large'); return;
+    }
     this.#upstreamMessages++; this.#upstreamBytes += bytes;
     if (!this.#downstream) {
-      if (this.#early.length >= this.#bridge.limits.maxEarlyMessages || !this.#canBuffer(bytes + 14)) {
+      if (this.#early.length >= this.#limits.maxEarlyMessages || !this.#canBuffer(bytes + 14)) {
         this.close(1013, 'WebSocket early-message budget exceeded'); return;
       }
       this.#early.push(message); this.#earlyBytes += bytes + 14;
@@ -1053,7 +1142,7 @@ class BridgeSession {
       session.refreshBuffered();
       processLimit = Math.min(processLimit, session.processLimit);
     }
-    return this.#bufferedBytes + bytes <= this.#bridge.limits.maxBufferedBytes
+    return this.#bufferedBytes + bytes <= this.#limits.maxBufferedBytes
       && processBufferedBytes + bytes <= processLimit;
   }
 
@@ -1074,7 +1163,7 @@ class BridgeSession {
     if (this.#finished || this.#closing) return;
     this.#closing = true; this.#code = code; this.#reason = closeReason(reason);
     this.#early.length = 0; this.#earlyBytes = 0;
-    this.#closeTimer = setTimeout(() => this.terminate(), this.#bridge.limits.closeTimeoutMs);
+    this.#closeTimer = setTimeout(() => this.terminate(), this.#limits.closeTimeoutMs);
     this.#closeTimer.unref?.();
     const upstream = this.#upstream;
     try {
@@ -1095,6 +1184,7 @@ class BridgeSession {
   }
 
   #upstreamClose(code: number, reason: string): void {
+    if (code === 1006 && !this.#closing) transportDiagnostic('websocket_abnormal_close', 'upstream', this.#limits.maxMessageBytes);
     this.#upstreamGone = true;
     if (!this.#handshakeFinished) this.cancelHandshake(502, 'WebSocket upstream closed before upgrade');
     this.close(code, reason);
@@ -1102,6 +1192,7 @@ class BridgeSession {
   }
 
   downstreamClose(code: number, reason: string): void {
+    if (code === 1006 && !this.#closing) transportDiagnostic('websocket_abnormal_close', 'client', this.#limits.maxMessageBytes);
     this.#downstreamGone = true;
     this.close(code, reason);
     // Report the actual downstream native close, including 1006 after a forced
