@@ -154,8 +154,7 @@ test('Gemini image tool results retain resource limits and other protocol reject
     { type: 'function_call', call_id: 'first', name: 'view_image', arguments: '{}' },
     { type: 'function_call_output', call_id: 'first', output: [toolImage] },
   ];
-  for (const targetProtocol of ['chat_completions', 'anthropic_messages'] as const)
-    expect(() => createProtocolSession({ ...context, targetProtocol }).convertRequest({ input })).toThrow();
+  expect(() => createProtocolSession({ ...context, targetProtocol: 'anthropic_messages' }).convertRequest({ input })).toThrow();
   expect(() => createProtocolSession({ ...context, sourceProtocol: 'chat_completions' }).convertRequest({ messages: [
     { role: 'assistant', tool_calls: [{ id: 'first', type: 'function', function: { name: 'view_image', arguments: '{}' } }] },
     { role: 'tool', tool_call_id: 'first', content: [{ type: 'image_url', image_url: { url: toolImage.image_url } }] },

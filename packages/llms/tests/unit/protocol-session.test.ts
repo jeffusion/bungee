@@ -1,6 +1,6 @@
 import { expect, test, describe } from 'bun:test';
 import { createProtocolSession, describeProtocolConversion, LLM_PROTOCOLS, type LLMProtocol, type ProtocolSessionContext } from '../../src/protocol-session';
-import { ResponsesCodecError, ResponsesEventEncoder } from '../../src/responses-codec';
+import { ResponsesCodecError, ResponsesEventEncoder, decodeResponsesRequest } from '../../src/responses-codec';
 const model = 'fixture-model';
 const request = (p: LLMProtocol): any => {
   if (p === 'responses')
@@ -288,6 +288,220 @@ test('Codex metadata on calls/results is diagnosed and removed without losing hi
  const result=session.convertRequest({input,instructions:'this turn only',tools:[{type:'function',name:'f',parameters:{type:'object',properties:{}}}]});
  expect(result.canonicalHistory).toHaveLength(3);expect(result.canonicalHistory.every(item=>!Object.hasOwn(item,'internal_chat_message_metadata_passthrough'))).toBe(true);expect(result.diagnostics.filter(item=>item.reason==='source_message_metadata')).toHaveLength(3);
  expect(result.body.messages).toMatchObject([{role:'system',content:'this turn only'},{role:'user'},{role:'assistant',tool_calls:[{id:'call'}]},{role:'tool',tool_call_id:'call',content:'done'}]);
+});
+
+test('Responses tool images project after paired Chat results without rewriting canonical history', () => {
+ const imageUrl='data:image/jpeg;base64,AAAA';
+ const image=(detail?:string)=>({type:'input_image',image_url:imageUrl,...(detail?{detail}:{})});
+ const tools=[{type:'function',name:'view_image',parameters:{type:'object',properties:{}}},{type:'function',name:'read',parameters:{type:'object',properties:{}}}];
+ const input=[
+  {role:'user',content:'inspect'},
+  {type:'function_call',call_id:'call_1',name:'view_image',arguments:'{}'},
+  {type:'function_call',call_id:'call_2',name:'read',arguments:'{}'},
+  {type:'function_call',call_id:'call_3',name:'read',arguments:'{}'},
+  {type:'function_call_output',call_id:'call_1',output:[{type:'input_text',text:'first'},image('high'),{type:'input_text',text:'second'},image('low')]},
+  {type:'function_call_output',call_id:'call_2',output:[image('auto')]},
+  {type:'function_call_output',call_id:'call_3',output:'plain result'},
+  {role:'user',content:'continue'},
+ ];
+ const converted=createProtocolSession(ctx('responses','chat_completions')).convertRequest({model,input,tools});
+ const messages=converted.body.messages as any[];
+ expect(messages.map(message=>message.role)).toEqual(['user','assistant','tool','tool','tool','user','user','user']);
+ expect(messages[1].tool_calls.map((call:any)=>call.id)).toEqual(['call_1','call_2','call_3']);
+ expect(messages[2]).toMatchObject({role:'tool',tool_call_id:'call_1',content:[{type:'text',text:'first'},{type:'text',text:'second'}]});
+ expect(messages[3]).toMatchObject({role:'tool',tool_call_id:'call_2',content:'Tool output contained only images; see the following images.'});
+ expect(messages[4]).toMatchObject({role:'tool',tool_call_id:'call_3',content:'plain result'});
+ expect(messages[5].content.map((part:any)=>part.type)).toEqual(['text','image_url','image_url']);
+ expect(messages[5].content[0].text).toContain('view_image');expect(messages[5].content[0].text).toContain('call_1');
+ expect(messages[5].content.slice(1)).toEqual([{type:'image_url',image_url:{url:imageUrl,detail:'high'}},{type:'image_url',image_url:{url:imageUrl,detail:'low'}}]);
+ expect(messages[6].content[0].text).toContain('read');expect(messages[6].content[0].text).toContain('call_2');
+ expect(messages[6].content[1]).toEqual({type:'image_url',image_url:{url:imageUrl,detail:'auto'}});
+ expect(converted.canonicalHistory).toEqual(input);
+ for(const param of ['input[4].output[1]','input[4].output[3]','input[5].output[0]'])
+  expect(converted.diagnostics).toContainEqual({param,action:'mapped',reason:'chat_tool_image_projected_to_user_message'});
+ const direct=decodeResponsesRequest({model,input,tools},'chat_completions');
+ expect(direct.body.messages).toEqual(messages);expect(direct.canonicalInput).toEqual(input);
+ const repeated=createProtocolSession(ctx('responses','chat_completions')).convertRequest({model,input,tools});
+ expect(repeated.body.messages).toEqual(messages);
+ expect(JSON.stringify(repeated.body.messages).match(/"type":"image_url"/g)).toHaveLength(3);
+ const interleaved=createProtocolSession(ctx('responses','chat_completions')).convertRequest({model,tools,input:[
+  {type:'function_call',call_id:'x',name:'view_image',arguments:'{}'},
+  {type:'function_call',call_id:'y',name:'read',arguments:'{}'},
+  {type:'function_call_output',call_id:'x',output:[image('high')]},
+  {role:'user',content:'between'},
+  {type:'function_call_output',call_id:'y',output:'done'},
+ ]});
+ const interleavedMessages=interleaved.body.messages as any[];
+ expect(interleavedMessages.map(message=>message.role)).toEqual(['assistant','tool','user','tool','user']);
+ expect(interleavedMessages.at(-1).content.at(-1)).toEqual({type:'image_url',image_url:{url:imageUrl,detail:'high'}});
+ let error:unknown;
+ try{createProtocolSession(ctx('responses','chat_completions')).convertRequest({model,input:[{type:'function_call',call_id:'bad',name:'view_image',arguments:'{}'},{type:'function_call_output',call_id:'bad',output:[{type:'input_file',file_id:'file_1'}]}]});}catch(caught){error=caught;}
+ expect(error).toMatchObject({code:'unsupported_content',param:'input[1].output[0]'});
+});
+
+test('Chat image validation rejects unknown fields and non-string detail through both entries', () => {
+ const imageUrl='data:image/jpeg;base64,CCCC';
+ const image=(extra:Record<string,unknown>={})=>({type:'input_image',image_url:imageUrl,detail:'high',...extra});
+ const outputInput=(part:Record<string,unknown>)=>({model,input:[
+  {type:'function_call',call_id:'call',name:'view_image',arguments:'{}'},
+  {type:'function_call_output',call_id:'call',output:[part]},
+ ]});
+ const toolCases:Array<[Record<string,unknown>,string]>=[
+  [image({file_id:'file_1'}),'input[1].output[0].file_id'],
+  [image({detail:['high']}),'input[1].output[0].detail'],
+ ];
+ for(const [part,param] of toolCases){
+  const raw=outputInput(part);
+  code(()=>decodeResponsesRequest(raw,'chat_completions'),'unsupported_content',param);
+  code(()=>createProtocolSession(ctx('responses','chat_completions')).convertRequest(raw),'unsupported_content',param);
+ }
+ const userCases:Array<[Record<string,unknown>,string]>=[
+  [image({file_id:'file_1'}),'file_id'],
+  [image({detail:['high']}),'detail'],
+ ];
+ for(const [part,field] of userCases){
+  const raw={model,input:[{role:'user',content:[part]}]};
+  const param=`input[0].content[0].${field}`;
+  code(()=>decodeResponsesRequest(raw,'chat_completions'),'unsupported_content',param);
+  code(()=>createProtocolSession(ctx('responses','chat_completions')).convertRequest(raw),'unsupported_content',param);
+ }
+});
+
+test('image-bearing tool outputs enforce maxItems on raw content items', () => {
+ const image={type:'input_image',image_url:'data:image/jpeg;base64,DDDD',detail:'high'};
+ const raw=(output:unknown[])=>({model,input:[
+  {type:'function_call',call_id:'call',name:'view_image',arguments:'{}'},
+  {type:'function_call_output',call_id:'call',output},
+ ]});
+ const context=ctx('responses','chat_completions');
+ const convert=(output:unknown[])=>createProtocolSession({...context,capabilities:{...context.capabilities,limits:{maxItems:4}}}).convertRequest(raw(output));
+ for(const output of [
+  [image,image,image,image,image],
+  [{type:'input_text',text:'a'},image,image,image,image],
+ ]){
+  code(()=>decodeResponsesRequest(raw(output),'chat_completions',{limits:{maxItems:4}}),'resource_limit','input[1].output');
+  code(()=>convert(output),'resource_limit','input[1].output');
+ }
+});
+
+test('Chat tool image projection replays across consecutive tool rounds', () => {
+ const imageUrl='data:image/jpeg;base64,BBBB',image={type:'input_image',image_url:imageUrl,detail:'high'};
+ const tools=[{type:'function',name:'view_image',parameters:{type:'object',properties:{}}}];
+ let history:any[]=[{role:'user',content:'inspect'}];
+ for(let round=0;round<2;round++){
+  const session=createProtocolSession(ctx('responses','chat_completions'));
+  const converted=session.convertRequest({model,input:history,tools});
+  const wire=(converted.body.tools as any[])[0].function.name;
+  const response=session.convertResponse({choices:[{index:0,message:{role:'assistant',content:null,tool_calls:[{id:`call_${round}`,type:'function',function:{name:wire,arguments:'{}'}}]},finish_reason:'tool_calls'}]});
+  const call=(response.output as any[]).find(item=>item.type==='function_call');
+  expect(call).toMatchObject({call_id:`call_${round}`,name:'view_image'});
+  history=[...converted.canonicalHistory,...response.output as any[],{type:'function_call_output',call_id:call.call_id,output:[{type:'input_text',text:`round ${round}`},image]}];
+  const next=createProtocolSession(ctx('responses','chat_completions')).convertRequest({model,input:history,tools});
+  const messages=next.body.messages as any[];
+  expect(messages.at(-2)).toMatchObject({role:'tool',tool_call_id:`call_${round}`,content:[{type:'text',text:`round ${round}`}]});
+  expect(messages.at(-1).role).toBe('user');
+  expect(messages.at(-1).content.at(-1)).toEqual({type:'image_url',image_url:{url:imageUrl,detail:'high'}});
+  expect(next.canonicalHistory).toEqual(history);
+ }
+});
+
+test('Chat replay merges adjacent assistant text around tool calls without losing canonical order', () => {
+ const imageUrl='data:image/jpeg;base64,EEEE';
+ const tools=[{type:'function',name:'view_image',parameters:{type:'object',properties:{}}}];
+ const toolOutput={type:'function_call_output',call_id:'call_img',output:[{type:'input_text',text:'image ready'},{type:'input_image',image_url:imageUrl,detail:'high'}]};
+ const chatRequest={model,input:[{role:'user',content:'inspect'}],tools:[{type:'function',name:'view_image',parameters:{type:'object',properties:{}}}]};
+ const streamSession=createProtocolSession(ctx('responses','chat_completions'));
+ const streamRequest=streamSession.convertRequest(chatRequest);
+ const wire=(streamRequest.body.tools as any[])[0].function.name;
+ const events:any[]=[];
+ events.push(...streamSession.push({choices:[{delta:{role:'assistant',content:"I'll "}}]}));
+ events.push(...streamSession.push({choices:[{delta:{tool_calls:[{index:0,id:'call_img',type:'function',function:{name:wire,arguments:'{}'}}]}}]}));
+ events.push(...streamSession.push({choices:[{delta:{content:'start by retrieving the image.'},finish_reason:'tool_calls'}]}));
+ events.push(...streamSession.finish());
+ expect(events.at(-1)?.type).toBe('response.completed');
+ const completed=events.at(-1)!.response as any;
+ expect(completed.output.map((item:any)=>item.type)).toEqual(['message','function_call','message']);
+ expect(completed.output[0].content[0].text).toBe("I'll ");
+ expect(completed.output[2].content[0].text).toBe('start by retrieving the image.');
+ expect(completed.output.find((item:any)=>item.type==='function_call')).toMatchObject({call_id:'call_img',name:'view_image'});
+ const replay=(input:any[])=>createProtocolSession(ctx('responses','chat_completions')).convertRequest({model,input,tools});
+ const streamed=replay([{role:'user',content:'inspect'},...completed.output,toolOutput]);
+ expect(streamed.body.messages.map((message:any)=>message.role)).toEqual(['user','assistant','tool','user']);
+ expect(JSON.stringify((streamed.body.messages as any[])[1].content)).toContain('start by retrieving the image.');
+ expect(streamed.canonicalHistory).toEqual([{role:'user',content:'inspect'},...completed.output,toolOutput]);
+ const splitInput:any[]=[{role:'user',content:'inspect'},{role:'assistant',content:"I'll "},{type:'function_call',call_id:'call_img',name:'view_image',arguments:'{}'},{role:'assistant',content:'start by retrieving the image.'},toolOutput];
+ const split=replay(splitInput);
+ const messages=split.body.messages as any[];
+ expect(messages.map(message=>message.role)).toEqual(['user','assistant','tool','user']);
+ expect(messages[1]).toMatchObject({role:'assistant',content:"I'll start by retrieving the image.",tool_calls:[{id:'call_img'}]});
+ expect(messages[1].content).toBe("I'll start by retrieving the image.");
+ expect(messages[2]).toMatchObject({role:'tool',tool_call_id:'call_img',content:[{type:'text',text:'image ready'}]});
+ expect(messages[3].content.at(-1)).toEqual({type:'image_url',image_url:{url:imageUrl,detail:'high'}});
+ expect(split.canonicalHistory).toEqual(splitInput);
+ const jsonSession=createProtocolSession(ctx('responses','chat_completions'));
+ const jsonRequest=jsonSession.convertRequest(chatRequest);
+ const jsonWire=(jsonRequest.body.tools as any[])[0].function.name;
+ const jsonOutput=(jsonSession.convertResponse({choices:[{index:0,message:{role:'assistant',content:"I'll start by retrieving the image.",tool_calls:[{id:'call_img',type:'function',function:{name:jsonWire,arguments:'{}'}}]},finish_reason:'tool_calls'}]}).output) as any[];
+ const jsonReplay=replay([{role:'user',content:'inspect'},...jsonOutput,toolOutput]).body.messages as any[];
+ const textOf=(content:any)=>typeof content==='string'?content:content.map((part:any)=>part.text??'').join('');
+ expect(jsonReplay.map(message=>message.role)).toEqual(messages.map(message=>message.role));
+ expect(textOf(jsonReplay[1].content)).toBe(textOf(messages[1].content));
+ expect(jsonReplay.slice(2)).toEqual(messages.slice(2));
+});
+
+test('Chat assistant merge honors parallel calls, custom calls, boundaries and preserve-order', () => {
+ const chatMessages=(input:any[],options:any={})=>decodeResponsesRequest({model,input},'chat_completions',{},options).body.messages as any[];
+ const parallel=chatMessages([{role:'user',content:'go'},{type:'function_call',call_id:'a',name:'view_image',arguments:'{}'},{type:'function_call',call_id:'b',name:'view_image',arguments:'{}'},{role:'assistant',content:'done'}]);
+ expect(parallel.map(message=>message.role)).toEqual(['user','assistant']);
+ expect(parallel[1]).toMatchObject({content:'done',tool_calls:[{id:'a'},{id:'b'}]});
+ const custom=chatMessages([{role:'user',content:'go'},{role:'assistant',content:'before'},{type:'custom_tool_call',call_id:'custom_1',name:'shell',input:'ls'},{role:'assistant',content:'after'}]);
+ expect(custom.map(message=>message.role)).toEqual(['user','assistant']);
+ expect(custom[1]).toMatchObject({content:'beforeafter',tool_calls:[{id:'custom_1'}]});
+ expect(chatMessages([{role:'assistant',content:'a'},{role:'user',content:'b'},{role:'assistant',content:'c'}]).map(message=>message.role)).toEqual(['assistant','user','assistant']);
+ expect(chatMessages([{role:'assistant',content:'a'},{role:'assistant',content:[{type:'input_text',text:'b'}]},{role:'assistant',content:'c'}])).toEqual([{role:'assistant',content:[{type:'text',text:'a'},{type:'text',text:'b'},{type:'text',text:'c'}]}]);
+ const afterCall=chatMessages([{role:'user',content:'go'},{type:'function_call',call_id:'call',name:'f',arguments:'{}'},{role:'assistant',content:'after'}]);
+ expect(afterCall[1]).toMatchObject({content:'after',tool_calls:[{id:'call'}]});
+ const ordered=chatMessages([{role:'assistant',content:'a'},{type:'function_call',call_id:'call',name:'f',arguments:'{}'},{role:'assistant',content:'b'}],{preserveContentOrder:true});
+ expect(ordered.map(message=>message.role)).toEqual(['assistant','assistant','assistant']);
+});
+
+test('Chat assistant merge preserves earlier reasoning when a later call joins the same assistant', () => {
+ const input=[
+  {role:'user',content:'go'},
+  {type:'reasoning',summary:[{type:'summary_text',text:'R1'}]},
+  {role:'assistant',content:'A'},
+  {role:'assistant',content:'B'},
+  {type:'reasoning',summary:[{type:'summary_text',text:'R2'}]},
+  {type:'function_call',call_id:'call',name:'f',arguments:'{}'},
+  {type:'function_call_output',call_id:'call',output:'done'},
+ ];
+ const converted=createProtocolSession(ctx('responses','chat_completions')).convertRequest({model,input});
+ const messages=converted.body.messages as any[];
+ expect(messages.map(message=>message.role)).toEqual(['user','assistant','tool']);
+ expect(messages[1]).toMatchObject({content:'AB',reasoning_content:'R1R2',tool_calls:[{id:'call'}]});
+ expect(converted.canonicalHistory).toEqual(input);
+});
+
+test('Chat JSON tolerates only empty choice metadata and matching tool-call indexes', () => {
+ const chatResponse=(choice:Record<string,unknown>={},message:Record<string,unknown>={role:'assistant',content:'answer'})=>({choices:[{index:0,message,finish_reason:'stop',...choice}]});
+ const convert=(raw:unknown)=>createProtocolSession(ctx('responses','chat_completions')).convertResponse(raw);
+ const accepted=chatResponse({provider_specific_fields:{}}),snapshot=structuredClone(accepted);
+ expect(JSON.stringify(convert(accepted))).toContain('answer');
+ expect(accepted).toEqual(snapshot);
+ for(const value of [{source:'upstream'},null,[],'opaque',42])
+  code(()=>convert(chatResponse({provider_specific_fields:value})),'unsupported_response','choices.provider_specific_fields');
+ code(()=>convert(chatResponse({vendor_extension:{}})),'unsupported_response','choices.vendor_extension');
+ code(()=>convert(chatResponse({}, {role:'assistant',content:'answer',provider_specific_fields:{}})),'unsupported_content','message.provider_specific_fields');
+ const calls=[{index:0,id:'a',type:'function',function:{name:'f',arguments:'{}'}},{index:1,id:'b',type:'function',function:{name:'f',arguments:'{}'}}];
+ const withIndex=chatResponse({finish_reason:'tool_calls'},{role:'assistant',content:null,tool_calls:calls}),indexSnapshot=structuredClone(withIndex);
+ const indexed=convert(withIndex);
+ expect((indexed.output as any[]).filter(item=>item.type==='function_call').map(item=>item.call_id)).toEqual(['a','b']);
+ expect((indexed.output as any[]).every(item=>item.type!=='function_call'||!('index' in item))).toBe(true);
+ expect(withIndex).toEqual(indexSnapshot);
+ expect((convert(chatResponse({finish_reason:'tool_calls'},{role:'assistant',content:null,tool_calls:[{id:'a',type:'function',function:{name:'f',arguments:'{}'}}]})).output as any[]).filter(item=>item.type==='function_call')).toHaveLength(1);
+ for(const index of [-1,1.5,'0',1])
+  code(()=>convert(chatResponse({finish_reason:'tool_calls'},{role:'assistant',content:null,tool_calls:[{index,id:'a',type:'function',function:{name:'f',arguments:'{}'}}]})),'invalid_payload','tool_calls[0].index');
+ code(()=>convert(chatResponse({finish_reason:'tool_calls'},{role:'assistant',content:null,tool_calls:[{id:'a',type:'function',function:{name:'f',arguments:'{}'},unknown_control:true}]})),'unsupported_tool','tool_calls.unknown_control');
 });
 
 test('Chat usage tolerates auxiliary counters while preserving consumed accounting', () => {

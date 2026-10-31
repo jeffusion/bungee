@@ -167,23 +167,27 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     if (toolNames.get(wire)!.custom !== custom) fail('tool_name_collision', 'Historical tool kind conflicts with its current declaration');
     return wire;
   };
-  const normalizeContent = (rawContent: unknown, role: string, path?: string): unknown => {
+  const normalizeContent = (rawContent: unknown, role: string, path: string): unknown => {
     if (typeof rawContent === 'string') return rawContent;
     const parts = list(rawContent, 'message content');
-    for (const [index, rawPart] of parts.entries()) atParam(path ? `${path}[${index}]` : messageParam, () => {
-      const part = record(rawPart, 'content part');
-      if (part.type === 'input_text' || part.type === 'output_text' || part.type === 'text') string(part.text, 'content text');
-      else if (part.type === 'refusal' && role === 'assistant') {
-        string(part.refusal,'refusal');
-        if (capabilities.preserveRefusalContent && protocol !== 'chat_completions') fail('unsupported_content','Target protocol cannot preserve refusal history authority');
-      }
-      else if (part.type === 'input_image' && (role === 'user' || (role === 'tool' && options.toolOutputImages))) {
-        if (protocol !== 'chat_completions') fail('unsupported_content', 'Anthropic image conversion requires provider-specific URL/data support');
-        string(part.image_url, 'image_url', true);
-        if (part.detail !== undefined && !['auto', 'low', 'high'].includes(String(part.detail))) fail('unsupported_content', 'Unknown image detail', path ? `${path}[${index}].detail` : undefined);
-      } else fail('unsupported_content', 'Unsupported message content type');
-      if (part.annotations !== undefined && list(part.annotations, 'annotations').length) fail('unsupported_content', 'Output annotations cannot be represented in input history');
-    });
+    for (const [index, rawPart] of parts.entries()) {
+      const partPath = `${path}[${index}]`;
+      atParam(partPath, () => {
+        const part = record(rawPart, 'content part');
+        if (part.type === 'input_text' || part.type === 'output_text' || part.type === 'text') string(part.text, 'content text');
+        else if (part.type === 'refusal' && role === 'assistant') {
+          string(part.refusal,'refusal');
+          if (capabilities.preserveRefusalContent && protocol !== 'chat_completions') fail('unsupported_content','Target protocol cannot preserve refusal history authority');
+        }
+        else if (part.type === 'input_image' && (role === 'user' || role === 'tool')) {
+          if (protocol !== 'chat_completions') fail('unsupported_content', 'Anthropic image conversion requires provider-specific URL/data support');
+          for (const key of Object.keys(part)) if (!['type', 'image_url', 'detail'].includes(key)) fail('unsupported_content', 'Unsupported image field', `${partPath}.${key}`);
+          string(part.image_url, 'image_url', true);
+          if (part.detail !== undefined && (typeof part.detail !== 'string' || !['auto', 'low', 'high'].includes(part.detail))) fail('unsupported_content', 'Unknown image detail', `${partPath}.detail`);
+        } else fail('unsupported_content', 'Unsupported message content type');
+        if (part.annotations !== undefined && list(part.annotations, 'annotations').length) fail('unsupported_content', 'Output annotations cannot be represented in input history');
+      });
+    }
     // Reuse the existing text/image normalizer only after validating every part.
     const normalized = contentNormalizer.normalizeResponsesMessageContent(parts.map(raw=>{const part=raw as JsonRecord;return part.type==='refusal'?{type:'output_text',text:part.refusal}:part;})) as JsonRecord[];
     for (let i = 0; i < parts.length; i++) {
@@ -193,21 +197,39 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     }
     return normalized;
   };
+  const appendAssistantContent = (previous: unknown, next: unknown): unknown => {
+    if (previous == null) return next;
+    if (next == null) return previous;
+    if (typeof previous === 'string' && typeof next === 'string') return previous + next;
+    const parts = (value: unknown): JsonRecord[] => typeof value === 'string'
+      ? [{ type: 'text', text: value }]
+      : Array.isArray(value) ? value as JsonRecord[] : [value as JsonRecord];
+    return [...parts(previous), ...parts(next)];
+  };
   const chat: JsonRecord[] = [];
   const messageParams = new WeakMap<JsonRecord, string>();
   let messageParam = 'instructions';
   const callIds = new Set<string>();
+  const callToolNames = new Map<string, string>();
   const answered = new Set<string>();
+  const projectedToolImages: { callId: string; name: string; images: JsonRecord[] }[] = [];
   let pendingReasoning = '';
   const addMessage = (message: JsonRecord): void => {
     if (chat.length >= budget.maxItems) fail('resource_limit', 'Too many input messages');
     chat.push(message);
     messageParams.set(message, messageParam);
   };
+  const flushToolImages = (force = false): void => {
+    if (!force && [...callIds].some(id => !answered.has(id))) return;
+    for (const { callId, name, images } of projectedToolImages)
+      addMessage({ role: 'user', content: [{ type: 'text', text: `Images returned by tool ${JSON.stringify(name)} (call ${JSON.stringify(callId)}):` }, ...images] });
+    projectedToolImages.length = 0;
+  };
   if (body.instructions !== undefined) addMessage({ role: 'system', content: string(body.instructions, 'instructions') });
   for (const [inputIndex, rawItem] of input.entries()) atParam(`input[${inputIndex}]`, () => {
     messageParam = `input[${inputIndex}]`;
     const item = record(rawItem, 'input item');
+    if (item.type !== 'function_call_output' && item.type !== 'custom_tool_call_output') flushToolImages();
     if (item.type === 'additional_tools') return;
     if (item.type === 'agent_message') {
       validateAgentMessage(item, messageParam, capabilities.limits);
@@ -238,10 +260,12 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
       const args = custom ? JSON.stringify({ input: string(item.input, 'custom input') }) : string(item.arguments, 'arguments');
       bounded(args, budget.maxArgumentBytes, 'arguments'); argumentObject(args);
       const call = { id, type: 'function', function: { name: resolve(item, custom), arguments: args } };
+      callToolNames.set(id, String(item.name));
       const previous = chat.at(-1);
       if (previous?.role === 'assistant' && !options.preserveContentOrder) {
         previous.tool_calls = [...(previous.tool_calls as JsonRecord[] ?? []), call];
-        if (pendingReasoning) previous.reasoning_content = pendingReasoning;
+        if (pendingReasoning)
+          previous.reasoning_content = previous.reasoning_content === undefined ? pendingReasoning : `${previous.reasoning_content}${pendingReasoning}`;
       } else addMessage({ role: 'assistant', content: null, tool_calls: [call], ...(pendingReasoning ? { reasoning_content: pendingReasoning } : {}) });
       pendingReasoning = '';
       return;
@@ -250,19 +274,44 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
       const id = string(item.call_id, 'call_id', true);
       if (!callIds.has(id) || answered.has(id)) fail('invalid_tool_history', 'Unmatched or duplicate tool result');
       answered.add(id);
-      const output = typeof item.output === 'string' ? item.output : normalizeContent(item.output, 'tool', `${messageParam}.output`);
+      if (Array.isArray(item.output) && item.output.length > budget.maxItems
+        && item.output.some(part => part && typeof part === 'object' && (part as JsonRecord).type === 'input_image'))
+        fail('resource_limit', 'Too many tool output content parts', `${messageParam}.output`);
+      let output = typeof item.output === 'string' ? item.output : normalizeContent(item.output, 'tool', `${messageParam}.output`);
+      if (protocol === 'chat_completions' && !options.toolOutputImages && Array.isArray(output)) {
+        const images = output.filter(part => part.type === 'image_url');
+        if (images.length) {
+          output.forEach((part, index) => {
+            if (part.type === 'image_url')
+              diagnostics.push({ param: `${messageParam}.output[${index}]`, action: 'mapped', reason: 'chat_tool_image_projected_to_user_message' });
+          });
+          const text = output.filter(part => part.type !== 'image_url');
+          projectedToolImages.push({ callId: id, name: callToolNames.get(id) ?? id, images });
+          output = text.length ? text : 'Tool output contained only images; see the following images.';
+        }
+      }
       addMessage({ role: 'tool', tool_call_id: id, content: output, ...(item.is_error === true ? { is_error: true } : {}) });
       return;
     }
     if (item.type !== undefined && item.type !== 'message') fail('unsupported_content', 'Unsupported input item type');
     const role = string(item.role, 'message role', true);
     if (!['user', 'assistant', 'system', 'developer'].includes(role)) fail('unsupported_content', 'Unknown message role');
-    const message: JsonRecord = { role, content: normalizeContent(item.content, role) };
+    const message: JsonRecord = { role, content: normalizeContent(item.content, role, `${messageParam}.content`) };
     if (options.preserveContentOrder && item.id !== undefined) message.id = string(item.id, 'item.id', true);
     if (pendingReasoning) { if (role !== 'assistant') fail('unsupported_reasoning', 'Reasoning must precede an assistant item'); message.reasoning_content = pendingReasoning; pendingReasoning = ''; }
+    if (protocol === 'chat_completions' && !options.preserveContentOrder && role === 'assistant') {
+      const previous = chat.at(-1);
+      if (previous?.role === 'assistant') {
+        previous.content = appendAssistantContent(previous.content, message.content);
+        if (message.reasoning_content !== undefined)
+          previous.reasoning_content = previous.reasoning_content === undefined ? message.reasoning_content : `${previous.reasoning_content}${message.reasoning_content}`;
+        return;
+      }
+    }
     addMessage(message);
   });
   if (pendingReasoning) fail('unsupported_reasoning', 'Orphan reasoning history cannot be represented');
+  flushToolImages(true);
   const result: JsonRecord = { model, messages: chat };
   const omittedAllTools = !tools.length && diagnostics.some(item => item.reason === 'optional_hosted_web_search_unavailable');
   for (const key of ['stream', 'temperature', 'top_p', 'parallel_tool_calls', 'metadata'])

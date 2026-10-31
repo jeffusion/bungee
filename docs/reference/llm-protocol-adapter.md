@@ -68,11 +68,15 @@ Responses→Chat/Anthropic/Gemini 的已知 `web_search`、`web_search_preview` 
 
 Responses 的 `include` 接受 `reasoning.encrypted_content` 和 `output.encrypted_content` 两项输出偏好。跨协议转换不生成 OpenAI 原生加密输出，逐项记录 `target_encrypted_output_unavailable` 后省略；未知项返回原始 `include[n]` 路径，输入中的实际密文仍按历史校验规则拒绝。`output.encrypted_content` 用于 [Codex 的输出 token 重放](https://github.com/openai/codex/blob/main/codex-rs/core/src/client.rs)，不构成解密或丢弃已有密文的授权；原生 Responses 透传保持原字段。
 
+Responses→Chat Completions 的 function/custom 工具结果支持图片投影：保留工具调用及 `tool_call_id`、工具结果中的文本，将 `input_image` 转成随后 user 消息中的 `image_url`，保留图片地址和 `detail`，并标明来源工具与调用 ID。同一批并行调用先输出全部工具结果，再按原顺序附加图片消息；纯图片结果用文本指向随后图片。[Chat 的 tool 消息](https://platform.openai.com/docs/api-reference/chat/create)不能原生表示图片，[DeepSeek 图片输入](https://api-docs.deepseek.com/guides/vision/)也使用 user 消息，因此这是改变图片角色及位置的有损适配，会记录映射诊断，不承诺无损或目标模型具备视觉能力。投影只影响出站正文，规范历史保留原始工具结果，重放时重新生成投影；未知内容、非法图片字段和既有资源限额仍严格校验。Anthropic 的工具结果图片转换不在此支持范围内。
+
+Chat Completions 出站历史将同一段相邻 assistant 内容与工具调用归并到一条消息，按原顺序拼接文本，不跨 user、system 或 tool 消息边界。工具调用后到达的文本不会另起 assistant 消息隔开调用与结果；流式输出项及规范历史的顺序和身份保持不变。JSON 响应允许 choice 携带空对象 `provider_specific_fields`，非空或类型非法时拒绝；工具调用的可选 `index` 必须是与数组位置一致的非负整数。这些冗余字段不写入规范历史，其他未知控制字段仍拒绝。
+
 会话按请求隔离，响应结束、失败、取消及 plugin dispose 都释放。终止状态、工具参数片段和 usage 由状态机统一管理，不能仅看到任一文本片段便宣告 completed。诊断通过宿主既有请求步骤记录，保留逻辑 requestId、字段路径和原因码，不回显正文、工具参数或凭据。
 
 Responses→Gemini 的工具调用将 thoughtSignature 编入公开 call_id 的 `__thought__` 后缀；回传完整工具历史或 previous_response_id 续聊时，恢复原始 functionCall/functionResponse.id 和调用签名。未携带签名的调用不伪造签名，namespace/custom 与明文协作标记沿用现有工具映射。parallel_tool_calls=true 校验后省略并记录诊断；false 转成“每次响应至多调用一个工具”的 systemInstruction 提示并记录 gemini_serial_tool_calls_prompt_only，不能保证提供商严格串行。
 
-Responses→Gemini 的 function/custom 工具结果支持内嵌 PNG、JPEG、WebP 图片：`output` 数组中的 `input_image.image_url` 必须是对应 MIME 类型的 Base64 data URL，图片写入 `functionResponse.parts[].inlineData`，结构化结果通过 `$ref` 保持图片与文本的顺序和工具调用身份，规范历史保留原始内容。此路径要求目标支持 [Gemini 多模态工具结果](https://ai.google.dev/gemini-api/docs/generate-content/function-calling#multimodal)。外部 URL、文件引用、非法编码和未知字段明确拒绝，不下载图片；请求字节和内容项数量受既有限额约束。可选 `detail` 仅接受 auto/low/high，经校验后记录 `gemini_tool_image_detail_unavailable` 并省略，不承诺目标端采用相同的图片处理精度，图片字节不变。其它协议对的图片工具结果支持范围保持不变。
+Responses→Gemini 的 function/custom 工具结果支持内嵌 PNG、JPEG、WebP 图片：`output` 数组中的 `input_image.image_url` 必须是对应 MIME 类型的 Base64 data URL，图片写入 `functionResponse.parts[].inlineData`，结构化结果通过 `$ref` 保持图片与文本的顺序和工具调用身份，规范历史保留原始内容。此路径要求目标支持 [Gemini 多模态工具结果](https://ai.google.dev/gemini-api/docs/generate-content/function-calling#multimodal)。外部 URL、文件引用、非法编码和未知字段明确拒绝，不下载图片；请求字节和内容项数量受既有限额约束。可选 `detail` 仅接受 auto/low/high，经校验后记录 `gemini_tool_image_detail_unavailable` 并省略，不承诺目标端采用相同的图片处理精度，图片字节不变。
 
 Responses→Gemini 的普通 user 消息同样支持上述内嵌图片，按图文顺序生成 `contents[].parts[].inlineData`，复用相同的 MIME、Base64 和资源限额校验，保留规范历史。`detail: low/high` 映射为每张图片的 `mediaResolution.level=MEDIA_RESOLUTION_LOW/HIGH` 并记录 `gemini_image_media_resolution`；auto 或缺省沿用目标默认值，显式 auto 记录 `gemini_image_detail_auto`。此映射要求目标支持 [Gemini 逐 Part 图片精度](https://ai.google.dev/gemini-api/docs/generate-content/media-resolution)，不承诺不同提供商使用相同的 token 数。图片字段错误返回原始消息及内容项路径，不用过滤后的签名历史索引替代。
 
