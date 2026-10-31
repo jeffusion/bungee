@@ -1,3 +1,10 @@
+# [6.11.0](https://github.com/jeffusion/bungee/compare/v6.10.1...v6.11.0) (2026-10-31)
+
+
+### Features
+
+* **ui:** unify bar charts and categorical colors ([ebcaed5](https://github.com/jeffusion/bungee/commit/ebcaed5c101ce6762fad8890103e003f4f1becf6))
+
 ## [6.10.1](https://github.com/jeffusion/bungee/compare/v6.10.0...v6.10.1) (2026-10-31)
 
 
