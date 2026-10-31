@@ -348,10 +348,15 @@ export type InterceptResult =
   | undefined;
 
 export const DEFAULT_WEBSOCKET_MAX_CONNECTIONS = 512;
+export const DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
+// The ws parser coerces maxPayload to a signed 32-bit integer.
+export const MAX_WEBSOCKET_MAX_MESSAGE_BYTES = 0x7fffffff;
 
 export interface AppConfig {
   /** Public client connections, including pending handshakes; null disables the count limit. */
   websocket_max_connections?: number | null;
+  /** Maximum complete WebSocket message in bytes; omitted uses 16 MiB. */
+  websocket_max_message_bytes?: number;
   config_version?: number;
   log_level?: string;
   body_parser_limit?: string;

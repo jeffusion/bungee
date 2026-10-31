@@ -48,7 +48,7 @@ function worker(id = '40000000-0000-4000-8000-000000000001', port = 40_001): Ser
 function admission(sequence: number, workerId: string, nonce: string, port: number): AdmissionSet {
   return {
     master_generation: GENERATION,
-    websocket_max_connections: 512, admission_sequence: sequence,
+    websocket_max_connections: 512, websocket_max_message_bytes: 16 * 1024 * 1024, admission_sequence: sequence,
     revision: sequence,
     content_hash: HASH,
     plugin_catalog_hash: CATALOG,

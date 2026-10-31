@@ -268,3 +268,16 @@ describe('native WebSocket Responses upstream as bounded SSE', () => {
   });
 
 });
+
+
+test('default Responses transport sends a large request and receives a large event beyond the former 2 MiB cap', async () => {
+  const input = 'input-'.repeat(900000);
+  const event = { type: 'response.output_text.delta', delta: 'output-'.repeat(500000) };
+  const up = upstream(socket => { send(socket, event); send(socket, terminal()); });
+  const gate = bridge();
+  const response = await request(gate, up.url, undefined, { model: 'fixture', input });
+  expect(await response.text()).toBe(sse(event) + sse(terminal()));
+  expect(up.received).toEqual([{ type: 'response.create', model: 'fixture', input }]);
+  await until(() => gate.stats.connections === 0);
+  expect(gate.stats.processBufferedBytes).toBe(0);
+});
