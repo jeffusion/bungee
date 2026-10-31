@@ -1,3 +1,10 @@
+## [6.10.1](https://github.com/jeffusion/bungee/compare/v6.10.0...v6.10.1) (2026-10-31)
+
+
+### Bug Fixes
+
+* **llms:** project tool images into Chat Completions messages ([1d3c17a](https://github.com/jeffusion/bungee/commit/1d3c17a0ed766d5a827c04f0481e204532ef85a7))
+
 # [6.10.0](https://github.com/jeffusion/bungee/compare/v6.9.0...v6.10.0) (2026-10-31)
 
 
