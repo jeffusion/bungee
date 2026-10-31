@@ -8,6 +8,9 @@
   import { IndustrialDialog, StatusBadge } from '$components/industrial';
   import { Button } from '$components/ui/button';
   import Download from 'lucide-svelte/icons/download';
+  import Info from 'lucide-svelte/icons/info';
+  import Loader2 from 'lucide-svelte/icons/loader-2';
+  import TriangleAlert from 'lucide-svelte/icons/triangle-alert';
   import { version } from '../../../../../../package.json';
 
   let { returnFocus }: { returnFocus?: HTMLElement | null } = $props();
@@ -24,14 +27,33 @@
   let reloadIntent = $state<{ id: string; at: number } | null>(null);
   let seconds = $state(10);
   let error = $state<string | null>(null);
+  let errorContext = $state<'status' | 'check' | 'operation' | null>(null);
   let destroyed = false;
   let generation = 0;
   const active = $derived(!!status?.operation && !['succeeded', 'failed', 'cancelled'].includes(status.operation.phase));
   const blocked = $derived(submitting || confirming || !!pendingId || !!reloadIntent || active);
   const ready = $derived(status?.operation?.phase === 'awaiting_confirmation');
-  const available = $derived(!!status?.latest && status.latest.version.localeCompare(status.running_version, undefined, { numeric: true }) > 0);
-  const needsAttention = $derived(available || active || !!pendingId || !!reloadIntent || !!error || !!status?.check_error
-    || status?.operation?.phase === 'failed' || status?.operation?.phase === 'cancelled');
+  const newerRelease = $derived(!!status?.latest && status.latest.version.localeCompare(status.running_version, undefined, { numeric: true }) > 0);
+  const operationFailed = $derived(!!status?.operation?.error || status?.operation?.phase === 'failed' || status?.operation?.phase === 'cancelled');
+  const unknownResult = $derived(pendingId !== null && error === 'result_unknown' && errorContext === 'operation');
+  const checkFailed = $derived(!!status?.check_error || (!!error && errorContext === 'check'));
+  const statusReadFailed = $derived(!!error && errorContext === 'status');
+  const actionError = $derived(!!error && errorContext !== 'status' && errorContext !== 'check');
+  const unavailableRelease = $derived(newerRelease && (status?.can_upgrade === false || !!status?.unavailable_reason)
+    && !checkFailed && !statusReadFailed && !operationFailed && !actionError);
+  const downloadAction = $derived(newerRelease && status?.can_upgrade === true && !status?.unavailable_reason && !status?.check_error
+    && !status?.checking && !checkingRelease && (unknownResult || (!error && !loading)));
+  const available = $derived(downloadAction && !blocked && !operationFailed);
+  const needsAttention = $derived(available || active || !!pendingId || !!reloadIntent || actionError
+    || operationFailed || unavailableRelease || checkingRelease || !!status?.checking || submitting || confirming);
+  const triggerState = $derived(available ? 'available'
+    : pendingId || reloadIntent ? 'pending'
+    : active || submitting || confirming ? 'progress'
+    : checkingRelease || status?.checking ? 'checking'
+    : loading ? 'reading'
+    : operationFailed || actionError ? 'attention'
+    : unavailableRelease ? 'unavailable'
+    : 'idle');
   $effect.pre(() => {
     if (!needsAttention && !open && trigger && document.activeElement === trigger) returnFocus?.focus({ preventScroll: true });
   });
@@ -44,10 +66,26 @@
     install_unavailable: 'installation', not_writable: 'writable', unsupported_platform: 'platform', unsupported_architecture: 'platform',
     update_busy: 'busy', asset_not_ready: 'asset', version_conflict: 'stale',
     unauthorized: 'unauthorized', forbidden: 'forbidden',
+    release_check_failed: 'check', release_rate_limited: 'check', invalid_release: 'check', status_unavailable: 'status',
     download_failed: 'download', digest_mismatch: 'digest', shutdown_failed: 'shutdown', startup_failed: 'startup',
     update_cancelled: 'cancelled', result_unknown: 'unknown', storage_unavailable: 'storage',
   };
-  function reason(code: string) { return $_(`updates.errors.${reasonKeys[code] ?? 'generic'}`); }
+  function reason(code: string, fallback = 'generic') { return $_(`updates.errors.${reasonKeys[code] ?? fallback}`); }
+  function requestReason(code: string, fallback = 'generic') {
+    const contextFallback = errorContext === 'status' ? 'status' : errorContext === 'check' ? 'check'
+      : errorContext === 'operation' ? 'operation' : fallback;
+    return reason(code, contextFallback);
+  }
+  function triggerLabel() {
+    if (triggerState === 'available') return $_('updates.trigger.available', { values: { version: status?.latest?.version ?? '' } });
+    if (triggerState === 'checking') return $_('updates.trigger.checking');
+    if (triggerState === 'reading') return $_('updates.trigger.reading');
+    if (triggerState === 'progress') return $_('updates.trigger.progress');
+    if (triggerState === 'pending') return $_('updates.trigger.pending');
+    if (triggerState === 'attention') return $_('updates.trigger.attention');
+    if (triggerState === 'unavailable') return $_('updates.trigger.unavailable');
+    return $_('updates.title');
+  }
   function apply(value: SystemUpdateStatus) {
     status = value;
     if (pendingId && value.operation?.id === pendingId) {
@@ -64,9 +102,12 @@
       const value = check
         ? await api.post<SystemUpdateStatus>('/system/updates/check', {}, { signal: AbortSignal.timeout(15_000) })
         : await api.get<SystemUpdateStatus>('/system/updates', { signal: AbortSignal.timeout(15_000) });
-      if (!destroyed && generation === requestGeneration) { apply(value); error = null; }
+      if (!destroyed && generation === requestGeneration) { apply(value); error = null; errorContext = null; }
     } catch (cause) {
-      if (!destroyed && generation === requestGeneration) error = cause instanceof ApiError ? cause.message : 'status_unavailable';
+      if (!destroyed && generation === requestGeneration) {
+        error = cause instanceof ApiError ? cause.message : check ? 'release_check_failed' : 'status_unavailable';
+        errorContext = check ? 'check' : 'status';
+      }
     } finally {
       if (!destroyed && generation === requestGeneration) { loading = false; checkingRelease = false; }
     }
@@ -112,13 +153,13 @@
     ++generation;
     try {
       const value = await api.post<SystemUpdateStatus>(path, input, { signal: AbortSignal.timeout(15_000) });
-      if (!destroyed) { apply(value); error = null; }
+      if (!destroyed) { apply(value); error = null; errorContext = null; }
     } catch (cause) {
       if (cause instanceof ApiError && cause.status >= 400 && cause.status < 500) {
         pendingId = null; sessionStorage.removeItem(pendingKey);
         if (path.endsWith('/confirm')) { reloadIntent = null; sessionStorage.removeItem(reloadKey); }
       }
-      if (!destroyed) error = cause instanceof ApiError ? cause.message : 'result_unknown';
+      if (!destroyed) { error = cause instanceof ApiError ? cause.message : 'result_unknown'; errorContext = 'operation'; }
     } finally { if (!destroyed) { submitting = false; void read(); } }
   }
   onMount(() => {
@@ -153,14 +194,19 @@
     <span class="font-mono text-[11px] text-zinc-400">v{status?.running_version ?? version}</span>
   {/if}
   {#if needsAttention || open}
-  <button type="button" bind:this={trigger} data-testid="system-updates-trigger" aria-label={available ? $_('updates.available', { values: { version: status?.latest?.version ?? '' } }) : $_('updates.title')} title={$_('updates.title')}
+  <button type="button" bind:this={trigger} data-testid="system-updates-trigger" aria-label={triggerLabel()} title={triggerLabel()}
     onclick={() => { open = true; void read(); }}
-    class="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center gap-1.5 px-2 font-mono text-[11px] text-zinc-400 transition-colors hover:bg-carbon-800 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-nexus-500">
-    <Download class="h-4 w-4" aria-hidden="true" />
+    class={`flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center gap-1.5 px-2 font-mono text-[11px] transition-colors hover:bg-carbon-800 hover:text-nexus-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-nexus-500 ${triggerState === 'available' ? 'text-nexus-300' : triggerState === 'attention' ? 'text-red-400' : triggerState === 'unavailable' ? 'text-amber-400' : triggerState === 'checking' || triggerState === 'reading' ? 'text-sky-400' : 'text-zinc-400'}`}>
+    {#if triggerState === 'available'}<Download class="h-4 w-4" aria-hidden="true" />
+    {:else if triggerState === 'checking' || triggerState === 'reading' || triggerState === 'progress' || triggerState === 'pending'}<Loader2 class="h-4 w-4 animate-spin" aria-hidden="true" />
+    {:else if triggerState === 'attention' || triggerState === 'unavailable'}<TriangleAlert class="h-4 w-4" aria-hidden="true" />
+    {:else}<Info class="h-4 w-4" aria-hidden="true" />{/if}
   </button>
   {/if}
   </div>
-  <IndustrialDialog bind:open busy={confirming} returnFocus={needsAttention ? undefined : returnFocus} title={$_('updates.title')} description={$_('updates.description')} closeLabel={$_('common.close')} scrollBody width="38rem">
+  <IndustrialDialog bind:open busy={confirming} returnFocus={needsAttention ? undefined : returnFocus} title={$_('updates.title')}
+    description={$_(downloadAction || active || pendingId || reloadIntent ? 'updates.description' : 'updates.statusDescription')}
+    closeLabel={$_('common.close')} scrollBody width="38rem">
     {#snippet body()}
       <div data-testid="system-updates-dialog" class="space-y-4">
         <dl class="grid grid-cols-2 gap-3 border-b border-carbon-600 pb-4">
@@ -171,28 +217,33 @@
         </dl>
         {#if releaseUrl}<a href={releaseUrl} target="_blank" rel="noopener noreferrer" class="text-sm text-nexus-300 underline">{$_('updates.releaseNotes')}</a>{/if}
         {#if status?.selected_version && status.selected_version !== status.running_version}<p class="text-sm text-zinc-400">{$_('updates.selected')}: <span class="font-mono">{status.selected_version}</span></p>{/if}
-        {#if checkingRelease || status?.checking || (loading && !status)}<p role="status" class="text-sm text-zinc-400">{$_('updates.checking')}</p>{/if}
-        {#if error || status?.check_error}<p role="alert" class="text-sm text-red-400">{reason(error ?? status!.check_error!)} <span class="font-mono">({error ?? status?.check_error})</span></p>{/if}
+        {#if checkingRelease || status?.checking}<p role="status" data-testid="updates-checking" class="text-sm text-zinc-400">{$_('updates.checking')}</p>
+        {:else if loading}<p role="status" data-testid="updates-reading" class="text-sm text-zinc-400">{$_('updates.reading')}</p>{/if}
+        {#if error || status?.check_error}<p role="alert" class="text-sm text-red-400">{error ? requestReason(error) : requestReason(status!.check_error!, 'check')}</p>{/if}
         {#if pendingId || (reloadIntent && ready)}<p role="status" data-testid="update-unknown" class="text-sm text-amber-400">{$_('updates.unknown')}</p>{/if}
         {#if reloadIntent}<p role="status" data-testid="update-countdown" class="font-mono text-sm text-nexus-300">{$_('updates.countdown', { values: { seconds } })}</p>{/if}
         {#if status?.operation}
           <div role="status" data-testid="update-operation" data-phase={status.operation.phase} class="space-y-2 border-l-2 border-nexus-500 bg-carbon-900 p-3 text-sm">
             <p class="font-mono text-zinc-200">{status.operation.source_version} → {status.operation.target_version}</p>
             <p>{$_(`updates.phases.${status.operation.phase}`)}</p>
-            {#if status.operation.error}<p class="text-red-400">{reason(status.operation.error)} <span class="font-mono">({status.operation.error})</span></p>{/if}
+            {#if status.operation.error}<p class="text-red-400">{reason(status.operation.error, 'operation')}</p>{/if}
             {#if status.operation.phase === 'succeeded' && !reloadIntent}<p class="text-emerald-400">{$_('updates.refreshHint')}</p>{/if}
           </div>
         {/if}
-        {#if status?.unavailable_reason}<p class="text-sm text-amber-400">{reason(status.unavailable_reason)} <span class="font-mono">({status.unavailable_reason})</span></p>{/if}
-        <p class="text-sm text-zinc-400">{$_('updates.downtime')}</p>
+        {#if status?.unavailable_reason}
+          <p role="status" data-testid="updates-unavailable" class="text-sm text-amber-400">{reason(status.unavailable_reason, 'capability')}</p>
+        {:else if unavailableRelease && status && !status.operation}
+          <p role="status" data-testid="updates-unavailable" class="text-sm text-amber-400">{$_('updates.notInstallable')}</p>
+        {/if}
+        {#if downloadAction || active || reloadIntent}<p data-testid="updates-downtime" class="text-sm text-zinc-400">{$_('updates.downtime')}</p>{/if}
       </div>
     {/snippet}
     {#snippet footer()}
       <Button variant="outline" disabled={loading || submitting || confirming} onclick={() => void read(true)} data-testid="updates-check">{$_('updates.check')}</Button>
       {#if ready}
         <Button disabled={submitting || confirming || !!pendingId || !!reloadIntent} onclick={event => void install(event.currentTarget as HTMLElement)} data-testid="updates-install">{$_('updates.install')}</Button>
-      {:else}
-        <Button disabled={!status?.can_upgrade || blocked || loading} onclick={event => void upgrade(event.currentTarget as HTMLElement)} data-testid="updates-upgrade">{$_('updates.download')}</Button>
+      {:else if downloadAction}
+        <Button disabled={blocked || loading || checkingRelease || !!status?.checking} onclick={event => void upgrade(event.currentTarget as HTMLElement)} data-testid="updates-upgrade">{$_('updates.download')}</Button>
       {/if}
     {/snippet}
   </IndustrialDialog>
