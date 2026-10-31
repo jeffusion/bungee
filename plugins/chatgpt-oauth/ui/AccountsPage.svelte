@@ -7,7 +7,8 @@
   import { accountReferences } from '$api/upstream-sources';
   import { sourceHandoffUrl, routeSourceHandoffUrl } from '$api/source-handoff';
   import { RoutesAPI, type Route } from '$api/routes';
-  import { PanelCard, MetricBar, StatusBadge, LoadingIndicator, IndustrialDialog } from '$components/industrial';
+  import { PanelCard, MetricBar, StatusBadge, LoadingIndicator, IndustrialDialog, IndustrialToggle } from '$components/industrial';
+  import { NumberInput } from '$components/ui/number-input';
   import RefreshCw from 'lucide-svelte/icons/refresh-cw';
   import Plus from 'lucide-svelte/icons/plus';
   import Server from 'lucide-svelte/icons/server';
@@ -34,7 +35,7 @@
   import { Input } from '$components/ui/input';
   import * as DropdownMenu from '$components/ui/dropdown-menu';
   import { Close as ResetClose } from '$components/ui/dialog';
-  import { loginStates, accountStates, terminal, verificationUrl, loginStatus, parseLoginStart, accountSummary, accountUsage, resetOutcome, errorText, errorCode, accountSourceId, canQueryUsage, loginMethods } from './account-model.js';
+  import { loginStates, accountStates, terminal, verificationUrl, loginStatus, parseLoginStart, accountSummary, accountUsage, usageDisplayState, resetCardDisplayState, resetOutcome, errorText, errorCode, accountSourceId, canQueryUsage, loginMethods } from './account-model.js';
 
   type Account = ReturnType<typeof accountSummary>;
   type AccountUsage = ReturnType<typeof accountUsage>;
@@ -60,6 +61,8 @@
   let url = $derived(active ? verificationUrl(session?.verificationUri ?? session?.authorizationUrl, kind) : null);
   let action = $state(''), actionAccount = $state<Account | null>(null), actionOpen = $state(false);
   let actionBusy = $state(false), label = $state(''), actionNotice = $state(''), referenceNotice = $state('');
+  let autoResetLeadEnabled = $state(false), autoResetLeadMinutes = $state(30);
+  let autoResetLowBalanceEnabled = $state(false), autoResetRemainingPercent = $state(10);
   let references = $state<(ReturnType<typeof accountReferences> & { revision: number }) | null>(null);
   let referenceGeneration = 0;
   let usageByAccount = $state<Record<string, UsageSnapshot>>({});
@@ -91,20 +94,30 @@
     return usageByAccount[account.id] ?? { state: 'loading' };
   }
   function usageStatus(account: Account) {
+    if (!eligibleForUsage(account)) return 'skipped';
+    return usageDisplayState(usageFor(account), !!usageErrors[account.id], clock);
+  }
+  function resetCardStatus(account: Account) {
     const snapshot = usageFor(account);
-    if ('state' in snapshot && snapshot.state === 'loading') return 'loading';
-    if ('state' in snapshot && snapshot.state === 'unavailable') return 'unavailable';
-    const usage = snapshot.usage, credits = snapshot.resetCredits;
-    if (usage.state === 'unavailable' && credits.state === 'unavailable') return 'unavailable';
-    const count = authoritativeCount(snapshot);
-    if (count === 0) return 'zero';
-    if (usage.state === 'stale' || credits.state === 'stale') return 'stale';
-    if (usage.state === 'fresh' && (!usage.value?.primary && !usage.value?.secondary)) return 'unavailable';
-    if (usage.state === 'fresh' && credits.state === 'fresh' && usage.value && credits.value) {
-      if (credits.value.credits.length < credits.value.availableCount) return 'partial';
-      if (usage.value.primary) return 'fresh';
-    }
-    return 'partial';
+    return !eligibleForUsage(account) && 'usage' in snapshot && (snapshot.usage.value || snapshot.resetCredits.value)
+      ? 'stale' : resetCardDisplayState(snapshot, !!usageErrors[account.id]);
+  }
+  function countIsStale(snapshot: UsageSnapshot, account?: Account) {
+    if (!('usage' in snapshot)) return false;
+    if (account && !eligibleForUsage(account) && (snapshot.usage.value || snapshot.resetCredits.value)) return true;
+    if (snapshot.resetCredits.state === 'fresh' && snapshot.resetCredits.value?.availableCount !== undefined) return false;
+    if (snapshot.usage.state === 'fresh' && snapshot.usage.value?.availableCount !== undefined) return false;
+    if (snapshot.resetCredits.state === 'stale' && snapshot.resetCredits.value?.availableCount !== undefined) return true;
+    return snapshot.usage.state === 'stale' && snapshot.usage.value?.availableCount !== undefined;
+  }
+  function windowExpired(window: { resetAt?: unknown }) {
+    void clock;
+    return typeof window.resetAt === 'number' && window.resetAt <= clock;
+  }
+  function usageStatusVariant(status: string): 'fault' | 'standby' | 'muted' {
+    if (status === 'failed' || status === 'refreshFailed') return 'fault';
+    if (status === 'stale' || status === 'expired' || status === 'partialExpired') return 'standby';
+    return 'muted';
   }
   function authoritativeCount(snapshot: UsageSnapshot) {
     if (!('usage' in snapshot)) return undefined;
@@ -313,7 +326,14 @@
     if (actionBusy) return;
     const generation = ++referenceGeneration;
     action = value; actionAccount = account; label = account.label; actionNotice = ''; references = null; referenceNotice = ''; actionOpen = true;
-    if (value === 'rename' || value === 'auto-reset') return;
+    if (value === 'auto-reset') {
+      autoResetLeadEnabled = account.autoResetCredits;
+      autoResetLeadMinutes = account.autoResetLeadMinutes;
+      autoResetLowBalanceEnabled = account.autoResetOnLowBalance;
+      autoResetRemainingPercent = account.autoResetRemainingPercent;
+      return;
+    }
+    if (value === 'rename') return;
     referenceNotice = 'ui.referencesLoading';
     try {
       const snapshot = await getConfigSnapshot();
@@ -362,11 +382,16 @@
     event.preventDefault();
     if (!actionAccount || actionBusy || action === 'references' || (action === 'auto-reset' && actionAccount.authType === 'siwc')) return;
     if (action === 'rename' && !label.trim()) { actionNotice = 'ui.nameRequired'; return; }
+    if (action === 'auto-reset' && (!Number.isSafeInteger(autoResetLeadMinutes) || autoResetLeadMinutes < 1 || autoResetLeadMinutes > 10080
+      || !Number.isSafeInteger(autoResetRemainingPercent) || autoResetRemainingPercent < 0 || autoResetRemainingPercent > 100)) {
+      actionNotice = 'ui.invalidNumber'; return;
+    }
     actionBusy = true;
     const generation = referenceGeneration;
     try {
       await control('POST', `/accounts/${action}`, { accountRef: actionAccount.id, ...(action === 'rename' ? { label: label.trim() } : {}),
-        ...(action === 'auto-reset' ? { enabled: !actionAccount.autoResetCredits } : {}) });
+        ...(action === 'auto-reset' ? { enabled: autoResetLeadEnabled, leadMinutes: autoResetLeadMinutes,
+          lowBalanceEnabled: autoResetLowBalanceEnabled, remainingPercent: autoResetRemainingPercent } : {}) });
       if (generation === referenceGeneration) actionOpen = false;
       await refreshAccounts();
     } catch (error) { actionNotice = errorText(error); }
@@ -438,6 +463,10 @@
 {/snippet}
 
 <div class="p-3 sm:p-4 space-y-3" data-testid="chatgpt-accounts-page">
+  <header class="flex items-center gap-3">
+    <span class="nx-stripe" aria-hidden="true"></span>
+    <div><p class="nx-label">// CHATGPT OAUTH</p><h1 class="nx-display text-xl text-zinc-50 tracking-[0.02em]">{t('ui.accountsPageTitle')}</h1></div>
+  </header>
   <div class="flex flex-wrap items-center justify-between gap-3">
     <p class="text-sm text-zinc-400">{t('ui.accountCount', { available: accounts.filter(account => account.available).length, total: accounts.length })}</p>
     <div class="flex gap-2"><Button variant="outline" disabled={refreshing} aria-busy={refreshing} onclick={refreshAccounts}>{@render actionIcon(RefreshCw, refreshing)}{t('ui.refresh')}</Button><Button onclick={() => openLogin()}>{@render actionIcon(Plus)}{t('ui.addAccount')}</Button></div>
@@ -450,67 +479,94 @@
       {#each accounts as account (account.id)}
         {@const snapshot = usageFor(account)}
         {@const status = usageStatus(account)}
+        {@const creditStatus = resetCardStatus(account)}
         {@const credits = sortedCredits(account)}
         {@const pending = pendingReset(account)}
         {@const count = authoritativeCount(snapshot)}
-        <PanelCard title={account.label} corners={false} class={`account-card min-w-0 ${count !== undefined || pending ? 'self-stretch' : ''}`} stripe={status === 'unavailable' ? 'zinc' : status === 'stale' || status === 'partial' ? 'amber' : 'orange'}>
-          <span slot="tag" data-testid="account-status"><StatusBadge variant={account.available ? 'active' : account.status === 'revoked' ? 'muted' : 'standby'}>{t(account.available ? 'ui.available' : account.status === 'active' ? 'account.reauth_required' : accountStates[account.status as keyof typeof accountStates])}</StatusBadge></span>
+        {@const staleCount = countIsStale(snapshot, account)}
+        {@const quota = t(`ui.quotaCycle.${account.quotaCycle}`)}
+        <PanelCard title={account.label} corners={false} class={`account-card min-w-0 ${count !== undefined || pending ? 'self-stretch' : ''}`} stripe={account.available ? 'orange' : account.status === 'revoked' ? 'red' : account.status === 'disabled' ? 'zinc' : 'amber'}>
+          <span slot="tag" data-testid="account-status" title={account.available ? t('ui.accountAvailabilityHelp') : undefined}><StatusBadge variant={account.available ? 'active' : account.status === 'revoked' ? 'muted' : 'standby'}>{t(account.available ? 'ui.accountStateAvailable' : account.status === 'active' ? 'account.reauth_required' : accountStates[account.status as keyof typeof accountStates])}</StatusBadge></span>
           <div class="flex flex-1 flex-col gap-3">
-            <div class="space-y-2" data-testid="account-identity">
-              {#if account.email && account.email !== account.label}<p class="break-all text-sm text-zinc-300">{account.email}</p>{/if}
-              {#if !account.email}<p class="text-sm text-zinc-400">{t('ui.noEmail')}</p>{/if}
-              {#if account.plan}<p class="text-sm text-zinc-300" data-testid="account-type">{t('ui.accountType', { plan: account.plan })}</p>{/if}
-              {#if typeof account.expiresAt === 'number'}<p class="tabular-nums text-xs text-zinc-400">{t('ui.credentialExpiry', { date: dateText(account.expiresAt) })}</p>{/if}
-              <p class="text-xs text-zinc-400">{t('ui.authMethod', { method: account.authType === 'siwc' ? t('ui.siwc') : 'Codex' })}</p>
-              {#if account.authType !== 'siwc'}<p class="text-xs text-zinc-400" data-testid="auto-reset-status">{t(account.autoResetCredits ? 'ui.autoResetEnabled' : 'ui.autoResetDisabled')}</p>{/if}
+            <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-400" data-testid="account-identity">
+              {#if account.email && account.email !== account.label}<span class="break-all text-sm text-zinc-300">{account.email}</span>{/if}
+              {#if !account.email}<span class="text-sm text-zinc-400">{t('ui.noEmail')}</span>{/if}
+              {#if account.plan}<span data-testid="account-type">{t('ui.accountType', { plan: account.plan })}</span>{/if}
+              {#if typeof account.expiresAt === 'number'}<span class="tabular-nums">{t('ui.credentialExpiry', { date: dateText(account.expiresAt) })}</span>{/if}
+              <span>{t('ui.authMethod', { method: account.authType === 'siwc' ? t('ui.siwc') : 'Codex' })}</span>
             </div>
             {#if account.authType === 'siwc'}
-              <div class="space-y-2" data-testid="siwc-usage">
+              <section class="space-y-2" data-testid="siwc-usage">
+                <span class="nx-field-label">{t('ui.usageLabel')}</span>
                 <p class="text-sm text-zinc-400">{t('ui.siwcUsageHelp')}</p>
                 <Button href="https://chatgpt.com" target="_blank" rel="noopener noreferrer" variant="outline" size="sm">{@render actionIcon(ExternalLink)}{t('ui.siwcUsage')}</Button>
-              </div>
+              </section>
             {:else}
-            <div class="flex flex-wrap items-center gap-2"><span class="nx-field-label">{t('ui.usageLabel')}</span><Button variant="ghost" size="sm" class="aspect-square px-0 [&>span]:mr-0" disabled={!eligibleForUsage(account) || usageRefreshing[account.id]} aria-busy={!!usageRefreshing[account.id]} aria-label={t('ui.refreshUsage')} title={t('ui.refreshUsage')} onclick={() => { if (!usageRefreshing[account.id]) void refreshUsage(account); }}>{@render actionIcon(RefreshCw, usageRefreshing[account.id])}</Button>{#if status !== 'fresh'}<span role="status" class={`text-xs ${status === 'stale' || status === 'partial' ? 'text-amber-300' : 'text-zinc-400'}`}>{t(`ui.usage.${status}`)}</span>{/if}</div>
-            {#if 'usage' in snapshot}
-              {#if usageErrors[account.id]}<p role="status" class="text-sm text-amber-300">{t('ui.usageFailed')}</p>{/if}
-              {#if snapshot.usage.value?.primary?.usedPercent !== undefined}<MetricBar label={windowLabel(snapshot.usage.value.primary.windowSeconds)} value={snapshot.usage.value.primary.usedPercent} valueLabel={`${snapshot.usage.value.primary.usedPercent}% ${t('ui.used')}`} /><p class="tabular-nums text-xs text-zinc-400">{#if snapshot.usage.value.primary.windowSeconds !== undefined}{t('ui.window', { duration: formatWindow(snapshot.usage.value.primary.windowSeconds) })}{/if}{#if snapshot.usage.value.primary.resetAt !== undefined} · {t('ui.resetAt', { value: resetTime(snapshot.usage.value.primary.resetAt) })}{/if}</p>{/if}
-              {#if snapshot.usage.value?.secondary?.usedPercent !== undefined}<MetricBar label={windowLabel(snapshot.usage.value.secondary.windowSeconds)} value={snapshot.usage.value.secondary.usedPercent} valueLabel={`${snapshot.usage.value.secondary.usedPercent}% ${t('ui.used')}`} /><p class="tabular-nums text-xs text-zinc-400">{#if snapshot.usage.value.secondary.windowSeconds !== undefined}{t('ui.window', { duration: formatWindow(snapshot.usage.value.secondary.windowSeconds) })}{/if}{#if snapshot.usage.value.secondary.resetAt !== undefined} · {t('ui.resetAt', { value: resetTime(snapshot.usage.value.secondary.resetAt) })}{/if}</p>{/if}
-              {#if !snapshot.usage.value?.primary && !snapshot.usage.value?.secondary}<p class="text-sm text-zinc-400">{t('ui.noUsageWindows')}</p>{/if}
-            {:else if snapshot.state === 'loading'}<LoadingIndicator label={t('ui.usageLoading')} size="sm" height="none" />
-            {:else}<p class="text-sm text-zinc-400">{t(snapshot.error ? 'ui.usageFailed' : 'ui.usageSkipped')}</p>{/if}
-            <div class="mt-auto border-t border-carbon-600 pt-3 space-y-2">
-              <div class="flex items-center justify-between gap-2" data-testid="reset-heading">
-                <div class="flex min-w-0 flex-wrap items-center gap-2"><span class="nx-field-label">{t('ui.resetCredits')}</span><span aria-hidden="true" class="text-zinc-500">·</span><span class="text-sm text-zinc-400"><span class="nx-display tabular-nums text-zinc-100">{count ?? '—'}</span> {t('ui.creditsAvailable')}</span></div>
-                <button type="button" role="switch" aria-checked={account.autoResetCredits}
-                  aria-label={`${t('ui.autoResetLabel')}: ${account.label}`}
-                  title={t(account.autoResetCredits ? 'ui.autoResetEnabled' : 'ui.autoResetHelp')}
-                  disabled={actionBusy || account.status === 'revoked'} data-testid="auto-reset-toggle"
-                  class="inline-flex h-[24px] shrink-0 items-center gap-1.5 whitespace-nowrap text-xs text-zinc-400 transition-colors hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-500 focus-visible:ring-offset-2 focus-visible:ring-offset-carbon-950 disabled:cursor-not-allowed disabled:opacity-50"
-                  onclick={() => openAction('auto-reset', account)}>
-                  <span>{t('ui.autoResetLabel')}</span>
-                  <span aria-hidden="true" data-testid="auto-reset-track"
-                    class={`inline-flex h-[16px] w-[30px] shrink-0 items-center border bg-carbon-900 transition-colors ${account.autoResetCredits ? 'border-nexus-500' : 'border-carbon-600'}`}>
-                    <span class={`block h-[12px] w-[12px] transition-transform ${account.autoResetCredits ? 'translate-x-[15px] bg-nexus-500' : 'translate-x-px bg-carbon-500'}`}></span>
-                  </span>
-                </button>
-              </div>
-              {#if count !== undefined || ('usage' in snapshot && snapshot.resetCredits.state !== 'unavailable') || pending}
+              <section class="space-y-3" data-testid="account-usage">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <span class="nx-field-label">{t('ui.usageLabel')}</span>
+                  <div class="flex flex-wrap items-center gap-2">
+                    {#if ['failed', 'refreshFailed', 'stale', 'expired', 'partialExpired'].includes(status)}<StatusBadge variant={usageStatusVariant(status)}>{t(`ui.usageStatus.${status}`)}</StatusBadge>{/if}
+                    <Button variant="ghost" size="sm" class="shrink-0" disabled={!eligibleForUsage(account) || usageRefreshing[account.id]} aria-busy={!!usageRefreshing[account.id]} aria-label={t('ui.refreshUsageAndCards')} title={t('ui.refreshUsageAndCards')} onclick={() => { if (!usageRefreshing[account.id]) void refreshUsage(account); }}>{@render actionIcon(RefreshCw, usageRefreshing[account.id])}{t('ui.refresh')}</Button>
+                  </div>
+                </div>
+                {#if status === 'loading'}<LoadingIndicator label={t('ui.usageLoading')} size="sm" height="none" />
+                {:else if status === 'failed'}<p role="alert" class="text-sm text-red-300">{t('ui.usageLoadFailed')}</p>
+                {:else if status === 'refreshFailed'}<p role="alert" class="text-sm text-amber-300">{t('ui.usageRefreshFailed')}</p>
+                {:else if status === 'stale'}<p role="status" class="text-sm text-amber-300">{t('ui.usageStale')}</p>
+                {:else if status === 'unavailable'}<p role="status" class="text-sm text-zinc-400">{t('ui.usageUnavailable')}</p>
+                {:else if status === 'skipped'}<p role="status" class="text-sm text-zinc-400">{t('ui.accountUsageSkipped')}</p>
+                {:else if status === 'noWindows'}<p role="status" class="text-sm text-zinc-400">{t('ui.noUsageWindows')}</p>
+                {:else if status === 'expired'}<p role="status" class="text-sm text-amber-300">{t('ui.usageAllWindowsExpired')}</p>
+                {:else if status === 'partialExpired'}<p role="status" class="text-sm text-amber-300">{t('ui.usageSomeWindowsExpired')}</p>{/if}
+                {#if 'usage' in snapshot}
+                  {#if snapshot.usage.value?.primary?.usedPercent !== undefined}
+                    {@const primary = snapshot.usage.value.primary}
+                    {#if windowExpired(primary)}<p role="status" class="text-sm text-amber-300">{t('ui.usageWindowExpired', { value: resetTime(primary.resetAt!) })}</p>
+                    {:else}<MetricBar label={windowLabel(primary.windowSeconds)} value={primary.usedPercent} valueLabel={`${primary.usedPercent}% ${t('ui.used')}`} /><p class="tabular-nums text-xs text-zinc-400">{#if primary.windowSeconds !== undefined}{t('ui.window', { duration: formatWindow(primary.windowSeconds) })}{/if}{#if primary.resetAt !== undefined} · {t('ui.resetAt', { value: resetTime(primary.resetAt) })}{/if}</p>{/if}
+                  {/if}
+                  {#if snapshot.usage.value?.secondary?.usedPercent !== undefined}
+                    {@const secondary = snapshot.usage.value.secondary}
+                    {#if windowExpired(secondary)}<p role="status" class="text-sm text-amber-300">{t('ui.usageWindowExpired', { value: resetTime(secondary.resetAt!) })}</p>
+                    {:else}<MetricBar label={windowLabel(secondary.windowSeconds)} value={secondary.usedPercent} valueLabel={`${secondary.usedPercent}% ${t('ui.used')}`} /><p class="tabular-nums text-xs text-zinc-400">{#if secondary.windowSeconds !== undefined}{t('ui.window', { duration: formatWindow(secondary.windowSeconds) })}{/if}{#if secondary.resetAt !== undefined} · {t('ui.resetAt', { value: resetTime(secondary.resetAt) })}{/if}</p>{/if}
+                  {/if}
+                {/if}
+              </section>
+              <section class="space-y-2 border-t border-carbon-600 pt-3" data-testid="account-reset-cards">
+                <div class="flex flex-wrap items-center gap-2" data-testid="reset-heading">
+                <span class="nx-field-label">{t('ui.resetCards')}</span><span aria-hidden="true" class="text-zinc-500">·</span>
+                  {#if count !== undefined}<span class="text-sm text-zinc-400">{t(staleCount ? 'ui.resetCardCountLastKnown' : 'ui.resetCardCountAvailable', { count })}</span>
+                  {:else}<span role="status" class="text-sm text-zinc-400">{t(creditStatus === 'loading' ? 'ui.resetCardCountLoading' : 'ui.resetCardCountUnavailable')}</span>{/if}
+                </div>
+                {#if creditStatus === 'stale' || creditStatus === 'refreshFailed' || staleCount}<p role="status" class="text-sm text-amber-300">{t('ui.resetCardDataStale')}</p>
+                {:else if count === 0}<p class="text-sm text-zinc-400">{t('ui.noResetCards')}</p>
+                {:else if count !== undefined && credits.length < count && creditStatus === 'fresh'}<p class="text-sm text-amber-300">{t('ui.resetCardPartialDetails')}</p>
+                {:else if count !== undefined && credits.length === 0}<p class="text-sm text-zinc-400">{t('ui.resetCardDetailsUnavailable')}</p>{/if}
+                {#if pending || credits.length > 0}
                   <!-- Native keyboard scrolling must also work when no credit action is available. -->
                   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-                  <div class="credit-viewport h-32 overscroll-contain space-y-1 pr-1" data-testid="credit-viewport" role="region" aria-label={t('ui.resetCredits')} tabindex="0">
-                  {#if pending}<div class="border border-amber-700/60 bg-carbon-900 p-2 space-y-2"><p class="text-sm text-amber-300">{t('ui.resetPending')}</p><p class="text-sm text-zinc-300">{resetTypeLabel(pending.credit.resetType)}</p><Button variant="outline" size="sm" title={t('ui.resolveUnknownReset')} aria-label={t('ui.resolveUnknownReset')} onclick={() => openPendingReset(account)}>{@render actionIcon(RefreshCw)}{t('ui.resolveReset')}</Button></div>{/if}
-                  {#if count === 0}<p class="text-sm text-zinc-400">{t('ui.noResetCredits')}</p>{/if}
-                  {#if !('usage' in snapshot) || snapshot.resetCredits.state !== 'fresh' || !snapshot.resetCredits.value}<p class="text-sm text-zinc-400">{t('ui.creditDetailsUnavailable')}</p>
-                  {:else if snapshot.resetCredits.value && snapshot.resetCredits.value.credits.length < snapshot.resetCredits.value.availableCount}<p class="text-sm text-amber-300">{t('ui.creditsPartial')}</p>{/if}
-                  {#each credits as credit (credit.creditId)}
-                    <div class="flex items-center gap-3 py-1.5 border-b border-carbon-600/50 last:border-b-0" data-testid="reset-credit">
-                      <div class="min-w-0 flex-1 space-y-1 text-sm text-zinc-300"><div class="flex flex-wrap items-baseline gap-x-2"><span>{resetTypeLabel(credit.resetType)}</span><span class={`text-xs ${credit.status === 'available' ? 'text-emerald-400' : 'text-zinc-400'}`}>{t(`ui.credit.${credit.status}`)}</span></div><p class="break-words tabular-nums text-xs text-zinc-400">{#if credit.expiresAt !== undefined}{t('ui.creditExpiry', { date: dateText(credit.expiresAt) })}{:else}{t('ui.creditExpiryUnknown')}{/if}</p></div>
-                      {#if canReset(account, credit)}<Button variant="outline" size="sm" class="shrink-0 border-carbon-500" title={t('ui.resetConfirmTitle')} onclick={() => openReset(account, credit)}>{@render actionIcon(RefreshCw)}{t('ui.useCredit')}</Button>{/if}
-                    </div>
-                  {/each}
+                  <div class="credit-viewport max-h-32 overscroll-contain space-y-1 pr-1" data-testid="credit-viewport" role="region" aria-label={t('ui.resetCards')} tabindex="0">
+                    {#if pending}<div class="border border-amber-700/60 bg-carbon-900 p-2 space-y-2"><p class="text-sm text-amber-300">{t('ui.resetPending')}</p><p class="text-sm text-zinc-300">{resetTypeLabel(pending.credit.resetType)}</p><Button variant="outline" size="sm" title={t('ui.resolveUnknownReset')} aria-label={t('ui.resolveUnknownReset')} onclick={() => openPendingReset(account)}>{@render actionIcon(RefreshCw)}{t('ui.resolveReset')}</Button></div>{/if}
+                    {#each credits as credit (credit.creditId)}
+                      <div class="flex items-center gap-3 py-1.5 border-b border-carbon-600/50 last:border-b-0" data-testid="reset-credit">
+                        <div class="min-w-0 flex-1 space-y-1 text-sm text-zinc-300"><div class="flex flex-wrap items-baseline gap-x-2"><span>{resetTypeLabel(credit.resetType)}</span><span class={`text-xs ${credit.status === 'available' ? 'text-emerald-400' : 'text-zinc-400'}`}>{t(`ui.credit.${credit.status}`)}</span></div><p class="break-words tabular-nums text-xs text-zinc-400">{#if credit.expiresAt !== undefined}{t('ui.creditExpiry', { date: dateText(credit.expiresAt) })}{:else}{t('ui.creditExpiryUnknown')}{/if}</p></div>
+                        {#if canReset(account, credit)}<Button variant="outline" size="sm" class="shrink-0 border-carbon-500" title={t('ui.resetConfirmTitle')} onclick={() => openReset(account, credit)}>{@render actionIcon(RefreshCw)}{t('ui.useCredit')}</Button>{/if}
+                      </div>
+                    {/each}
                   </div>
-              {:else}<p class="text-sm text-zinc-400">{t('ui.creditDetailsUnavailable')}</p>{/if}
-            </div>
+                {/if}
+              </section>
+              <section class="space-y-2 border-t border-carbon-600 pt-3" data-testid="account-reset-strategies">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <span class="nx-field-label">{t('ui.autoResetSettingsTitle')}</span>
+                  <Button variant="outline" size="sm" class="shrink-0" disabled={actionBusy || account.status === 'revoked'} data-testid="auto-reset-settings"
+                    onclick={() => openAction('auto-reset', account)}>{@render actionIcon(Pencil)}{t('ui.configureAutoReset')}</Button>
+                </div>
+                <div class="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                  <p class="text-xs text-zinc-300" data-testid="auto-reset-status">{t(account.autoResetCredits ? 'ui.autoResetEnabled' : 'ui.autoResetDisabled', { minutes: account.autoResetLeadMinutes })}</p>
+                  <p class="text-xs text-zinc-300">{t(account.autoResetOnLowBalance ? 'ui.autoResetLowBalanceEnabled' : 'ui.autoResetLowBalanceDisabled', { quota, percent: account.autoResetRemainingPercent })}</p>
+                </div>
+              </section>
             {/if}
             <div class="flex flex-wrap items-center justify-end gap-2" data-testid="account-actions">
               <Button variant="secondary" size="sm" disabled={!account.available} onclick={() => openUse(account)}>{@render actionIcon(Server)}{t('ui.useService')}</Button>
@@ -620,15 +676,27 @@
 </IndustrialDialog>
 
 {#snippet accountActionFooter()}
-  <Button form={`${id}-account-action`} type="submit" variant={action === 'delete' ? 'destructive' : 'default'} disabled={actionBusy} aria-busy={actionBusy}>{@render actionIcon(actionIcons[action] ?? Check, actionBusy)}{t(action === 'delete' ? 'ui.confirmDelete' : 'ui.confirm')}</Button>
+  <Button form={`${id}-account-action`} type="submit" variant={action === 'delete' ? 'destructive' : 'default'} disabled={actionBusy} aria-busy={actionBusy}>{@render actionIcon(actionIcons[action] ?? Check, actionBusy)}{t(action === 'delete' ? 'ui.confirmDelete' : action === 'auto-reset' ? 'ui.saveAutoResetSettings' : 'ui.confirm')}</Button>
 {/snippet}
 
 <IndustrialDialog bind:open={actionOpen} busy={actionBusy} scrollBody closeLabel={t('ui.close')} footer={action === 'references' ? undefined : accountActionFooter}
-  title={t(action === 'auto-reset' ? (actionAccount?.autoResetCredits ? 'ui.disableAutoReset' : 'ui.enableAutoReset') : actionTitles[action] ?? 'ui.more')} description={actionAccount?.label ?? ''}>
+  title={t(action === 'auto-reset' ? 'ui.autoResetSettingsTitle' : actionTitles[action] ?? 'ui.more')} description={actionAccount?.label ?? ''}>
   {#snippet body()}
+    {@const quota = t(`ui.quotaCycle.${actionAccount?.quotaCycle ?? 'weekOrMonth'}`)}
     <form id={`${id}-account-action`} onsubmit={confirmAction} class="space-y-4">
       {#if action === 'rename'}<label class="block space-y-1.5"><span class="nx-field-label">{t('ui.accountName')}</span><Input bind:value={label} maxlength={128} required /></label>{/if}
-      {#if action === 'auto-reset'}<p class="text-sm text-zinc-300">{t(actionAccount?.autoResetCredits ? 'ui.disableAutoResetHelp' : 'ui.autoResetHelp')}</p>{/if}
+      {#if action === 'auto-reset'}
+        <div class="space-y-3">
+          <div class="flex items-center justify-between gap-3"><span class="nx-field-label">{t('ui.nearExpiryStrategy')}</span><IndustrialToggle bind:checked={autoResetLeadEnabled} label={t('ui.nearExpiryStrategy')} /></div>
+          <label class="block space-y-1.5"><span class="nx-field-label">{t('ui.leadMinutes')}</span><NumberInput bind:value={autoResetLeadMinutes} min={1} max={10080} required
+            increaseLabel={t('ui.numberIncrease')} decreaseLabel={t('ui.numberDecrease')} invalidMessage={t('ui.invalidNumber')} /></label>
+          <div class="flex items-center justify-between gap-3"><span class="nx-field-label">{t('ui.lowBalanceStrategy', { quota })}</span><IndustrialToggle bind:checked={autoResetLowBalanceEnabled} label={t('ui.lowBalanceStrategy', { quota })} /></div>
+          <label class="block space-y-1.5"><span class="nx-field-label">{t('ui.remainingPercent', { quota })}</span><NumberInput bind:value={autoResetRemainingPercent} min={0} max={100} required
+            increaseLabel={t('ui.numberIncrease')} decreaseLabel={t('ui.numberDecrease')} invalidMessage={t('ui.invalidNumber')} /></label>
+          <p class="text-sm text-zinc-400">{t('ui.autoResetSettingsHelp', { quota })}</p>
+          <p class="border border-amber-700/60 bg-carbon-900 p-3 text-sm text-amber-300">{t('ui.autoResetConsumptionWarning')}</p>
+        </div>
+      {/if}
       {#if ['delete', 'disable'].includes(action)}<p role="alert" class="text-sm text-amber-300">{t('ui.dangerHelp')}</p>{/if}
       {#if referenceNotice}<p role="status" class="text-sm text-zinc-400">{t(referenceNotice)}</p>{/if}
       {#if references}

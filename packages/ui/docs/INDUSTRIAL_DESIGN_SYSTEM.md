@@ -754,7 +754,7 @@ The page title, KPI strip, controls, and body must share one content axis.
 Built-in, plugin and administration pages share one instance-wide menu catalog
 and layout. Top-level pages and one-level groups can be reordered, hidden and
 assigned icons in Menu Management. The preset orders Dashboard, Gateway
-(Routes, Services), Usage & Budget (Token Statistics, Token Budget), Access
+(Routes, Services), Usage & Budget (Token Statistics, Token Budget, ChatGPT Accounts), Access
 (Key Access, Users), Request Logs, and System (Global Settings, Plugins,
 Menu Management, Profile). Include only available pages and omit empty groups;
 append other contributions after System. Default groups use translated titles

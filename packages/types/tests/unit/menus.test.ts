@@ -9,13 +9,14 @@ const pluginPage = (pluginName: string, path: string, available = true): MenuPag
 test('default groups follow gateway, usage and access tasks independently of catalog order', () => {
   const catalog = [...BUILTIN_MENU_PAGES,
     pluginPage('user-auth', '/profile'), pluginPage('user-auth', '/users'), pluginPage('token-budget', '/settings'),
-    pluginPage('token-stats', '/statistics'), pluginPage('key-access', '/settings'), pluginPage('extra', '/page')].reverse();
+    pluginPage('token-stats', '/statistics'), pluginPage('key-access', '/settings'), pluginPage('chatgpt-oauth', '/accounts'),
+    pluginPage('extra', '/page')].reverse();
   const page = (pageId: string) => ({ kind: 'page', pageId, visible: true });
   const group = (id: string, pages: string[]) => ({ kind: 'group', id, title: null, visible: true, children: pages.map(page) });
   expect(createDefaultMenuLayout(catalog)).toEqual([
     page('builtin:dashboard'),
     group('group:gateway', ['builtin:routes', 'builtin:services']),
-    group('group:usage', ['plugin:token-stats:%2Fstatistics', 'plugin:token-budget:%2Fsettings']),
+    group('group:usage', ['plugin:token-stats:%2Fstatistics', 'plugin:token-budget:%2Fsettings', 'plugin:chatgpt-oauth:%2Faccounts']),
     group('group:access', ['plugin:key-access:%2Fsettings', 'plugin:user-auth:%2Fusers']),
     page('builtin:logs'),
     group('group:system', ['builtin:configuration', 'builtin:plugins', 'builtin:menus', 'plugin:user-auth:%2Fprofile']),

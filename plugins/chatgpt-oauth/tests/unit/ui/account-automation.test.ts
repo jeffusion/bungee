@@ -10,14 +10,37 @@ const usage = { usage: { state: 'fresh', value: { availableCount: 1 } }, resetCr
 
 test('old accounts default automation off; pending automatic reset is bounded and redacted', () => {
   const base = { id: 'simulation-account', label: 'Simulation', status: 'active', available: true };
-  assert.equal(accountSummary(base).autoResetCredits, false);
+  const defaults = accountSummary(base);
+  assert.equal(defaults.autoResetCredits, false);
+  assert.equal(defaults.autoResetLeadMinutes, 30);
+  assert.equal(defaults.autoResetOnLowBalance, false);
+  assert.equal(defaults.autoResetRemainingPercent, 10);
   const pending = { creditId: 'simulation-credit', redeemRequestId: '123e4567-e89b-42d3-a456-426614174000', expiresAt: 1900000000000, completed: false };
   const parsed = accountSummary({ ...base, autoResetCredits: true, pendingAutoReset: { ...pending, accessToken: 'never-expose' } });
   assert.equal(parsed.autoResetCredits, true);
   assert.deepEqual(parsed.pendingAutoReset, { creditId: pending.creditId, redeemRequestId: pending.redeemRequestId, expiresAt: pending.expiresAt });
   for (const autoResetCredits of ['true', 1, null]) assert.throws(() => accountSummary({ ...base, autoResetCredits }), /invalid_response/);
+  for (const [field, invalid] of [['autoResetLeadMinutes', 0], ['autoResetLeadMinutes', 10081], ['autoResetLeadMinutes', null],
+    ['autoResetOnLowBalance', 1], ['autoResetOnLowBalance', null], ['autoResetRemainingPercent', -1],
+    ['autoResetRemainingPercent', 101], ['autoResetRemainingPercent', null]] as const) {
+    assert.throws(() => accountSummary({ ...base, [field]: invalid }), /invalid_response/);
+  }
+  const boundaries = accountSummary({ ...base, autoResetCredits: true, autoResetLeadMinutes: 10080, autoResetOnLowBalance: true, autoResetRemainingPercent: 0 });
+  assert.equal(boundaries.autoResetLeadMinutes, 10080);
+  assert.equal(boundaries.autoResetOnLowBalance, true);
+  assert.equal(boundaries.autoResetRemainingPercent, 0);
   for (const override of [{ creditId: '' }, { redeemRequestId: 'bad' }, { expiresAt: NaN }, { completed: true }]) {
     assert.throws(() => accountSummary({ ...base, pendingAutoReset: { ...pending, ...override } }), /invalid_response/);
+  }
+});
+
+test('account quota cycle follows only recognized free and paid plan names', () => {
+  const base = { id: 'simulation-account', label: 'Simulation', status: 'active', available: true };
+  for (const [planType, quotaCycle] of [
+    ['free', 'month'], ['Free', 'month'], ['plus', 'week'], ['Plus', 'week'], ['pro', 'week'],
+    ['future-plan', 'weekOrMonth'], [undefined, 'weekOrMonth'],
+  ] as const) {
+    assert.equal(accountSummary({ ...base, identity: planType === undefined ? {} : { planType } }).quotaCycle, quotaCycle);
   }
 });
 

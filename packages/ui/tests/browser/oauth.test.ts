@@ -184,7 +184,8 @@ async function runOAuthScenario(scenario: string) {
 
   if (scenario === 'account-business') {
   await primary().waitFor();
-  await page.getByText('Zero', { exact: true }).waitFor();
+  const zeroAccount = accountCards().filter({ hasText: 'Zero account' }).first();
+  await zeroAccount.getByTestId('reset-heading').getByText('0 available', { exact: true }).waitFor();
   assert(maxUsageInFlight <= 4, `usage GET concurrency exceeded 4: ${maxUsageInFlight}`);
 
   const bodyText = await page.locator('body').innerText();
@@ -196,13 +197,15 @@ async function runOAuthScenario(scenario: string) {
 
   assert(!(await primary().innerText()).includes('Upstream title must stay hidden') && !(await primary().innerText()).includes('Upstream description must stay hidden'));
   const usageSummary = page.locator('.nx-panel-raised').filter({ hasText: 'Usage summary' }).first();
-  assert((await usageSummary.innerText()).includes('2'));
-  await usageSummary.getByText('Credit details unavailable', { exact: true }).waitFor();
+  const unavailableCards = usageSummary.getByTestId('account-reset-cards');
+  await unavailableCards.getByTestId('reset-heading').getByText('2 available', { exact: true }).waitFor();
+  await unavailableCards.getByText('Reset-card details were not returned.', { exact: true }).waitFor();
+  assert.equal(await unavailableCards.getByTestId('reset-credit').count(), 0);
   const primaryOnly = page.locator('.nx-panel-raised').filter({ hasText: 'Primary only' }).first();
   assert.equal(await primaryOnly.locator('.metric-bar').count(), 1);
 
   await page.getByRole('button', { name: 'Refresh', exact: true }).and(page.locator('[aria-busy="false"]')).waitFor();
-  const quotaRefresh = primary().getByRole('button', { name: 'Refresh quota usage', exact: true });
+  const quotaRefresh = primary().getByRole('button', { name: 'Refresh usage + reset-card data', exact: true });
   const beforeQuota = { ...usageGets }, quotaAccounts = accountGets, quotaPosts = resetPosts;
   holdUsage = 'account-1'; await quotaRefresh.click();
   await quotaRefresh.locator('.nx-load-xs').waitFor();
@@ -215,7 +218,9 @@ async function runOAuthScenario(scenario: string) {
   assert.equal(accountGets, quotaAccounts); assert.equal(resetPosts, quotaPosts);
 
   usageFailure = 'account-1'; holdUsage = ''; releaseUsage();
-  await primary().getByText('Usage could not be loaded. Refresh to try again.', { exact: true }).waitFor();
+  const refreshFailure = primary().getByTestId('account-usage').getByRole('alert');
+  await refreshFailure.waitFor();
+  assert.equal(await refreshFailure.innerText(), 'Refresh failed; previously received data may be out of date. Retry with the refresh button.');
   assert.equal(await primary().getByRole('button', { name: 'Use', exact: true }).count(), 0, 'stale credits cannot be consumed');
   usageFailure = ''; await quotaRefresh.click(); await primary().getByRole('button', { name: 'Use', exact: true }).waitFor();
   const monthly = page.locator('.nx-panel-raised').filter({ hasText: 'Free monthly' }).first();
