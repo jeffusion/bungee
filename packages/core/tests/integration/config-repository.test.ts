@@ -418,6 +418,34 @@ describe('configuration schema migration definition', () => {
 });
 
 describe('ConfigRepository initialization and migration', () => {
+  test.each([1, 16 * 1024 * 1024, 100 * 1024 * 1024])('persists WS message bytes %p through export snapshots and reopening', (limit) => {
+    const { repository, dbPath } = openRepository();
+    const aggregate = { ...EMPTY_AGGREGATE, logical_configuration: {
+      ...EMPTY_AGGREGATE.logical_configuration, websocket_max_message_bytes: limit,
+    } };
+    expect(repository.commit(command('ws-message-limit', 1, aggregate)).kind).toBe('committed');
+    const expected = { revision: 2, content_hash: hashConfigurationContent(aggregate), aggregate };
+    expect(repository.getSnapshot()).toEqual(expected);
+    const reopened = ConfigRepository.open(dbPath);
+    try { expect(reopened.getSnapshot()).toEqual(expected); } finally { reopened.close(); }
+  });
+
+  test('upgrades schema 6 without rewriting revisions and rejects invalid stored WS message sizes', () => {
+    const db = new Database(':memory:', { strict: true });
+    try {
+      migrateConfigurationDatabase(db, CONFIG_MIGRATIONS.filter(migration => migration.version <= 6));
+      const before = db.query('SELECT * FROM configuration_revisions').all();
+      migrateConfigurationDatabase(db);
+      expect(db.query('SELECT * FROM configuration_revisions').all()).toEqual(before);
+      expect(readRepositorySnapshot(db).aggregate).toEqual(EMPTY_AGGREGATE);
+      expect(db.query('SELECT websocket_max_message_bytes FROM settings').get()).toEqual({ websocket_max_message_bytes: null });
+      for (const value of [0, -1, 1.5, 2147483648, 'invalid']) {
+        expect(() => db.run('UPDATE settings SET websocket_max_message_bytes=?', [value])).toThrow();
+      }
+      migrateConfigurationDatabase(db);
+    } finally { db.close(); }
+  });
+
 
   test.each([512, 1024, null])('persists WebSocket admission %p through revision snapshots and reopening', (limit) => {
     const { repository, dbPath } = openRepository();

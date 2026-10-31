@@ -7,6 +7,8 @@ import { privateRequestHeaders, publicResponseHeaders, requestsUpgrade } from '.
 
 export interface AdmittedWorkerSelector {
   readonly websocketMaxConnections?: number | null;
+  readonly websocketMaxMessageBytes?: number;
+  subscribeWebSocketMessagePolicy?(listener: (maxMessageBytes: number) => void): () => void;
   acquire(): {
     readonly worker: Pick<ServingConfigWorker, 'private_port'> | null;
     release(): void;

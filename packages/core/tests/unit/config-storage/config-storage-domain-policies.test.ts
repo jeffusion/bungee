@@ -264,3 +264,18 @@ describe('configuration v2 domain policy validation', () => {
     ]);
   });
 });
+
+
+test('WebSocket message limits are finite integer bytes and omitted defaults stay omitted', () => {
+  const empty = { services: [], routes: [], plugins: [] };
+  expect(parseNormalizeCompile(empty)).toEqual({ ok: true, value: empty });
+  for (const value of [1, 524288, 16 * 1024 * 1024, 100 * 1024 * 1024, 2147483647]) {
+    const config = { ...empty, websocket_max_message_bytes: value };
+    expect(parseNormalizeCompile(config)).toEqual({ ok: true, value: config });
+  }
+  for (const value of [null, 0, -1, 1.5, 2147483648, '16777216', true, {}]) {
+    const result = parseNormalizeCompile({ ...empty, websocket_max_message_bytes: value });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors).toContainEqual(expect.objectContaining({ path: 'websocket_max_message_bytes' }));
+  }
+});

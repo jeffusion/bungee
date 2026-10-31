@@ -395,3 +395,40 @@ test('imported WebSocket limits are read-only and publish the import while cance
     expect(model.writes[0]!.body.envelope.aggregate.logical_configuration.websocket_max_connections).toBe(limit);
   });
 },60_000);
+
+
+test('message size validates the visible draft and publishes larger sizes through review and snapshot CAS', async () => {
+  await withSettings(async (page, model) => {
+    const input = page.locator('#config-websocket-max-message');
+    for (const invalid of ['', '0', '-1', '2048']) {
+      await input.fill(invalid);
+      await expect(page.getByTestId('config-save-button')).toBeDisabled();
+      expect(model.validations).toHaveLength(0); expect(model.writes).toHaveLength(0);
+    }
+    await input.fill('64'); await review(page);
+    expect(model.validations.at(-1).aggregate.logical_configuration.websocket_max_message_bytes).toBe(64 * 1024 * 1024);
+    await closeReview(page); expect(model.writes).toHaveLength(0);
+    await review(page); await page.getByTestId('config-confirm-publish').click();
+    await expect(page.getByTestId('config-review')).toHaveCount(0);
+    expect(model.writes).toHaveLength(1);
+    expect(model.writes[0]!.body.expected_revision).toBe(42);
+    expect(model.writes[0]!.body.aggregate.logical_configuration.websocket_max_message_bytes).toBe(64 * 1024 * 1024);
+  });
+}, 60_000);
+
+test('message size import is read-only and cancellation preserves the local draft', async () => {
+  await withSettings(async (page, model) => {
+    const input = page.locator('#config-websocket-max-message');
+    await input.fill('64');
+    const next = aggregate(); next.logical_configuration.websocket_max_message_bytes = 128 * 1024 * 1024;
+    await upload(page, envelope(next)); await expect(page.getByTestId('import-preview')).toBeVisible();
+    await expect(input).toBeDisabled();
+    await page.getByRole('button', { name: 'Cancel import', exact: true }).click();
+    await expect(input).toHaveValue('64'); expect(model.writes).toHaveLength(0);
+    await upload(page, envelope(next)); await expect(page.getByTestId('import-preview')).toBeVisible();
+    await review(page); await page.getByTestId('config-confirm-publish').click();
+    await expect(page.getByTestId('config-review')).toHaveCount(0);
+    expect(model.writes).toHaveLength(1);
+    expect(model.writes[0]!.body.envelope.aggregate.logical_configuration.websocket_max_message_bytes).toBe(128 * 1024 * 1024);
+  });
+}, 60_000);

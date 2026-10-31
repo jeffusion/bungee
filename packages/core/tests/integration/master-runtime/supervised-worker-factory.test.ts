@@ -114,7 +114,7 @@ async function completedWorker(worker: OnlineWorker): Promise<OnlineWorker> {
 
 function admission(worker: OnlineWorker): AdmissionSet {
   return {
-    master_generation: GENERATION, websocket_max_connections: 512, admission_sequence: 1, revision: 1, content_hash: HASH, plugin_catalog_hash: CATALOG,
+    master_generation: GENERATION, websocket_max_connections: 512, websocket_max_message_bytes: 16 * 1024 * 1024, admission_sequence: 1, revision: 1, content_hash: HASH, plugin_catalog_hash: CATALOG,
     workers: [{ ...worker.identity, boot_nonce: worker.descriptor.boot_nonce, private_port: worker.descriptor.private_port! }],
   };
 }
@@ -643,7 +643,7 @@ test('force cleanup waits a second bounded interval and retains ownership withou
   internal.owned.set(process, { process });
   try {
     await expect(workerFactory.discardConfirmedUncommitted({
-      master_generation: GENERATION, websocket_max_connections: 512, admission_sequence: 1, revision: 1, content_hash: HASH, plugin_catalog_hash: CATALOG,
+      master_generation: GENERATION, websocket_max_connections: 512, websocket_max_message_bytes: 16 * 1024 * 1024, admission_sequence: 1, revision: 1, content_hash: HASH, plugin_catalog_hash: CATALOG,
       workers: [{ ...identity, boot_nonce: process.bootNonce, private_port: 44206 }],
     })).rejects.toBeInstanceOf(SupervisedConfigWorkerFactoryError);
     expect(calls).toEqual(['graceful', 'force']);
@@ -905,7 +905,7 @@ test('adoption that fails mid-flight leaves ownership maps unchanged', async () 
   const workerFactory = factory(directory, [good, bad], undefined, control);
   try {
     const admissionSet: AdmissionSet = {
-      master_generation: GENERATION, websocket_max_connections: 512, admission_sequence: 1, revision: 1, content_hash: HASH, plugin_catalog_hash: CATALOG,
+      master_generation: GENERATION, websocket_max_connections: 512, websocket_max_message_bytes: 16 * 1024 * 1024, admission_sequence: 1, revision: 1, content_hash: HASH, plugin_catalog_hash: CATALOG,
       workers: [
         { ...good.identity, boot_nonce: good.descriptor.boot_nonce, private_port: good.descriptor.private_port! },
         { ...bad.identity, boot_nonce: bad.descriptor.boot_nonce, private_port: bad.descriptor.private_port! },

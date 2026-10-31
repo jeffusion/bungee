@@ -8,7 +8,7 @@ const CATALOG = `sha256:${'b'.repeat(64)}`;
 const generation = '10000000-0000-4000-8000-000000000001';
 
 function admission(sequence = 1): AdmissionSet {
-  return { master_generation: generation, websocket_max_connections: 512, admission_sequence: sequence, revision: 7,
+  return { master_generation: generation, websocket_max_connections: 512, websocket_max_message_bytes: 16 * 1024 * 1024, admission_sequence: sequence, revision: 7,
     content_hash: HASH as never, plugin_catalog_hash: CATALOG as never,
     workers: [0, 1].map((slot) => ({ master_generation: generation,
       worker_instance_id: `20000000-0000-4000-8000-00000000000${slot + 1}`,

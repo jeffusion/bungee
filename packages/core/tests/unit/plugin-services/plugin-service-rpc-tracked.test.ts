@@ -37,10 +37,13 @@ describe('native provider actual task observation', () => {
   });
 
   test('command executor early return does not hide actual business from terminal observation', async () => {
-    const work = gate<string>();
-    const made = fixture(() => work.promise, { executor: { execute: async execution => { void execution.executeBusiness(); return 'premature'; } } });
-    const tracked = made.runtime.invokeTracked({ ...made.request(), target: { ...made.request().target, method: 'write' }, purpose: 'management', operationId: 'tracked-command', timeoutMs: 2 });
+    const work = gate<string>(), started = gate<void>();
+    const controller = new AbortController();
+    const made = fixture(() => { started.resolve(); return work.promise; }, { executor: { execute: async execution => { void execution.executeBusiness(); return 'premature'; } } });
+    const tracked = made.runtime.invokeTracked({ ...made.request(), target: { ...made.request().target, method: 'write' }, purpose: 'management', operationId: 'tracked-command', signal: controller.signal });
     let ended = false; void tracked.terminal.then(() => { ended = true; });
+    // Let the executor return while real work remains gated, then end the caller's wait.
+    await started.promise; await tick(); controller.abort();
     expect((await rejected(tracked.result)).code).toBe('unknown'); expect(ended).toBe(false); expect(made.releases()).toBe(0);
     work.resolve('committed'); await tracked.terminal;
     expect(made.releases()).toBe(1); expect(made.runtime.status().active).toBe(0);

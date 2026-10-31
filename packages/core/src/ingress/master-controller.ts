@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { armProcessLifetimeGuard, parseProcessLifetimeHeldAck, PROCESS_LIFETIME_GUARD_ENV } from '../supervision/process-lifetime-guard';
 import { spawn as spawnChild, type ChildProcess } from 'node:child_process';
 import { clearDaemonBootstrapEnvironment, DAEMON_BOOTSTRAP_ENV_NAMES } from '../daemon-control/bootstrap';
-import { DAEMON_PROCESS_IDENTITY_MARKER_PREFIX, DEFAULT_PUBLICATION_POLICY, DEFAULT_WEBSOCKET_MAX_CONNECTIONS, type Sha256Digest } from '@jeffusion/bungee-types';
+import { DAEMON_PROCESS_IDENTITY_MARKER_PREFIX, DEFAULT_PUBLICATION_POLICY, DEFAULT_WEBSOCKET_MAX_CONNECTIONS, DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES, MAX_WEBSOCKET_MAX_MESSAGE_BYTES, type Sha256Digest } from '@jeffusion/bungee-types';
 import { validateDigest } from '../config-storage/repository-validation';
 import { isLowercaseUuid } from '../config-storage/validation';
 import type { PreparedWorkerAdmission, ServingConfigWorker, WorkerAdmissionController } from '../config-publication';
@@ -458,7 +458,7 @@ export class MasterIngressController implements WorkerAdmissionController {
     this.startLeaseRenewal();
   }
 
-  prepare(workers: readonly ServingConfigWorker[], signal?: AbortSignal, handoffTimeoutMs?: number, websocketMaxConnections: number | null = DEFAULT_WEBSOCKET_MAX_CONNECTIONS): Promise<PreparedWorkerAdmission> {
+  prepare(workers: readonly ServingConfigWorker[], signal?: AbortSignal, handoffTimeoutMs?: number, websocketMaxConnections: number | null = DEFAULT_WEBSOCKET_MAX_CONNECTIONS, websocketMaxMessageBytes = DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES): Promise<PreparedWorkerAdmission> {
     this.requireMutation();
     throwIfAborted(signal);
     const handoffBudgetMs = handoffTimeoutMs ?? DEFAULT_PUBLICATION_POLICY.drain_timeout_ms;
@@ -466,7 +466,7 @@ export class MasterIngressController implements WorkerAdmissionController {
       throw new MasterIngressControllerError('invalid_options', 'handoff timeout is invalid');
     }
     const scope = this.captureAdmissionHandleScope();
-    const set = this.toAdmissionSet(workers, websocketMaxConnections);
+    const set = this.toAdmissionSet(workers, websocketMaxConnections, websocketMaxMessageBytes);
     const fingerprint = canonicalJson({ admission: { ...set, admission_sequence: 0 }, handoff_timeout_ms: handoffBudgetMs });
     if (this.pendingAdmission?.fingerprint === fingerprint) return this.pendingAdmission.promise;
     this.beginPrepareRecovery(set);
@@ -1809,7 +1809,11 @@ export class MasterIngressController implements WorkerAdmissionController {
     }
   }
 
-  private toAdmissionSet(workers: readonly ServingConfigWorker[], websocketMaxConnections: number | null): AdmissionSet {
+  private toAdmissionSet(workers: readonly ServingConfigWorker[], websocketMaxConnections: number | null, websocketMaxMessageBytes: number): AdmissionSet {
+    if (!Number.isSafeInteger(websocketMaxMessageBytes) || websocketMaxMessageBytes < 1
+      || websocketMaxMessageBytes > MAX_WEBSOCKET_MAX_MESSAGE_BYTES) {
+      throw new MasterIngressControllerError('invalid_options', 'WebSocket message limit is invalid');
+    }
     if (websocketMaxConnections !== null && (!Number.isSafeInteger(websocketMaxConnections)
       || websocketMaxConnections < 1 || websocketMaxConnections > 0x7fffffff)) {
       throw new MasterIngressControllerError('invalid_options', 'WebSocket connection limit is invalid');
@@ -1853,6 +1857,7 @@ export class MasterIngressController implements WorkerAdmissionController {
       content_hash: first.content_hash as Sha256Digest,
       plugin_catalog_hash: first.plugin_catalog_hash as Sha256Digest,
       websocket_max_connections: websocketMaxConnections,
+      websocket_max_message_bytes: websocketMaxMessageBytes,
       workers: ordered,
     };
   }

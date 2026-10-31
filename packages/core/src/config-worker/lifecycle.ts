@@ -1,4 +1,4 @@
-import { createWebSocketBridge, isWebSocketUpgradeRequest, type WebSocketBridge, type WebSocketBridgeData } from '../websocket';
+import { createWebSocketBridge, webSocketMessageLimits, isWebSocketUpgradeRequest, type WebSocketBridge, type WebSocketBridgeData } from '../websocket';
 import { runGatewayWebSocket } from '../gateway/runtime';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import type { Server } from 'bun';
@@ -116,7 +116,7 @@ export function createConfigWorkerLifecycle(
       let cleanupPromise: Promise<void> | null = null;
       const cleanup = () => cleanupPromise ??= cleanupAll(resources);
       let server: LifecycleServer | null = null;
-      const websocket = createWebSocketBridge();
+      const websocket = createWebSocketBridge(webSocketMessageLimits(config.websocket_max_message_bytes));
       const sessions = new Set<Promise<void>>();
       try {
         resources.configureBodyStorage(config);
