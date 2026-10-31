@@ -18,17 +18,27 @@ const initial = (): SystemUpdateStatus => ({ running_version: '6.6.0', selected_
 async function scenario(run: (page: Page, state: {
   status: SystemUpdateStatus; posts: unknown[]; confirmations: unknown[]; checks: number; reads: number;
   response: 'accepted' | 'lost' | 'unauthorized'; confirmResponse: 'accepted' | 'lost' | 'unauthorized';
+  statusReadFailure: boolean; holdCheck: boolean; releaseCheck: () => void;
 }) => Promise<void>, language = 'en', startOpen = true, status = initial()) {
   const context = await browser.newContext({ locale: language });
   const state = { status, posts: [] as unknown[], confirmations: [] as unknown[], checks: 0, reads: 0,
-    response: 'accepted' as 'accepted' | 'lost' | 'unauthorized', confirmResponse: 'accepted' as 'accepted' | 'lost' | 'unauthorized' };
+    response: 'accepted' as 'accepted' | 'lost' | 'unauthorized', confirmResponse: 'accepted' as 'accepted' | 'lost' | 'unauthorized',
+    statusReadFailure: false, holdCheck: false, releaseCheck: () => {} };
   try {
     const page = await context.newPage();
     const evidence = collectApiEvidence(page), errors = evidence.errors;
     await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
       const request = route.request(), path = new URL(request.url()).pathname;
-      if (request.method() === 'GET' && path === '/api/system/updates') { state.reads++; return route.fulfill({ json: state.status }); }
-      if (request.method() === 'POST' && path === '/api/system/updates/check') { state.checks++; return route.fulfill({ json: state.status }); }
+      if (request.method() === 'GET' && path === '/api/system/updates') {
+        state.reads++;
+        if (state.statusReadFailure) { evidence.expectStatus(route, 503); return route.fulfill({ status: 503, json: { error: 'status_unavailable' } }); }
+        return route.fulfill({ json: state.status });
+      }
+      if (request.method() === 'POST' && path === '/api/system/updates/check') {
+        state.checks++;
+        if (state.holdCheck) await new Promise<void>(resolve => state.releaseCheck = resolve);
+        return route.fulfill({ json: state.status });
+      }
       if (request.method() === 'POST' && path === '/api/system/updates/confirm') {
         const body = request.postDataJSON(); state.confirmations.push(body);
         assert(body).toEqual({ operation_id: state.status.operation!.id,
@@ -62,7 +72,7 @@ async function scenario(run: (page: Page, state: {
     await run(page, state);
     evidence.verify();
     assert(errors).toEqual([]);
-  } finally { await context.close(); }
+  } finally { state.releaseCheck(); await context.close(); }
 }
 
 test('current version hides the update entry while pending and failed operations remain accessible', async () => {
@@ -82,18 +92,142 @@ test('current version hides the update entry while pending and failed operations
     await expect(page.getByTestId('updates-check')).toBeEnabled();
     state.status.operation.phase = 'failed';
     state.status.operation.error = 'shutdown_failed';
+    state.status.latest = initial().latest;
     await page.reload();
     await page.getByTestId('system-updates-trigger').click();
     await expect(page.getByTestId('update-operation')).toHaveAttribute('data-phase', 'failed');
+    await expect(page.getByTestId('system-updates-dialog')).not.toContainText('shutdown_failed');
+    await expect(page.getByTestId('updates-unavailable')).toHaveCount(0);
+    await expect(page.getByTestId('system-updates-trigger')).not.toHaveAttribute('title', /^Download update/i);
+    await expect(page.getByTestId('system-updates-trigger')).not.toHaveAttribute('aria-label', /^Download update/i);
+    await expect(page.getByTestId('updates-upgrade')).toHaveCount(0);
 
     await expect(page.getByTestId('updates-check')).toBeEnabled();
-    state.status.operation = null;
-    state.status.check_error = 'release_check_failed';
+    state.status.can_upgrade = true;
     await page.reload();
-    await expect(page.getByTestId('system-updates-trigger')).toBeVisible();
+    await page.getByTestId('system-updates-trigger').click();
+    await expect(page.getByTestId('update-operation')).toHaveAttribute('data-phase', 'failed');
+    await expect(page.getByTestId('updates-unavailable')).toHaveCount(0);
+    await expect(page.getByTestId('system-updates-trigger')).not.toHaveAttribute('title', /^Download update/i);
+    await expect(page.getByTestId('system-updates-trigger')).not.toHaveAttribute('aria-label', /^Download update/i);
+    await expect(page.getByTestId('updates-upgrade')).toBeEnabled();
+    await page.getByTestId('updates-upgrade').click();
+    await expect(page.getByTestId('confirmation-cancel')).toBeVisible();
+    await page.getByTestId('confirmation-cancel').click();
+    state.status.operation.phase = 'cancelled';
+    state.status.operation.error = 'update_cancelled';
+    await page.reload();
+    await page.getByTestId('system-updates-trigger').click();
+    await expect(page.getByTestId('update-operation')).toHaveAttribute('data-phase', 'cancelled');
+    await expect(page.getByTestId('system-updates-dialog')).not.toContainText('update_cancelled');
+    await expect(page.getByTestId('updates-upgrade')).toBeEnabled();
+    await page.getByTestId('updates-upgrade').click();
+    await expect(page.getByTestId('confirmation-cancel')).toBeVisible();
+    await page.getByTestId('confirmation-cancel').click();
     assert(state.posts).toHaveLength(0);
     assert(state.confirmations).toHaveLength(0);
+
+    state.status.operation = null;
+    state.status.latest = initial().latest;
+    state.status.can_upgrade = true;
+    state.status.check_error = null;
+    state.status.unavailable_reason = null;
+    await page.reload();
+    const trigger = page.getByTestId('system-updates-trigger');
+    await expect(trigger).toBeVisible();
+    await trigger.click();
+    const dialog = page.getByTestId('system-updates-dialog');
+    await expect(page.getByTestId('updates-check')).toBeEnabled();
+    state.status.check_error = 'release_check_failed';
+    await page.getByTestId('updates-check').click();
+    await expect(dialog.getByRole('alert')).toBeVisible();
+    await expect(dialog).not.toContainText(/release_check_failed|source_runtime|status_unavailable|shutdown_failed|result_unknown|update_cancelled/);
+    await expect(trigger).not.toHaveAttribute('title', /needs attention/i);
+    await expect(page.getByTestId('updates-upgrade')).toHaveCount(0);
+    await expect(page.getByTestId('updates-install')).toHaveCount(0);
+    await expect(page.getByTestId('updates-downtime')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Close', exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toHaveCount(0);
+    assert(state.status.latest?.version).toBe('6.7.0');
+    assert(state.status.can_upgrade).toBe(true);
+
+    state.status.latest = null;
+    state.status.can_upgrade = false;
+    state.status.unavailable_reason = 'source_runtime';
+    await page.reload();
+    await expect(trigger).toHaveCount(0);
+    assert(state.posts).toHaveLength(0);
+    assert(state.confirmations).toHaveLength(0);
+    assert(state.checks).toBe(1);
   }, 'en', false, status);
+}, 30_000);
+
+test('source runtime and unreadable update status never offer a download action', async () => {
+  const source = initial();
+  source.running_version = '6.9.0';
+  source.latest = { ...source.latest!, version: '6.10.0' };
+  source.can_upgrade = false;
+  source.unavailable_reason = 'source_runtime';
+  await scenario(async (page, state) => {
+    const trigger = page.getByTestId('system-updates-trigger');
+    await expect(trigger).toBeVisible();
+    await expect(trigger).not.toHaveAttribute('title', /^Download update/i);
+    await expect(trigger).not.toHaveAttribute('aria-label', /^Download update/i);
+    await trigger.click();
+    const dialog = page.getByTestId('system-updates-dialog');
+    await expect(dialog.getByTestId('updates-unavailable')).toBeVisible();
+    await expect(dialog).toContainText('6.10.0');
+    await expect(dialog).not.toContainText('source_runtime');
+    await expect(page.getByTestId('updates-check')).toBeEnabled();
+    await expect(page.getByTestId('updates-upgrade')).toHaveCount(0);
+    await expect(page.getByTestId('updates-install')).toHaveCount(0);
+    await expect(page.getByTestId('updates-downtime')).toHaveCount(0);
+    assert(state.posts).toHaveLength(0);
+    assert(state.confirmations).toHaveLength(0);
+    assert(state.checks).toBe(0);
+  }, 'en', false, source);
+
+  const sourceWithoutRelease = initial();
+  sourceWithoutRelease.running_version = '6.9.0';
+  sourceWithoutRelease.latest = null;
+  sourceWithoutRelease.can_upgrade = false;
+  sourceWithoutRelease.unavailable_reason = 'source_runtime';
+  await scenario(async (page, state) => {
+    await expect(page.getByTestId('system-updates-trigger')).toHaveCount(0);
+    assert(state.posts).toHaveLength(0);
+    assert(state.confirmations).toHaveLength(0);
+    assert(state.checks).toBe(0);
+  }, 'en', false, sourceWithoutRelease);
+
+  const cachedCapability = initial();
+  cachedCapability.can_upgrade = false;
+  cachedCapability.unavailable_reason = 'source_runtime';
+  await scenario(async (page, state) => {
+    const trigger = page.getByTestId('system-updates-trigger');
+    await expect(trigger).toBeVisible();
+    state.statusReadFailure = true;
+    await trigger.click();
+    const dialog = page.getByTestId('system-updates-dialog');
+    await expect(dialog.getByRole('alert')).toBeVisible();
+    await expect(dialog).toContainText('6.7.0');
+    await expect(dialog.getByTestId('updates-unavailable')).toBeVisible();
+    await expect(dialog).not.toContainText(/status_unavailable|source_runtime|release_check_failed/);
+    await expect(trigger).not.toHaveAttribute('title', /needs attention/i);
+    await expect(page.getByTestId('updates-check')).toBeEnabled();
+    await expect(page.getByTestId('updates-upgrade')).toHaveCount(0);
+    await expect(page.getByTestId('updates-install')).toHaveCount(0);
+    await expect(page.getByTestId('updates-downtime')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Close', exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toHaveCount(0);
+    assert(state.status.latest?.version).toBe('6.7.0');
+    assert(state.status.can_upgrade).toBe(false);
+    assert(state.reads).toBeGreaterThanOrEqual(2);
+    assert(state.posts).toHaveLength(0);
+    assert(state.confirmations).toHaveLength(0);
+    assert(state.checks).toBe(0);
+  }, 'en', false, cachedCapability);
 }, 30_000);
 
 test('idle status refreshes only on entry or manually; an upgrade polls until it finishes', async () => {
@@ -113,12 +247,18 @@ test('idle status refreshes only on entry or manually; an upgrade polls until it
     assert(state.reads).toBe(reads + 1);
     await page.clock.fastForward(65_000);
     assert(state.reads).toBe(reads + 1);
+    state.holdCheck = true;
     await page.getByTestId('updates-check').click();
     await expect.poll(() => state.checks).toBe(1);
+    await expect(page.getByTestId('updates-checking')).toBeVisible();
+    await expect(page.getByTestId('system-updates-trigger')).not.toHaveAttribute('title', /^Download update/i);
+    state.holdCheck = false; state.releaseCheck();
     await expect(page.getByTestId('updates-upgrade')).toBeEnabled();
     await page.getByTestId('updates-upgrade').click();
     await page.getByTestId('confirmation-accept').click();
     await expect(page.getByTestId('update-operation')).toHaveAttribute('data-phase', 'downloading');
+    await expect(page.getByTestId('system-updates-trigger')).not.toHaveAttribute('title', /^Download update/i);
+    await expect(page.getByTestId('system-updates-trigger')).not.toHaveAttribute('aria-label', /^Download update/i);
     await expect(page.getByTestId('updates-check')).toBeEnabled();
     const downloadingReads = state.reads;
     state.status.operation!.phase = 'awaiting_confirmation';
@@ -192,12 +332,18 @@ test('lost download responses recover by querying only; other-page upgrades pres
     await page.getByTestId('confirmation-accept').click();
     await failed;
     await expect(page.getByTestId('update-unknown')).toBeVisible();
+    await expect(page.getByTestId('system-updates-dialog')).not.toContainText('result_unknown');
+    await expect(page.getByTestId('system-updates-trigger')).not.toHaveAttribute('title', /^Download update/i);
+    await expect(page.getByTestId('system-updates-trigger')).not.toHaveAttribute('aria-label', /^Download update/i);
     await expect(page.getByTestId('updates-upgrade')).toBeDisabled();
     const reads = state.reads;
     await page.reload();
     await expect.poll(() => state.reads).toBeGreaterThan(reads);
     await page.getByTestId('system-updates-trigger').click();
     await expect(page.getByTestId('update-unknown')).toBeVisible();
+    await expect(page.getByTestId('system-updates-dialog')).not.toContainText('result_unknown');
+    await expect(page.getByTestId('system-updates-trigger')).not.toHaveAttribute('title', /^Download update/i);
+    await expect(page.getByTestId('system-updates-trigger')).not.toHaveAttribute('aria-label', /^Download update/i);
     await expect(page.getByTestId('updates-upgrade')).toBeDisabled();
     const body = state.posts[0] as any;
     state.status.operation = { id: body.operation_id, source_version: body.current_version, target_version: body.target_version,
