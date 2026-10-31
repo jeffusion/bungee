@@ -1,3 +1,15 @@
+# [6.10.0](https://github.com/jeffusion/bungee/compare/v6.9.0...v6.10.0) (2026-10-31)
+
+
+### Bug Fixes
+
+* **ui:** keep update check failures quiet and readable ([9b9f2c0](https://github.com/jeffusion/bungee/commit/9b9f2c0e1d20ee22322ffc59c20f17f02f23ddcf))
+
+
+### Features
+
+* **chatgpt-oauth:** add account page and configurable reset strategies ([b59ebd7](https://github.com/jeffusion/bungee/commit/b59ebd7cd2c568c3d7bdb4adddd460d7b5c13d95))
+
 # [6.9.0](https://github.com/jeffusion/bungee/compare/v6.8.2...v6.9.0) (2026-10-29)
 
 
