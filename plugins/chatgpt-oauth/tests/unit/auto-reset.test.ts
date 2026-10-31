@@ -2,7 +2,7 @@ import { controlHost } from '../helpers/control-host';
 import { describe, expect, test } from 'bun:test';
 import type { SecretStore, SecretValue, PluginControl, ControlHostContext } from '../../../../packages/core/src/plugin-control/contracts';
 import { AccountStore, ACCOUNT_STORE_KEY } from '../../server/accounts';
-import { AUTO_RESET_LEAD_MS, AUTO_RESET_INTERVAL_MS, isAutoResetDue, type AutoResetTimer } from '../../server/auto-reset';
+import { AUTO_RESET_LEAD_MS, AUTO_RESET_INTERVAL_MS, isAutoResetDue, isLowBalance, type AutoResetTimer } from '../../server/auto-reset';
 import { createControl } from '../../server/control';
 import type { FetchLike } from '../../server/oauth';
 import type { ResetCredit } from '../../server/usage';
@@ -47,6 +47,8 @@ async function setup(enabled = true) {
   let credits = [credit()];
   let creditStatus = 200;
   let outcome = 'reset';
+  let usageBody: unknown = { rate_limit: { allowed: true, primary_window: { used_percent: 50, limit_window_seconds: 18000, reset_after_seconds: 3600 } } };
+  let usageStatus = 200;
   let onGetCredits: (() => void | Promise<void>) | undefined;
   let onPost: (() => Promise<void>) | undefined;
   const posts: { credit_id: string; redeem_request_id: string }[] = [];
@@ -65,9 +67,7 @@ async function setup(enabled = true) {
       if (onPost) await onPost();
       return json({ code: outcome, windows_reset: outcome === 'nothing_to_reset' || outcome === 'no_credit' ? 0 : 1 });
     }
-    if (path.endsWith('/usage')) return json({ rate_limit: { allowed: true, primary_window: {
-      used_percent: 50, limit_window_seconds: 18000, reset_after_seconds: 3600,
-    } } });
+    if (path.endsWith('/usage')) return json(usageBody, usageStatus);
     if (!path.endsWith('/rate-limit-reset-credits')) throw new Error('Unexpected simulation endpoint');
     await onGetCredits?.();
     return json({ available_count: credits.filter(item => item.status === 'available').length,
@@ -89,6 +89,7 @@ async function setup(enabled = true) {
   return { ...initial, accounts, account, store, requests, posts, host, restart,
     setNow: (value: number) => { now = value; }, setCredits: (value: ResetCredit[]) => { credits = value; },
     setCreditStatus: (value: number) => { creditStatus = value; }, setOutcome: (value: string) => { outcome = value; },
+    setUsage: (value: unknown, status = 200) => { usageBody = value; usageStatus = status; },
     onGetCredits: (callback: () => void | Promise<void>) => { onGetCredits = callback; },
     onPost: (callback: () => Promise<void>) => { onPost = callback; },
     dispose: async () => { for (const item of controls) await item.dispose(); },
@@ -102,6 +103,110 @@ async function invoke(control: PluginControl, handler: string, body?: unknown): 
 }
 
 describe('automatic reset, simulation only', () => {
+  test('balance trusts the unique longest fresh duration in either position, not five-hour or expired windows', () => {
+    const weekly = { usedPercent: 90, windowSeconds: 604800, resetAfterSeconds: 3600, resetAt: NOW + 3600_000 };
+    for (const key of ['primary', 'secondary']) {
+      expect(isLowBalance({ state: 'fresh', [key]: weekly }, 10, NOW)).toBe(true);
+      expect(isLowBalance({ state: 'fresh', [key]: { ...weekly, usedPercent: 89 } }, 10, NOW)).toBe(false);
+      expect(isLowBalance({ state: 'fresh', [key]: { ...weekly, windowSeconds: 18000 } }, 10, NOW)).toBe(false);
+      expect(isLowBalance({ state: 'fresh', [key]: { ...weekly, resetAt: NOW } }, 10, NOW)).toBe(false);
+      for (const state of ['stale', 'unavailable'] as const) expect(isLowBalance({ state, [key]: weekly }, 10, NOW)).toBe(false);
+    }
+    expect(isLowBalance({ state: 'fresh' }, 100, NOW)).toBe(false);
+    const daily = { ...weekly, windowSeconds: 86400 };
+    expect(isLowBalance({ state: 'fresh', primary: daily }, 10, NOW)).toBe(true);
+    expect(isLowBalance({ state: 'fresh', primary: daily, secondary: weekly }, 10, NOW)).toBe(true);
+    expect(isLowBalance({ state: 'fresh', primary: daily, secondary: { ...weekly, usedPercent: 0 } }, 10, NOW)).toBe(false);
+    expect(isLowBalance({ state: 'fresh', primary: daily, secondary: daily }, 10, NOW)).toBe(false);
+  });
+
+  test('expiry remains eligible when balance revalidation becomes healthy, unavailable or disabled', async () => {
+    for (const change of ['healthy', 'unavailable', 'disabled']) {
+      const s = await setup();
+      try {
+        await s.accounts.setAutoResetCredits(s.account.id, true, { lowBalanceEnabled: true });
+        s.setUsage({ rate_limit: { primary_window: { used_percent: 100, limit_window_seconds: 86400, reset_after_seconds: 3600 } } });
+        let gets = 0;
+        s.onGetCredits(async () => {
+          if (++gets !== 2) return;
+          if (change === 'disabled') await s.accounts.setAutoResetCredits(s.account.id, true, { lowBalanceEnabled: false });
+          else s.setUsage({ rate_limit: { primary_window: { used_percent: 0, limit_window_seconds: 86400, reset_after_seconds: 3600 } } }, change === 'unavailable' ? 503 : 200);
+        });
+        await s.timer.fire();
+        expect(s.posts.map(item => item.credit_id)).toEqual(['simulation-credit']);
+      } finally { await s.dispose(); }
+    }
+  });
+
+  test('one balance redemption preserves imminent expiry deadlines for remaining cards', async () => {
+    const s = await setup();
+    try {
+      await s.accounts.setAutoResetCredits(s.account.id, true, { lowBalanceEnabled: true, leadMinutes: 1 });
+      s.setUsage({ rate_limit: { secondary_window: { used_percent: 100, limit_window_seconds: 86400, reset_after_seconds: 3600 } } });
+      s.setCredits([credit('balance', NOW + 30_000), credit('next', NOW + 90_000), credit('last', NOW + 120_000)]);
+      await s.timer.fire();
+      expect(s.posts.map(item => item.credit_id)).toEqual(['balance']);
+      expect([...s.timer.tasks.values()].some(task => task.at === NOW + 30_000)).toBe(true);
+      s.setNow(NOW + 30_000);
+      await s.timer.fire(30_000);
+      expect(s.posts.map(item => item.credit_id)).toEqual(['balance', 'next']);
+      s.setNow(NOW + 60_000);
+      await s.timer.fire(30_000);
+      expect(s.posts.map(item => item.credit_id)).toEqual(['balance', 'next', 'last']);
+    } finally { await s.dispose(); }
+  });
+
+  test('balance single-card limit does not suppress other cards already due for expiry', async () => {
+    const s = await setup();
+    try {
+      await s.accounts.setAutoResetCredits(s.account.id, true, { lowBalanceEnabled: true });
+      s.setUsage({ rate_limit: { primary_window: { used_percent: 100, limit_window_seconds: 86400, reset_after_seconds: 3600 } } });
+      s.setCredits([credit('first', NOW + 30_000), credit('second', NOW + 60_000)]);
+      await s.timer.fire();
+      expect(s.posts.map(item => item.credit_id)).toEqual(['first', 'second']);
+    } finally { await s.dispose(); }
+  });
+
+  test('balance-only round selects earliest expiry and consumes at most one card even if usage remains low', async () => {
+    const s = await setup(false);
+    try {
+      await s.accounts.setAutoResetCredits(s.account.id, false, { lowBalanceEnabled: true });
+      s.setCredits([credit('later', NOW + 86400_000 * 3), credit('earliest', NOW + 86400_000)]);
+      s.setUsage({ rate_limit: { primary_window: { used_percent: 90, limit_window_seconds: 604800, reset_after_seconds: 3600 } } });
+      await s.timer.fire();
+      expect(s.posts.map(item => item.credit_id)).toEqual(['earliest']);
+    } finally { await s.dispose(); }
+  });
+
+  test('expiry lead is configurable and does not require successful usage', async () => {
+    const s = await setup();
+    try {
+      await s.accounts.setAutoResetCredits(s.account.id, true, { leadMinutes: 60 });
+      s.setCredits([credit('within-hour', NOW + 45 * 60_000)]);
+      s.setUsage({}, 503);
+      await s.timer.fire();
+      expect(s.posts.map(item => item.credit_id)).toEqual(['within-hour']);
+    } finally { await s.dispose(); }
+  });
+
+  test('balance rechecks configuration and fresh usage before consumption', async () => {
+    for (const change of ['disable', 'healthy', 'unavailable']) {
+      const s = await setup(false);
+      try {
+        await s.accounts.setAutoResetCredits(s.account.id, false, { lowBalanceEnabled: true });
+        s.setCredits([credit('future', NOW + 86400_000)]);
+        s.setUsage({ rate_limit: { secondary_window: { used_percent: 100, limit_window_seconds: 604800, reset_after_seconds: 3600 } } });
+        let gets = 0;
+        s.onGetCredits(async () => {
+          if (++gets !== 2) return;
+          if (change === 'disable') await s.accounts.setAutoResetCredits(s.account.id, false, { lowBalanceEnabled: false });
+          else s.setUsage({ rate_limit: { secondary_window: { used_percent: 0, limit_window_seconds: 604800, reset_after_seconds: 3600 } } }, change === 'unavailable' ? 503 : 200);
+        });
+        await s.timer.fire();
+        expect(s.posts).toHaveLength(0);
+      } finally { await s.dispose(); }
+    }
+  });
   test('five-minute discovery does not poll between scans or delay a known deadline', async () => {
     const s = await setup();
     try {
@@ -447,13 +552,18 @@ describe('automatic reset, simulation only', () => {
   });
 
   test('atomic persistent claims allow only one scheduler to POST', async () => {
+    for (const lowBalance of [false, true]) {
     const s = await setup();
+    if (lowBalance) {
+      await s.accounts.setAutoResetCredits(s.account.id, false, { lowBalanceEnabled: true });
+      s.setUsage({ rate_limit: { primary_window: { used_percent: 100, limit_window_seconds: 604800, reset_after_seconds: 3600 } } });
+    }
     const otherTimer = new VirtualTimer();
     const other = createControl(controlHost(s.store, s.host.signal), {
       now: () => NOW, autoResetTimer: otherTimer,
       fetchImpl: async (_url, init) => {
         if (init?.method === 'POST') { s.posts.push(JSON.parse(String(init.body))); return json({ code: 'reset', windows_reset: 1 }); }
-        return String(_url).endsWith('/usage') ? json({ allowed: true }) : json({ available_count: 1, credits: [{
+        return String(_url).endsWith('/usage') ? json({ rate_limit: { secondary_window: { used_percent: 100, limit_window_seconds: 604800, reset_after_seconds: 3600 } } }) : json({ available_count: 1, credits: [{
           id: 'simulation-credit', reset_type: 'codex_rate_limits', status: 'available', granted_at: NOW,
           expires_at: NOW + AUTO_RESET_LEAD_MS,
         }] });
@@ -464,6 +574,7 @@ describe('automatic reset, simulation only', () => {
       await Promise.all([s.timer.fire(), otherTimer.fire()]);
       expect(s.posts).toHaveLength(1);
     } finally { await other.dispose(); await s.dispose(); }
+    }
   });
 
   test('unknown outcome persists and never retries automatically; explicit retry reuses request ID', async () => {
@@ -558,6 +669,12 @@ describe('automatic reset, simulation only', () => {
       expect(body).not.toContain('simulation-access');
       expect(body).not.toContain('simulation-refresh');
       expect((await s.accounts.list())[0].autoResetCredits).toBe(true);
+      for (const payload of [{ leadMinutes: 0 }, { leadMinutes: 10081 }, { leadMinutes: 1.5 }, { remainingPercent: -1 }, { remainingPercent: 101 }, { lowBalanceEnabled: 1 }]) {
+        expect((await invoke(s.control, 'setAutoResetCredits', { accountRef: s.account.id, ...payload })).status).toBe(400);
+      }
+      expect((await invoke(s.control, 'setAutoResetCredits', { accountRef: s.account.id, leadMinutes: 10080, lowBalanceEnabled: true, remainingPercent: 0 })).status).toBe(200);
+      expect((await s.accounts.list())[0]).toMatchObject({ autoResetCredits: true, autoResetLeadMinutes: 10080, autoResetOnLowBalance: true, autoResetRemainingPercent: 0 });
+      expect((await invoke(s.control, 'setAutoResetCredits', { accountRef: s.account.id })).status).toBe(200);
     } finally { await s.dispose(); }
   });
 

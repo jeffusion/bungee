@@ -1,5 +1,5 @@
 import { accountListItem, type AccountStore } from './accounts';
-import { UsageError, type UsageService, type ResetCredit } from './usage';
+import { UsageError, type UsageService, type ResetCredit, type UsageSummary } from './usage';
 
 export const AUTO_RESET_LEAD_MS = 30 * 60 * 1000;
 export const AUTO_RESET_INTERVAL_MS = 5 * 60 * 1000;
@@ -7,6 +7,9 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 interface AccountPlan {
   credits: ResetCredit[];
+  leadMinutes: number;
+  expiryEnabled: boolean;
+  lowBalance: boolean;
   handle?: unknown;
 }
 
@@ -25,9 +28,22 @@ const defaultTimer: AutoResetTimer = {
   cancel: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
-export function isAutoResetDue(credit: ResetCredit, now: number): boolean {
+export function isAutoResetDue(credit: ResetCredit, now: number, leadMinutes = 30): boolean {
   return credit.status === 'available' && typeof credit.expiresAt === 'number' && Number.isFinite(credit.expiresAt)
-    && credit.expiresAt > now && credit.expiresAt - now <= AUTO_RESET_LEAD_MS;
+    && credit.expiresAt > now && credit.expiresAt - now <= leadMinutes * 60_000;
+}
+
+export function isLowBalance(usage: UsageSummary, remainingPercent: number, now: number): boolean {
+  if (usage.state !== 'fresh' || usage.error) return false;
+  // Duration, not primary/secondary ordering, identifies the unique longest window beyond five hours.
+  const windows = [usage.primary, usage.secondary].filter(window => window !== undefined && Number.isFinite(window.windowSeconds) && window.windowSeconds > 18000);
+  const longest = Math.max(...windows.map(window => window!.windowSeconds));
+  const candidates = windows.filter(window => window!.windowSeconds === longest);
+  const window = candidates[0];
+  return candidates.length === 1 && window !== undefined && Number.isFinite(window.usedPercent)
+    && window.usedPercent >= 0 && window.usedPercent <= 100 && window.resetAt > now
+    && window.resetAt - now <= window.windowSeconds * 1000
+    && 100 - window.usedPercent <= remainingPercent;
 }
 
 /** One host-owned loop, independent of browser tabs, requests and worker instances. */
@@ -70,7 +86,7 @@ export class AutoResetScheduler {
 
   private async scan(): Promise<void> {
     const accounts = await this.accounts.list();
-    const eligible = new Set(accounts.filter(account => account.available && account.autoResetCredits
+    const eligible = new Set(accounts.filter(account => account.available && (account.autoResetCredits || account.autoResetOnLowBalance)
       && (!account.pendingAutoReset || this.accountRuns.has(account.id))).map(account => account.id));
     for (const id of this.plans.keys()) if (!eligible.has(id)) this.cancelPlan(id);
     for (const account of accounts) {
@@ -88,7 +104,8 @@ export class AutoResetScheduler {
         const credits = [...(snapshot.resetCredits.credits ?? [])].filter(credit => credit.status === 'available'
           && typeof credit.expiresAt === 'number' && Number.isFinite(credit.expiresAt) && credit.expiresAt > this.now())
           .sort((a, b) => a.expiresAt! - b.expiresAt!);
-        const plan: AccountPlan = { credits };
+        const plan: AccountPlan = { credits, leadMinutes: account.autoResetLeadMinutes, expiryEnabled: account.autoResetCredits,
+          lowBalance: account.autoResetOnLowBalance && isLowBalance(snapshot.usage, account.autoResetRemainingPercent, this.now()) };
         this.plans.set(account.id, plan);
         await this.executePlan(account.id, plan);
       } catch { /* Keep known deadlines; one unavailable account must not stop other accounts. */ }
@@ -105,7 +122,8 @@ export class AutoResetScheduler {
   private armPlan(accountRef: string, plan: AccountPlan): void {
     if (this.disposed || this.signal.aborted || this.plans.get(accountRef) !== plan) return;
     if (plan.credits.length === 0) { this.cancelPlan(accountRef); return; }
-    const dueAt = plan.credits[0].expiresAt! - AUTO_RESET_LEAD_MS;
+    if (!plan.expiryEnabled) { this.cancelPlan(accountRef); return; }
+    const dueAt = plan.credits[0].expiresAt! - plan.leadMinutes * 60_000;
     // Cap long delays: native timers overflow beyond roughly 24 days.
     plan.handle = this.timer.schedule(() => this.executePlan(accountRef, plan), Math.min(MAX_TIMER_DELAY_MS, Math.max(0, dueAt - this.now())));
   }
@@ -117,24 +135,41 @@ export class AutoResetScheduler {
       if (this.disposed || this.signal.aborted || this.plans.get(accountRef) !== plan) return;
       try {
         const account = accountListItem(await this.accounts.get(accountRef));
-        if (!account.available || !account.autoResetCredits || account.pendingAutoReset) { this.cancelPlan(accountRef, plan); return; }
+        if (!account.available || !(account.autoResetCredits || account.autoResetOnLowBalance) || account.pendingAutoReset) { this.cancelPlan(accountRef, plan); return; }
+        plan.leadMinutes = account.autoResetLeadMinutes;
+        plan.expiryEnabled = account.autoResetCredits;
         while (this.plans.get(accountRef) === plan && plan.credits.length > 0) {
           if (this.disposed || this.signal.aborted) return;
           const credit = plan.credits[0];
-          if (credit.expiresAt! - AUTO_RESET_LEAD_MS > this.now()) break;
+          const latestConfig = accountListItem(await this.accounts.get(accountRef));
+          plan.leadMinutes = latestConfig.autoResetLeadMinutes;
+          plan.expiryEnabled = latestConfig.autoResetCredits;
+          const balanceAttempt = plan.lowBalance && latestConfig.autoResetOnLowBalance;
+          if (!balanceAttempt && (!plan.expiryEnabled || credit.expiresAt! - plan.leadMinutes * 60_000 > this.now())) break;
           plan.credits.shift();
-          if (!isAutoResetDue(credit, this.now())) continue;
+          if (balanceAttempt) plan.lowBalance = false;
+          if (!balanceAttempt && !isAutoResetDue(credit, this.now(), plan.leadMinutes)) continue;
           const attempt = await this.accounts.claimAutoReset(accountRef, credit, this.now());
-          if (!attempt) continue;
+          if (!attempt) {
+            continue;
+          }
           let deferred: ResetCredit | undefined;
           try {
             const result = await this.usage.consume(accountRef, attempt.redeemRequestId, credit.id, this.signal, {
               canConsume: async selected => {
-                const latest = await this.accounts.get(accountRef);
-                if (this.disposed || this.signal.aborted || latest.autoResetCredits !== true || latest.status !== 'active') return false;
+                const fresh = balanceAttempt ? await this.usage.get(accountRef, this.signal, { forceFresh: true }).catch(() => undefined) : undefined;
+                const latest = accountListItem(await this.accounts.get(accountRef));
+                if (this.disposed || this.signal.aborted || !latest.available) return false;
+                if (balanceAttempt) {
+                  const first = fresh?.resetCredits.state === 'fresh' && (fresh.resetCredits.availableCount ?? 0) > 0
+                    ? [...(fresh.resetCredits.credits ?? [])].filter(item => item.status === 'available' && Number.isFinite(item.expiresAt) && item.expiresAt! > this.now()).sort((a, b) => a.expiresAt! - b.expiresAt!)[0] : undefined;
+                  if (latest.autoResetOnLowBalance && fresh !== undefined && first?.id === selected.id
+                    && isLowBalance(fresh.usage, latest.autoResetRemainingPercent, this.now())) return true;
+                }
+                if (!latest.autoResetCredits) return false;
                 if (selected.status === 'available' && typeof selected.expiresAt === 'number' && Number.isFinite(selected.expiresAt)
-                  && selected.expiresAt - AUTO_RESET_LEAD_MS > this.now()) deferred = selected;
-                return isAutoResetDue(selected, this.now());
+                  && selected.expiresAt - latest.autoResetLeadMinutes * 60_000 > this.now()) deferred = selected;
+                return isAutoResetDue(selected, this.now(), latest.autoResetLeadMinutes);
               },
             });
             if (result.outcome === 'reset_outcome_unknown') { this.cancelPlan(accountRef, plan); return; }
@@ -146,6 +181,7 @@ export class AutoResetScheduler {
               return;
             }
             await this.accounts.finishAutoReset(accountRef, attempt.redeemRequestId);
+            // The balance opportunity is spent; remaining cards still follow their independent expiry deadlines.
           } catch (error) {
             // These errors occur before this request's POST. All other failures remain pending across restarts.
             if (error instanceof UsageError && ['credits_unavailable', 'credit_unavailable', 'reset_in_progress'].includes(error.code)) {

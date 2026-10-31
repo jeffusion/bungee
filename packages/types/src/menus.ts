@@ -69,7 +69,7 @@ export const DEFAULT_MENU_GROUPS = [
   { id: 'group:gateway', label: 'menus.groups.gateway', icon: 'lucide:network',
     pages: ['builtin:routes', 'builtin:services'] },
   { id: 'group:usage', label: 'menus.groups.usage', icon: 'lucide:chart-no-axes-combined',
-    pages: ['plugin:token-stats:%2Fstatistics', 'plugin:token-budget:%2Fsettings'] },
+    pages: ['plugin:token-stats:%2Fstatistics', 'plugin:token-budget:%2Fsettings', 'plugin:chatgpt-oauth:%2Faccounts'] },
   { id: 'group:access', label: 'menus.groups.access', icon: 'lucide:shield-check',
     pages: ['plugin:key-access:%2Fsettings', 'plugin:user-auth:%2Fusers'] },
   { id: SYSTEM_MENU_GROUP_ID, label: 'header.management', icon: 'lucide:settings',

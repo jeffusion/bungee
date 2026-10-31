@@ -397,9 +397,13 @@ class ChatgptControl implements PluginControl {
       }) },
       { path: '/accounts/auto-reset', methods: ['POST'], handler: 'setAutoResetCredits', invoke: invoke(async context => {
         const body = await this.readJson(context);
-        exactKeys(body, ['accountRef', 'enabled']);
-        if (typeof body.enabled !== 'boolean') throw new ControlError('invalid_input');
-        return jsonResponse({ account: accountListItem(await this.accounts.setAutoResetCredits(requiredText(body.accountRef, 128), body.enabled)) });
+        exactKeys(body, ['accountRef', 'enabled', 'leadMinutes', 'lowBalanceEnabled', 'remainingPercent']);
+        if (('enabled' in body && typeof body.enabled !== 'boolean') || ('lowBalanceEnabled' in body && typeof body.lowBalanceEnabled !== 'boolean') ||
+          ('leadMinutes' in body && (typeof body.leadMinutes !== 'number' || !Number.isInteger(body.leadMinutes) || body.leadMinutes < 1 || body.leadMinutes > 10080)) ||
+          ('remainingPercent' in body && (typeof body.remainingPercent !== 'number' || !Number.isInteger(body.remainingPercent) || body.remainingPercent < 0 || body.remainingPercent > 100))) throw new ControlError('invalid_input');
+        return jsonResponse({ account: accountListItem(await this.accounts.setAutoResetCredits(requiredText(body.accountRef, 128), body.enabled as boolean | undefined, {
+          leadMinutes: body.leadMinutes as number | undefined, lowBalanceEnabled: body.lowBalanceEnabled as boolean | undefined, remainingPercent: body.remainingPercent as number | undefined,
+        })) });
       }) },
       { path: '/accounts/draft', methods: ['POST'], handler: 'createDraft', invoke: invoke(context => this.draft(context, 'codex')) },
       { path: '/accounts/siwc/draft', methods: ['POST'], handler: 'createSiwcDraft', invoke: invoke(context => this.draft(context, 'siwc')) },

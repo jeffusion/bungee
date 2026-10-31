@@ -242,9 +242,11 @@ describe('ChatGPT OAuth adapter', () => {
     expect(manifest.uiExtensionMode).toBe('native-static');
     expect(manifest.capabilities).toContain('nativeWidgetsStatic');
     expect(manifest.capabilities).not.toContain('sandboxUiExtension');
-    expect(manifest.contributes?.nativeSettingsComponent).toBe('ChatgptAccountsPage');
     expect(manifest.ui?.components).toContainEqual({ name: 'ChatgptAccountsPage', entry: 'ui/AccountsPage.svelte' });
-    expect(manifest.contributes?.settings).toBe('/accounts');
+    expect(manifest.contributes?.navigation).toContainEqual({ label: 'ui.accountsPageTitle', path: '/accounts',
+      component: 'ChatgptAccountsPage', target: 'header', icon: 'manage_accounts' });
+    expect(manifest.contributes?.nativeSettingsComponent).toBeUndefined();
+    expect(manifest.contributes?.settings).toBeUndefined();
     expect(manifest.contributes?.upstreamSources?.[0]?.credentialPolicy.allowedHeaderNames)
       .toEqual(['Authorization', 'Chatgpt-Account-Id']);
   });

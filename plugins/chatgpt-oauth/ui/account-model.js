@@ -38,6 +38,12 @@ function record(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_response');
   return /** @type {Record<string, unknown>} */ (value);
 }
+function quotaCycle(plan) {
+  const value = typeof plan === 'string' ? plan.trim().toLowerCase() : '';
+  if (value === 'free') return 'month';
+  if (value === 'plus' || value === 'pro') return 'week';
+  return 'weekOrMonth';
+}
 /** @param {unknown} input @param {string} sessionId @param {string} [expectedKind] */
 export function loginStatus(input, sessionId, expectedKind) {
   const value = record(input);
@@ -54,6 +60,12 @@ export function accountSummary(input) {
   const authType = value.authType === undefined ? 'codex' : value.authType;
   if (authType !== 'codex' && authType !== 'siwc') throw new Error('invalid_response');
   if (value.autoResetCredits !== undefined && typeof value.autoResetCredits !== 'boolean') throw new Error('invalid_response');
+  const autoResetLeadMinutes = value.autoResetLeadMinutes === undefined ? 30 : value.autoResetLeadMinutes;
+  const autoResetOnLowBalance = value.autoResetOnLowBalance === undefined ? false : value.autoResetOnLowBalance;
+  const autoResetRemainingPercent = value.autoResetRemainingPercent === undefined ? 10 : value.autoResetRemainingPercent;
+  if (!Number.isSafeInteger(autoResetLeadMinutes) || autoResetLeadMinutes < 1 || autoResetLeadMinutes > 10080
+    || typeof autoResetOnLowBalance !== 'boolean'
+    || !Number.isSafeInteger(autoResetRemainingPercent) || autoResetRemainingPercent < 0 || autoResetRemainingPercent > 100) throw new Error('invalid_response');
   let pendingAutoReset;
   if (value.pendingAutoReset !== undefined) {
     const pending = record(value.pendingAutoReset);
@@ -64,11 +76,14 @@ export function accountSummary(input) {
       || pending.completed !== false) throw new Error('invalid_response');
     pendingAutoReset = { creditId, redeemRequestId, expiresAt };
   }
+  const plan = typeof identity.planType === 'string' ? identity.planType : undefined;
   return { id: value.id, label: value.label, status: value.status, available: value.available, authType,
-    autoResetCredits: authType === 'codex' && value.autoResetCredits === true, pendingAutoReset: authType === 'codex' ? pendingAutoReset : undefined,
+    autoResetCredits: authType === 'codex' && value.autoResetCredits === true,
+    autoResetLeadMinutes, autoResetOnLowBalance: authType === 'codex' && autoResetOnLowBalance, autoResetRemainingPercent,
+    pendingAutoReset: authType === 'codex' ? pendingAutoReset : undefined,
     expiresAt: Number.isFinite(value.expiresAt) ? value.expiresAt : undefined,
     email: typeof identity.email === 'string' ? identity.email : undefined,
-    plan: typeof identity.planType === 'string' ? identity.planType : undefined };
+    plan, quotaCycle: quotaCycle(plan) };
 }
 /** @param {{authType?: string}} account */
 export const accountSourceId = account => account.authType === 'siwc' ? 'chatgpt-siwc' : 'chatgpt';
@@ -152,6 +167,25 @@ function resetCreditsResource(input) {
 export function accountUsage(input) {
   const value = record(input);
   return { usage: usageResource(value.usage), resetCredits: resetCreditsResource(value.resetCredits) };
+}
+/** @param {ReturnType<typeof accountUsage>|{state:'loading'|'unavailable'}} snapshot @param {boolean} [requestFailed] @param {number} [now] */
+export function usageDisplayState(snapshot, requestFailed = false, now = Date.now()) {
+  if (requestFailed) return 'usage' in snapshot && (snapshot.usage.value || snapshot.resetCredits.value) ? 'refreshFailed' : 'failed';
+  if (!('usage' in snapshot)) return snapshot.state;
+  if (snapshot.usage.state === 'stale') return 'stale';
+  if (snapshot.usage.state === 'unavailable') return 'unavailable';
+  const windows = [snapshot.usage.value?.primary, snapshot.usage.value?.secondary]
+    .filter(window => typeof window?.usedPercent === 'number' && Number.isFinite(window.usedPercent));
+  if (!windows.length) return 'noWindows';
+  const expired = windows.filter(window => typeof window.resetAt === 'number' && window.resetAt <= now).length;
+  if (expired === windows.length) return 'expired';
+  return expired ? 'partialExpired' : 'fresh';
+}
+/** @param {ReturnType<typeof accountUsage>|{state:'loading'|'unavailable'}} snapshot @param {boolean} [requestFailed] */
+export function resetCardDisplayState(snapshot, requestFailed = false) {
+  if (requestFailed) return 'usage' in snapshot && snapshot.resetCredits.value ? 'refreshFailed' : 'failed';
+  if (!('usage' in snapshot)) return snapshot.state;
+  return snapshot.resetCredits.state === 'fresh' && !snapshot.resetCredits.value ? 'unavailable' : snapshot.resetCredits.state;
 }
 /** @param {unknown} input */
 export function resetOutcome(input) {

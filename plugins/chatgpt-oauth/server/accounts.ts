@@ -33,6 +33,9 @@ export interface StoredAccount {
   loginFence: number;
   credentialValid: boolean;
   autoResetCredits?: boolean;
+  autoResetLeadMinutes?: number;
+  autoResetOnLowBalance?: boolean;
+  autoResetRemainingPercent?: number;
   autoResetAttempts?: AutoResetAttempt[];
 }
 
@@ -51,6 +54,9 @@ export interface AccountListItem {
   readonly expiresAt?: number;
   readonly identity?: Readonly<CodexIdentity>;
   readonly autoResetCredits: boolean;
+  readonly autoResetLeadMinutes: number;
+  readonly autoResetOnLowBalance: boolean;
+  readonly autoResetRemainingPercent: number;
   readonly pendingAutoReset?: Readonly<AutoResetAttempt>;
 }
 
@@ -132,6 +138,9 @@ function validStoredAccount(value: unknown): value is StoredAccount {
     (account.loginFence === undefined || (Number.isSafeInteger(account.loginFence) && (account.loginFence as number) > 0)) &&
     (account.credentialValid === undefined || typeof account.credentialValid === 'boolean') &&
     (account.autoResetCredits === undefined || typeof account.autoResetCredits === 'boolean') &&
+    (account.autoResetLeadMinutes === undefined || (Number.isInteger(account.autoResetLeadMinutes) && (account.autoResetLeadMinutes as number) >= 1 && (account.autoResetLeadMinutes as number) <= 10080)) &&
+    (account.autoResetOnLowBalance === undefined || typeof account.autoResetOnLowBalance === 'boolean') &&
+    (account.autoResetRemainingPercent === undefined || (Number.isInteger(account.autoResetRemainingPercent) && (account.autoResetRemainingPercent as number) >= 0 && (account.autoResetRemainingPercent as number) <= 100)) &&
     (account.siwc === undefined || validSiwcMetadata(account.siwc)) &&
     validAutoResetAttempts(account.autoResetAttempts) &&
     Number.isFinite(account.createdAt) && Number.isFinite(account.updatedAt);
@@ -177,6 +186,9 @@ export function accountListItem(account: StoredAccount): AccountListItem {
     expiresAt: account.expiresAt,
     identity: copyIdentity(account.identity),
     autoResetCredits: !account.siwc && account.autoResetCredits === true,
+    autoResetLeadMinutes: account.autoResetLeadMinutes ?? 30,
+    autoResetOnLowBalance: !account.siwc && account.autoResetOnLowBalance === true,
+    autoResetRemainingPercent: account.autoResetRemainingPercent ?? 10,
     pendingAutoReset: !account.siwc && pending ? { ...pending } : undefined,
   };
 }
@@ -377,14 +389,20 @@ export class AccountStore {
     });
   }
 
-  async setAutoResetCredits(id: string, enabled: boolean): Promise<StoredAccount> {
-    if (typeof enabled !== 'boolean') throw new AccountControlError('invalid_input');
+  async setAutoResetCredits(id: string, enabled?: boolean, options: { leadMinutes?: number; lowBalanceEnabled?: boolean; remainingPercent?: number } = {}): Promise<StoredAccount> {
+    if ((enabled !== undefined && typeof enabled !== 'boolean') ||
+      (options.lowBalanceEnabled !== undefined && typeof options.lowBalanceEnabled !== 'boolean') ||
+      (options.leadMinutes !== undefined && (!Number.isInteger(options.leadMinutes) || options.leadMinutes < 1 || options.leadMinutes > 10080)) ||
+      (options.remainingPercent !== undefined && (!Number.isInteger(options.remainingPercent) || options.remainingPercent < 0 || options.remainingPercent > 100))) throw new AccountControlError('invalid_input');
     return this.mutate(aggregate => {
       const account = aggregate.accounts.find(item => item.id === id);
       if (!account) throw new AccountControlError('not_found');
       if (account.status === 'revoked') throw new AccountControlError('revoked');
       if (account.siwc) throw new AccountControlError('unsupported_operation');
-      account.autoResetCredits = enabled;
+      account.autoResetCredits = enabled ?? account.autoResetCredits ?? false;
+      account.autoResetLeadMinutes = options.leadMinutes ?? account.autoResetLeadMinutes ?? 30;
+      account.autoResetOnLowBalance = options.lowBalanceEnabled ?? account.autoResetOnLowBalance ?? false;
+      account.autoResetRemainingPercent = options.remainingPercent ?? account.autoResetRemainingPercent ?? 10;
       account.updatedAt = Date.now();
       return copyAccount(account);
     });
@@ -394,7 +412,7 @@ export class AccountStore {
   async claimAutoReset(id: string, credit: ResetCredit, now: number): Promise<AutoResetAttempt | undefined> {
     return this.mutate(aggregate => {
       const account = aggregate.accounts.find(item => item.id === id);
-      if (!account || account.siwc || !accountListItem(account).available || account.autoResetCredits !== true) return undefined;
+      if (!account || account.siwc || !accountListItem(account).available || !(account.autoResetCredits || account.autoResetOnLowBalance)) return undefined;
       const attempts = account.autoResetAttempts ?? [];
       if (attempts.some(item => !item.completed || item.creditId === credit.id)) return undefined;
       account.autoResetAttempts = attempts.filter(item => !item.completed || item.expiresAt === undefined || item.expiresAt > now);
