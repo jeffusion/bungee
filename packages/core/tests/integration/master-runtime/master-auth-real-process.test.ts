@@ -10,12 +10,12 @@ import {captureProcessIdentity,probeProcessIdentity,type CapturedProcessIdentity
 import {makeCanonicalTempDir} from '../../../../../tests/helpers/canonical-temp';
 import {waitForAuthPublication} from '../../../../../tests/helpers/auth-publication-readiness';
 import {FIXTURE_STARTUP_WAIT_MS,FIXTURE_PUBLICATION_WAIT_MS} from '../../../../../tests/helpers/publication-fixture';
+import {reservePortBlock,releasePortBlock,type PortLease} from '../../../../../tests/helpers/gateway-runtime';
 test('real master publishes credential ACKs and guards every account mode mutation entry', async()=>{
-const root=makeCanonicalTempDir('bungee-auth-smoke',{daemonSafe:true});let child: ReturnType<typeof spawn> | undefined;let output='';let childExitObserved=false;let childCloseObserved=false;let testFailure:unknown;let spawnError:Error|undefined;let manager:DaemonManager|undefined;const ownedWorkers=new Map<string,CapturedProcessIdentity>();const ports=[];
+const root=makeCanonicalTempDir('bungee-auth-smoke',{daemonSafe:true});let child: ReturnType<typeof spawn> | undefined;let output='';let childExitObserved=false;let childCloseObserved=false;let testFailure:unknown;let spawnError:Error|undefined;let manager:DaemonManager|undefined;const ownedWorkers=new Map<string,CapturedProcessIdentity>();let ports:readonly number[]=[];let lease:PortLease|undefined;
 const childExited=()=>child!==undefined&&(childExitObserved||child.exitCode!==null||child.signalCode!==null||spawnError!==undefined);
-const childDiagnostic=()=>({exitCode:child?.exitCode,signal:child?.signalCode,exitObserved:childExitObserved,closeObserved:childCloseObserved,spawnError:spawnError?.message,outputTail:output});
-for(let i=0;i<4;i++){const s=Bun.serve({hostname:'127.0.0.1',port:0,fetch:()=>new Response('')});ports.push(s.port!);await s.stop(true);}
-try{await initializeConfigurationDatabase({configDbPath:join(root,'config.db')});
+const childDiagnostic=()=>({exitCode:child?.exitCode,signal:child?.signalCode,exitObserved:childExitObserved,closeObserved:childCloseObserved,spawnError:spawnError?.message,ports,outputTail:output});
+try{lease=await reservePortBlock();ports=lease.block.ports;await initializeConfigurationDatabase({configDbPath:join(root,'config.db')});
 const launchEnvironment={...process.env,HOME:root,USERPROFILE:root,BUNGEE_CONFIG_DB_PATH:join(root,'config.db'),BUNGEE_ACCESS_DB_PATH:join(root,'access.db'),WORKER_COUNT:'1',HOST:'127.0.0.1',PORT:String(ports[0]),BUNGEE_MANAGEMENT_PORT:String(ports[1]),BUNGEE_MASTER_CONTROL_PORT:String(ports[2]),BUNGEE_INGRESS_SUPERVISION_PORT:String(ports[3]),BUNGEE_PLUGIN_SECRETS_KEY:Buffer.alloc(32,7).toString('base64'),BUNGEE_INCLUDE_SYSTEM_PLUGINS:'false',PLUGINS_DIR:fileURLToPath(new URL('../../../../../plugins', import.meta.url)),LOG_LEVEL:'info'};
 await initializePluginSecretsKey(join(root,'config.db'),launchEnvironment.BUNGEE_PLUGIN_SECRETS_KEY);
 manager=new DaemonManager((executable,args,options)=>{
@@ -107,6 +107,7 @@ console.log('REAL_MASTER_PASS online first activation, protected full PUT/import
 
 
 }catch(error){testFailure=error;throw error;}finally{
+  const cleanupErrors:unknown[]=[];
   try{
     if(child){
       if(!childExited())await manager!.stop();
@@ -125,9 +126,15 @@ console.log('REAL_MASTER_PASS online first activation, protected full PUT/import
         await probe.stop(true);
       }
     }
-    await rm(root,{recursive:true,force:true});
-  }catch(error){
-    const cleanupError=new Error('auth fixture cleanup failed; evidence retained at '+root,{cause:error});
+  }catch(error){cleanupErrors.push(error);}
+  // Release verifies physical closure first and quarantines the block when it
+  // cannot, so an unknown listener state is never reported as a free lease.
+  try{if(lease!==undefined)await releasePortBlock(lease);}catch(error){cleanupErrors.push(error);}
+  if(cleanupErrors.length===0){
+    try{await rm(root,{recursive:true,force:true});}catch(error){cleanupErrors.push(error);}
+  }
+  if(cleanupErrors.length!==0){
+    const cleanupError=new Error('auth fixture cleanup failed; evidence retained at '+root,{cause:cleanupErrors.length===1?cleanupErrors[0]:new AggregateError(cleanupErrors,'auth fixture cleanup steps failed')});
     throw testFailure===undefined?cleanupError:new AggregateError([testFailure,cleanupError],'auth fixture assertion and cleanup both failed');
   }
 }
