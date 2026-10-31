@@ -58,7 +58,13 @@ token-metering 识别 `/v1/responses` 与 `/backend-api/codex/responses`，消�
 
 公共 ingress 对全实例、所有路由的客户端连接统一计数，不随 worker 数量增长；握手中及关闭尚未确认的连接也占用额度。worker 不再另设连接或并发握手数量门槛，原生 Responses 上游连接不会重复占用客户端额度。额度随 admission commit 与 worker 集合一起切换，prepare 阶段不改变现行限制；降额只拒绝新连接，不按额度驱逐已有连接。保存仍沿用配置发布和旧 worker 排空流程，已有连接可能以 1012 关闭并需要客户端重连。
 
-握手超时 10 秒；单消息 2 MiB，单连接缓冲 8 MiB，进程共享缓冲 64 MiB，上游提前消息最多 16 条，拒绝 HTTP body 最多 64 KiB。选择「不额外限制」只关闭连接数量准入，不关闭这些保护，也不等于无限容量。缓冲预算不等于进程 RSS 上限，socket、parser、JSON、TLS、内核内存及文件描述符仍受实例与操作系统资源约束。超过客户端连接限额时返回 503，不排队等待。
+系统设置中的「最大 WS 消息大小」以 MiB 编辑，对应逻辑配置 `websocket_max_message_bytes`（字节整数），缺省 **16 MiB**，用于客户端与上游双向完整消息。配置经校验、预览、发布及快照导入/导出生效。取值为 1 至 2147483647 字节；上界来自 npm `ws` 解析器的有符号 32 位表示，不另设业务容量上限。每条连接在握手选择 worker 时捕获消息大小策略，已有连接保持原值。该值独立于 HTTP `body_parser_limit`。
+
+发送和接收缓冲随消息设置联动：单连接预算为 `max(8 MiB, 2 × 消息大小 + 64 KiB)`，允许一个完整输入和输出重叠；进程共享预算为 `max(64 MiB, 单连接预算)`。这些是按实际使用量计费的预算，不预分配对应内存；并不保证任意数量的大消息同时驻留。稳定 ingress 在 admission commit 时使用新的 handler 更新原生解析器，阈值覆盖当前策略及仍活跃连接的最大值；连接回调执行各自捕获的限制。Bun 1.4.2 只为后续连接应用原生解析器更新，因此更新必须在接入新连接之前完成，不能推迟到该连接的握手回调。worker 原生解析器和上游客户端直接使用所属配置。
+
+握手超时 10 秒，上游提前消息最多 16 条，拒绝 HTTP body 最多 64 KiB。选择「不额外限制」只关闭连接数量准入，不关闭这些保护，也不等于无限容量。缓冲预算不等于进程 RSS 上限，socket、parser、JSON、TLS、内核内存及文件描述符仍受实例与操作系统资源约束。超过客户端连接限额时返回 503，不排队等待。
+
+超过消息大小时向 stderr 输出 `websocket_message_too_large` JSON 事件，包含方向 `direction`、限制 `limitBytes`、已知消息字节数 `messageBytes`（解析器未提供时为 `null`）、角色、PID 和时间。意外 1006 关闭输出 `websocket_abnormal_close`，消息大小未知，不据此推断超限。诊断不记录消息正文、URL、header 或凭据。
 
 容量拒绝向进程 stderr 输出 `websocket_capacity_exceeded` JSON 事件，容器可通过 Docker 日志采集。事件包含进程角色 `role`（ingress／worker；独立使用为 standalone）、PID、接入操作 `operation`、触发项 `exceeded`、当前连接数 `connections` 与上限 `maxConnections`、当前握手数 `handshakes` 与上限 `maxHandshakes`。未启用的计数上限记录为 `null`；不记录 URL、header、消息正文或凭据。客户端仍收到相同的 503 文本，服务排空拒绝不记为容量超限。
 
@@ -66,11 +72,11 @@ token-metering 识别 `/v1/responses` 与 `/backend-api/codex/responses`，消�
 
 慢下游暂停 npm ws 读取，在 Bun drain 后恢复；Bun send 返回 -1 代表已排队，不能再次发送。Bun 无接收 pause 时，慢上游触及发送预算以 1013 关闭，不能无限排队。控制帧由两跳协议栈分别处理，普通关闭码/原因安全转发。
 
-Responses 上游转换为 SSE 时，接收队列按转换后的 SSE 字节数纳入单连接 8 MiB 和进程共享 64 MiB 缓冲预算，不使用握手早期消息的 16 条限制。消费者先排空队列，再按需恢复上游读取；暂停不能撤回当前网络数据块中已解码的消息，这些消息在字节预算内按序保留。入队将超过预算时终止流，内部错误区分单连接与进程预算，并记录队列条数、队列字节数、已用缓冲、待入队字节和限制值，不记录消息正文或凭据。取消、终态及关闭完成后释放相应缓冲。
+Responses 上游转换为 SSE 时，接收队列按转换后的 SSE 字节数纳入上述随消息大小设置联动的单连接和进程共享缓冲预算，不使用握手早期消息的 16 条限制。消费者先排空队列，再按需恢复上游读取；暂停不能撤回当前网络数据块中已解码的消息，这些消息在字节预算内按序保留。入队将超过预算时终止流，内部错误区分单连接与进程预算，并记录队列条数、队列字节数、已用缓冲、待入队字节和限制值，不记录消息正文或凭据。取消、终态及关闭完成后释放相应缓冲。
 
 旧 worker 停止新握手，已有会话继续使用旧配置；仍使用 publication.drain_timeout_ms（默认 300000）。在窗口结束前预留 close 确认与观察清理时间，以 1012 关闭剩余会话；1 秒后强制结束未确认 peer。真实 native close 及观察清理完成后才释放 owner/admission lease；worker 的清理屏障包括 WS 生命周期。
 
-Bun 1.4.2 的已知边界：服务端 maxPayloadLength 超限可能由 Bun 直接关闭为 1006，应用无法再发送 1009；Bun 没有公开服务端 fragment-count 上限。npm ws 出站接收侧限制 1024 fragments，入站服务端只有 native 消息大小限制。未声称具备双向分片计数保护，也没有为改善关闭码扩大 payload 上限。
+Bun 1.4.2 的已知边界：服务端 maxPayloadLength 超限可能由 Bun 直接关闭为 1006，应用无法再发送 1009；Bun 没有公开服务端 fragment-count 上限。npm ws 出站接收侧限制 1024 fragments，入站服务端由 native 解析器与连接回调执行消息大小限制。未声称具备双向分片计数保护。原生解析器可能在完整消息进入回调之前分配缓冲，因此这些预算不是严格的内存上限。
 
 ## 验证方法与协议来源
 

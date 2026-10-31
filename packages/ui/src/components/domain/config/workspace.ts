@@ -1,8 +1,8 @@
-import { DEFAULT_PUBLICATION_POLICY, MAX_PUBLICATION_TIMEOUT_MS, type ConfigurationAggregate } from '@jeffusion/bungee-types';
+import { DEFAULT_PUBLICATION_POLICY, MAX_PUBLICATION_TIMEOUT_MS, DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES, MAX_WEBSOCKET_MAX_MESSAGE_BYTES, type ConfigurationAggregate } from '@jeffusion/bungee-types';
 import type { ConfigurationImportEnvelope, ConfigurationPublication } from '$api/config';
 
 export const IMPORT_LIMITS = { bytes: 1024 * 1024, depth: 16, nodes: 12000, items: 500 } as const;
-export type DiffLabel = 'logLevel' | 'requestLimit' | 'websocketMaxConnections' | 'authEnabled' | 'authTokens' | 'loggingEnabled' | 'bodyMax' | 'retention'
+export type DiffLabel = 'logLevel' | 'requestLimit' | 'websocketMaxConnections' | 'websocketMaxMessageBytes' | 'authEnabled' | 'authTokens' | 'loggingEnabled' | 'bodyMax' | 'retention'
   | 'drain_start_timeout_ms' | 'drain_timeout_ms' | 'worker_exit_timeout_ms' | 'publicationHidden'
   | 'routes' | 'services' | 'activations' | 'bindings' | 'authHidden' | 'loggingHidden' | 'globalHidden' | 'unknown';
 export type ConfigDiff = {
@@ -64,6 +64,9 @@ export function configurationDiff(before: unknown, after: unknown, credentials: 
   field('requestLimit', own(a, 'body_parser_limit'), own(b, 'body_parser_limit'), v => v === undefined ? 'unset' : typeof v === 'string' && /^\d{1,6}(?:\.\d{1,3})?(?:b|kb|mb|gb)$/i.test(v) ? v : 'hidden');
   field('websocketMaxConnections', own(a, 'websocket_max_connections'), own(b, 'websocket_max_connections'),
     v => v === undefined ? 'websocketDefault' : v === null ? 'websocketUnlimited' : boundedNumber(v, 1, 2147483647, String));
+  field('websocketMaxMessageBytes', own(a, 'websocket_max_message_bytes'), own(b, 'websocket_max_message_bytes'),
+    v => v === undefined ? `${DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES / 1024 / 1024} MiB`
+      : boundedNumber(v, 1, MAX_WEBSOCKET_MAX_MESSAGE_BYTES, n => `${n / 1024 / 1024} MiB`));
   field('authEnabled', own(aa, 'enabled'), own(ba, 'enabled'), bool);
   field('authTokens', own(aa, 'tokens'), own(ba, 'tokens'));
   field('loggingEnabled', own(ab, 'enabled'), own(bb, 'enabled'), bool);
@@ -85,7 +88,7 @@ export function configurationDiff(before: unknown, after: unknown, credentials: 
   unknown('loggingHidden', ab, bb, ['enabled', 'max_size', 'retention_days']);
   unknown('loggingHidden', al, bl, ['body']);
   unknown('publicationHidden', ap, bp, ['drain_start_timeout_ms', 'drain_timeout_ms', 'worker_exit_timeout_ms']);
-  unknown('globalHidden', a, b, ['log_level', 'body_parser_limit', 'websocket_max_connections', 'auth', 'logging', 'publication', 'routes', 'services', 'plugins']);
+  unknown('globalHidden', a, b, ['log_level', 'body_parser_limit', 'websocket_max_connections', 'websocket_max_message_bytes', 'auth', 'logging', 'publication', 'routes', 'services', 'plugins']);
   unknown('unknown', before, after, ['logical_configuration', 'plugin_activations']);
   function resources(label: 'routes' | 'services' | 'activations' | 'bindings', x: unknown, y: unknown) {
     if (equal(x, y)) return;

@@ -338,6 +338,6 @@ test('worker lifecycle leaves client admission to ingress and retains buffer bud
   const started = await lifecycle.start(config, startCurrentMessage());
   try {
     expect(started.handle.websocket?.limits).toMatchObject({ maxConnections: null, maxHandshakes: null,
-      maxMessageBytes: 2 * 1024 * 1024, maxBufferedBytes: 8 * 1024 * 1024, maxTotalBufferedBytes: 64 * 1024 * 1024 });
+      maxMessageBytes: 16 * 1024 * 1024, maxBufferedBytes: 32 * 1024 * 1024 + 64 * 1024, maxTotalBufferedBytes: 64 * 1024 * 1024 });
   } finally { await lifecycle.stop(started.handle); }
 });

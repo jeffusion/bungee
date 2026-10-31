@@ -18,17 +18,17 @@ let handshakeCount=0;
 let generation=0;
 const sockets=new Set<WebSocket>();
 const SERVICE='10000000-0000-4000-8000-000000000021';
-const aggregate=(enabled=true,limit:number|null=2)=>({plugin_activations:[{plugin_name:'token-metering'},{plugin_name:'token-stats'}],logical_configuration:{websocket_max_connections:limit,publication:{drain_start_timeout_ms:5000,drain_timeout_ms:10000,worker_exit_timeout_ms:10000},plugins:[],
+const aggregate=(enabled=true,limit:number|null=2,messageBytes?:number)=>({plugin_activations:[{plugin_name:'token-metering'},{plugin_name:'token-stats'}],logical_configuration:{websocket_max_connections:limit,...(messageBytes===undefined?{}:{websocket_max_message_bytes:messageBytes}),publication:{drain_start_timeout_ms:5000,drain_timeout_ms:10000,worker_exit_timeout_ms:10000},plugins:[],
   services:[{id:SERVICE,position:1,name:'ws-fixture',plugins:[],endpoints:[{id:'20000000-0000-4000-8000-000000000021',position:1,target:`http://127.0.0.1:${upstream.port}`,weight:100,priority:1,is_disabled:false,plugins:[]}]}],
   routes:[{id:'30000000-0000-4000-8000-000000000021',position:1,path:'/v1/responses',service_references: [{ id: crypto.randomUUID(), position: 0, service_id: SERVICE, weight: 100, priority: 1, is_disabled: false }],plugins:[],websocket:{enabled}},
     {id:'30000000-0000-4000-8000-000000000022',position:2,path:'/disabled',service_references: [{ id: crypto.randomUUID(), position: 0, service_id: SERVICE, weight: 100, priority: 1, is_disabled: false }],plugins:[]}],
 }});
 const management=()=>`http://127.0.0.1:${lease.base}`;
 const proxy=()=>`ws://127.0.0.1:${lease.block.ports[1]}`;
-async function publish(enabled=true,wait=true,limit:number|null=2) {
+async function publish(enabled=true,wait=true,limit:number|null=2,messageBytes?:number) {
   const snapshot=await requestJson(`${management()}/api/config`,{},fixture);
   const mutation=randomUUID();
-  const result=await requestJson(`${management()}/api/config`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({expected_revision:(snapshot.body as any).revision,mutation_id:mutation,aggregate:aggregate(enabled,limit)})},fixture);
+  const result=await requestJson(`${management()}/api/config`,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({expected_revision:(snapshot.body as any).revision,mutation_id:mutation,aggregate:aggregate(enabled,limit,messageBytes)})},fixture);
   expect(result.response.status).toBe(202);
   if (wait) await waitUntil(async()=>{
     const result=await requestJson(`${management()}/api/config/operations/${mutation}`,{},fixture);
@@ -73,7 +73,7 @@ beforeAll(async()=>{
       if (server.upgrade(request, { data: undefined })) return;
       return new Response('fixture only',{status:400});
     },
-    websocket:{message(socket,message){
+    websocket:{maxPayloadLength:40*1024*1024,message(socket,message){
       if (typeof message!=='string') {socket.send(message);return;}
       received.push(message);
       const create=JSON.parse(message);
@@ -157,6 +157,26 @@ test('publishing unlimited admission removes both ingress and worker count bottl
     await publish();
   }
 }, 90_000);
+
+test('published message size survives storage, both process hops and a second generation on the same socket', async () => {
+  await publish(true, true, null, 40 * 1024 * 1024);
+  const snapshot = await requestJson(`${management()}/api/config`, {}, fixture);
+  expect((snapshot.body as any).config.logical_configuration.websocket_max_message_bytes).toBe(40 * 1024 * 1024);
+  const socket = await connect();
+  const completed: string[] = [];
+  socket.on('message', data => { const event = JSON.parse(data.toString()); if (event.type === 'response.completed') completed.push(event.stream_id); });
+  try {
+    for (const [index, input] of ['x'.repeat(33 * 1024 * 1024), 'continued'].entries()) {
+      const message = JSON.stringify({ type: 'response.create', model: 'gpt-4o-mini', input, stream_id: `large-${index}` });
+      socket.send(message);
+      await waitUntil(async () => completed.filter(id => id === `large-${index}`).length === 2, 'generation did not complete over WebSocket', 10_000);
+      expect(received.at(-1)).toBe(message);
+    }
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+  } finally {
+    const closed = new Promise<void>(resolve => socket.once('close', resolve)); socket.close(); await closed;
+  }
+}, 60_000);
 
 test('publication drains an existing socket finitely and new disabled revision refuses Upgrade',async()=>{
   const socket=await connect();

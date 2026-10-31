@@ -154,8 +154,8 @@ export async function runCurrentStartup(
     let prepared: Awaited<ReturnType<WorkerAdmissionController['prepare']>>;
     try {
       prepared = options.signal === undefined
-        ? await options.admission.prepare(serving, undefined, publicationPolicy.drain_timeout_ms, snapshot.aggregate.logical_configuration.websocket_max_connections)
-        : await options.admission.prepare(serving, options.signal, publicationPolicy.drain_timeout_ms, snapshot.aggregate.logical_configuration.websocket_max_connections);
+        ? await options.admission.prepare(serving, undefined, publicationPolicy.drain_timeout_ms, snapshot.aggregate.logical_configuration.websocket_max_connections, snapshot.aggregate.logical_configuration.websocket_max_message_bytes)
+        : await options.admission.prepare(serving, options.signal, publicationPolicy.drain_timeout_ms, snapshot.aggregate.logical_configuration.websocket_max_connections, snapshot.aggregate.logical_configuration.websocket_max_message_bytes);
       preparedForCleanup = prepared;
       throwIfPublicationCancelled(options.signal);
     } catch (error) {

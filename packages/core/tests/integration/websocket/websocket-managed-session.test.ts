@@ -3,7 +3,7 @@ import WebSocket from '@bungee/ws-client';
 import type { IncomingMessage } from 'node:http';
 import type { WebSocketSessionMetrics } from '../../../src/gateway/websocket-contracts';
 import {
-  createWebSocketBridge, isWebSocketUpgradeRequest,
+  createWebSocketBridge, webSocketMessageLimits, isWebSocketUpgradeRequest,
   type ManagedWebSocketSession, type ManagedWebSocketSessionOptions,
   type WebSocketBridgeData, type WebSocketBridgeOptions,
 } from '../../../src/websocket';
@@ -276,4 +276,18 @@ describe('managed WebSocket sessions', () => {
     expect(await done).toBe(1011); await until(() => calls === 1); expect(kind).toBe('binary');
     expect(gate.bridge.stats.connections).toBe(0);
   });
+});
+
+
+test('configured large messages accommodate overlapping managed input and output within the shared budget', async () => {
+  const payload = 'x'.repeat(40 * 1024 * 1024);
+  const current = await fixture({ onMessage: (session, message) => {
+    expect(message.byteLength).toBe(payload.length); return session.send(payload);
+  } }, webSocketMessageLimits(payload.length));
+  current.bridge.websocket.message!(current.socket, payload);
+  await until(() => current.sent.length === 1);
+  expect(current.sent[0]?.length).toBe(payload.length);
+  expect(current.closes).toEqual([]);
+  await until(() => current.bridge.stats.bufferedBytes === 0);
+  expect(current.bridge.stats.processBufferedBytes).toBe(0);
 });

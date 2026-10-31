@@ -63,10 +63,20 @@ test('older worker accepts a younger controller deadline and preserves the share
     await Bun.sleep(6_000);
     const entry = fileURLToPath(new URL('../fixtures/kernel-clock-child.ts', import.meta.url));
     const before = kernelMonotonicNowNs();
-    const child = Bun.spawn([process.execPath, entry], { stdout: 'pipe', stderr: 'pipe' });
-    const text = await new Response(child.stdout).text();
-    const stderr = await new Response(child.stderr).text();
-    expect(await child.exited, stderr).toBe(0);
+    const child = Bun.spawn([process.execPath, entry], {
+      stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', timeout: 10_000, killSignal: 'SIGKILL',
+    });
+    let text: string;
+    try {
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+      ]);
+      expect(exitCode, `clock child (signal=${child.signalCode}): ${stderr}`).toBe(0);
+      text = stdout;
+    } finally {
+      if (child.exitCode === null) child.kill('SIGKILL');
+      await child.exited;
+    }
     const controller = JSON.parse(text) as { now: string; startDeadline: string; exitDeadline: string; clockId: string };
     const after = kernelMonotonicNowNs();
     expect(BigInt(controller.now)).toBeGreaterThanOrEqual(before);
