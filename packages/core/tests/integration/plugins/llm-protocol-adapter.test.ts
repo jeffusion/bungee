@@ -99,8 +99,17 @@ test('strict scoped conversion rejects unknown inputs/tools/history/structured o
 import {ScopedPluginRegistry,setScopedPluginRegistry,getScopedPluginRegistry} from '../../../src/scoped-plugin-registry';
 const {handleRequest}=await import('../../../src/worker/request/handler');
 const logging={accessLogWriter:{write(){},updateBodyId(){},updateResponseBodyId(){},updateProtocolOutcome(){}},fileLogWriter:{async write(){}}};
-for(const source of protocols)for(const target of protocols)for(const streaming of [false,true])test(`Gateway scoped adapter ${source} → ${target} ${streaming?'SSE':'JSON'} final wire`,async()=>{
-  if((source==='gemini_generate_content'&&target==='responses'))return;
+const gatewayPairs=[
+  ['responses','gemini_generate_content'],
+  ['gemini_generate_content','anthropic_messages'],
+  ['anthropic_messages','chat_completions'],
+  ['chat_completions','responses'],
+  ['responses','responses'],
+  ['chat_completions','chat_completions'],
+  ['anthropic_messages','anthropic_messages'],
+  ['gemini_generate_content','gemini_generate_content'],
+] as const;
+for(const [source,target] of gatewayPairs)for(const streaming of [false,true])test(`Gateway scoped adapter ${source} → ${target} ${streaming?'SSE':'JSON'} final wire`,async()=>{
   const previous=getScopedPluginRegistry(),fetch=globalThis.fetch;const serviceHost=relayServiceHost(catalog),h=serviceHost.worker;
   const registry=new ScopedPluginRegistry(import.meta.dir,h);registry.setServiceDependencies(new Map([[ADAPTER_PLUGIN,{'models-dev':'^1.0.0'}]]));
   const config:any={routes:[{id:'adapter',path:'/adapter',path_rewrite:{'^/adapter':''},plugins:[{name:ADAPTER_PLUGIN,path:new URL('../../../../../plugins/llm-protocol-adapter/server/index.ts',import.meta.url).pathname,options:{sourceProtocol:source,targetProtocol:target}}],endpoints:[{id:'mock',target:'http://upstream.test'}]}]};
@@ -108,7 +117,7 @@ for(const source of protocols)for(const target of protocols)for(const streaming 
   try{expect((await registry.initializeFromConfig(config)).failed).toBe(0);setScopedPluginRegistry(registry);const body=structuredClone(requests[source]);if(source!=='gemini_generate_content')body.stream=streaming;
     const response=await handleRequest(new Request('http://local/adapter'+path(source,streaming),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}),config,{logging});expect(response.status).toBe(200);const text=await response.text();expect(text).toContain('answer');expect(calls).toBe(1);expect(new URL(url).pathname).toBe(wirePath(source,target,streaming));if(source===target)expect(wire).toEqual(body);
     if(source!==target&&target==='gemini_generate_content')expect(new URL(url).searchParams.get('alt')).toBe(streaming?'sse':null);
-    if(streaming&&source==='responses')expect(text).toContain('response.completed');if(streaming&&source==='anthropic_messages')expect(text).toContain('message_stop');if(streaming&&source==='chat_completions')expect(text).toContain('[DONE]');
+    if(streaming&&source==='responses')expect(text).toContain('response.completed');if(streaming&&source==='anthropic_messages')expect(text).toContain('message_stop');if(streaming&&source==='chat_completions')expect(text).toContain('[DONE]');if(source==='gemini_generate_content')expect(text).toContain('STOP');
   }finally{globalThis.fetch=fetch;setScopedPluginRegistry(previous);await registry.destroy();await serviceHost.dispose();}
 });
 

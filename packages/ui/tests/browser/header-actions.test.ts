@@ -102,7 +102,6 @@ browserTest('header navigation and confirmed session logout', async () => {
       const overflow = page.getByTestId('header-more-menu');
       await expect(overflow.getByRole('menuitem', { name: '扩展应用 28', exact: true })).toBeVisible();
       await expect(overflow.getByRole('menuitem', { name: '菜单管理', exact: true })).toHaveAttribute('aria-current', 'page');
-      if (mode === 'anonymous') await page.screenshot({ path: '/tmp/bungee-header-overflow-open.png' });
       await page.keyboard.press('Escape');
       await expect(overflow).toHaveCount(0);
       await more.click();
@@ -147,17 +146,8 @@ browserTest('header navigation and confirmed session logout', async () => {
       await compact.getByRole('link', { name: '插件管理', exact: true }).click();
       await expect(page).toHaveURL(/#\/plugins$/);
       await expect(compact).toHaveCount(0);
-      if (mode === 'anonymous') {
-        await page.emulateMedia({ reducedMotion: 'reduce' });
-        await page.setViewportSize({ width: 390, height: 844 });
-      }
       await navigation.click();
       await expect(compact.getByRole('link', { name: '插件管理', exact: true })).toHaveAttribute('aria-current', 'page');
-      if (mode === 'anonymous') {
-        await page.screenshot({ path: '/tmp/bungee-menu-sections-active.png', animations: 'disabled' });
-        await section.click();
-        await page.screenshot({ path: '/tmp/bungee-menu-sections-collapsed.png', animations: 'disabled' });
-      }
       await compact.getByRole('button', { name: '关闭菜单', exact: true }).click();
       await expect(compact).toHaveCount(0);
       if (mode === 'plugin') {

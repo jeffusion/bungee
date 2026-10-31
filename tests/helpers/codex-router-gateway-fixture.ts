@@ -64,6 +64,7 @@ export async function createCodexRouterGatewayFixture(): Promise<GatewayFixture>
 export async function seedCodexRouterCatalog(fixture: GatewayFixture): Promise<void> {
     const configDb = new Database(pluginStateFixturePath(fixture.configDbPath));
     try {
+      configDb.exec('PRAGMA busy_timeout = 5000');
       await new SQLitePluginStorage(configDb, 'models-dev').set(MODELS_DEV_SETTINGS_KEY,
         {autoRefresh: false, intervalHours: 24, timeoutSeconds: 15});
       const store = new HostSnapshotStore(new PluginCommunicationStore(configDb, undefined, {setup: false}).forNamespace('channel.models-dev'),

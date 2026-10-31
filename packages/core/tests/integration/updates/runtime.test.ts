@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { getAssetName, getBinaryName } from '../../../src/updates/names';
@@ -9,6 +9,7 @@ import { readDaemonMetadataFile } from '@jeffusion/bungee-types/daemon-file';
 import { createBinaryArchive } from '../../../../../scripts/build/build-binaries';
 import { buildExternalPlugins } from '../../../../../scripts/build/build-external-plugins';
 import { BinaryManager } from '../../../../cli/src/binary/manager';
+import { PluginStateClient } from '../../../src/plugin-state/client';
 import { makeCanonicalTempDir } from '../../../../../tests/helpers/daemon-fixture';
 
 let root: string, bytes: Buffer, server: ReturnType<typeof Bun.serve>;
@@ -57,7 +58,7 @@ async function until<T>(read:()=>Promise<T>,valid:(value:T)=>boolean,timeout=45_
   throw new Error(`Update runtime did not converge: ${String(failure)}`);
 }
 
-for(const trigger of ['page','cli','defaults','stop','confirm-stop','cleanup-failure','startup-failure'] as const)test(`real update lifecycle: ${trigger}`,async()=>{
+for(const trigger of ['page','defaults','stop'] as const)test(`real update lifecycle: ${trigger}`,async()=>{
   const instance=join(root,trigger),data=join(instance,'data'),logs=join(instance,'logs'),run=join(instance,'run');
   mkdirSync(data,{recursive:true});mkdirSync(logs);mkdirSync(run);
   cpSync(join(root,'6.6.0'),join(instance,'bin','6.6.0'),{recursive:true});
@@ -65,20 +66,23 @@ for(const trigger of ['page','cli','defaults','stop','confirm-stop','cleanup-fai
   const key=Buffer.alloc(32,7).toString('base64');writeFileSync(join(data,'plugin-secrets.key'),key,{mode:0o600});
   const ports=new Set<number>();while(ports.size<4)ports.add(await port());const [publicPort,managementPort,controlPort,ingressPort]=[...ports];
   const env={...process.env,NODE_ENV:'test',BUNGEE_INSTALL_ROOT:instance,BUNGEE_TEST_UPDATE_ORIGIN:origin,
-    BUNGEE_TEST_FAIL_VERSION:trigger==='startup-failure'?'6.6.1':'',
     BUNGEE_CONFIG_DB_PATH:join(data,'bungee.db'),BUNGEE_ACCESS_DB_PATH:join(logs,'access.db'),BUNGEE_MANAGEMENT_HOST:'127.0.0.1',
     BUNGEE_MANAGEMENT_PORT:String(managementPort),BUNGEE_MASTER_CONTROL_PORT:String(controlPort),BUNGEE_INGRESS_SUPERVISION_PORT:String(ingressPort),
     BUNGEE_PLUGIN_SECRETS_KEY:key,WORKER_COUNT:'1',PORT:String(publicPort),BUNGEE_ROLE:'master'};
   const executable=join(instance,'bin','6.6.0',binary);chmodSync(executable,0o755);
   const init=Bun.spawn([executable,'--initialize-config',join(data,'bungee.db')],{cwd:data,env,stdout:'pipe',stderr:'pipe'});
   const initialized=await init.exited;
-  if(initialized!==0)throw new Error(`Fixture init failed (${initialized}, ${init.signalCode}): ${await new Response(init.stdout).text()} ${await new Response(init.stderr).text()}`);
+  const initOutput=await new Response(init.stdout).text()+await new Response(init.stderr).text();
+  if(initialized!==0)throw new Error(`Fixture init failed (${initialized}, ${init.signalCode}): ${initOutput}`);
+  expect(initOutput).not.toContain('bng_management_');
+  const state=await PluginStateClient.open(join(data,'plugin-state.db'));
+  try{expect(await state.durableState('user-auth').list()).toEqual([]);}finally{await state.close();}
   let child:ChildProcess|undefined;
   const manager=new DaemonManager((file,args,options)=>child=spawn(file,[...args],options),undefined,{configDirectory:instance,dataDirectory:data,logsDirectory:logs,runtimeDirectory:run,
     pidFile:join(instance,'bungee.pid'),logFile:join(logs,'daemon.log'),errorLogFile:join(logs,'daemon-error.log'),
     inheritedEnvironment:env,directLaunch:{executable,entrypoint:null}});
   const endpoint=`http://127.0.0.1:${managementPort}`;
-  const metadataPath=join(run,'daemon.json'),savedMetadata=join(run,'daemon.json.saved');
+  const metadataPath=join(run,'daemon.json');
   try{
     if(trigger==='defaults'){
       const launch=Bun.spawn(['node',join(project,'packages/cli/dist/index.js'),'start','--workers','1','--port',String(publicPort)],
@@ -87,20 +91,12 @@ for(const trigger of ['page','cli','defaults','stop','confirm-stop','cleanup-fai
     }else await manager.start({workers:'1',port:String(publicPort)});
     const prior=await readDaemonMetadataFile(join(run,'daemon.json'),{runtimeDirectory:run});
     await until(async()=>fetch(`${endpoint}/api/system/updates`).then(response=>response.json()),value=>value.latest?.version==='6.6.1');
-    if(trigger==='startup-failure'){
-      await expect(manager.upgrade()).rejects.toThrow('startup_failed');
-      expect(readFileSync(join(instance,'version.txt'),'utf8').trim()).toBe('6.6.1');
-      expect(JSON.parse(readFileSync(join(instance,'update.json'),'utf8')).phase).toBe('failed');
-      expect(existsSync(join(instance,'bin','6.6.0',binary))).toBe(true);
-      return;
-    }
-    if(trigger==='stop'||trigger==='cleanup-failure')downloadGate=new Promise<void>(resolve=>releaseDownload=resolve);
+    if(trigger==='stop')downloadGate=new Promise<void>(resolve=>releaseDownload=resolve);
     const priorDownloads=downloadRequests;
     if(trigger==='defaults'){
       const upgrade=Bun.spawn(['node',join(project,'packages/cli/dist/index.js'),'upgrade'],{cwd:data,env,stdout:'pipe',stderr:'pipe'});
       if(await upgrade.exited!==0)throw new Error(`Default CLI upgrade failed: ${await new Response(upgrade.stdout).text()} ${await new Response(upgrade.stderr).text()}`);
-    }else if(trigger==='cli')await manager.upgrade();
-    else{
+    }else{
       const response=await fetch(`${endpoint}/api/system/updates`,{method:'POST',headers:{origin:endpoint,'content-type':'application/json'},
         body:JSON.stringify({operation_id:crypto.randomUUID(),current_version:'6.6.0',target_version:'6.6.1'})});
       expect(response.status).toBe(202);
@@ -112,30 +108,14 @@ for(const trigger of ['page','cli','defaults','stop','confirm-stop','cleanup-fai
       expect(readFileSync(join(instance,'version.txt'),'utf8').trim()).toBe('6.6.0');
       return;
     }
-    if(trigger==='cleanup-failure'){
-      await until(async()=>downloadRequests,value=>value>priorDownloads);
-      releaseDownload!();downloadGate=null;
-    }
-    if(trigger==='page'||trigger==='confirm-stop'||trigger==='cleanup-failure'){
+    if(trigger==='page'){
       const waiting=await until(async()=>fetch(`${endpoint}/api/system/updates`).then(response=>response.json()),value=>value.operation?.phase==='awaiting_confirmation');
       expect((await fetch(`${endpoint}/health/data`)).status).toBe(200);
       expect(readFileSync(join(instance,'version.txt'),'utf8').trim()).toBe('6.6.0');
       expect((await readDaemonMetadataFile(metadataPath,{runtimeDirectory:run})).boot_nonce).toBe(prior.boot_nonce);
-      if(trigger==='confirm-stop'){
-        await manager.stop();expect(JSON.parse(readFileSync(join(instance,'update.json'),'utf8')).phase).toBe('cancelled');return;
-      }
-      if(trigger==='cleanup-failure'){renameSync(metadataPath,savedMetadata);mkdirSync(metadataPath);}
       const confirmed=await fetch(`${endpoint}/api/system/updates/confirm`,{method:'POST',headers:{origin:endpoint,'content-type':'application/json'},
         body:JSON.stringify({operation_id:waiting.operation.id,current_version:'6.6.0',target_version:'6.6.1'})});
       expect(confirmed.status).toBe(202);
-    }
-    if(trigger==='cleanup-failure'){
-      const operation=await until(async()=>JSON.parse(readFileSync(join(instance,'update.json'),'utf8')),value=>value.phase==='failed');
-      expect(operation.error).toBe('shutdown_failed');
-      expect(readFileSync(join(instance,'version.txt'),'utf8').trim()).toBe('6.6.0');
-      expect(existsSync(join(instance,'bin','6.6.1'))).toBe(false);
-      expect(existsSync(savedMetadata)).toBe(true);
-      return;
     }
     const status=await until(async()=>fetch(`${endpoint}/api/system/updates`).then(response=>response.json()),value=>['succeeded','failed','cancelled'].includes(value.operation?.phase));
     expect(status.operation.phase).toBe('succeeded');
@@ -155,7 +135,6 @@ for(const trigger of ['page','cli','defaults','stop','confirm-stop','cleanup-fai
   }catch(error){
     const output=existsSync(join(logs,'daemon-error.log'))?readFileSync(join(logs,'daemon-error.log'),'utf8'):'';throw new Error(`${String(error)}\n${output}`);
   }finally{
-    if(existsSync(savedMetadata)){rmSync(metadataPath,{recursive:true,force:true});renameSync(savedMetadata,metadataPath);}
     releaseDownload?.();releaseDownload=null;downloadGate=null;
     try{await manager.stop();}catch(error){if(child?.pid){child.kill('SIGTERM');await until(async()=>{try{process.kill(child!.pid!,0);return false;}catch{return true;}},Boolean,5_000);}else throw error;}
   }

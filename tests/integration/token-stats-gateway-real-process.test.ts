@@ -181,6 +181,7 @@ describe('Token Stats gateway real-process integration (local HTTP fixture)', ()
       const writePrices = async (multiplier: number) => {
         const configDb = new Database(pluginStateFixturePath(currentFixture.configDbPath));
         try {
+          configDb.exec('PRAGMA busy_timeout = 5000');
           await new SQLitePluginStorage(configDb, 'models-dev').set(MODELS_DEV_SETTINGS_KEY,
             { autoRefresh: false, intervalHours: 24, timeoutSeconds: 15 });
           const store = new HostSnapshotStore(new PluginCommunicationStore(configDb, undefined, { setup: false }).forNamespace('channel.models-dev'),

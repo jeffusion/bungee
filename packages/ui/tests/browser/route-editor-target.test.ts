@@ -91,7 +91,6 @@ test('route list copy uses the dedicated endpoint and reloads the created route'
     assert.equal(state.writes.length, 1);
     assert.equal(state.writes[0].path, '/fixture-custom/');
     await expect(copy).toBeEnabled();
-    await page.screenshot({path:'/tmp/bungee-route-copy.png'});
   });
 }, 60_000);
 
@@ -267,12 +266,6 @@ test('multiple Route references retain pool policy and Route plugin through save
     await target.getByTestId('service-load-balancing-section').getByRole('combobox').click();
     await page.getByRole('option',{name:/轮询/}).click();
     await target.getByRole('switch',{name:'启用自动故障转移',exact:true}).click();
-    await page.evaluate(() => window.scrollTo(0,0));
-    await page.screenshot({path:'/tmp/bungee-route-service-references.png'});
-    await page.setViewportSize({width:390,height:844});
-    await page.getByTestId('service-mixed-targets').evaluate(element => element.scrollIntoView({block:'center'}));
-    await page.screenshot({path:'/tmp/bungee-route-service-references-mobile.png'});
-    await page.setViewportSize({width:1326,height:822});
     const refreshed = page.waitForResponse(response => new URL(response.url()).pathname === '/api/config/runtime');
     await page.getByTestId('route-save-button').click();
     await (await refreshed).finished(); await page.waitForLoadState('networkidle');
@@ -314,11 +307,6 @@ for (const serviceFirst of [false, true]) test(`Route mixed targets survive addi
     await target.getByTestId('service-load-balancing-section').getByRole('combobox').click();
     await page.getByRole('option',{name:/轮询/}).click();
     await target.getByRole('switch',{name:'启用自动故障转移',exact:true}).click();
-    await page.screenshot({path:`/tmp/opencode/route-mixed-${serviceFirst ? 'service' : 'endpoint'}-desktop.png`});
-    await page.setViewportSize({width:390,height:844});
-    await target.evaluate(element => element.scrollIntoView({block:'start'}));
-    await page.screenshot({path:`/tmp/opencode/route-mixed-${serviceFirst ? 'service' : 'endpoint'}-mobile.png`});
-    await page.setViewportSize({width:1326,height:822});
     const refreshed = page.waitForResponse(response => new URL(response.url()).pathname === '/api/config/runtime');
     await page.getByTestId('route-save-button').click();
     await (await refreshed).finished(); await page.waitForLoadState('networkidle');
@@ -361,12 +349,6 @@ test('Service mixed targets share ordering and preserve endpoint and Service plu
     await page.getByTestId('service-nav-plugins').first().click();
     await addPlugin(page, page.getByTestId('section-plugins'));
     await page.getByTestId('service-nav-endpoints').first().click();
-    await page.evaluate(() => window.scrollTo(0,0));
-    await page.screenshot({path:'/tmp/bungee-service-mixed-targets.png'});
-    await page.setViewportSize({width:390,height:844});
-    await page.getByTestId('service-mixed-targets').evaluate(element => element.scrollIntoView({block:'center'}));
-    await page.screenshot({path:'/tmp/bungee-service-mixed-targets-mobile.png'});
-    await page.setViewportSize({width:1326,height:822});
     const refreshed = page.waitForResponse(response => new URL(response.url()).pathname === '/api/config/runtime');
     await page.getByTestId('service-save-button').click();
     await (await refreshed).finished(); await page.waitForLoadState('networkidle');

@@ -239,9 +239,6 @@ test('idle status refreshes only on entry or manually; an upgrade polls until it
     const reads = state.reads;
     await page.clock.fastForward(65_000);
     assert(state.reads).toBe(reads);
-    await page.screenshot({ path: '/tmp/bungee-system-updates-header.png' });
-    await page.getByTestId('system-updates-trigger').hover();
-    await page.screenshot({ path: '/tmp/bungee-system-updates-header-hover.png' });
     await page.getByTestId('system-updates-trigger').click();
     await expect(page.getByTestId('updates-upgrade')).toBeEnabled();
     assert(state.reads).toBe(reads + 1);
@@ -278,6 +275,12 @@ test('idle status refreshes only on entry or manually; an upgrade polls until it
 
 test('two confirmations separate download from restart; fixed countdown reloads once while restarting', async () => {
   await scenario(async (page, state) => {
+    await page.clock.install();
+    await page.clock.pauseAt(new Date());
+    await page.reload();
+    await page.clock.runFor(1_000);
+    await page.getByTestId('system-updates-trigger').click();
+    await expect(page.getByTestId('updates-upgrade')).toBeEnabled();
     assert(state.posts).toHaveLength(0);
     await page.getByTestId('updates-check').click();
     await expect.poll(() => state.checks).toBe(1);
@@ -292,35 +295,40 @@ test('two confirmations separate download from restart; fixed countdown reloads 
     const body = state.posts[0] as any;
     assert(body).toEqual({ operation_id: assert.any(String), current_version: '6.6.0', target_version: '6.7.0' });
     assert(body.operation_id).toMatch(/^[0-9a-f-]{36}$/);
-    await expect(page.getByTestId('updates-upgrade')).toBeDisabled();
-    await expect(page.getByTestId('update-operation')).toBeVisible();
+    await expect(page.getByTestId('update-operation')).toHaveAttribute('data-phase', 'downloading');
+    await expect(page.getByTestId('updates-upgrade')).toHaveCount(0);
     state.status.operation!.phase = 'awaiting_confirmation';
+    await expect(page.getByTestId('updates-check')).toBeEnabled();
+    await page.clock.runFor(2_250);
     await expect(page.getByTestId('updates-install')).toBeEnabled();
+    const confirmationAt = await page.evaluate(() => Date.now());
     await page.getByTestId('updates-install').click();
     await page.getByTestId('confirmation-cancel').click();
     assert(state.confirmations).toHaveLength(0);
     await expect(page.getByTestId('update-countdown')).toHaveCount(0);
-    await page.screenshot({ path: '/tmp/bungee-system-updates-ready-en.png' });
     let reloads = 0;
     page.on('framenavigated', frame => { if (frame === page.mainFrame()) reloads++; });
+    assert(reloads).toBe(0);
     await page.getByTestId('updates-install').click();
-    const began = Date.now();
     const loaded = page.waitForEvent('load');
     await page.getByTestId('confirmation-accept').evaluate(node => { (node as HTMLElement).click(); (node as HTMLElement).click(); });
     await expect.poll(() => state.confirmations.length).toBe(1);
     await expect(page.getByTestId('update-countdown')).toBeVisible();
-    await page.screenshot({ path: '/tmp/bungee-system-updates-countdown-en.png' });
-    await page.waitForFunction(() => {
-      const intent = JSON.parse(sessionStorage.getItem('bungee.system-update.reload')!);
-      return Date.now() >= intent.at - 1000;
-    });
+    const intent = await page.evaluate(() => JSON.parse(sessionStorage.getItem('bungee.system-update.reload')!));
+    assert(intent.at).toBe(confirmationAt + 10_000);
     assert(reloads).toBe(0);
+    const readsBefore = state.reads;
+    await page.clock.runFor(intent.at - (await page.evaluate(() => Date.now())) - 1);
+    await expect.poll(() => state.reads).toBeGreaterThan(readsBefore);
+    await expect(page.getByTestId('updates-check')).toBeEnabled();
+    assert(reloads).toBe(0);
+    assert(await page.evaluate(() => sessionStorage.getItem('bungee.system-update.reload'))).not.toBeNull();
+    await page.clock.runFor(251);
     await loaded;
-    assert(Date.now() - began).toBeGreaterThanOrEqual(10_000);
     assert(state.status.operation!.phase).toBe('restarting');
     await expect.poll(() => page.evaluate(() => sessionStorage.getItem('bungee.system-update.reload'))).toBeNull();
     assert(reloads).toBe(1);assert(state.posts).toHaveLength(1);assert(state.confirmations).toHaveLength(1);
-  });
+  }, 'en', false);
 }, 30_000);
 
 test('lost download responses recover by querying only; other-page upgrades preserve the draft', async () => {
@@ -360,7 +368,6 @@ test('lost download responses recover by querying only; other-page upgrades pres
     state.status.selected_version = '6.7.0';
     state.status.can_upgrade = false;
     await expect(page.getByTestId('update-operation')).toHaveAttribute('data-phase', 'succeeded');
-    await page.screenshot({ path: '/tmp/bungee-system-updates-zh.png' });
     await page.getByRole('button', { name: /Close|关闭/, exact: true }).click();
     await expect(page.getByRole('textbox', { name: 'Draft' })).toHaveValue('unsaved work');
     assert(state.posts).toHaveLength(1);
@@ -369,28 +376,44 @@ test('lost download responses recover by querying only; other-page upgrades pres
 
 test('lost installation confirmation preserves the fixed reload deadline across refresh and failed status', async () => {
   await scenario(async (page, state) => {
+    await page.clock.install();
+    await page.clock.pauseAt(new Date());
+    await page.reload();
+    await page.clock.runFor(1_000);
+    await page.getByTestId('system-updates-trigger').click();
+    await expect(page.getByTestId('updates-upgrade')).toBeEnabled();
     await page.getByTestId('updates-upgrade').click();await page.getByTestId('confirmation-accept').click();
     await expect.poll(() => state.posts.length).toBe(1);
     state.status.operation!.phase = 'awaiting_confirmation';
+    await expect(page.getByTestId('updates-check')).toBeEnabled();
+    await page.clock.runFor(2_250);
     await expect(page.getByTestId('updates-install')).toBeEnabled();
+    const confirmationAt = await page.evaluate(() => Date.now());
     state.confirmResponse = 'lost';
     const failed = page.waitForEvent('requestfailed', request => new URL(request.url()).pathname === '/api/system/updates/confirm');
     await page.getByTestId('updates-install').click();await page.getByTestId('confirmation-accept').click();await failed;
     await expect(page.getByTestId('update-unknown')).toBeVisible();
     const intent = await page.evaluate(() => JSON.parse(sessionStorage.getItem('bungee.system-update.reload')!));
+    assert(intent.at).toBe(confirmationAt + 10_000);
+    await expect(page.getByTestId('updates-check')).toBeEnabled();
     await page.reload();await page.getByTestId('system-updates-trigger').click();
     await expect(page.getByTestId('updates-install')).toBeDisabled();
     assert(await page.evaluate(() => JSON.parse(sessionStorage.getItem('bungee.system-update.reload')!))).toEqual(intent);
+    await expect(page.getByTestId('updates-check')).toBeEnabled();
     let reloads = 0;page.on('framenavigated', frame => { if (frame === page.mainFrame()) reloads++; });
     const loaded = page.waitForEvent('load');
     state.status.operation!.phase = 'failed'; state.status.operation!.error = 'shutdown_failed';
+    await page.clock.runFor(2_250);
     await expect(page.getByTestId('update-operation')).toHaveAttribute('data-phase', 'failed');
     await expect(page.getByTestId('update-countdown')).toBeVisible();
+    await page.clock.runFor(intent.at - (await page.evaluate(() => Date.now())) - 1);
+    assert(reloads).toBe(0);
+    assert(await page.evaluate(() => sessionStorage.getItem('bungee.system-update.reload'))).not.toBeNull();
+    await page.clock.runFor(251);
     await loaded;
-    assert(Date.now()).toBeGreaterThanOrEqual(intent.at);
     assert(await page.evaluate(() => sessionStorage.getItem('bungee.system-update.reload'))).toBeNull();
     assert(reloads).toBe(1);assert(state.posts).toHaveLength(1);assert(state.confirmations).toHaveLength(1);
-  }, 'zh-CN');
+  }, 'zh-CN', false);
 }, 30_000);
 
 test('an unauthorized second confirmation never replays on reauthentication', async () => {
