@@ -106,7 +106,13 @@
     <MenuIcon icon={item.icon} /><span class="min-w-0 break-words [overflow-wrap:anywhere]">{item.label}</span>
   </Button>
 {/snippet}
-<svelte:window onhashchange={() => { languageOpen = false; menuOpen = false; moreOpen = false; }} />
+<svelte:window onhashchange={() => { languageOpen = false; menuOpen = false; moreOpen = false; }}
+  onkeydown={event => {
+    // Escape can arrive before the sheet moves focus off its opener.
+    if (menuOpen && event.key === 'Escape' && event.target === document.getElementById('header-menu-trigger')) {
+      event.preventDefault(); menuOpen = false;
+    }
+  }} />
 {#if !$isLoading}
 <header data-testid="app-header" class="sticky top-0 z-50 flex h-[var(--app-header-height)] w-full min-w-0 max-w-full shrink-0 items-stretch border-b border-carbon-600 bg-carbon-950"
   style="padding-top: env(safe-area-inset-top); padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right)">

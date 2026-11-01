@@ -60,11 +60,15 @@ test('dashboard displays observed upstream hosts independently of endpoint confi
   await expect(page.getByTestId('tps-model-row')).toHaveCount(3);
   await expect(page.getByTestId('tps-model-row').first().getByText('/v1/chat/completions', { exact: true })).toBeVisible();
   assert(reads).toBe(1);
+  // Keep initial focus pending so Escape comes from the opener.
+  await page.clock.install();
+  await page.clock.pauseAt(new Date());
   await page.setViewportSize({ width: 320, height: 820 });
   const navigation = page.locator('#header-menu-trigger');
   await navigation.click();
   await expect(page.getByTestId('header-menu').getByRole('link', { name: '用户管理', exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
+  await page.clock.resume();
   await expect(page.getByTestId('header-menu')).toHaveCount(0);
   fixture.network.assertSettled(); assert(fixture.pageErrors).toEqual([]);
 }), 120_000);
