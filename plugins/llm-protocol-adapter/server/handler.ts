@@ -2,14 +2,14 @@ import { logger, protocolSSEOutput, type Plugin, type PluginHooks, DataAdmission
 import { protocolRequestModel } from '@jeffusion/bungee-llms/plugin-api';
 import { readModelIdentity } from '../contract';
 import type { AdapterSession, LLMProtocol } from '../contract';
-export function adapterError(error: unknown): never {
+export function adapterError(error: unknown, status = 422): never {
     const e = error as {
         code?: string;
         message?: string;
         param?: string;
     };
     if (typeof e?.code === 'string')
-        throw new DataAdmissionError(422, `llm_adapter_${e.code}`, undefined, { message: e.message, param: e.param });
+        throw new DataAdmissionError(status, `llm_adapter_${e.code}`, undefined, { message: e.message, param: e.param });
     throw error;
 }
 /** Transport hooks use only the shared BodyHandle; all codec state belongs to the service session. */
@@ -58,7 +58,7 @@ export function responseHandler(input: {
                     body = structuredClone(input.session.convertResponse(raw));
                 }
                 catch (e) {
-                    adapterError(e);
+                    adapterError(e, 502);
                 }
                 if (body.status === 'completed') {
                     check();
@@ -83,7 +83,7 @@ export function responseHandler(input: {
                     events = input.session.push(envelope.json);
                 }
                 catch (e) {
-                    adapterError(e);
+                    adapterError(e, 502);
                 }
                 remember(events!);
                 return protocolSSEOutput(events!, input.sourceProtocol, envelope);
@@ -98,7 +98,7 @@ export function responseHandler(input: {
                     events = input.session.finish();
                 }
                 catch (e) {
-                    adapterError(e);
+                    adapterError(e, 502);
                 }
                 remember(events!);
                 if (terminal) {

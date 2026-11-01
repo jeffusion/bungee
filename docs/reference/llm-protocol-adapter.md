@@ -60,7 +60,7 @@ Codex Router 负责模型目录替换、绑定选择、dispatch 和 HTTP/WS 传�
 
 转换不会把不可表示的硬约束悄悄删除。工具定义及调用/返回身份、结构化输出、输入顺序、明确历史和终止状态必须保持语义；影响内容或控制语义的未知字段/类型、未解析引用、加密历史、compaction、目标不可表达的格式或角色约束、多个候选不能无损转换时返回具体 param 的错误。生成偏好只有经过校验且有明确省略规则时才可省略，并记录 mapped/omitted 原因；非法值不能当作“未知”继续生成。
 
-会话目录身份为 `deepseek` 的 Responses→Chat Completions 转换，将出站消息中的 `developer` 角色映射为 `system`，保留各条消息的内容和顺序；规范历史仍保留原角色。该处理依据 [DeepSeek Chat API](https://api-docs.deepseek.com/api/create-chat-completion) 的角色契约，不匹配具体型号，不增加配置字段，也不改写其他提供商或原生 Responses 透传的角色。若后续切换目标使已执行的角色映射不再适用，或最终 DeepSeek 消息仍包含 `developer`，末端校验明确拒绝，不在只读校验阶段重新改写正文。
+会话目录身份为 `deepseek` 的 Responses→Chat Completions 转换，将出站消息中的 `developer` 角色映射为 `system`，保留各条消息的内容；工具调用期间插入的指令位置按下述 Chat 历史规则处理，规范历史仍保留原角色和顺序。该处理依据 [DeepSeek Chat API](https://api-docs.deepseek.com/api/create-chat-completion) 的角色契约，不匹配具体型号，不增加配置字段，也不改写其他提供商或原生 Responses 透传的角色。若后续切换目标使已执行的角色映射不再适用，或最终 DeepSeek 消息仍包含 `developer`，末端校验明确拒绝，不在只读校验阶段重新改写正文。
 
 Chat Completions 上游 `usage` 及其 details 对象是可扩展的辅助统计，不使用封闭字段名单作为响应准入条件。适配器校验核心 token 计数及实际读取的缓存、推理细项，接受可选细项的缺省或 `null`；未消费的统计字段不参与转换决策，不因其出现而中断正文或完成事件。原始统计仍由既有上游 BodyHandle 观察与计量链路读取，转换不修改该对象，也不向 Responses 输出新增未经目标协议定义的字段；这不表示所有上游统计细分均能无损转换。该边界参考 [OpenAI Chat usage](https://platform.openai.com/docs/api-reference/chat/object) 和 [AI SDK DeepSeek 的开放 usage schema](https://github.com/vercel/ai/blob/39aae5425e9f9a25acce413cc7e6823c2b5a73c5/packages/deepseek/src/chat/deepseek-chat-api-types.ts)，不放宽正文、工具、终态或其他协议的既有校验。
 
@@ -70,7 +70,9 @@ Responses 的 `include` 接受 `reasoning.encrypted_content` 和 `output.encrypt
 
 Responses→Chat Completions 的 function/custom 工具结果支持图片投影：保留工具调用及 `tool_call_id`、工具结果中的文本，将 `input_image` 转成随后 user 消息中的 `image_url`，保留图片地址和 `detail`，并标明来源工具与调用 ID。同一批并行调用先输出全部工具结果，再按原顺序附加图片消息；纯图片结果用文本指向随后图片。[Chat 的 tool 消息](https://platform.openai.com/docs/api-reference/chat/create)不能原生表示图片，[DeepSeek 图片输入](https://api-docs.deepseek.com/guides/vision/)也使用 user 消息，因此这是改变图片角色及位置的有损适配，会记录映射诊断，不承诺无损或目标模型具备视觉能力。投影只影响出站正文，规范历史保留原始工具结果，重放时重新生成投影；未知内容、非法图片字段和既有资源限额仍严格校验。Anthropic 的工具结果图片转换不在此支持范围内。
 
-Chat Completions 出站历史将同一段相邻 assistant 内容与工具调用归并到一条消息，按原顺序拼接文本，不跨 user、system 或 tool 消息边界。工具调用后到达的文本不会另起 assistant 消息隔开调用与结果；流式输出项及规范历史的顺序和身份保持不变。JSON 响应允许 choice 携带空对象 `provider_specific_fields`，非空或类型非法时拒绝；工具调用的可选 `index` 必须是与数组位置一致的非负整数。这些冗余字段不写入规范历史，其他未知控制字段仍拒绝。
+Chat Completions 出站历史将同一段相邻 assistant 内容与工具调用归并到一条消息，按原顺序拼接文本，不跨 user、system 或 tool 消息边界。工具调用后到达的文本不会另起 assistant 消息隔开调用与结果；流式输出项及规范历史的顺序和身份保持不变。Chat JSON 和 SSE 的响应外壳、choice 与消息允许附加供应商元数据，例如 `request_id`、耗时和 `provider_specific_fields`；转换只投影已消费字段，原始响应继续由共享 BodyHandle 的观察与计量链路读取，不修改原对象，也不向目标协议注入未定义的字段。消息中的 `provider_specific_fields` 可缺省或为 null，否则必须是对象；其中 refusal、reasoning_content 和 reasoning 按对应输出字段映射，非空值冲突时拒绝。可选输出字段的 null 表示无值。音频、签名、thinking_blocks、reasoning_details、加密状态及嵌套工具等已知但无法表示的内容仍拒绝，不能当作普通 metadata 丢弃；未知元数据不构成已支持新内容类型的声明。工具调用的可选 `index` 必须是与数组位置一致的非负整数，工具结构、角色、候选数量、终态及内容类型继续校验。Anthropic 和 Gemini 的响应外壳同样允许附加元数据，内容块及规范表示保持严格。所有原始 JSON 响应和 SSE 事件（包括未消费的元数据）在投影前受 maxOutputBytes 约束。这种原始响应与统一语义分离的边界参考 [AI SDK OpenAI-compatible 实现](https://github.com/vercel/ai/blob/main/packages/openai-compatible/src/chat/openai-compatible-chat-language-model.ts)；不代表所有供应商扩展都能无损转换。
+
+Responses→Chat Completions 在同一批工具调用尚未收齐结果时暂存插入的 system/developer 指令，全部结果到齐后、工具图片投影和下一次模型发言之前，按原相对顺序输出指令。工具调用与结果通过原 call_id 配对，允许并行结果逆序到达；不丢弃指令，不将指令降级为 user 或工具输出。此规则适用于所有 Chat 目标，不依赖 Agent 角色名称、hook 内容或模型型号。它改变了指令相对于工具结果的位置，属于记录诊断 `chat_instruction_deferred_until_tool_results` 的有损映射；指令不能撤销历史中已执行的工具操作。规范历史保持原内容、角色和顺序，重放时重新转换。暂存指令后到结果收齐前，只接受后续指令、工具结果及工具声明；出现 user/agent_message、assistant、reasoning 或新增工具调用时明确拒绝，避免跨指令边界合并或猜测新一轮调用。输入结束仍有无法释放的指令时返回原始指令字段错误。此规则不应用于原生 Responses 透传、目标 Responses 的历史校验、Gemini 的保序中间表示或 Anthropic 的中途指令限制。
 
 会话按请求隔离，响应结束、失败、取消及 plugin dispose 都释放。终止状态、工具参数片段和 usage 由状态机统一管理，不能仅看到任一文本片段便宣告 completed。诊断通过宿主既有请求步骤记录，保留逻辑 requestId、字段路径和原因码，不回显正文、工具参数或凭据。
 
@@ -105,7 +107,7 @@ Gemini usageMetadata 的辅助统计（如 promptTokensDetails、cacheTokensDeta
 
 有明确目标 profile 的转换请求必须核验 selectedEffort。真正出站 attempt 再核验实际 model、协议、目录版本、规则版本及 wire effort；后续模型映射、重试/failover 改变目标不能无声丢失已选强度。不将不同档位折叠成相近值，也不从档位臆造 thinking.budget_tokens。字段映射依据 [OpenAI Responses](https://platform.openai.com/docs/api-reference/responses)、[Chat Completions](https://platform.openai.com/docs/api-reference/chat/completions)、[Gemini thinking levels](https://ai.google.dev/api/generate-content#ThinkingConfig) 和 [Anthropic effort](https://platform.claude.com/docs/en/build-with-claude/effort) 的协议定义；提供商的额外约束仍需实际验证，不能由兼容协议名称推断全部行为。
 
-本地 `DataAdmissionError` 在每次 attempt 的故障分类前按公共错误契约归一化，保留安全的状态、原因和字段位置。插件独立打包导致构造器身份不同，也不得将本地协议拒绝累计为上游故障或触发熔断。
+客户端请求及出站参数校验失败返回本地 422；上游成功响应无法转换时返回结构化 502，已开始的流按现有严格流错误路径结束，不伪造成功终态。本地 `DataAdmissionError` 在每次 attempt 的故障分类前按公共错误契约归一化，脱敏保留安全的状态、原因、重试时间和字段位置，不复制任意异常属性。插件独立打包导致构造器身份不同，也不得将本地协议拒绝降为普通异常、HTML 500、累计为上游故障或触发熔断。
 
 ## 最终模型身份校验
 

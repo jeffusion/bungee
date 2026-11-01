@@ -7,6 +7,7 @@ import { RequestRetryAction } from './retry-action';
 import type { GatewayRequestOverride } from './contracts';
 import { gatewayHooks, requireGatewayResult } from './runtime';
 import { DataAdmissionError } from '../data-admission/host';
+import { normalizeAdmissionError } from '../data-admission/errors';
 /**
  * Request proxy module
  * Core logic for proxying requests to upstream servers
@@ -1583,6 +1584,7 @@ export async function executeForward(
     return result;
   } catch (error) {
     if(attemptOptions?.nativeWebSocket && upstreamResponse?.ok && error instanceof UpstreamResponseValidationError)error=new DataAdmissionError(502,'upstream_websocket_response_failed');
+    if (normalizeAdmissionError(error)) error = sanitizeError(error, credentialSecrets);
     const timeoutReason = abortSource === 'first_response_timeout' || abortSource === 'request_timeout'
       ? abortSource
       : null;

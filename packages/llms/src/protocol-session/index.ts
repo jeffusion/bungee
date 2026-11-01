@@ -101,9 +101,9 @@ export function createProtocolSession(context: ProtocolSessionContext): Protocol
           fail('invalid_session', 'A session can convert one JSON response or one stream');
         mode = 'json';
         finished = true;
+        const body = record(raw, 'response');
+        serialized(body, limits(context.capabilities?.limits).maxOutputBytes, 'response');
         if (same) {
-          const body = record(raw, 'response');
-          serialized(body, limits(context.capabilities?.limits).maxOutputBytes, 'response');
           return body;
         }
         const canonical = canonicalResponse(raw, context, names); for (const item of canonical.output as JsonRecord[]) checkTool(item);
@@ -115,9 +115,9 @@ export function createProtocolSession(context: ProtocolSessionContext): Protocol
         if (finished || mode === 'json')
           fail('invalid_stream', 'Event arrived after session completion');
         mode = 'stream';
+        const e = record(raw, 'event');
+        serialized(e, limits(context.capabilities?.limits).maxOutputBytes, 'event');
         if (same) {
-          const e = record(raw, 'event');
-          serialized(e, limits(context.capabilities?.limits).maxOutputBytes, 'event');
           if (context.targetProtocol === 'anthropic_messages') {
             if (passAnthropicStopped)
               fail('invalid_stream', 'Event arrived after message_stop');
@@ -192,11 +192,10 @@ function validateStreamEnvelope(raw: unknown, protocol: LLMProtocol): void {
   if (e.error !== undefined || e.type === 'error')
     return;
   if (protocol === 'chat_completions') {
-    fields(e, ['id', 'object', 'created', 'model', 'choices', 'usage', 'system_fingerprint', 'service_tier'], '', 'unsupported_response');
     if (Array.isArray(e.choices))
       for (const rawChoice of e.choices) {
         const c = record(rawChoice, 'choice');
-        fields(c, ['index', 'delta', 'finish_reason', 'logprobs'], 'choices', 'unsupported_response');
+        if (c.provider_specific_fields != null) record(c.provider_specific_fields, 'choices.provider_specific_fields');
         if (c.logprobs != null)
           fail('unsupported_response', 'Log probabilities cannot cross protocols', 'choices.logprobs');
         const d = record(c.delta ?? {}, 'delta');
@@ -211,8 +210,6 @@ function validateStreamEnvelope(raw: unknown, protocol: LLMProtocol): void {
     validateUsage(e.usage, protocol);
   }
   else {
-    const allowed = e.type === 'message_start' ? ['type', 'message'] : e.type === 'message_delta' ? ['type', 'delta', 'usage'] : e.type === 'content_block_start' ? ['type', 'index', 'content_block'] : e.type === 'content_block_delta' ? ['type', 'index', 'delta'] : e.type === 'content_block_stop' ? ['type', 'index'] : ['type'];
-    fields(e, allowed, '', 'unsupported_response');
     if (e.type === 'content_block_start')
       validateAnthropicBlock(record(e.content_block, 'block'), 'content_block');
     if (e.type === 'content_block_delta') {
@@ -225,7 +222,6 @@ function validateStreamEnvelope(raw: unknown, protocol: LLMProtocol): void {
       fields(record(e.delta, 'delta'), ['stop_reason', 'stop_sequence'], 'delta', 'unsupported_response');
     if (e.type === 'message_start') {
       const m = record(e.message, 'message');
-      fields(m, ['id', 'type', 'role', 'model', 'content', 'stop_reason', 'stop_sequence', 'usage'], 'message', 'unsupported_response');
       validateUsage(m.usage, protocol);
       if (m.content !== undefined && (!Array.isArray(m.content) || m.content.length))
         fail('unsupported_content', 'Initial stream message content must be empty', 'message.content');

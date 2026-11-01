@@ -5,7 +5,9 @@ import {
   credentialPolicyFromManifest,
   stripCredentialHeaders,
   validateCredentialLease,
+  sanitizeError,
 } from '../../src/worker/request/credential';
+import { DataAdmissionError } from '../../src/data-admission/errors';
 
 const manifest = {
   contributes: {
@@ -43,6 +45,24 @@ const profileManifest = {
 };
 
 describe('request credential boundary', () => {
+  test('redaction preserves the validated cross-bundle admission contract without copying arbitrary error fields', () => {
+    const foreign = Object.assign(new Error('private outer message'), {
+      name: 'DataAdmissionError', status: 502, code: 'llm_adapter_unsupported_content', retryAfter: 3,
+      details: { message: 'Bad provider response PRIVATE_TOKEN', param: 'choices[0].message' }, secret: 'PRIVATE_TOKEN',
+    });
+    const safe = sanitizeError(foreign, ['PRIVATE_TOKEN']);
+    expect(safe).toBeInstanceOf(DataAdmissionError);
+    expect(safe).toMatchObject({ status: 502, code: foreign.code, retryAfter: 3,
+      details: { message: 'Bad provider response [REDACTED]', param: 'choices[0].message' } });
+    expect(JSON.stringify(safe)).not.toContain('PRIVATE_TOKEN');
+    expect(safe.message).toBe(foreign.code);
+    expect('secret' in safe).toBe(false);
+    expect(foreign.details.message).toContain('PRIVATE_TOKEN');
+    expect(sanitizeError(Object.assign(new Error('PRIVATE_TOKEN'), { name: 'DataAdmissionError', status: 200, code: 'invalid' }), ['PRIVATE_TOKEN']))
+      .not.toBeInstanceOf(DataAdmissionError);
+    expect(sanitizeError(Object.assign(new Error(), { name: 'DataAdmissionError', status: 502, code: 'PRIVATE_TOKEN' }), ['PRIVATE_TOKEN']))
+      .toMatchObject({ code: 'data_admission_rejected', message: 'data_admission_rejected' });
+  });
   test('requires the verified contribution policy and never falls back', () => {
     expect(credentialPolicyFromManifest(manifest, 'provider').allowedHeaderNames).toEqual(['authorization', 'x-api-key']);
     expect(() => credentialPolicyFromManifest({}, 'provider')).toThrow();

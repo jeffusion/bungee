@@ -16,7 +16,7 @@ export function encodeResponsesResult(raw: unknown, protocol: ResponsesProtocol,
     const choice = record(choices[0], 'choice');
     const message = record(choice.message, 'message');
     const delta: JsonRecord = { ...message };
-    if (message.tool_calls !== undefined) delta.tool_calls = list(message.tool_calls, 'tool_calls').map((tool, index) => ({ ...record(tool, 'tool call'), index }));
+    if (message.tool_calls != null) delta.tool_calls = list(message.tool_calls, 'tool_calls').map((tool, index) => ({ ...record(tool, 'tool call'), index }));
     encoder.push({ choices: [{ index: choice.index ?? 0, delta, finish_reason: choice.finish_reason }], usage: body.usage });
   } else {
     encoder.push({ type: 'message_start', message: { usage: body.usage } });

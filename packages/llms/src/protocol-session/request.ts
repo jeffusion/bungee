@@ -458,7 +458,7 @@ export function convertProtocolRequest(raw: unknown, context: ProtocolSessionCon
   }
   if (target === 'responses') {
     // Validate canonical tools/history with the mature strict decoder; its wire body is discarded.
-    const validation = decodeResponsesRequest({ ...b, reasoning: reasoning ? { ...reasoning, effort: undefined } : undefined }, 'chat_completions', { ...cap, reasoningHistory: true });
+    const validation = decodeResponsesRequest({ ...b, reasoning: reasoning ? { ...reasoning, effort: undefined } : undefined }, 'chat_completions', { ...cap, reasoningHistory: true }, { preserveContentOrder: true, toolOutputImages: true });
     if (mappedEffort !== undefined)
       b.reasoning = { ...reasoning, effort: mappedEffort };
     else if (reasoning?.effort !== undefined)

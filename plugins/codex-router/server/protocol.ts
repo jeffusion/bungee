@@ -14,20 +14,20 @@ export function protocolAdapter(input: {
     const dispose = () => input.session.dispose();
     input.signal.addEventListener('abort', dispose, { once: true });
     const release = () => { input.signal.removeEventListener('abort', dispose); dispose(); };
-    const convert = <T>(run: () => T): T => { try {
+    const convert = <T>(run: () => T, status = 502): T => { try {
         return run();
     }
     catch (error) {
         const e = error as any;
         if (typeof e.code === 'string')
-            throw new DataAdmissionError(422, `llm_adapter_${e.code}`, undefined, { message: e.message, param: e.param });
+            throw new DataAdmissionError(status, `llm_adapter_${e.code}`, undefined, { message: e.message, param: e.param });
         throw error;
     } };
     const remember = (events: any[]) => { for (const event of events)
         if (event.type === 'response.completed')
             nativeTerminal = event.response; };
     return { bodyRequirements() { return { request: 'none', response: ['json', 'sse-json'] }; }, register(hooks: PluginHooks) {
-            hooks.onValidateOutbound.tapPromise('codex-router.target', async (context) => { input.signal.throwIfAborted(); const result = convert(() => input.session.validateAttempt({ model: protocolRequestModel(input.protocol, context.body, context.url), modelIdentity: readModelIdentity(context.annotations), protocol: input.protocol, body: context.body, url: context.url })); logger.info({ requestId: context.requestId, attemptId: context.attemptId, ...result }, 'llm_adapter_target_validated'); return context; });
+            hooks.onValidateOutbound.tapPromise('codex-router.target', async (context) => { input.signal.throwIfAborted(); const result = convert(() => input.session.validateAttempt({ model: protocolRequestModel(input.protocol, context.body, context.url), modelIdentity: readModelIdentity(context.annotations), protocol: input.protocol, body: context.body, url: context.url }), 422); logger.info({ requestId: context.requestId, attemptId: context.attemptId, ...result }, 'llm_adapter_target_validated'); return context; });
             hooks.onResponse.tapPromise('codex-router.protocol', async (response, context) => {
                 if (!response.ok || !response.headers.get('content-type')?.includes('json'))
                     return response;

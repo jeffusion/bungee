@@ -212,6 +212,8 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
   const callIds = new Set<string>();
   const callToolNames = new Map<string, string>();
   const answered = new Set<string>();
+  const deferredInstructions: { message: JsonRecord; param: string }[] = [];
+  const normalizeChatHistory = protocol === 'chat_completions' && !options.preserveContentOrder;
   const projectedToolImages: { callId: string; name: string; images: JsonRecord[] }[] = [];
   let pendingReasoning = '';
   const addMessage = (message: JsonRecord): void => {
@@ -231,6 +233,9 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     const item = record(rawItem, 'input item');
     if (item.type !== 'function_call_output' && item.type !== 'custom_tool_call_output') flushToolImages();
     if (item.type === 'additional_tools') return;
+    if (deferredInstructions.length && item.type !== 'function_call_output' && item.type !== 'custom_tool_call_output'
+      && !((item.type === undefined || item.type === 'message') && (item.role === 'system' || item.role === 'developer')))
+      fail('invalid_tool_history', 'Only instructions and tool results may follow a deferred instruction until all tool results arrive', messageParam);
     if (item.type === 'agent_message') {
       validateAgentMessage(item, messageParam, capabilities.limits);
       if (capabilities.agentMessageDelivery !== 'plaintext') fail('unsupported_content', 'Agent messages require explicit plaintext delivery', messageParam);
@@ -291,6 +296,13 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
         }
       }
       addMessage({ role: 'tool', tool_call_id: id, content: output, ...(item.is_error === true ? { is_error: true } : {}) });
+      if (callIds.size === answered.size) {
+        for (const instruction of deferredInstructions) {
+          messageParam = instruction.param;
+          addMessage(instruction.message);
+        }
+        deferredInstructions.length = 0;
+      }
       return;
     }
     if (item.type !== undefined && item.type !== 'message') fail('unsupported_content', 'Unsupported input item type');
@@ -299,6 +311,12 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     const message: JsonRecord = { role, content: normalizeContent(item.content, role, `${messageParam}.content`) };
     if (options.preserveContentOrder && item.id !== undefined) message.id = string(item.id, 'item.id', true);
     if (pendingReasoning) { if (role !== 'assistant') fail('unsupported_reasoning', 'Reasoning must precede an assistant item'); message.reasoning_content = pendingReasoning; pendingReasoning = ''; }
+    // Chat requires contiguous tool results; keep instructions before the next model turn.
+    if (normalizeChatHistory && (role === 'system' || role === 'developer') && callIds.size !== answered.size) {
+      deferredInstructions.push({ message, param: messageParam });
+      diagnostics.push({ param: messageParam, action: 'mapped', reason: 'chat_instruction_deferred_until_tool_results' });
+      return;
+    }
     if (protocol === 'chat_completions' && !options.preserveContentOrder && role === 'assistant') {
       const previous = chat.at(-1);
       if (previous?.role === 'assistant') {
@@ -311,6 +329,7 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     addMessage(message);
   });
   if (pendingReasoning) fail('unsupported_reasoning', 'Orphan reasoning history cannot be represented');
+  if (deferredInstructions.length) fail('invalid_tool_history', 'Deferred instructions require all pending tool results', deferredInstructions[0].param);
   flushToolImages(true);
   const result: JsonRecord = { model, messages: chat };
   const omittedAllTools = !tools.length && diagnostics.some(item => item.reason === 'optional_hosted_web_search_unavailable');
