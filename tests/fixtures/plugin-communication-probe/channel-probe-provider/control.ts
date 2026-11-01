@@ -112,6 +112,20 @@ function digestOf(bytes: Uint8Array): string {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 }
 
+const PLUGIN_SECRET = process.env.BUNGEE_PLUGIN_SECRETS_KEY ?? '';
+
+/** Scrub this plugin's own key before bounding, so a cut cannot leave half a secret. */
+function redactSecrets(value: string): string {
+  return PLUGIN_SECRET === '' ? value : value.split(PLUGIN_SECRET).join('[REDACTED_PLUGIN_KEY]');
+}
+
+function errorBrief(error: unknown): string {
+  const name = error instanceof Error ? error.name : typeof error;
+  const code = typeof (error as any)?.code === 'string' ? ` ${(error as any).code}` : '';
+  const message = error instanceof Error ? error.message : String(error);
+  return redactSecrets(`${name}${code}: ${message}`).slice(0, 240);
+}
+
 /**
  * A snapshot body is fixed UTF-8 JSON matching the declared content schema. The
  * body is padded to an exact byte size so size/digest assertions stay exact.
@@ -152,6 +166,7 @@ export function createControl(context: any) {
     duplexFailReceived: 0,
     duplexFailCommitted: '',
     duplexFailAborted: 0,
+    duplexProgress: [] as any[],
     snapshotPublishError: '',
     snapshotReadError: '',
     snapshotStoreVersion: 0,
@@ -229,6 +244,7 @@ export function createControl(context: any) {
         duplexHalfCommitted: state.duplexHalfCommitted,
         duplexFailReceived: state.duplexFailReceived,
         duplexFailAborted: state.duplexFailAborted,
+        duplexProgress: state.duplexProgress,
         snapshotPublishError: state.snapshotPublishError,
         snapshotReadError: state.snapshotReadError,
         snapshotStoreVersion: state.snapshotStoreVersion,
@@ -341,6 +357,21 @@ export function createControl(context: any) {
           const failing = objectId === CHANNEL_DUPLEX_FAIL_ID_VALUE;
           if (object?.version !== 1 || (!half && !failing && objectId !== CHANNEL_DUPLEX_ID_VALUE)) return null;
           const key = failing ? 'duplexFail' : half ? 'duplexHalf' : 'duplex';
+          // One entry per duplex() call: two workers may open the same kind at the
+          // same time, and a per-kind object would mix their counters and first errors.
+          // Entries carry only the provider-local creation order; the public duplex
+          // handle exposes no peer identity, so they must not be mapped to a worker pid.
+          const progress = {
+            kind: key,
+            session: state.duplexProgress.length + 1,
+            source: { reads: 0, bytes: 0, firstAt: null as number | null, lastAt: null as number | null, error: '', errorOffset: null as number | null },
+            sink: {
+              writes: 0, bytes: 0, firstAt: null as number | null, lastAt: null as number | null,
+              error: '', errorOffset: null as number | null, finishAt: null as number | null,
+              committedAt: null as number | null, abortedAt: null as number | null,
+            },
+          };
+          state.duplexProgress.push(progress);
           const inbound = pattern(failing ? 256 * 1024 : half ? CHANNEL_DUPLEX_HALF_READ_SIZE : CHANNEL_DUPLEX_READ_SIZE, failing ? 35 : half ? 34 : 33);
           const chunks: Uint8Array[] = [];
           let received = 0;
@@ -349,27 +380,60 @@ export function createControl(context: any) {
               size: inbound.byteLength,
               digest: digestOf(inbound),
               read: async (offset: number, length: number) => {
-                // Injected provider-side read failure AFTER real chunks were served.
-                if (failing && offset >= CHANNEL_FAIL_AFTER_BYTES) throw new Error('injected duplex source failure');
-                return inbound.slice(offset, offset + length);
+                const at = Date.now();
+                progress.source.reads += 1;
+                progress.source.firstAt ??= at;
+                try {
+                  // Injected provider-side read failure AFTER real chunks were served.
+                  if (failing && offset >= CHANNEL_FAIL_AFTER_BYTES) throw new Error('injected duplex source failure');
+                  const bytes = inbound.slice(offset, offset + length);
+                  progress.source.bytes += bytes.byteLength;
+                  progress.source.lastAt = Date.now();
+                  return bytes;
+                } catch (error) {
+                  if (progress.source.error === '') { progress.source.error = errorBrief(error); progress.source.errorOffset = offset; }
+                  progress.source.lastAt = Date.now();
+                  throw error;
+                }
               },
             },
             sink: {
               write: async (offset: number, bytes: Uint8Array) => {
-                if (offset !== received) throw new Error('duplex sink offset mismatch');
-                chunks.push(bytes.slice());
-                received += bytes.byteLength;
-                state[`${key}Received`] = received;
-                await new Promise<void>((resolve) => setTimeout(resolve, 2));
+                const at = Date.now();
+                progress.sink.writes += 1;
+                progress.sink.firstAt ??= at;
+                try {
+                  if (offset !== received) throw new Error('duplex sink offset mismatch');
+                  chunks.push(bytes.slice());
+                  received += bytes.byteLength;
+                  state[`${key}Received`] = received;
+                  progress.sink.bytes = received;
+                  progress.sink.lastAt = Date.now();
+                  await new Promise<void>((resolve) => setTimeout(resolve, 2));
+                } catch (error) {
+                  if (progress.sink.error === '') { progress.sink.error = errorBrief(error); progress.sink.errorOffset = offset; }
+                  progress.sink.lastAt = Date.now();
+                  throw error;
+                }
               },
               finish: async (size: number, digest: string) => {
-                const joined = new Uint8Array(received);
-                let at = 0;
-                for (const chunk of chunks) { joined.set(chunk, at); at += chunk.byteLength; }
-                if (joined.byteLength !== size || digestOf(joined) !== digest) throw new Error('duplex sink mismatch');
-                state[`${key}Committed`] = `${digest}|${size}`;
+                progress.sink.finishAt = Date.now();
+                try {
+                  const joined = new Uint8Array(received);
+                  let at = 0;
+                  for (const chunk of chunks) { joined.set(chunk, at); at += chunk.byteLength; }
+                  if (joined.byteLength !== size || digestOf(joined) !== digest) throw new Error('duplex sink mismatch');
+                  state[`${key}Committed`] = `${digest}|${size}`;
+                  progress.sink.committedAt = Date.now();
+                } catch (error) {
+                  if (progress.sink.error === '') progress.sink.error = errorBrief(error);
+                  throw error;
+                }
               },
-              abort: () => { state[`${key}Aborted`] = (state[`${key}Aborted`] ?? 0) + 1; },
+              abort: () => {
+                state[`${key}Aborted`] = (state[`${key}Aborted`] ?? 0) + 1;
+                progress.sink.abortedAt = Date.now();
+              },
             },
           };
         },

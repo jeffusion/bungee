@@ -70,7 +70,7 @@ async function withSettings(run: (page: Page, model: ReturnType<typeof createMod
       model.saved=body.aggregate ?? body.envelope.aggregate;model.revision=43;
       return json({...operation(model.id,model.active?'committed':'converged'),operation_id:model.id,revision:43},202);
     }
-    if(path === `/api/config/operations/${model.id}` && method === 'GET') {model.queries++;return model.queryStatus ? json({error:'unavailable'},model.queryStatus) : json(operation(model.id,model.queryState));}
+    if(path === `/api/config/operations/${model.id}` && method === 'GET') {model.queries++;const gate=model.operationGate;if(gate){model.operationGate=null;await gate;}return model.queryStatus ? json({error:'unavailable'},model.queryStatus) : json(operation(model.id,model.queryState));}
     errors.push(`Unexpected API ${method} ${path}`);return json({error:'unexpected_request'},500);
   });
     await page.goto(`${runtime.origin}/#/${route}`);
@@ -88,6 +88,7 @@ function createModel() {
   return {saved:aggregate(),revision:42,id:'',writes:[] as Array<{method:string;path:string;body:any}>,validations:[] as any[],exports:0,
     active:false,queryState:'converged' as 'converged'|'draining'|'degraded',publication:null as ConfigurationPublication|null,
     cleanupWrites:0,cleanupStatus:0,cleanupRefreshFailure:false,queries:0,rejection:'',status:503,networkFailure:false,nonJson:false,queryStatus:0,runtimeUnavailable:false,
+    operationGate:null as Promise<void>|null,
 };
 }
 async function review(page:Page) {
@@ -173,6 +174,12 @@ test('submission failures retain the draft, distinguish known rejection from unk
       await review(page);await page.getByTestId('config-confirm-publish').click();
       const known=['control_recovering','control_readiness_failed','conflict','invalid'].includes(outcome);
       await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase',known?'rejected':'unknown');
+      // A known rejection must be readable while the review still covers the page.
+      if(known) await expect(page.getByTestId('config-review').getByRole('alert').first()).toBeVisible();
+      if(outcome.startsWith('control_')) {
+        await expect(page.getByTestId('config-review')).toContainText('HTTP 503 · control_');
+        await expect(page.getByTestId('toast-container')).toContainText(/control service|控制服务/i);
+      }
       await closeReview(page);
       if(imported) await expect(page.getByTestId('import-preview')).toBeVisible();else await expect(page.getByTestId('logging-max-size')).toHaveValue('52');
       await expect(page.getByTestId('page-config')).not.toContainText('PRIVATE-ERROR');
@@ -222,8 +229,16 @@ test('later import selection wins over a slow earlier validation response',async
 test('accepted publication stays locked across query failure and reload, then exposes degradation without resubmitting',async()=>{
   await withSettings(async(page,model)=>{
     model.active=true;model.queryStatus=503;
-    await page.getByTestId('logging-max-size').fill('52');await review(page);await page.getByTestId('config-confirm-publish').click();
-    await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','active');await closeReview(page);
+    let releaseOperation!:()=>void;
+    model.operationGate=new Promise<void>(resolve=>{releaseOperation=resolve;});
+    try {
+      await page.getByTestId('logging-max-size').fill('52');await review(page);await page.getByTestId('config-confirm-publish').click();
+      await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','active');
+      // ACK received while the first operation read is still held: the review must close,
+      // keep tracking, and never re-enable submission.
+      await closeReview(page);await expect(page.getByTestId('config-save-button')).toBeDisabled();
+    } finally { releaseOperation(); }
+    await expect(page.getByTestId('settings-notice')).toBeVisible();
     await reloadSettings(page);await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','active');
     await expect(page.getByTestId('logging-max-size')).toBeDisabled();
     model.queryStatus=0;model.queryState='degraded';await page.getByRole('button',{name:'Check this publication',exact:true}).click();
@@ -351,7 +366,7 @@ test('a missing accepted operation remains locked across reload and never author
 test('WebSocket connection limits publish an integer or explicit null through review and snapshot CAS',async()=>{
   for (const limit of [128,null]) await withSettings(async(page,model)=>{
     if(limit === null) await page.getByRole('switch',{name:'No additional WebSocket connection limit',exact:true}).click();
-    else await page.getByRole('spinbutton',{name:'Maximum client WebSocket connections',exact:true}).fill(String(limit));
+    else await page.getByRole('spinbutton',{name:'Max WS client connections',exact:true}).fill(String(limit));
     await review(page);
     expect(model.validations.at(-1).aggregate.logical_configuration.websocket_max_connections).toBe(limit);
     await closeReview(page);expect(model.writes).toHaveLength(0);
@@ -361,11 +376,34 @@ test('WebSocket connection limits publish an integer or explicit null through re
     expect(model.writes[0]!.body.expected_revision).toBe(42);
     expect(model.writes[0]!.body.aggregate.logical_configuration.websocket_max_connections).toBe(limit);
   });
+  // "No limit" and 64 MiB in the same submission: the null must survive the
+  // disabled numeric control, the write, and the post-publish reset.
+  await withSettings(async(page,model)=>{
+    const unlimited=page.getByRole('switch',{name:'No additional WebSocket connection limit',exact:true});
+    const connections=page.locator('#config-websocket-max-connections');
+    await unlimited.click();
+    await page.locator('#config-websocket-max-message').fill('64');
+    await expect(connections).toBeDisabled();
+    await review(page);
+    const validated=model.validations.at(-1).aggregate.logical_configuration;
+    expect(validated.websocket_max_connections).toBeNull();
+    expect(validated.websocket_max_message_bytes).toBe(64*1024*1024);
+    await page.getByTestId('config-confirm-publish').click();
+    await expect(page.getByTestId('config-review')).toHaveCount(0);
+    expect(model.writes).toHaveLength(1);
+    const submitted=model.writes[0]!.body.aggregate.logical_configuration;
+    expect(submitted.websocket_max_connections).toBeNull();
+    expect(submitted.websocket_max_message_bytes).toBe(64*1024*1024);
+    await waitForSettingsReads(page);
+    await expect(unlimited).toHaveAttribute('aria-checked','true');
+    await expect(connections).toBeDisabled();
+    await expect(page.locator('#config-websocket-max-message')).toHaveValue('64');
+  });
 },60_000);
 
 test('empty and out-of-range WebSocket limits cannot validate or publish a retained valid draft',async()=>{
   await withSettings(async(page,model)=>{
-    const input=page.getByRole('spinbutton',{name:'Maximum client WebSocket connections',exact:true});
+    const input=page.getByRole('spinbutton',{name:'Max WS client connections',exact:true});
     for(const invalid of ['', '0', '2147483648', '999999999999999999999999999']) {
       await input.fill(invalid);
       await expect(page.getByTestId('config-save-button')).toBeDisabled();
@@ -380,7 +418,7 @@ test('empty and out-of-range WebSocket limits cannot validate or publish a retai
 
 test('imported WebSocket limits are read-only and publish the import while cancellation retains the local draft',async()=>{
   for(const limit of [321,null]) await withSettings(async(page,model)=>{
-    const input=page.getByRole('spinbutton',{name:'Maximum client WebSocket connections',exact:true});
+    const input=page.getByRole('spinbutton',{name:'Max WS client connections',exact:true});
     await input.fill('600');
     const next=aggregate();next.logical_configuration.websocket_max_connections=limit;
     await upload(page,envelope(next));await expect(page.getByTestId('import-preview')).toBeVisible();

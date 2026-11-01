@@ -21,6 +21,8 @@ import {
 import { PluginPeerRpcLink, type PluginPeerRpcSendAdapter } from '../../../src/plugin-services/peer-rpc-link';
 import { decodePluginPeerFrame } from '../../../src/plugin-services/peer-frame';
 import {
+  CHANNEL_MAX_TRANSFER_BUFFER_BYTES,
+  CHANNEL_STREAM_MAX_CREDIT_BYTES,
   PluginPeerChannelHub,
   type PluginChannelEventEntry,
   type PluginChannelReliableEventLog,
@@ -33,7 +35,7 @@ import { HostChannelAdapter, StoreBackedReliableEventLog } from '../../../src/pl
 import { HostSnapshotStore } from '../../../src/plugin-services/snapshot-store';
 import { PluginCommunicationStore } from '../../../src/plugin-services/persistence';
 import { PluginDurableStateStore, PLUGIN_DURABLE_STATE_SCHEMA_SQL } from '../../../src/plugin-durable-state';
-import type { ChannelSnapshotDescriptor, PluginChannelLane, PluginChannelTarget } from '../../../src/plugin-services/peer-channel-protocol';
+import { decodeChannelEmit, type ChannelSnapshotDescriptor, type PluginChannelLane, type PluginChannelTarget } from '../../../src/plugin-services/peer-channel-protocol';
 
 const ROOT_KEY = new Uint8Array(32).fill(31);
 const INSTANCE = '10000000-0000-4000-8000-0000000000d1';
@@ -296,6 +298,152 @@ describe('plugin channel hub over a real peer link', () => {
     });
     const collected = await stream.collect();
     expect(collected.bytes).toBe(60 * 1024);
+  });
+
+  test('consumed read credit is granted back once, so the next announced window adds only the consumed bytes', async () => {
+    const fixture = makeFixture();
+    const credit = 60 * 1024;
+    const size = 3 * credit;
+    const bytes = pattern(size);
+    let releaseRead!: () => void;
+    const readBlocked = new Promise<void>((resolve) => { releaseRead = resolve; });
+    const handle = fixture.controlHub.registerStream(
+      { lane: 'stream', provider: STREAM_TARGET.provider, service: STREAM_TARGET.service, major: 1, process: 'control', contract: CONTRACT },
+      {
+        open: (input) => input.objectId !== 'catalog-v1' ? null : {
+          size, digest: sha256(bytes),
+          read: async (offset, length) => {
+            // Serve the first full credit window; park the follow-up read so the
+            // producer never marks the stream last-seen before the grant lands.
+            if (offset >= credit) await readBlocked;
+            return bytes.slice(offset, offset + length);
+          },
+        },
+      },
+    );
+    handle.markReady();
+
+    let observeWindow!: (window: number) => void;
+    const observed = new Promise<number>((resolve) => { observeWindow = resolve; });
+    // Capture the REAL credit frame this consumer emits, then deliver it unchanged.
+    fixture.workerLink.attach((frame) => {
+      const packet = decodePluginPeerFrame(frame);
+      if (packet.header.kind === 'notification') {
+        const context = packet.header.context as unknown as { readonly emit?: unknown };
+        const emit = decodeChannelEmit(context.emit);
+        if (emit?.kind === 'stream.credit' && emit.direction === 'read' && emit.window > credit) observeWindow(emit.window);
+      }
+      fixture.controlLink.receive(frame);
+      return true;
+    });
+
+    const stream = fixture.workerHub.openStream(STREAM_TARGET, CALLER, CALLER_SCOPE, CONTRACT, {
+      objectId: 'catalog-v1', version: 1, offset: 0, size, digest: sha256(bytes), creditBytes: credit,
+    });
+    const completion = stream.completed.catch(() => undefined);
+    let next: Promise<IteratorResult<Uint8Array, void>> | undefined;
+    try {
+      const iterator = stream.chunks();
+      const first = await iterator.next();
+      if (first.done !== false || !(first.value instanceof Uint8Array)) throw new Error('expected a first chunk');
+      expect(first.value.byteLength).toBe(credit);
+      // `yield` suspends BEFORE #grantCredit: only resuming the generator hands
+      // the consumed bytes back to the producer, so the grant needs another next().
+      next = iterator.next();
+      const window = await Promise.race([
+        observed,
+        next.then(
+          () => Promise.reject(new Error('the producer sent more data before the credit grant was observed')),
+          () => Promise.reject(new Error('the stream failed before the credit grant was observed')),
+        ),
+      ]);
+      expect(window).toBe(2 * credit);
+    } finally {
+      stream.cancel();
+      releaseRead();
+      await next?.catch(() => undefined);
+      await completion;
+    }
+  });
+
+  test('read credit above the receive buffer is refused synchronously while the provider stays unopened', () => {
+    const fixture = makeFixture();
+    const bytes = pattern(1024, 41);
+    const { opened } = registerReadStream(fixture, 'catalog-v1', bytes);
+    const invalidCredit = CHANNEL_MAX_TRANSFER_BUFFER_BYTES + 1;
+
+    let streamRefusal: unknown = null;
+    try {
+      fixture.workerHub.openStream(STREAM_TARGET, CALLER, CALLER_SCOPE, CONTRACT, {
+        objectId: 'catalog-v1', version: 1, offset: 0, size: bytes.byteLength, digest: sha256(bytes),
+        creditBytes: invalidCredit,
+      });
+    } catch (error) { streamRefusal = error; }
+    expect((streamRefusal as { code?: string } | null)?.code).toBe('invalid');
+
+    // The duplex read half is bounded by the same receive buffer, not by the
+    // separate eight-chunk credit ceiling used for the write direction.
+    let duplexRefusal: unknown = null;
+    try {
+      fixture.workerHub.openDuplex(STREAM_TARGET, CALLER, CALLER_SCOPE, CONTRACT, {
+        objectId: 'catalog-v1', version: 1, readSize: bytes.byteLength, writeSize: bytes.byteLength,
+        readCreditBytes: invalidCredit,
+      });
+    } catch (error) { duplexRefusal = error; }
+    expect((duplexRefusal as { code?: string } | null)?.code).toBe('invalid');
+    expect(opened).toHaveLength(0);
+  });
+
+  test('the read ceiling completes a whole object and a duplex keeps the eight-chunk write ceiling', async () => {
+    const fixture = makeFixture();
+    const body = pattern(200 * 1024, 42);
+    const { opened } = registerReadStream(fixture, 'catalog-v1', body);
+    const read = await fixture.workerHub.openStream(STREAM_TARGET, CALLER, CALLER_SCOPE, CONTRACT, {
+      objectId: 'catalog-v1', version: 1, offset: 0, size: body.byteLength, digest: sha256(body),
+      creditBytes: CHANNEL_MAX_TRANSFER_BUFFER_BYTES,
+    }).collect();
+    expect(opened).toHaveLength(1);
+    expect(read.bytes).toBe(body.byteLength);
+    expect(read.digest).toBe(sha256(body));
+    expect(sha256(read.body)).toBe(sha256(body));
+
+    const duplexFixture = makeFixture();
+    const inbound = pattern(120 * 1024, 43);
+    const outbound = pattern(100 * 1024, 44);
+    const received: Uint8Array[] = [];
+    let committed: { size: number; digest: string } | null = null;
+    const handle = duplexFixture.controlHub.registerStream(
+      { lane: 'stream', provider: STREAM_TARGET.provider, service: STREAM_TARGET.service, major: 1, process: 'control', contract: CONTRACT },
+      {
+        duplex: () => ({
+          source: { size: inbound.byteLength, digest: sha256(inbound), read: async (offset, length) => inbound.slice(offset, offset + length) },
+          sink: {
+            write: async (offset, bytes) => { expect(offset).toBe(received.reduce((total, chunk) => total + chunk.byteLength, 0)); received.push(bytes.slice()); },
+            finish: async (size, digest) => { committed = { size, digest }; },
+          },
+        }),
+      },
+    );
+    handle.markReady();
+    const session = duplexFixture.workerHub.openDuplex(STREAM_TARGET, CALLER, CALLER_SCOPE, CONTRACT, {
+      objectId: 'catalog-v1', version: 1,
+      readSize: inbound.byteLength, writeSize: outbound.byteLength,
+      readCreditBytes: CHANNEL_MAX_TRANSFER_BUFFER_BYTES, writeCreditBytes: CHANNEL_STREAM_MAX_CREDIT_BYTES,
+    });
+    const readTask = session.collect();
+    const writeTask = (async () => {
+      for (let offset = 0; offset < outbound.byteLength; offset += 60 * 1024) {
+        await session.write(outbound.slice(offset, Math.min(offset + 60 * 1024, outbound.byteLength)));
+      }
+      return session.finishWrite();
+    })();
+    const [duplexRead, duplexWrite] = await Promise.all([readTask, writeTask]);
+    await session.completed;
+    expect(duplexRead.bytes).toBe(inbound.byteLength);
+    expect(duplexRead.digest).toBe(sha256(inbound));
+    expect(duplexWrite.digest).toBe(sha256(outbound));
+    expect(committed).toEqual({ size: outbound.byteLength, digest: sha256(outbound) });
+    expect(received.reduce((total, chunk) => total + chunk.byteLength, 0)).toBe(outbound.byteLength);
   });
 
   test('a consumer-side digest mismatch fails the stream instead of delivering bytes as complete', async () => {

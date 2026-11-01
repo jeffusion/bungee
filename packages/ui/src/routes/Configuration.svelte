@@ -7,6 +7,7 @@
   import { ApiError } from '$api/client';
   import { getToken } from '$stores/auth';
   import { publicationRecovery } from '$stores/runtime';
+  import { toast } from '$stores/toast';
   import { confirmAction } from '$stores/confirmation';
   import { settingsDirty } from '$stores/navigation-guard';
   import { token as authToken } from '$stores/auth';
@@ -72,10 +73,29 @@
   let importGeneration = 0;
   let inspectGeneration = 0;
   let disposed = false;
-  let accepted = false;
+  let accepted = $state(false);
   let proofForRead = $state<string | undefined>();
   let lastDetailKey = '';
   const t = (key: string) => $isLoading ? '' : $_(`settings.${key}`);
+  // One visible outcome per submission: the dialog carries it while open, the
+  // toast carries it everywhere else. Deduped so polling cannot spam it.
+  let announced = '';
+  let announcedId: number | null = null;
+  function announce(key: string) {
+    if (!key || key === announced) return;
+    const text = t(key);
+    if (!text) return;
+    announced = key;
+    // Replace only this page's own notice, so an older phase cannot sit next to
+    // the current one. Other pages' toasts are never touched.
+    if (announcedId !== null) toast.remove(announcedId);
+    const tone = key === 'published' ? 'success' : key === 'rejected' ? 'error' : key === 'submitted' ? 'info' : 'warning';
+    announcedId = toast.show(text, tone);
+  }
+  // Before the durable ACK the review cannot be dismissed; after it, tracking
+  // continues in the background and the dialog may close.
+  const submitting = $derived(busy && !accepted);
+  const reviewOutcome = $derived(notice && notice !== 'published' ? notice : '');
   const logLevels = $derived($isLoading ? [] : [
     { value: '', label: t('defaultLogLevel') },
     ...['debug', 'info', 'warn', 'error'].map(value => ({ value, label: t(`logLevels.${value}`) })),
@@ -194,14 +214,16 @@
     if (firstAccepted && !retainAccepted(state.operation.mutation_id)) storageWarning = 'storageTrackingFailed';
     tracked = state; accepted = true;
     if (isTerminal(state.operation.state)) { releaseIdentity('terminal'); detailsOpen = true; }
-    else phase = 'active';
+    else { phase = 'active'; }
+    // The first durable ACK is a result in its own right: submitted, not converged.
+    if (firstAccepted && !isTerminal(state.operation.state)) announce('submitted');
     // A durable ACK proves which credential can read this publication. Resume
     // real serving reads while the operation waits for old requests to drain.
     if (firstAccepted) void publicationRecovery.resume(readHeaders());
   }
   async function publish() {
     if (!canPublish || !snapshot || !candidate) return;
-    busy = true; notice = ''; storageWarning = ''; accepted = false; phase = 'idle';
+    busy = true; notice = ''; storageWarning = ''; accepted = false; phase = 'idle'; announced = '';
     proofForRead = nextAuthRequired ? nextAuthToken.trim() : undefined;
     publicationRecovery.pause();
     const options = {
@@ -216,7 +238,7 @@
       if (imported) await importConfig(snapshot, JSON.parse(JSON.stringify(imported)), options);
       else await commitConfiguration(snapshot, JSON.parse(signature), options);
       if (disposed) return;
-      proofForRead = undefined; nextAuthToken = ''; notice = 'published';
+      proofForRead = undefined; nextAuthToken = ''; notice = 'published'; announce('published');
       cancelReview(); await loadConfig();
     } catch (error) {
       if (disposed) return;
@@ -235,6 +257,7 @@
         releaseIdentity('rejected'); notice = 'rejected'; proofForRead = undefined;
       }
       else { notice = accepted ? queryFailure(error instanceof ApiError ? error.status : undefined) : 'unknownAcceptance'; }
+      announce(notice);
     } finally {
       if (disposed) return;
       busy = false;
@@ -259,6 +282,9 @@
             proofForRead = undefined;
           }
           notice = state.operation.state === 'converged' ? 'published' : 'degraded';
+          announce(notice);
+          // Terminal outcome: never leave the dialog on a disabled button.
+          cancelReview();
           await loadConfig(); if (!disposed) await publicationRecovery.resume(readHeaders());
         } else {
           notice = 'tracking';
@@ -475,58 +501,75 @@
     </nav>
     <section id="settings-general" tabindex="-1" aria-label={t('general')} class="scroll-mt-20">
       <PanelCard title={t('general')} tag="GLOBAL">
-        <fieldset disabled={locked || reviewOpen || !!imported} class="grid gap-4 sm:grid-cols-2">
-          <div class="min-w-0 space-y-1.5" data-testid="config-log-level-select">
-            <Label for="config-log-level">{$_('configuration.logLevel')}</Label>
-            {#key draft.log_level}
-            <Select.Root selected={logLevels.find(option => option.value === (draft?.log_level ?? ''))}
-              disabled={locked || reviewOpen || !!imported}
-              onSelectedChange={(selected) => { globalField('log_level', selected?.value ?? ''); void focusEditor(); }}>
-              <Select.Trigger id="config-log-level" class="focus-visible:border-nexus-500" data-value={draft.log_level ?? ''} aria-describedby="config-log-level-help">
-                <Select.Value />
-              </Select.Trigger>
-              <Select.Content class="settings-select-list">
-                {#each logLevels as option}<Select.Item value={option.value} label={option.label} />{/each}
-              </Select.Content>
-            </Select.Root>
-            {/key}
-            <p id="config-log-level-help" class="text-sm text-zinc-400">{t('logLevelHelp')}</p>
+        <fieldset disabled={locked || reviewOpen || !!imported} class="space-y-5">
+          <div class="grid gap-x-6 gap-y-1.5 md:grid-cols-2">
+            <div class="row-span-3 grid min-w-0 [grid-template-rows:subgrid]" data-testid="config-log-level-select">
+              <div class="flex min-h-[44px] items-center sm:min-h-[40px]">
+                <Label for="config-log-level">{$_('configuration.logLevel')}</Label>
+              </div>
+              {#key draft.log_level}
+              <Select.Root selected={logLevels.find(option => option.value === (draft?.log_level ?? ''))}
+                disabled={locked || reviewOpen || !!imported}
+                onSelectedChange={(selected) => { globalField('log_level', selected?.value ?? ''); void focusEditor(); }}>
+                <Select.Trigger id="config-log-level" class="focus-visible:border-nexus-500" data-value={draft.log_level ?? ''} aria-describedby="config-log-level-help">
+                  <Select.Value />
+                </Select.Trigger>
+                <Select.Content class="settings-select-list">
+                  {#each logLevels as option}<Select.Item value={option.value} label={option.label} />{/each}
+                </Select.Content>
+              </Select.Root>
+              {/key}
+              <p id="config-log-level-help" class="text-sm text-zinc-400">{t('logLevelHelp')}</p>
+            </div>
+
+            <div class="row-span-3 grid min-w-0 [grid-template-rows:subgrid]">
+              <div class="flex min-h-[44px] items-center sm:min-h-[40px]">
+                <label class="nx-field-label" id="config-request-limit-label" for="config-request-limit">{$_('configuration.bodyParserLimit')}</label>
+              </div>
+              <Input id="config-request-limit" aria-labelledby="config-request-limit-label" class="focus-visible:border-nexus-500" value={draft.body_parser_limit ?? ''} placeholder={`${t('useDefault')} (50mb)`} aria-describedby="config-request-limit-help"
+                oninput={(e) => globalField('body_parser_limit', e.currentTarget.value)} />
+              <p id="config-request-limit-help" class="text-sm text-zinc-400">{t('requestLimitHelp')} {t('defaultHelp')}</p>
+            </div>
           </div>
-          <div class="block space-y-1.5">
-            <label class="nx-field-label" id="config-request-limit-label" for="config-request-limit">{$_('configuration.bodyParserLimit')}</label>
-            <Input id="config-request-limit" aria-labelledby="config-request-limit-label" class="focus-visible:border-nexus-500" value={draft.body_parser_limit ?? ''} placeholder={`${t('useDefault')} (50mb)`} aria-describedby="config-request-limit-help"
-              oninput={(e) => globalField('body_parser_limit', e.currentTarget.value)} />
-            <p id="config-request-limit-help" class="text-sm text-zinc-400">{t('requestLimitHelp')} {t('defaultHelp')}</p>
-          </div>
-          <div class="min-w-0 space-y-3 sm:col-span-2">
-            <div class="grid gap-4 sm:grid-cols-2">
-              <div class="min-w-0 space-y-1.5">
-                <Label for="config-websocket-max-message">{t('websocket.messageLabel')}</Label>
-                <Input id="config-websocket-max-message" type="number" inputmode="decimal" step="any"
-                  min={1 / 1024 / 1024} max={MAX_WEBSOCKET_MAX_MESSAGE_BYTES / 1024 / 1024}
-                  value={websocketMessageDisplay} aria-invalid={websocketMessageInvalid}
-                  aria-describedby={`config-websocket-message-help${websocketMessageInvalid ? ' config-websocket-message-error' : ''}`}
-                  oninput={(e) => websocketMessageField(e.currentTarget.value)} />
+
+          <div class="grid gap-x-6 gap-y-1.5 md:grid-cols-2">
+            <div class="row-span-3 grid min-w-0 [grid-template-rows:subgrid]">
+              <div class="flex min-h-[44px] items-center sm:min-h-[40px]">
+                <Label for="config-websocket-max-message">{t('websocket.messageLabel')} <span class="normal-case">(MiB)</span></Label>
+              </div>
+              <Input id="config-websocket-max-message" type="number" inputmode="decimal" step="any"
+                min={1 / 1024 / 1024} max={MAX_WEBSOCKET_MAX_MESSAGE_BYTES / 1024 / 1024}
+                value={websocketMessageDisplay} aria-invalid={websocketMessageInvalid}
+                aria-describedby={`config-websocket-message-help${websocketMessageInvalid ? ' config-websocket-message-error' : ''}`}
+                oninput={(e) => websocketMessageField(e.currentTarget.value)} />
+              <div class="space-y-1">
                 <p id="config-websocket-message-help" class="text-sm text-zinc-400">{t('websocket.messageHelp')}</p>
                 {#if websocketMessageInvalid}<p id="config-websocket-message-error" role="alert" class="text-sm text-red-400">{t('websocket.messageInvalid')}</p>{/if}
               </div>
-              <div class="min-w-0 space-y-3">
-              <div class="flex items-center justify-between gap-3">
-                <Label for="config-websocket-unlimited">{t('websocket.unlimited')}</Label>
-                <IndustrialToggle id="config-websocket-unlimited" checked={websocketUnlimited}
-                  disabled={locked || reviewOpen || !!imported} label={t('websocket.unlimited')} onchange={websocketLimitDisabled} />
+            </div>
+
+            <div class="row-span-3 grid min-w-0 [grid-template-rows:subgrid]">
+              <div class="flex min-h-[44px] flex-wrap items-center gap-3 sm:min-h-[40px]">
+                <Label for="config-websocket-max-connections">{t('websocket.label')}</Label>
+                <span class="inline-flex items-center gap-2">
+                  <span class="font-mono text-sm text-zinc-400">{t('websocket.noLimitShort')}</span>
+                  <IndustrialToggle id="config-websocket-unlimited" checked={websocketUnlimited}
+                    disabled={locked || reviewOpen || !!imported} label={t('websocket.unlimited')} onchange={websocketLimitDisabled} />
+                </span>
               </div>
-              {#if !websocketUnlimited}
-                <div class="settings-integer-control max-w-sm space-y-1.5">
-                  <Label for="config-websocket-max-connections">{t('websocket.label')}</Label>
-                  <NumberInput id="config-websocket-max-connections" min={1} max={2147483647} required
-                    bind:value={() => websocketDisplay, websocketField} disabled={locked || reviewOpen || !!imported}
-                    increaseLabel={t('websocket.increase')} decreaseLabel={t('websocket.decrease')} invalidMessage={t('websocket.invalid')}
-                    aria-describedby={`config-websocket-help${websocketInvalid ? ' config-websocket-error' : ''}`} />
-                  {#if websocketInvalid}<p id="config-websocket-error" role="alert" class="text-sm text-red-400">{t('websocket.invalid')}</p>{/if}
-                </div>
-              {/if}
-              <p id="config-websocket-help" class="text-sm text-zinc-400">{t('websocket.help')}</p>
+              <div class="settings-integer-control min-w-0">
+                <NumberInput id="config-websocket-max-connections" min={1} max={2147483647}
+                  required={!websocketUnlimited}
+                  bind:value={() => websocketUnlimited ? undefined : websocketDisplay, websocketField}
+                  disabled={locked || reviewOpen || !!imported || websocketUnlimited}
+                  class={websocketUnlimited ? 'disabled:opacity-100' : undefined}
+                  placeholder={websocketUnlimited ? t('websocket.noLimitShort') : undefined}
+                  increaseLabel={t('websocket.increase')} decreaseLabel={t('websocket.decrease')} invalidMessage={t('websocket.invalid')}
+                  aria-describedby={`config-websocket-help${websocketInvalid ? ' config-websocket-error' : ''}`} />
+              </div>
+              <div class="space-y-1">
+                <p id="config-websocket-help" class="text-sm text-zinc-400">{t('websocket.help')}</p>
+                {#if websocketInvalid}<p id="config-websocket-error" role="alert" class="text-sm text-red-400">{t('websocket.invalid')}</p>{/if}
               </div>
             </div>
           </div>
@@ -572,7 +615,7 @@
 </div>
 
 <IndustrialDialog bind:open={reviewOpen} title={t('reviewTitle')} description={t('reviewDescription')}
-  busy={busy} width="52rem" scrollBody={true} closeLabel={t('closeReview')} onOpenChange={(open) => { if (!open) cancelReview(); }}>
+  busy={submitting} width="52rem" scrollBody={true} closeLabel={t('closeReview')} onOpenChange={(open) => { if (!open) cancelReview(); }}>
   {#snippet body()}
     <div class="space-y-4" data-testid="config-review">
       <p class="text-sm text-zinc-300">{t('baseline')} r{snapshot?.revision} · {changeCount}</p>
@@ -584,12 +627,21 @@
       {:else if validSignature === signature}<p class="text-sm text-zinc-300">{t('validated')}</p>{/if}
       {#if nextAuthRequired && !nextAuthToken.trim()}<p role="alert" class="text-sm text-amber-300">{t('proofRequired')}</p>{/if}
       {#if !fresh || conflict || runtimeConflict}<p role="alert" class="text-sm text-amber-300">{t(conflict || runtimeConflict ? 'conflict' : runtimeMessage)}</p>{/if}
-       {#if busy || pendingId || notice === 'degraded'}<p class="text-sm text-amber-300" aria-live="polite">{t(notice || 'tracking')} · {t(`state.${operationState}`)}</p>{/if}
-       {#if pendingId && fresh && publication?.operation}<p class="text-sm text-zinc-300" aria-live="polite">{$_(`configurationSave.${publicationStatusMessage}`)}</p>{/if}
+      {#if reviewOutcome || pendingId}
+        <SystemAlertBar tone={reviewOutcome === '' || reviewOutcome === 'tracking' ? 'info' : 'warn'} class="bg-carbon-900">
+          <div class="space-y-1">
+            <p id="config-review-outcome" class="text-sm text-zinc-200" role="alert">{t(reviewOutcome || 'tracking')}</p>
+            {#if rejectionSummary && reviewOutcome.startsWith('control_')}<p class="font-mono text-xs text-amber-300">{rejectionSummary}</p>{/if}
+            {#if pendingId}<p class="text-sm text-zinc-400" aria-live="polite">{t(`state.${operationState}`)}{#if fresh && publication?.operation} · {$_(`configurationSave.${publicationStatusMessage}`)}{/if}</p>{/if}
+          </div>
+        </SystemAlertBar>
+      {/if}
     </div>
   {/snippet}
   {#snippet footer()}
-    <Button class="min-h-[44px] sm:min-h-[40px]" onclick={publish} disabled={!canPublish} data-testid="config-confirm-publish">{t(busy ? 'tracking' : 'publish')}</Button>
+    <Button class="min-h-[44px] sm:min-h-[40px]" onclick={publish} disabled={!canPublish}
+      aria-describedby={reviewOutcome || pendingId ? 'config-review-outcome' : undefined}
+      data-testid="config-confirm-publish">{t(busy ? 'tracking' : 'publish')}</Button>
   {/snippet}
 </IndustrialDialog>
 

@@ -153,6 +153,8 @@ hooks.onStreamChunk.tap('example', envelope => {
 
 同进程服务通过 `context.services.consume` 使用已声明的 provider、ID 和版本；跨进程使用声明的 RPC，事件、snapshot 和可靠 channel 使用各自契约。消费另一个插件的 namespace 不是通信接口。声明例子可查 [model-mapping manifest](../../plugins/model-mapping/manifest.json)和[插件服务类型](../../packages/core/src/plugin-services.ts)。
 
+Stream 的读信用 `creditBytes` 和 duplex 的 `readCreditBytes` 均以字节计，默认及最大值为 245760（240 KiB，即四个 60 KiB chunk），超限以 `invalid` 拒绝。消费数据后只等量返还信用；绝对窗口为恢复偏移加已消费字节数加固定信用额度，心跳重发不会增加额度。写信用上限仍为 491520（480 KiB）。这些是插件通信的流控预算，与公共 WebSocket 消息大小限制无关。
+
 本地服务门面受控转发 AbortSignal、Promise、异步迭代器和函数回调，数据及二进制视图提供隔离副本；实现对象身份不对外开放。所有操作仍受消费方和提供方排空、租约及撤销检查。跨进程 RPC 继续使用数据契约，不能传递这些进程内句柄。需要在插件租约结束后保存的日志详情必须在记录时取快照。
 
 ## API、UI 与资源扩展

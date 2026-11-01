@@ -159,9 +159,10 @@ test('publishing unlimited admission removes both ingress and worker count bottl
 }, 90_000);
 
 test('published message size survives storage, both process hops and a second generation on the same socket', async () => {
-  await publish(true, true, null, 40 * 1024 * 1024);
+  await publish(true, true, null, 64 * 1024 * 1024);
   const snapshot = await requestJson(`${management()}/api/config`, {}, fixture);
-  expect((snapshot.body as any).config.logical_configuration.websocket_max_message_bytes).toBe(40 * 1024 * 1024);
+  expect((snapshot.body as any).config.logical_configuration.websocket_max_connections).toBeNull();
+  expect((snapshot.body as any).config.logical_configuration.websocket_max_message_bytes).toBe(64 * 1024 * 1024);
   const socket = await connect();
   const completed: string[] = [];
   socket.on('message', data => { const event = JSON.parse(data.toString()); if (event.type === 'response.completed') completed.push(event.stream_id); });
