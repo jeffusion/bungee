@@ -1,3 +1,10 @@
+## [6.11.1](https://github.com/jeffusion/bungee/compare/v6.11.0...v6.11.1) (2026-11-01)
+
+
+### Bug Fixes
+
+* **websocket:** make message size configurable ([ce033d9](https://github.com/jeffusion/bungee/commit/ce033d900d323c327326b613a77241d3177fa229))
+
 # [6.11.0](https://github.com/jeffusion/bungee/compare/v6.10.1...v6.11.0) (2026-10-31)
 
 
