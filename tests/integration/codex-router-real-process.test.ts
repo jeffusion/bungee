@@ -152,6 +152,13 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         if (body.model === CODEX_DEEPSEEK_MODEL && path.endsWith('/chat/completions')) {
           const unsupported = Array.isArray(body.messages) && body.messages.find((message: any) => !['system', 'user', 'assistant', 'tool'].includes(message.role));
           if (unsupported) return Response.json({error: 'fixture_deepseek_unsupported_role', role: unsupported.role}, {status: 422});
+          const pending=new Set<string>();
+          for(const message of body.messages){
+            if(pending.size && message.role!=='tool')return Response.json({error:{code:'invalid_request_error',message:'Tool results must directly follow tool_calls'}},{status:400});
+            if(message.role==='assistant')for(const call of message.tool_calls??[])pending.add(call.id);
+            if(message.role==='tool' && !pending.delete(message.tool_call_id))return Response.json({error:{code:'invalid_request_error',message:'Unmatched tool result'}},{status:400});
+          }
+          if(pending.size)return Response.json({error:{code:'invalid_request_error',message:'Missing tool results'}},{status:400});
         }
         // Observed legal Chat stream: text, then tool calls, then more text. The follow-up
         // rejects a tool result that does not directly follow its assistant tool_calls.
@@ -746,6 +753,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       {role: 'developer', content: 'fixture developer three'},
       {role: 'user', content: 'fixture user three'},
       {type: 'function_call', call_id: 'deepseek_lookup', name: 'lookup', arguments: '{}'},
+      {role: 'developer', content: 'fixture instruction during tool execution'},
       {type: 'function_call_output', call_id: 'deepseek_lookup', output: 'fixture tool result'},
     ];
     const nonstream = await post({model: 'org/deepseek-flash', input: deepseekHistory, tools, reasoning: {effort: 'high'}});
@@ -761,6 +769,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     expect(call.body.messages.map((message: any) => [message.role, message.content ?? null])).toEqual([
       ['system', 'fixture developer one'], ['user', 'fixture user one'], ['system', 'fixture developer two'], ['user', 'fixture user two'],
       ['system', 'fixture developer three'], ['user', 'fixture user three'], ['assistant', null], ['tool', 'fixture tool result'],
+      ['system', 'fixture instruction during tool execution'],
     ]);
     expect(call.body.tools[0].function.name).toEqual(expect.any(String));
     expect(call.body.messages[6]).toMatchObject({tool_calls: [{id: 'deepseek_lookup', type: 'function', function: {name: call.body.tools[0].function.name, arguments: '{}'}}]});

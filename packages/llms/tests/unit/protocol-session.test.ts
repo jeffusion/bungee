@@ -449,6 +449,71 @@ test('Chat replay merges adjacent assistant text around tool calls without losin
  expect(jsonReplay.slice(2)).toEqual(messages.slice(2));
 });
 
+test('Chat defers instructions until parallel tool results finish without changing replay history', () => {
+ const image='data:image/png;base64,AAAA';
+ const input:any[]=[
+  {role:'user',content:'inspect'},
+  {type:'function_call',call_id:'a',name:'lookup',arguments:'{}'},
+  {type:'custom_tool_call',call_id:'b',name:'patch',input:'patch bytes'},
+  {role:'assistant',content:'working'},
+  {role:'developer',content:'  first instruction\n'},
+  {type:'custom_tool_call_output',call_id:'b',output:'patched'},
+  {role:'system',content:[{type:'input_text',text:'second instruction'}]},
+  {type:'function_call_output',call_id:'a',output:[{type:'input_text',text:'found'},{type:'input_image',image_url:image}]},
+  {role:'assistant',content:'next turn'},
+  {type:'function_call',call_id:'c',name:'lookup',arguments:'{}'},
+  {role:'developer',content:'third instruction'},
+  {type:'function_call_output',call_id:'c',output:'done'},
+ ];
+ const snapshot=structuredClone(input);
+ const convert=(items:any[])=>createProtocolSession(ctx('responses','chat_completions')).convertRequest({model,input:items});
+ const converted=convert(input), messages=converted.body.messages as any[];
+ expect(messages.map(m=>m.role)).toEqual(['user','assistant','tool','tool','developer','system','user','assistant','tool','developer']);
+ expect(messages[1].tool_calls.map((c:any)=>c.id)).toEqual(['a','b']);
+ expect(messages[1].content).toBe('working');
+ expect(messages.slice(2,4).map(m=>m.tool_call_id)).toEqual(['b','a']);
+ expect(messages[4].content).toBe('  first instruction\n');
+ expect(messages[5].content).toEqual([{type:'text',text:'second instruction'}]);
+ expect(messages[6].content.at(-1)).toEqual({type:'image_url',image_url:{url:image}});
+ expect(messages[7]).toMatchObject({content:'next turn',tool_calls:[{id:'c'}]});
+ expect(messages[9].content).toBe('third instruction');
+ expect(converted.diagnostics.filter(d=>d.reason==='chat_instruction_deferred_until_tool_results').map(d=>d.param)).toEqual(['input[4]','input[6]','input[10]']);
+ expect(input).toEqual(snapshot);expect(converted.canonicalHistory).toEqual(snapshot);
+ expect(convert(converted.canonicalHistory).body).toEqual(converted.body);
+});
+
+test('Chat refuses ambiguous boundaries after deferred instructions instead of moving dialogue across them', () => {
+ const call={type:'function_call',call_id:'a',name:'f',arguments:'{}'};
+ const instruction={role:'developer',content:'rule'};
+ const result={type:'function_call_output',call_id:'a',output:'done'};
+ const convert=(input:any[])=>createProtocolSession({...ctx('responses','chat_completions'),agentMessageDelivery:'plaintext'}).convertRequest({model,input});
+ for(const item of [{role:'user',content:'next'},{role:'assistant',content:'next'},
+  {type:'function_call',call_id:'b',name:'f',arguments:'{}'},
+  {type:'reasoning',summary:[{type:'summary_text',text:'next'}]},
+  {type:'agent_message',author:'/root/child',recipient:'/root',content:[{type:'input_text',text:'next'}]}])
+  code(()=>convert([call,instruction,item,result]),'invalid_tool_history','input[2]');
+ code(()=>convert([call,instruction]),'invalid_tool_history','input[1]');
+ code(()=>convert([call,instruction,{...result,call_id:'missing'}]),'invalid_tool_history','input[2]');
+ code(()=>convert([call,result,result]),'invalid_tool_history','input[2]');
+});
+
+test('Chat instruction deferral does not alter native validation or other protocol instruction policies', () => {
+ const input:any[]=[{type:'function_call',call_id:'a',name:'f',arguments:'{}'},{role:'developer',content:'rule'},
+  {type:'function_call_output',call_id:'a',output:'done'}];
+ const native=createProtocolSession(ctx('responses','responses')).convertRequest({model,input});
+ expect(native.body.input).toBe(input);expect(native.diagnostics).toEqual([]);
+ const messages:any[]=[{role:'assistant',content:null,tool_calls:[{id:'a',type:'function',function:{name:'f',arguments:'{}'}}]},
+  {role:'developer',content:'rule'},{role:'user',content:'interrupt'},{role:'tool',tool_call_id:'a',content:'done'}];
+ const responses=createProtocolSession(ctx('chat_completions','responses')).convertRequest({model,messages});
+ expect((responses.body.input as any[]).map(item=>item.role??item.type)).toEqual(['function_call','developer','user','function_call_output']);
+ expect(responses.diagnostics).toEqual([]);
+ const gemini=createProtocolSession(ctx('responses','gemini_generate_content')).convertRequest({model,input});
+ expect(gemini.canonicalHistory).toEqual(input);
+ expect(gemini.diagnostics.some(d=>d.reason==='chat_instruction_deferred_until_tool_results')).toBe(false);
+ expect(gemini.body.systemInstruction).toEqual({parts:[{text:'rule'}]});
+ code(()=>createProtocolSession(ctx('responses','anthropic_messages')).convertRequest({model,input}),'unsupported_content','input[1].role');
+});
+
 test('Chat assistant merge honors parallel calls, custom calls, boundaries and preserve-order', () => {
  const chatMessages=(input:any[],options:any={})=>decodeResponsesRequest({model,input},'chat_completions',{},options).body.messages as any[];
  const parallel=chatMessages([{role:'user',content:'go'},{type:'function_call',call_id:'a',name:'view_image',arguments:'{}'},{type:'function_call',call_id:'b',name:'view_image',arguments:'{}'},{role:'assistant',content:'done'}]);
@@ -482,16 +547,17 @@ test('Chat assistant merge preserves earlier reasoning when a later call joins t
  expect(converted.canonicalHistory).toEqual(input);
 });
 
-test('Chat JSON tolerates only empty choice metadata and matching tool-call indexes', () => {
+test('Chat JSON tolerates choice metadata and retains strict tool-call indexes', () => {
  const chatResponse=(choice:Record<string,unknown>={},message:Record<string,unknown>={role:'assistant',content:'answer'})=>({choices:[{index:0,message,finish_reason:'stop',...choice}]});
  const convert=(raw:unknown)=>createProtocolSession(ctx('responses','chat_completions')).convertResponse(raw);
  const accepted=chatResponse({provider_specific_fields:{}}),snapshot=structuredClone(accepted);
  expect(JSON.stringify(convert(accepted))).toContain('answer');
  expect(accepted).toEqual(snapshot);
- for(const value of [{source:'upstream'},null,[],'opaque',42])
-  code(()=>convert(chatResponse({provider_specific_fields:value})),'unsupported_response','choices.provider_specific_fields');
- code(()=>convert(chatResponse({vendor_extension:{}})),'unsupported_response','choices.vendor_extension');
- code(()=>convert(chatResponse({}, {role:'assistant',content:'answer',provider_specific_fields:{}})),'unsupported_content','message.provider_specific_fields');
+ for(const value of [{source:'upstream'},null])
+  expect(JSON.stringify(convert(chatResponse({provider_specific_fields:value,vendor_extension:{}})))).toContain('answer');
+ for(const value of [[],'opaque',42])
+  code(()=>convert(chatResponse({provider_specific_fields:value})),'invalid_payload');
+ expect(JSON.stringify(convert(chatResponse({}, {role:'assistant',content:'answer',provider_specific_fields:{}})))).toContain('answer');
  const calls=[{index:0,id:'a',type:'function',function:{name:'f',arguments:'{}'}},{index:1,id:'b',type:'function',function:{name:'f',arguments:'{}'}}];
  const withIndex=chatResponse({finish_reason:'tool_calls'},{role:'assistant',content:null,tool_calls:calls}),indexSnapshot=structuredClone(withIndex);
  const indexed=convert(withIndex);
@@ -502,6 +568,76 @@ test('Chat JSON tolerates only empty choice metadata and matching tool-call inde
  for(const index of [-1,1.5,'0',1])
   code(()=>convert(chatResponse({finish_reason:'tool_calls'},{role:'assistant',content:null,tool_calls:[{index,id:'a',type:'function',function:{name:'f',arguments:'{}'}}]})),'invalid_payload','tool_calls[0].index');
  code(()=>convert(chatResponse({finish_reason:'tool_calls'},{role:'assistant',content:null,tool_calls:[{id:'a',type:'function',function:{name:'f',arguments:'{}'},unknown_control:true}]})),'unsupported_tool','tool_calls.unknown_control');
+});
+
+test('Chat JSON and SSE project extensible provider output without losing refusal or reasoning', () => {
+ const message={role:'assistant',content:'answer',refusal:null,tool_calls:null,annotations:null,
+  provider_specific_fields:{refusal:'cannot execute',reasoning_content:'considered',vendor_trace:{id:1}},vendor_metric:7};
+ const raw={request_id:'provider-request',vendor_envelope:{latency:1},choices:[{index:0,message,finish_reason:'stop',provider_specific_fields:{source:'gateway'}}]};
+ const snapshot=structuredClone(raw);
+ const json=createProtocolSession(ctx('responses','chat_completions')).convertResponse(raw);
+ expect(json.status).toBe('completed');
+ expect(JSON.stringify(json.output)).toContain('cannot execute');expect(JSON.stringify(json.output)).toContain('considered');
+ expect(JSON.stringify(json)).not.toContain('vendor_');expect(raw).toEqual(snapshot);
+ const s=createProtocolSession(ctx('responses','chat_completions'));
+ const chunks=[{...raw,choices:[{...raw.choices[0],message:undefined,delta:message,finish_reason:null}]},
+  {request_id:'provider-request',choices:[{delta:{vendor_metric:8,provider_specific_fields:{refusal:null}},finish_reason:'stop'}]},
+  {request_id:'provider-request',choices:[],usage:{prompt_tokens:2,completion_tokens:1}}];
+ const chunkSnapshot=structuredClone(chunks);
+ const events=chunks.flatMap(chunk=>s.push(chunk));events.push(...s.finish());
+ const end=events.at(-1)!.response as any;
+ expect(events.at(-1)!.type).toBe('response.completed');
+ expect(end.output.map((item:any)=>item.type)).toEqual((json.output as any[]).map(item=>item.type));
+ expect(JSON.stringify(end.output)).toContain('cannot execute');expect(JSON.stringify(end.output)).toContain('considered');
+ expect(end.usage.total_tokens).toBe(3);expect(chunks).toEqual(chunkSnapshot);
+ for(const provider of [{refusal:null},{reasoning:null},null]) {
+  const result=createProtocolSession(ctx('responses','chat_completions')).convertResponse({choices:[{message:{role:'assistant',content:'ok',provider_specific_fields:provider},finish_reason:'stop'}]});
+  expect(JSON.stringify(result.output)).toContain('ok');
+ }
+});
+
+test('Chat extension tolerance does not hide conflicting or unrepresentable output semantics', () => {
+ const cases:Array<[Record<string,unknown>,string?]>=[
+  [{refusal:'A',provider_specific_fields:{refusal:'B'}},'provider_specific_fields.refusal'],
+  [{reasoning:'A',reasoning_content:'B'},'reasoning'],
+  [{provider_specific_fields:{tool_calls:[]}},'provider_specific_fields.tool_calls'],
+  [{provider_specific_fields:{thinking_blocks:[{type:'thinking',signature:'opaque'}]}},'thinking_blocks'],
+  [{reasoning_details:[{type:'reasoning.encrypted',data:'opaque-replay'}]},'reasoning_details'],
+  [{provider_specific_fields:{reasoning_details:[{type:'reasoning.text',text:'reasoning',signature:'signed'}]}},'reasoning_details'],
+  [{audio:{id:'audio'}},'audio'],[{provider_specific_fields:[]},undefined],
+ ];
+ for(const [extra,param] of cases) {
+  const message={role:'assistant',content:'ok',...extra};
+  const expected=Array.isArray(extra.provider_specific_fields)?'invalid_payload':'unsupported_content';
+  code(()=>createProtocolSession(ctx('responses','chat_completions')).convertResponse({choices:[{message,finish_reason:'stop'}]}),expected,param);
+  code(()=>createProtocolSession(ctx('responses','chat_completions')).push({choices:[{delta:message}]}),expected,param);
+ }
+ code(()=>createProtocolSession(ctx('responses','chat_completions')).convertResponse({choices:[{message:{role:'assistant',content:[{type:'unknown',text:'x'}]},finish_reason:'stop'}]}),'invalid_payload');
+ code(()=>createProtocolSession(ctx('responses','chat_completions')).convertResponse({choices:[{message:{role:'assistant',content:'ok'},finish_reason:'new_reason'}]}),'unknown_terminal');
+ const ended=createProtocolSession(ctx('responses','chat_completions'));
+ ended.push({choices:[{delta:{content:'ok'},finish_reason:'stop'}]});
+ code(()=>ended.push({choices:[{delta:{reasoning_details:[{type:'reasoning.encrypted',data:'opaque'}]}}]}),'unsupported_content','reasoning_details');
+});
+
+test('raw provider envelope metadata remains subject to the response byte budget', () => {
+ for(const target of ['chat_completions','anthropic_messages','gemini_generate_content'] as const) {
+  const context={...ctx('responses',target),capabilities:{limits:{maxOutputBytes:1024}}};
+  const oversized={...response(target,'f'),request_id:'x'.repeat(4096)};
+  code(()=>createProtocolSession(context).convertResponse(oversized),'resource_limit');
+  code(()=>createProtocolSession(context).push({...stream(target,'f')[0],request_id:'x'.repeat(4096)}),'resource_limit');
+ }
+});
+
+test('provider envelope extensions do not relax Anthropic or Gemini content semantics', () => {
+ for(const target of ['anthropic_messages','gemini_generate_content'] as const) {
+  const raw={...response(target,'f'),request_id:'trace',provider_timing:{latency:1}},snapshot=structuredClone(raw);
+  expect(createProtocolSession(ctx('responses',target)).convertResponse(raw).status).toBe('completed');expect(raw).toEqual(snapshot);
+  const s=createProtocolSession(ctx('responses',target));
+  const events=stream(target,'f').flatMap(event=>s.push({...event,request_id:'trace'}));events.push(...s.finish());
+  expect(events.at(-1)!.type).toBe('response.completed');
+ }
+ code(()=>createProtocolSession(ctx('responses','anthropic_messages')).convertResponse({content:[{type:'unknown',text:'x'}],stop_reason:'end_turn'}),'unsupported_content');
+ code(()=>createProtocolSession(ctx('responses','gemini_generate_content')).convertResponse({candidates:[{content:{parts:[{opaque_text:'x'}]},finishReason:'STOP'}]}),'unsupported_content','candidates.content.parts.opaque_text');
 });
 
 test('Chat usage tolerates auxiliary counters while preserving consumed accounting', () => {

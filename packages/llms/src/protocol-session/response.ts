@@ -44,20 +44,13 @@ export function validateProviderResponse(raw: unknown, protocol: LLMProtocol): J
   if (b.error !== undefined || b.type === 'error')
     return b;
   if (protocol === 'chat_completions') {
-    fields(b, ['id', 'object', 'created', 'model', 'choices', 'usage', 'system_fingerprint', 'service_tier'], '', 'unsupported_response');
     for (const rawChoice of list(b.choices, 'choices')) {
       const c = record(rawChoice, 'choice');
-      fields(c, ['index', 'message', 'finish_reason', 'logprobs', 'provider_specific_fields'], 'choices', 'unsupported_response');
-      if (c.provider_specific_fields !== undefined) {
-        const providerFields = c.provider_specific_fields;
-        if (providerFields === null || typeof providerFields !== 'object' || Array.isArray(providerFields) || Object.keys(providerFields).length)
-          fail('unsupported_response', 'Only empty provider-specific choice fields are portable', 'choices.provider_specific_fields');
-      }
+      if (c.provider_specific_fields != null) record(c.provider_specific_fields, 'choices.provider_specific_fields');
       if (c.logprobs != null)
         fail('unsupported_response', 'Log probabilities cannot cross protocols', 'choices.logprobs');
       const m = record(c.message, 'message');
-      fields(m, ['role', 'content', 'refusal', 'reasoning_content', 'reasoning', 'tool_calls', 'annotations'], 'message', 'unsupported_content');
-      for (const [callIndex, rawCall] of (m.tool_calls === undefined ? [] : list(m.tool_calls, 'tool_calls')).entries()) {
+      for (const [callIndex, rawCall] of (m.tool_calls == null ? [] : list(m.tool_calls, 'tool_calls')).entries()) {
         const call = record(rawCall, 'call');
         fields(call, ['id', 'type', 'function', 'index'], 'tool_calls', 'unsupported_tool');
         if (call.index !== undefined && integer(call.index, `tool_calls[${callIndex}].index`) !== callIndex)
@@ -68,7 +61,6 @@ export function validateProviderResponse(raw: unknown, protocol: LLMProtocol): J
     validateUsage(b.usage, protocol);
   }
   else if (protocol === 'anthropic_messages') {
-    fields(b, ['id', 'type', 'role', 'model', 'content', 'stop_reason', 'stop_sequence', 'usage'], '', 'unsupported_response');
     if (b.role !== undefined && b.role !== 'assistant')
       fail('unsupported_response', 'Response role must be assistant', 'role');
     for (const rawPart of list(b.content, 'content'))
@@ -268,7 +260,6 @@ export class GeminiCanonicalDecoder {
   constructor(private context: ProtocolSessionContext, names: ResponsesToolNames, private streaming = true) { this.encoder = new ResponsesEventEncoder('chat_completions', context.responseModel ?? context.model, names, context.capabilities?.limits, { preserveContentOrder: true, agentMessageDelivery: context.capabilities?.agentMessageDelivery }); }
   push(raw: unknown): JsonRecord[] {
     const b = record(raw, 'Gemini response');
-    fields(b, ['candidates', 'usageMetadata', 'modelVersion', 'responseId', 'promptFeedback', 'error'], '', 'unsupported_response');
     if (b.error !== undefined)
       return this.decorate(this.encoder.push({ error: safeProtocolError() }));
     const events: JsonRecord[] = [];
@@ -285,7 +276,6 @@ export class GeminiCanonicalDecoder {
       fail('unsupported_response', 'Multiple Gemini candidates cannot cross protocols', 'candidates');
     if (candidates.length) {
       const c = record(candidates[0], 'candidate');
-      fields(c, ['index', 'content', 'finishReason', 'safetyRatings', 'finishMessage'], 'candidates', 'unsupported_response');
       if (c.index !== undefined && c.index !== 0)
         fail('unsupported_response', 'Only candidate index zero is supported', 'candidates.index');
       if (c.content !== undefined && c.content !== null) {

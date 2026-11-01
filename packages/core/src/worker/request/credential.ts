@@ -4,6 +4,7 @@ import type {
   CredentialPolicy,
   CredentialRequestPolicy,
 } from '../../plugin-control/contracts';
+import { DataAdmissionError, normalizeAdmissionError } from '../../data-admission/errors';
 
 const HOP_HEADERS = new Set([
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
@@ -219,11 +220,16 @@ export function sanitizeError(error: unknown, secrets: readonly string[] = []): 
   const needles = [...new Set(secrets.flatMap((secret) => [secret, ...secret.split(/\s+/)]))]
     .filter((secret) => secret.length >= 4)
     .sort((left, right) => right.length - left.length);
-  const sanitized = needles.reduce(
+  const redact = (text: string) => needles.reduce(
     (result, secret) => result.split(secret).join('[REDACTED]'),
-    message,
+    text,
   );
-  const result = new Error(sanitized);
+  const admission = normalizeAdmissionError(error);
+  if (admission) return new DataAdmissionError(admission.status, redact(admission.code) === admission.code ? admission.code : 'data_admission_rejected', admission.retryAfter, {
+    message: admission.details?.message === undefined ? undefined : redact(admission.details.message),
+    param: admission.details?.param === undefined ? undefined : redact(admission.details.param),
+  });
+  const result = new Error(redact(message));
   if (error instanceof Error) {
     result.name = error.name;
     const code = (error as Error & { code?: unknown }).code;

@@ -97,6 +97,8 @@ Gemini 工具 thoughtSignature 经公开 call_id 的 `__thought__` 后缀往返�
 
 工具 JSON 不完整、流截断、取消和 incomplete 不写入成功连接历史。Anthropic 不能无损表达某些结构化输出及中途 developer 指令，也不支持 Router 的签名 thinking 续聊。转换诊断只记录字段路径、mapped/omitted、稳定原因码和请求 ID，不回显正文或参数值。
 
+Chat 目标要求工具结果紧随对应的 assistant 工具调用。工具执行期间插入的 system/developer 指令由共享转换器暂存，整批结果收齐后再输出，保留正文、权限角色和指令之间的顺序；这会调整指令相对于工具结果的位置，不承诺逐项顺序无损。原始规范历史不变，无法安全归并的交错历史明确拒绝。详见[适配器历史规则](../../docs/reference/llm-protocol-adapter.md#严格语义和生命周期)。
+
 ## 历史缓存
 
 历史通过 canonical 插件 RPC 在 control 进程临时保存，不持久化正文或写命令日志。隔离键包含可信身份、入口、配置版本与绑定；无可信身份的 HTTP 请求应提供完整历史。
@@ -112,6 +114,8 @@ Gemini 工具 thoughtSignature 经公开 call_id 的 `__thought__` 后缀往返�
 ## WebSocket 会话
 
 `response.create` 派生独立请求 ID 并重新执行绑定与最终链路；同一连接串行生成，busy 时拒绝新生成。`generate:false` 仅预热连接内输入，不访问提供商也不产生生成统计。response.cancel 和断连取消活动生成。
+
+生成请求的 HTTP 错误通过 WS error 事件返回，保留状态码，并解析宿主字符串错误及上游对象错误中的 code、type、message、param。标识符和字段路径须通过校验；消息先清理常见凭据形式和控制字符，再截断到 512 字符，不转发完整错误对象、响应头或堆栈。非 JSON、未知结构及无效字段使用通用错误兜底。模式脱敏不能保证识别任意未标注的裸凭据，上游仍不应在错误消息中回显秘密。
 
 HTTP 上游经共享 SSE BodyHandle 转成 WS JSON；启用 WS 的 Responses 目标可使用原生上游连接。发送 drain、消息预算、关闭期限和连接排空使用 Bungee 的[WebSocket transport](../../docs/architecture/websocket.md)。逐生成硬预算未支持时在上游连接前拒绝，不能用统计代替授权。
 

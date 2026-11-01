@@ -21,6 +21,42 @@ async function setup(endpoints:any[], bindModels=true, logging?:RequestLoggerDep
 const chat=(text:string)=>[{choices:[{index:0,delta:{content:text},finish_reason:null}]},{choices:[{index:0,delta:{},finish_reason:'stop'}]},{choices:[],usage:{prompt_tokens:2,completion_tokens:1}}];
 const anthropic=(text:string)=>[{type:'message_start',message:{usage:{input_tokens:2,output_tokens:0}}},{type:'content_block_start',index:0,content_block:{type:'text',text:''}},{type:'content_block_delta',index:0,delta:{type:'text_delta',text}},{type:'content_block_stop',index:0},{type:'message_delta',delta:{stop_reason:'end_turn'},usage:{output_tokens:1}},{type:'message_stop'}];
 function sse(events:any[]){return new Response(events.map(e=>`data: ${JSON.stringify(e)}\n\n`).join(''),{headers:{'content-type':'text/event-stream'}});}
+test('provider extensions survive HTTP JSON and WS SSE while invalid upstream output returns structured 502',async()=>{
+ let calls=0;
+ const upstream=Bun.serve({hostname:'127.0.0.1',port:0,async fetch(request){
+  calls++;const body=await request.json();
+  const invalid=body.messages.some((message:any)=>JSON.stringify(message.content).includes('invalid-output'));
+  const invalidStream=body.messages.some((message:any)=>JSON.stringify(message.content).includes('invalid-stream'));
+  const message={role:'assistant',content:'GLM_OK',reasoning_content:'checked',provider_specific_fields:{refusal:null},...(invalid?{audio:{id:'unsupported'}}:{})};
+  if(!body.stream||invalid)return Response.json({id:'provider-id',request_id:'trace',choices:[{index:0,message,finish_reason:'stop',provider_specific_fields:{region:'test'}}]});
+  return sse([{request_id:'trace',choices:[{index:0,delta:message,finish_reason:null,provider_specific_fields:{region:'test'}}]},
+   {request_id:'trace',choices:[{delta:invalidStream?{audio:{id:'unsupported'}}:{provider_specific_fields:{refusal:null}},finish_reason:'stop'}]},
+   {request_id:'trace',choices:[],usage:{prompt_tokens:2,completion_tokens:1}}]);
+ }});
+ const env=await setup([{protocol:'chat_completions',provider:'zai',model:'glm-5.3-flash',target:`http://127.0.0.1:${upstream.port}`}],true,{
+  accessLogWriter:{write(){},updateResponseBodyId(){},updateProtocolOutcome(){},updateTransportOutcome(){}},fileLogWriter:{write(){}},
+ });
+ try{
+  for(const invalid of [false,true]) {
+   const input=invalid?'invalid-output':'hello';
+   const response=await fetch(env.url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'m0',input})});
+   expect(response.status).toBe(invalid?502:200);expect(response.headers.get('content-type')).toContain('application/json');
+   const json=await response.json() as any;
+   if(invalid)expect(json).toMatchObject({error:'llm_adapter_unsupported_content',param:'audio'});
+   else {expect(json.status).toBe('completed');expect(JSON.stringify(json.output)).toContain('GLM_OK');expect(JSON.stringify(json)).not.toContain('provider_specific_fields');}
+   const start=env.events.length;env.client.send(JSON.stringify({type:'response.create',model:'m0',input}));
+   const terminal=(await env.terminal(start)).at(-1);
+   if(invalid)expect(terminal).toMatchObject({type:'error',status:502,error:{code:'llm_adapter_unsupported_content',param:'audio'}});
+   else {expect(terminal.type).toBe('response.completed');expect(JSON.stringify(terminal.response.output)).toContain('GLM_OK');expect(terminal.response.usage.total_tokens).toBe(3);}
+  }
+  let start=env.events.length;env.client.send(JSON.stringify({type:'response.create',model:'m0',input:'invalid-stream'}));
+  const failed=await env.terminal(start);
+  expect(failed.at(-1)).toMatchObject({type:'error',status:502});expect(failed.some(event=>event.type==='response.completed')).toBe(false);
+  start=env.events.length;env.client.send(JSON.stringify({type:'response.create',model:'m0',input:'recover'}));
+  expect((await env.terminal(start)).at(-1).type).toBe('response.completed');
+  expect(calls).toBe(6);
+ }finally{await env.close();upstream.stop(true);}
+});
 test('identical Responses POST paths log client HTTP or WS regardless of HTTP upstream and client headers',async()=>{
   const access:any[]=[],files:any[]=[],calls:any[]=[];
   const upstream=Bun.serve({hostname:'127.0.0.1',port:0,async fetch(request){calls.push({method:request.method,upgrade:request.headers.get('upgrade')});return sse(chat('answer'));}});
@@ -70,6 +106,48 @@ test('real WS binding protocol selects HTTP conversion on WS-enabled targets; pr
     start=env.events.length;env.client.send(JSON.stringify({type:'response.create',model:'m0',previous_response_id:'missing',input:'next'}));expect((await env.terminal(start)).at(-1).error.code).toContain('history_missing');expect(calls).toHaveLength(2);
   }finally{await env.close();upstream.stop(true);}
 });
+test('WS generation errors retain bounded redacted upstream diagnostics and recover on the same connection',async()=>{
+ const longMessage='Tool results must follow tool_calls.\nBearer private-bearer sk-private-key api_key=private-key access_token=private-access\n'+ 'x'.repeat(700);
+ const cases=[
+  {status:400,body:{error:{code:'400',type:'invalid_request_error',message:longMessage,param:'messages[13].role'}},code:'400',type:'invalid_request_error',param:'messages[13].role'},
+  {status:429,body:{error:{code:'rate_limit',type:'rate_limit_error',message:'retry later'}},code:'rate_limit',type:'rate_limit_error'},
+  {status:422,body:{error:'local_denied',message:'local error',param:'input[0]'},code:'local_denied',type:'invalid_request_error',param:'input[0]'},
+  {status:400,body:{error:{code:42,type:'invalid type',message:'safe message',param:'bad param'}},code:'codex_router_generation_rejected',type:'invalid_request_error'},
+  {status:400,body:{error:{code:'x'.repeat(129),type:'x'.repeat(129),message:{nested:'private'}}},code:'codex_router_generation_rejected',type:'invalid_request_error'},
+  {status:502,body:{error:[],message:'unrecognized private text'},code:'codex_router_generation_rejected',type:'invalid_request_error'},
+  {status:502,body:'<html>private upstream failure</html>',code:'codex_router_generation_rejected',type:'invalid_request_error'},
+  {status:502,body:'',code:'codex_router_generation_rejected',type:'invalid_request_error'},
+  {status:400,body:{error:{code:'bad_request',message:'Authentication failed: {"authorization":"Basic dXNlcjpzZWNyZXQ=","cookie":"theme=dark; session=private-cookie"}\nAuthorization: Basic dXNlcjpzZWNyZXQ=\nCookie: theme=dark; session=private-cookie'}},code:'bad_request',type:'invalid_request_error'},
+ ];
+ let calls=0;
+ const upstream=Bun.serve({hostname:'127.0.0.1',port:0,fetch(){
+  const item=cases[calls++];
+  return item ? typeof item.body==='string'?new Response(item.body,{status:item.status}):Response.json(item.body,{status:item.status}) : sse(chat('recovered'));
+ }});
+ const env=await setup([{protocol:'chat_completions',target:`http://127.0.0.1:${upstream.port}`}]);
+ try{
+  for(const [index,item] of cases.entries()){
+   const start=env.events.length;
+   env.client.send(JSON.stringify({type:'response.create',model:'m0',input:'hello'}));
+   const terminal=(await env.terminal(start)).at(-1);
+   expect(terminal).toMatchObject({type:'error',status:item.status,error:{code:item.code,type:item.type}});
+   expect(terminal.error.param).toBe('param' in item?item.param:undefined);
+   expect(terminal.error.message.length).toBeLessThanOrEqual(512);
+   expect(terminal.error.message).not.toMatch(/[\x00-\x1f\x7f]/);
+   expect(JSON.stringify(terminal)).not.toMatch(/private-|private upstream|unrecognized private/);
+   expect(terminal.error.message).not.toContain('dXNlcjpzZWNyZXQ=');expect(terminal.error.message).not.toContain('theme=dark');
+   if(index===0){expect(terminal.error.message).toStartWith('Tool results must follow tool_calls.');expect(terminal.error.message).toContain('[REDACTED]');expect(terminal.error.message.length).toBe(512);}
+   if(index===1)expect(terminal.error.message).toBe('retry later');
+   if(index===2)expect(terminal.error.message).toBe('local error');
+   if(index===3)expect(terminal.error.message).toBe('safe message');
+   if(index>=4 && index<=7)expect(terminal.error.message).toBe(item.code);
+   if(index===8){expect(terminal.error.message).toStartWith('Authentication failed:');expect(terminal.error.message).toContain('[REDACTED]');}
+  }
+  const start=env.events.length;env.client.send(JSON.stringify({type:'response.create',model:'m0',input:'continue'}));
+  expect((await env.terminal(start)).at(-1).type).toBe('response.completed');expect(calls).toBe(cases.length+1);
+ }finally{await env.close();upstream.stop(true);}
+});
+
 test('real WS native Responses target uses WS transport once per generation',async()=>{
   const calls:any[]=[];const upstream=Bun.serve({hostname:'127.0.0.1',port:0,fetch(request,server){if(server.upgrade(request))return;return new Response('HTTP not supported',{status:400});},websocket:{message(socket,message){const body=JSON.parse(String(message));calls.push(body);const response={id:`resp_${calls.length}`,object:'response',status:'completed',model:body.model,output:[{type:'message',role:'assistant',content:[{type:'output_text',text:'native'}]}],usage:{input_tokens:1,output_tokens:1,total_tokens:2}};socket.send(JSON.stringify({type:'response.created',response:{...response,status:'in_progress',output:[]}}));socket.send(JSON.stringify({type:'response.completed',response}));}}});
   const env=await setup([{protocol:'responses',target:`http://127.0.0.1:${upstream.port}`,ws:true,model:'destination'}]);

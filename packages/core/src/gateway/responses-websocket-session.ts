@@ -12,6 +12,23 @@ import {DataAdmissionError, type DataAdmissionErrorDetails} from '../data-admiss
 
 interface History {model:string;items:unknown[];bytes:number;expires:number}
 const TERMINALS = new Set(['response.completed','response.incomplete','response.failed']);
+function generationError(payload: unknown): {code: string; type: string; details?: DataAdmissionErrorDetails} {
+  const fallback = {code: 'codex_router_generation_rejected', type: 'invalid_request_error'};
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return fallback;
+  const body = payload as Record<string, unknown>;
+  const error = typeof body.error === 'string' ? {...body, code: body.error}
+    : body.error && typeof body.error === 'object' && !Array.isArray(body.error) ? body.error as Record<string, unknown> : undefined;
+  if (!error) return fallback;
+  const identifier = (value: unknown, otherwise: string) => typeof value === 'string' && /^[a-zA-Z0-9_.-]{1,128}$/.test(value) ? value : otherwise;
+  // Upstream diagnostics are untrusted: redact before bounding the client-visible message.
+  const message = typeof error.message === 'string' ? error.message.slice(0, 16_384)
+    .replace(/\b(Bearer|Basic)\s+[^\s,;"'<>]+/gi, '$1 [REDACTED]')
+    .replace(/\b(?:sk-[\w-]+|eyJ[\w-]+\.[\w-]+\.[\w-]+)/g, '[REDACTED]')
+    .replace(/((?:authorization|access_token|refresh_token|id_token|api[_-]?key|cookie)["']?\s*[=:]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n,<>]+)/gi, '$1[REDACTED]')
+    .replace(/[\x00-\x1f\x7f]+/g, ' ').trim().slice(0, 512) : undefined;
+  return {code: identifier(error.code, fallback.code), type: identifier(error.type, fallback.type),
+    details: {message: message || undefined, param: typeof error.param === 'string' ? error.param : undefined}};
+}
 /** One connection owns one active logical generation; the transport owns all queues. */
 export class ResponsesWebSocketSession {
   private active:AbortController|undefined;
@@ -28,9 +45,9 @@ export class ResponsesWebSocketSession {
     while(this.history.size>=32 || this.historyBytes+bytes>8*1024*1024){const oldest=this.history.keys().next().value!;const item=this.history.get(oldest)!;this.history.delete(oldest);this.historyBytes-=item.bytes;this.historyLease.release(item.bytes);}
     this.historyLease.add(bytes);this.historyBytes+=bytes;this.history.set(id,{model,items:structuredClone(items),bytes,expires:Date.now()+600_000});
   }
-  private error(session:ManagedWebSocketSession,code:string,status=422,details?:DataAdmissionErrorDetails):Promise<void> {
+  private error(session:ManagedWebSocketSession,code:string,status=422,details?:DataAdmissionErrorDetails,type='invalid_request_error'):Promise<void> {
     const safe=new DataAdmissionError(status,code,undefined,details).details;
-    return session.send(JSON.stringify({type:'error',status,error:{type:'invalid_request_error',code,message:safe?.message ?? code,...(safe?.param ? {param:safe.param}:{})}}));
+    return session.send(JSON.stringify({type:'error',status,error:{type,code,message:safe?.message ?? code,...(safe?.param ? {param:safe.param}:{})}}));
   }
   onMessage(session:ManagedWebSocketSession,message:WebSocketMessageView):void|Promise<void> {
     const value=message.json() as Record<string,any>|undefined;
@@ -89,10 +106,9 @@ export class ResponsesWebSocketSession {
       const wire=response.body && bodySourceFor(response.body)===source ? response.body : source.take() as ReadableStream<Uint8Array>|null;
       const handle:BodyHandle=controlledBodyHandle(source,wire,source.handle(),signal);
       if(!response.ok){
-        let code='codex_router_generation_rejected';
-        let details:DataAdmissionErrorDetails|undefined;
-        try{const payload:any=await handle.json({id:'websocket.error',mandatory:true,signal});if(typeof payload?.error==='string'){code=payload.error;details={message:payload.message,param:payload.param};}}catch{}
-        await this.error(session,code,response.status,details);return;
+        let error=generationError(undefined);
+        try{error=generationError(await handle.json({id:'websocket.error',mandatory:true,signal}));}catch{}
+        await this.error(session,error.code,response.status,error.details,error.type);return;
       }
       let terminal=false;
       const deliver=async(event:any)=>{

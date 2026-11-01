@@ -68,6 +68,18 @@ test('catalog effort metadata drives a new provider without code rules through c
  expect(other.validateAttempt({model:'glm-5.3',protocol:'chat_completions',body:otherBody})).toMatchObject({catalogModel:{provider:'zai',model:'glm-5.3'}});
  expect(()=>other.validateAttempt({model:'glm-5.3',protocol:'chat_completions',body:otherBody,modelIdentity:{wireModel:'glm-5.3',catalogModel:{provider:'deepseek',model:'deepseek-flash'}}})).toThrow('DeepSeek target requires developer messages');
  other.dispose();
+ const hookHistory=[{type:'custom_tool_call',call_id:'patch',name:'apply_patch',input:'patch'},
+  {role:'developer',content:'  hook instruction\n'},{type:'custom_tool_call_output',call_id:'patch',output:'applied'}];
+ const hookSnapshot=structuredClone(hookHistory);
+ for(const [model,role] of [['deepseek-flash','system'],['glm-5.3','developer']] as const){
+  const session=service.createSession({sourceProtocol:'responses',targetProtocol:'chat_completions',model});
+  const result=session.convertRequest({input:hookHistory});
+  expect((result.body.messages as any[]).map(message=>message.role)).toEqual(['assistant','tool',role]);
+  expect((result.body.messages as any[])[2].content).toBe('  hook instruction\n');
+  expect(result.canonicalHistory).toEqual(hookSnapshot);expect(hookHistory).toEqual(hookSnapshot);
+  expect(session.validateAttempt({model,protocol:'chat_completions',body:result.body})).toMatchObject({catalogModel:{model}});
+  session.dispose();
+ }
  const native=service.createSession({sourceProtocol:'responses',targetProtocol:'responses',model:'deepseek-flash'});
  expect(((native.convertRequest({input:roles}).body as {input:Array<{role:string}>}).input).map(m=>m.role)).toEqual(['developer','user','developer','user','developer','user']);native.dispose();
 });

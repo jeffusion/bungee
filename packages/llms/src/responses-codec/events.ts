@@ -8,6 +8,29 @@ interface OutputState {
   original?: ResponsesToolName; added: boolean; closed: boolean;
 }
 
+/** Project consumed output fields without mutating the raw provider response. */
+function chatOutput(raw: JsonRecord): JsonRecord {
+  const keys = ['role', 'content', 'refusal', 'reasoning_content', 'reasoning', 'tool_calls', 'function_call', 'annotations'];
+  const delta = Object.fromEntries(keys.filter(key => raw[key] != null).map(key => [key, raw[key]]));
+  const provider = raw.provider_specific_fields == null ? {} : record(raw.provider_specific_fields, 'provider_specific_fields');
+  for (const key of ['refusal', 'reasoning_content', 'reasoning']) {
+    if (provider[key] == null) continue;
+    if (delta[key] != null && delta[key] !== provider[key])
+      fail('unsupported_content', 'Conflicting provider output fields', `provider_specific_fields.${key}`);
+    delta[key] = provider[key];
+  }
+  // These extensions carry content or replay authority, not opaque diagnostics.
+  for (const key of ['audio', 'thinking_blocks', 'reasoning_details', 'signature', 'thought_signature', 'thoughtSignature', 'encrypted_content', 'encrypted_function_args'])
+    if (raw[key] != null || provider[key] != null)
+      fail('unsupported_content', 'Provider output authority cannot cross protocols', key);
+  for (const key of ['content', 'tool_calls', 'function_call', 'annotations'])
+    if (provider[key] != null)
+      fail('unsupported_content', 'Nested provider output cannot cross protocols', `provider_specific_fields.${key}`);
+  if (delta.reasoning_content != null && delta.reasoning != null && delta.reasoning_content !== delta.reasoning)
+    fail('unsupported_content', 'Conflicting reasoning fields', 'reasoning');
+  return delta;
+}
+
 /** Incremental payload codec. SSE framing and transport cancellation remain caller-owned.
  * Chat terminal is deferred until finish() so trailing usage-only chunks are retained.
  * Anthropic additionally requires message_stop, not merely a stop_reason in message_delta.
@@ -165,8 +188,7 @@ export class ResponsesEventEncoder {
     if (choices.length) {
       const choice = record(choices[0], 'choice');
       if (choice.index !== undefined && choice.index !== 0) fail('unsupported_response', 'Only choice index 0 is supported');
-      const delta = record(choice.delta ?? {}, 'choice delta');
-      for (const key of Object.keys(delta)) if (!['role', 'content', 'refusal', 'reasoning_content', 'reasoning', 'tool_calls', 'function_call', 'annotations'].includes(key)) fail('unsupported_content', `Unsupported Chat output field ${key}`);
+      const delta = chatOutput(record(choice.delta ?? {}, 'choice delta'));
       if (delta.annotations !== undefined && list(delta.annotations, 'annotations').length) fail('unsupported_content', 'Chat output annotations cannot be faithfully converted');
       if (delta.role !== undefined && delta.role !== 'assistant') fail('unsupported_response', 'Response role must be assistant');
       if (this.end && Object.values(delta).some(v => v !== undefined && v !== null && v !== '' && (!Array.isArray(v) || v.length))) fail('invalid_stream', 'Output arrived after finish_reason');
