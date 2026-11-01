@@ -1,3 +1,11 @@
+## [6.11.3](https://github.com/jeffusion/bungee/compare/v6.11.2...v6.11.3) (2026-11-01)
+
+
+### Bug Fixes
+
+* **protocol:** preserve tool history and provider response semantics ([8c2dcb3](https://github.com/jeffusion/bungee/commit/8c2dcb38fdb747819b3a52068ecc71bd5df30380))
+* **ui:** close navigation before initial focus completes ([24b96fb](https://github.com/jeffusion/bungee/commit/24b96fb5182b9cbba4abd8a3cd8b18ee5f0cb1d7))
+
 ## [6.11.2](https://github.com/jeffusion/bungee/compare/v6.11.1...v6.11.2) (2026-11-01)
 
 
