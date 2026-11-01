@@ -91,6 +91,26 @@ function codeOf(error: any): string {
   return typeof error?.code === 'string' ? error.code : error instanceof Error ? 'thrown' : 'unknown';
 }
 
+const PLUGIN_SECRET = process.env.BUNGEE_PLUGIN_SECRETS_KEY ?? '';
+
+/** Scrub this plugin's own key before bounding, so a cut cannot leave half a secret. */
+function redactSecrets(value: string): string {
+  return PLUGIN_SECRET === '' ? value : value.split(PLUGIN_SECRET).join('[REDACTED_PLUGIN_KEY]');
+}
+
+function boundedMessage(error: unknown): string {
+  return redactSecrets(error instanceof Error ? error.message : String(error)).slice(0, 240);
+}
+
+function errorFacts(error: unknown): { code: string; name: string; message: string } | null {
+  if (error === null || error === undefined) return null;
+  return {
+    code: codeOf(error),
+    name: error instanceof Error ? error.name : typeof error,
+    message: boundedMessage(error),
+  };
+}
+
 function pattern(size: number, seed: number): Uint8Array {
   const bytes = new Uint8Array(size);
   let state = seed >>> 0;
@@ -396,6 +416,16 @@ export class ChannelProbeConsumer {
 
   /** R16: ONE duplex session with CONCURRENT read and write over one transfer id. */
   async #probeDuplex(): Promise<void> {
+    const startedAt = Date.now();
+    let transferId: string | null = null;
+    let stage = 'open';
+    let readBytes: number | null = null;
+    let readSettledAt: number | null = null;
+    let writeBytes = 0;
+    let writeChunks = 0;
+    let writeSettledAt: number | null = null;
+    let readFirstError: unknown = null;
+    let writeFirstError: unknown = null;
     try {
       const outbound = pattern(DUPLEX_WRITE_SIZE, 44);
       const outboundDigest = digestOf(outbound);
@@ -403,14 +433,50 @@ export class ChannelProbeConsumer {
         readSize: DUPLEX_READ_SIZE, writeSize: outbound.byteLength,
         readCreditBytes: 60 * 1024, writeCreditBytes: 60 * 1024, timeoutMs: 60_000,
       });
-      const readTask = session.collect();
+      transferId = session.transferId;
+      trace('duplex-start', { transferId, readSize: DUPLEX_READ_SIZE, writeSize: outbound.byteLength });
+      // Per-direction first error: Promise.all still reports the first rejection, and
+      // the rethrow keeps the original error; a sibling failure stays identifiable.
+      const readTask = session.collect().then(
+        (value: any) => {
+          readBytes = value.bytes; readSettledAt = Date.now();
+          trace('duplex-read-settled', { transferId, bytes: value.bytes });
+          return value;
+        },
+        (error: unknown) => {
+          if (readFirstError === null) readFirstError = error;
+          readSettledAt = Date.now();
+          trace('duplex-read-settled', { transferId, failed: true, code: codeOf(error) });
+          throw error;
+        },
+      );
       const writeTask = (async () => {
         for (let offset = 0; offset < outbound.byteLength; offset += 60 * 1024) {
-          await session.write(outbound.slice(offset, Math.min(offset + 60 * 1024, outbound.byteLength)));
+          const chunk = outbound.slice(offset, Math.min(offset + 60 * 1024, outbound.byteLength));
+          stage = 'write';
+          await session.write(chunk);
+          // Local count of session.write calls that resolved; it says nothing about
+          // a fresh credit grant (a write may only consume the existing window).
+          writeChunks += 1;
+          writeBytes += chunk.byteLength;
         }
+        stage = 'finish-write';
         return session.finishWrite();
-      })();
+      })().then(
+        (value: any) => {
+          writeSettledAt = Date.now();
+          trace('duplex-write-settled', { transferId, chunks: writeChunks, bytes: writeBytes });
+          return value;
+        },
+        (error: unknown) => {
+          if (writeFirstError === null) writeFirstError = error;
+          writeSettledAt = Date.now();
+          trace('duplex-write-settled', { transferId, failed: true, chunks: writeChunks, bytes: writeBytes, code: codeOf(error) });
+          throw error;
+        },
+      );
       const [read, write] = await Promise.all([readTask, writeTask]);
+      stage = 'completed';
       const result = await session.completed;
       await this.#report({
         phase: 'duplex',
@@ -419,7 +485,22 @@ export class ChannelProbeConsumer {
         readBytes: read.bytes, readDigest: read.digest, writeBytes: write.bytes, writeDigest: write.digest,
         resultReadBytes: result.read?.bytes ?? null, resultWriteDigest: result.write?.digest ?? null,
       });
-    } catch (error) { await this.#report({ phase: 'duplex', ok: false, code: codeOf(error) }); }
+    } catch (error) {
+      const facts = {
+        transferId, stage, elapsedMs: Date.now() - startedAt,
+        code: codeOf(error), name: error instanceof Error ? error.name : typeof error,
+        message: boundedMessage(error),
+        // `collect()` exposes read progress only at its terminal; null means the API
+        // could not observe a byte count, not "zero bytes read".
+        readBytes, readSettledAt,
+        writeBytes, writeChunks, writeSettledAt,
+        readError: errorFacts(readFirstError), writeError: errorFacts(writeFirstError),
+        direction: readFirstError !== null && error === readFirstError ? 'read'
+          : writeFirstError !== null && error === writeFirstError ? 'write' : 'unknown',
+      };
+      trace('duplex-failed', facts);
+      await this.#report({ phase: 'duplex', ok: false, ...facts });
+    }
   }
 
   /** R16: half-close the read direction; the write direction must still commit. */

@@ -82,6 +82,11 @@ export interface PluginStreamReadInput {
   readonly offset?: number;
   readonly size?: number | null;
   readonly digest?: `sha256:${string}` | null;
+  /**
+   * Read credit in bytes: defaults to and may not exceed 245760 (4 × 60 KiB),
+   * the receiver's per-transfer receive buffer. Every consumed byte is granted
+   * back once; an out-of-range value is rejected.
+   */
   readonly creditBytes?: number;
   readonly idleMs?: number;
   readonly timeoutMs?: number;
@@ -103,6 +108,11 @@ export interface PluginStreamDuplexInput {
   readonly readDigest?: `sha256:${string}` | null;
   readonly writeSize?: number | null;
   readonly writeDigest?: `sha256:${string}` | null;
+  /**
+   * Read-direction credit in bytes: same default and 245760 (4 × 60 KiB)
+   * ceiling as {@link PluginStreamReadInput.creditBytes}, returned once per
+   * consumed byte.
+   */
   readonly readCreditBytes?: number;
   readonly writeCreditBytes?: number;
   readonly idleMs?: number;

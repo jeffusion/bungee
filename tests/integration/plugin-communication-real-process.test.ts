@@ -21,6 +21,8 @@
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import {
   cleanupGatewayFixture,
   quarantinePortBlock,
@@ -97,6 +99,8 @@ describe('plugin communication channels real-process integration (control provid
   let lease: PortLease | undefined;
   let master: OwnedMaster | undefined;
   const masterStartup: GatewayMasterStartupState = { attempted: false, errors: [] };
+  let workerPids: number[] = [];
+  let preserveFixture = false;
 
   async function startGatewayMaster(currentFixture: GatewayFixture, currentLease: PortLease): Promise<OwnedMaster> {
     try {
@@ -130,7 +134,12 @@ describe('plugin communication channels real-process integration (control provid
       lease = undefined;
     }
     const portsVerifiedClosed = !masterStartup.attempted || leaseReleased;
-    if (fixture !== undefined) {
+    if (fixture !== undefined && preserveFixture) {
+      // A business failure keeps this run's evidence tree. The stop/port-release
+      // attempts above still report any failure through the existing cleanup errors.
+      console.error(scrub(`preserving fixture for diagnosis at ${fixture.root}`, fixture));
+      fixture = undefined;
+    } else if (fixture !== undefined) {
       try {
         const removed = await cleanupGatewayFixture(fixture, {
           startupAttempted: masterStartup.attempted, master, shutdownVerified, portsVerifiedClosed,
@@ -195,6 +204,7 @@ describe('plugin communication channels real-process integration (control provid
       await recordOwnedWorkers(master, workers);
       expect(workers).toHaveLength(2);
       const pids = workers.map((worker) => worker.pid).sort((left, right) => left - right);
+      workerPids = pids;
 
       const state = await waitForChannelState(management, currentFixture, (current) => {
         const completed = new Set(phasePids(current, 'complete'));
@@ -374,13 +384,32 @@ describe('plugin communication channels real-process integration (control provid
       expect(new Set(state.reports.filter((report) => report.phase === 'complete').map((report) => report.pid)).size).toBe(2);
       expect(state.reports.filter((report) => report.phase === 'complete').map((report) => report.pid).sort((left, right) => left - right)).toEqual(pids);
     } catch (error) {
-      const runtime = await requestJson(`${management}/api/config/runtime`, { signal: AbortSignal.timeout(2_000) }, currentFixture)
-        .then(result => result.body, () => null);
-      const provider = await readChannelState(management, currentFixture);
-      const crossState = await readCrossState(management, currentFixture);
+      preserveFixture = true;
+      // Diagnostic reads must never replace the original assertion failure.
+      const diagnostic = async (label: string, read: () => Promise<unknown>): Promise<unknown> => {
+        try { return await read(); }
+        catch (cause) { return { diagnostic_error: `${label}: ${safeGatewayError(cause, currentFixture, 1_024)}` }; }
+      };
+      const runtime = await diagnostic('runtime', async () => (await requestJson(
+        `${management}/api/config/runtime`, { signal: AbortSignal.timeout(2_000) }, currentFixture,
+      )).body);
+      const provider = await diagnostic('provider', () => readChannelState(management, currentFixture));
+      const crossState = await diagnostic('cross', () => readCrossState(management, currentFixture));
       console.error(scrub(JSON.stringify({ event: 'channel_probe_failure_snapshot', runtime, provider, cross: crossState }), currentFixture));
+      // Worker traces live under the fixture root (HOME); read only the two owned
+      // worker PIDs and scrub the fixture key before bounding each tail.
+      for (const pid of workerPids) {
+        if (!Number.isSafeInteger(pid) || pid <= 0) continue;
+        let raw: string;
+        try {
+          raw = await readFile(join(currentFixture.root, `channel-probe-consumer-${pid}.jsonl`), 'utf8');
+        } catch (cause) {
+          raw = `trace unreadable: ${cause instanceof Error ? cause.message : String(cause)}`;
+        }
+        console.error(`channel_probe_worker_trace pid=${pid} tail=${raw.length}\n${scrub(raw, currentFixture).slice(-16_384)}`);
+      }
       const diagnostics = (await master?.diagnostics?.().catch((cause) => safeGatewayError(cause, currentFixture)) ?? '').slice(-12_000);
-      throw new Error(safeGatewayError(new Error(`${safeGatewayError(error, currentFixture)}; master exit=${master?.child.exitCode ?? master?.child.signalCode ?? 'running'}; diagnostics=${diagnostics}`), currentFixture, 24_576));
+      throw new Error(safeGatewayError(new Error(`${safeGatewayError(error, currentFixture)}; master exit=${master?.child.exitCode ?? master?.child.signalCode ?? 'running'}; diagnostics=${diagnostics}`), currentFixture, 24_576), { cause: error });
     }
   }, 240_000);
 });

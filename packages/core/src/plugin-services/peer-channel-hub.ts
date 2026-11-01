@@ -387,8 +387,8 @@ interface StreamOutbound {
   receivedBytes: number;
   /** Bytes the caller already consumed (the window base). */
   consumedBytes: number;
-  /** Allowance granted but not yet consumed. */
-  slack: number;
+  /** Fixed read window granted by the open request; consumption never grows it. */
+  readonly slack: number;
   heartbeat: ReturnType<typeof setInterval> | null;
   lastSeen: boolean;
   /** The consumer half-closed this read direction (duplex): iteration must end. */
@@ -850,7 +850,7 @@ export class PluginPeerChannelHub {
     if (request.size !== null && request.size > CHANNEL_STREAM_MAX_TOTAL_BYTES) throw new ChannelError('overloaded', 'peer channel stream exceeds the total byte ceiling');
     const creditBytes = request.creditBytes ?? CHANNEL_STREAM_DEFAULT_CREDIT_BYTES;
     const idleMs = request.idleMs ?? CHANNEL_STREAM_DEFAULT_IDLE_MS;
-    if (!Number.isSafeInteger(creditBytes) || creditBytes < 1 || creditBytes > CHANNEL_STREAM_MAX_CREDIT_BYTES) throw new ChannelError('invalid', 'peer channel stream credit is invalid');
+    if (!Number.isSafeInteger(creditBytes) || creditBytes < 1 || creditBytes > CHANNEL_MAX_TRANSFER_BUFFER_BYTES) throw new ChannelError('invalid', 'peer channel stream credit is invalid');
     if (!Number.isSafeInteger(idleMs) || idleMs < 1) throw new ChannelError('invalid', 'peer channel stream idle deadline is invalid');
     const deadlineAt = request.deadlineAt ?? Date.now() + CHANNEL_STREAM_DEFAULT_DEADLINE_MS;
 
@@ -1036,7 +1036,7 @@ export class PluginPeerChannelHub {
     }
     const readCreditBytes = request.readCreditBytes ?? CHANNEL_STREAM_DEFAULT_CREDIT_BYTES;
     const writeCreditBytes = request.writeCreditBytes ?? CHANNEL_STREAM_DEFAULT_CREDIT_BYTES;
-    if (!Number.isSafeInteger(readCreditBytes) || readCreditBytes < 1 || readCreditBytes > CHANNEL_STREAM_MAX_CREDIT_BYTES
+    if (!Number.isSafeInteger(readCreditBytes) || readCreditBytes < 1 || readCreditBytes > CHANNEL_MAX_TRANSFER_BUFFER_BYTES
       || !Number.isSafeInteger(writeCreditBytes) || writeCreditBytes < 1 || writeCreditBytes > CHANNEL_STREAM_MAX_CREDIT_BYTES) {
       throw new ChannelError('invalid', 'peer channel duplex credit is invalid');
     }
@@ -1377,8 +1377,8 @@ export class PluginPeerChannelHub {
 
   #grantCredit(state: StreamOutbound, bytes: number): void {
     if (bytes <= 0 || state.lastSeen || state.failure !== null) return;
+    // Consumption advances the absolute window; its initial allowance stays fixed.
     state.consumedBytes += bytes;
-    state.slack = Math.min(state.slack + bytes, CHANNEL_STREAM_MAX_CREDIT_BYTES);
     this.#announceStreamWindow(state);
   }
 
