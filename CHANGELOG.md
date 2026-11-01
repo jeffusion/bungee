@@ -1,3 +1,10 @@
+## [6.11.2](https://github.com/jeffusion/bungee/compare/v6.11.1...v6.11.2) (2026-11-01)
+
+
+### Bug Fixes
+
+* correct settings publication feedback and channel read credit ([de850f8](https://github.com/jeffusion/bungee/commit/de850f8b65d5a58c08c90e141e9878954579ea5d))
+
 ## [6.11.1](https://github.com/jeffusion/bungee/compare/v6.11.0...v6.11.1) (2026-11-01)
 
 
