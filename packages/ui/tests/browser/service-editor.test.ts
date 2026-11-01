@@ -1,7 +1,7 @@
 import { test } from 'bun:test';
 import { expect } from 'playwright/test';
 import { editorFixture } from '../helpers/editors/component-fixture';
-const { withPage, fixtureUrl } = editorFixture(['service']);
+const { withPage } = editorFixture(['service']);
 
 test('service navigation follows seven visible sections and respects field and dialog shortcut boundaries', async () => {
   await withPage('scenario=service', async (page,evidence) => {
@@ -47,7 +47,7 @@ test('service navigation follows seven visible sections and respects field and d
 }, 60_000);
 
 test('service account handoff consumes its URL, prepares a draft and focuses an existing binding without duplicate creation', async () => {
-  for (const duplicate of [false, true]) await withPage('scenario=service', async page => {
+  for (const duplicate of [false, true]) {
     const serviceId = 'e8765b5b-8d0a-4ed6-889b-3eae0ccf8bb5';
     const bindingId = '60000000-0000-4000-8000-000000000001';
     let drafts = 0, writes = 0;
@@ -55,28 +55,33 @@ test('service account handoff consumes its URL, prepares a draft and focuses an 
       upstreamSources: [{ id: 'source', label: 'Source', listAccounts: 'accounts', createDraft: 'draft', credentialPolicy: { allowedOrigins: [], allowedRequests: [], allowedHeaderNames: [] } }],
       api: [{ path: '/accounts', methods: ['GET'], handler: 'accounts', execution: 'control' }, { path: '/draft', methods: ['POST'], handler: 'draft', execution: 'control' }],
     } } };
-    await page.route('**/api/plugins', route => route.request().method()==='GET'?route.fulfill({ json: [plugin] }):route.fallback());
-    await page.route('**/api/plugins/test-provider/control/accounts', route => route.request().method()==='GET'?route.fulfill({ json: { accounts: [{ id: 'account', label: 'Account', available: true }] } }):route.fallback());
-    await page.route('**/api/plugins/test-provider/control/draft', route => {
-      if(route.request().method()!=='POST')return route.fallback();
-      drafts++; expect(route.request().postDataJSON()).toEqual({ accountRef: 'account' });
-      return route.fulfill({ json: { target: 'https://authoritative.test/responses', bindingOptions: { accountRef: 'account' } } });
+    await withPage('scenario=service&edit', async page => {
+      await expect(page.getByRole('dialog')).toBeVisible();
+      await expect(page).toHaveURL(/#\/services\/edit\/existing$/);
+      await expect(page.getByRole('dialog').getByRole('textbox').first()).toHaveValue('https://authoritative.test/responses');
+      expect(drafts).toBe(duplicate ? 0 : 1);expect(writes).toBe(0);
+      await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click();
+      await expect(page.getByRole('listitem').filter({has:page.getByRole('button',{name:'Edit',exact:true})})).toHaveCount(duplicate ? 1 : 2);
+    }, {
+      hash: `#/services/edit/existing?serviceId=${serviceId}&sourcePlugin=test-provider&sourceId=source&accountRef=account&mode=existing`,
+      beforeMount: async page => {
+        await page.route('**/api/plugins', route => route.request().method()==='GET'?route.fulfill({ json: [plugin] }):route.fallback());
+        await page.route('**/api/plugins/test-provider/control/accounts', route => route.request().method()==='GET'?route.fulfill({ json: { accounts: [{ id: 'account', label: 'Account', available: true }] } }):route.fallback());
+        await page.route('**/api/plugins/test-provider/control/draft', route => {
+          if(route.request().method()!=='POST')return route.fallback();
+          drafts++; expect(route.request().postDataJSON()).toEqual({ accountRef: 'account' });
+          return route.fulfill({ json: { target: 'https://authoritative.test/responses', bindingOptions: { accountRef: 'account' } } });
+        });
+        await page.route('**/api/config', route => {
+          if (route.request().method() !== 'GET') { writes++; return route.fulfill({ status: 500, json: { error: 'unexpected_write' } }); }
+          return route.fulfill({ json: { revision: 1, content_hash: `sha256:${'a'.repeat(64)}`, config: {
+            plugin_activations: [], logical_configuration: { routes: [], plugins: [], services: [{ id: serviceId, position: 0, name: 'existing', plugins: [], endpoints: [{
+              id: '70000000-0000-4000-8000-000000000001', position: 0, target: duplicate ? 'https://authoritative.test/responses' : 'https://manual.test', weight: 100, priority: 1,
+              ...(duplicate ? { managedBy: { plugin: 'test-provider', contributionId: 'source', bindingId }, plugins: [{ id: bindingId, position: 0, name: 'test-provider', enabled: true, options: { accountRef: 'account' } }] } : { plugins: [] }),
+            }] }] },
+          } } });
+        });
+      },
     });
-    await page.route('**/api/config', route => {
-      if (route.request().method() !== 'GET') { writes++; return route.fulfill({ status: 500, json: { error: 'unexpected_write' } }); }
-      return route.fulfill({ json: { revision: 1, content_hash: `sha256:${'a'.repeat(64)}`, config: {
-        plugin_activations: [], logical_configuration: { routes: [], plugins: [], services: [{ id: serviceId, position: 0, name: 'existing', plugins: [], endpoints: [{
-          id: '70000000-0000-4000-8000-000000000001', position: 0, target: duplicate ? 'https://authoritative.test/responses' : 'https://manual.test', weight: 100, priority: 1,
-          ...(duplicate ? { managedBy: { plugin: 'test-provider', contributionId: 'source', bindingId }, plugins: [{ id: bindingId, position: 0, name: 'test-provider', enabled: true, options: { accountRef: 'account' } }] } : { plugins: [] }),
-        }] }] },
-      } } });
-    });
-    await page.goto(`${fixtureUrl('service')}?scenario=service&edit#/services/edit/existing?serviceId=${serviceId}&sourcePlugin=test-provider&sourceId=source&accountRef=account&mode=existing`);
-    await expect(page.getByRole('dialog')).toBeVisible();
-    await expect(page).toHaveURL(/#\/services\/edit\/existing$/);
-    await expect(page.getByRole('dialog').getByRole('textbox').first()).toHaveValue('https://authoritative.test/responses');
-    expect(drafts).toBe(duplicate ? 0 : 1);expect(writes).toBe(0);
-    await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click();
-    await expect(page.getByRole('listitem').filter({has:page.getByRole('button',{name:'Edit',exact:true})})).toHaveCount(duplicate ? 1 : 2);
-  });
+  }
 }, 60_000);
