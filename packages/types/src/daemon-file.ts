@@ -540,7 +540,7 @@ export function formatDaemonFileAclError(error: unknown): string | null {
 }
 
 function boundedElapsed(startedAt: number, deadlineMs: number): number {
-  return Math.min(deadlineMs, Math.max(0, Date.now() - startedAt));
+  return Math.min(deadlineMs, Math.max(0, Math.round(performance.now() - startedAt)));
 }
 
 function selectWindowsAclExecutable(environment: NodeJS.ProcessEnv): string {
@@ -595,7 +595,7 @@ async function runPowerShell(
   environment: NodeJS.ProcessEnv,
   deadlineMs: number,
 ): Promise<WindowsAclProcessResult> {
-  const startedAt = Date.now();
+  const startedAt = performance.now();
   let phase: WindowsAclProcessDiagnostic['last_phase'] = null;
   let child: ReturnType<typeof spawn>;
   try {
