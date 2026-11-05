@@ -5,7 +5,7 @@ import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { DaemonManager } from '../../packages/cli/src/daemon/manager';
-import { captureProcessTree } from '../../packages/cli/src/daemon/process-tree';
+import { captureDarwinProcessTree, captureProcessTree } from '../../packages/cli/src/daemon/process-tree';
 import { initializePluginSecretsKey } from '../../packages/cli/src/config/plugin-secrets-key';
 import { captureProcessIdentity, probeProcessIdentity, type CapturedProcessIdentity } from '../../packages/core/src/master-runtime/process-identity';
 import { discoverIngressIdentity } from '../../packages/core/src/ingress/supervision-http';
@@ -314,7 +314,9 @@ async function captureOwnedIngress(
   }
   const masterPid = master.child.pid;
   if (masterPid === undefined) throw new Error('master PID is unavailable for ingress ownership capture');
-  const tree = await captureProcessTree(masterPid);
+  const tree = process.platform === 'darwin'
+    ? await captureDarwinProcessTree(masterPid, { expectedExecutable: process.execPath })
+    : await captureProcessTree(masterPid);
   const matches = tree.filter((item) => item.processIdentity === identity.process_instance_id);
   const snapshot = matches[0];
   if (matches.length !== 1 || snapshot === undefined) {
