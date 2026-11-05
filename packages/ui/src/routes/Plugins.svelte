@@ -6,6 +6,7 @@
   import { _ } from '$i18n';
   import { isLoading } from 'svelte-i18n';
   import { publicationRecovery } from '$stores/runtime';
+  import { configurationWrite } from '$stores/configuration-write';
   import { PluginsAPI, setPluginEnabled, type Plugin } from '$api/plugins';
   import { toast } from '$stores/toast';
   import { pluginList, pluginsLoading, refreshPlugins } from '$stores/plugins';
@@ -23,6 +24,10 @@
   let processing = $state<string[]>([]);
   let selected = $state<{plugin: Plugin; enabled: boolean; dependencies: string[]} | null>(null);
   let operationNotice = $state<{key:string;plugin?:string;errorKey?:string;keepDependencies?:boolean}|null>(null), operationDetail = $state('');
+  let writeInFlight = $state(false);
+  const unresolvedWrite = $derived(!writeInFlight && !!$configurationWrite.pending && !$configurationWrite.pending.accepted);
+  const writeBlocked = $derived(unresolvedWrite || $configurationWrite.corrupt);
+  const writeBlockedNotice = $derived(unresolvedWrite ? 'pluginActivation.unknownWrite' : 'settings.storageError');
   let searchQuery = $state('');
   let filterState = $state<'all' | 'enabled' | 'disabled'>('all');
   function pluginDisplayName(name: string) {
@@ -47,14 +52,17 @@
   }
   function requestToggle(plugin: Plugin, enabled: boolean) {
     if (processing.includes(plugin.name) || activationBlockedReason(plugin, pluginDisplayName, $_)) return;
+    if (writeBlocked) { operationNotice = {key:writeBlockedNotice}; return; }
     const dependencies = enabled ? activationDependencies(plugin, $pluginList).map(item => item.name) : [];
     if (plugin.management || dependencies.length) selected = {plugin, enabled, dependencies};
     else void togglePlugin(plugin, enabled);
   }
   async function togglePlugin(plugin: Plugin, enabled: boolean) {
     if (processing.includes(plugin.name)) return;
+    if (writeBlocked) { operationNotice = {key:writeBlockedNotice}; return; }
     processing = [...processing, plugin.name]; operationNotice = null; operationDetail = '';
     let accepted = false;
+    writeInFlight = true;
     try {
       await setPluginEnabled(plugin.name, enabled, { onAccepted: () => { accepted = true; operationNotice = {key:'pluginActivation.stages.awaitingPublication'}; } });
       if (await refreshServerState()) {
@@ -67,7 +75,7 @@
       operationNotice = {key:accepted ? 'pluginActivation.acceptedError' : 'pluginActivation.operationError',errorKey:translated.key};
       operationDetail = translated.detail;
       await refreshServerState();
-    } finally { processing = processing.filter(name => name !== plugin.name); }
+    } finally { writeInFlight = false; processing = processing.filter(name => name !== plugin.name); }
   }
 
   onMount(async () => {
@@ -139,6 +147,12 @@
     </button>
   </div>
 
+  {#if writeBlocked}
+    <SystemAlertBar tone="warn">
+      <p class="text-sm text-zinc-300" role="status">{$_(unresolvedWrite ? 'pluginActivation.unknownWrite' : 'settings.storageError')}
+        <a href="/#/config" class="text-nexus-300 underline">{$_('editor.reconcile')}</a></p>
+    </SystemAlertBar>
+  {/if}
   {#if selected}<PluginActivationDialog plugin={selected.plugin} enabled={selected.enabled} dependencies={dependencyNames} onclose={() => { selected = null; }} oncomplete={async () => { await refreshServerState(); }} />{/if}
   {#if operationNotice}<PanelCard title={$_('pluginActivation.operationTitle')} tag="STATUS"><p role="status" class="text-sm text-zinc-300">{noticeText()}</p>{#if operationDetail}<details class="text-sm text-zinc-400"><summary>{$_('pluginActivation.technicalDetails')}</summary><pre class="whitespace-pre-wrap break-all">{operationDetail}</pre></details>{/if}</PanelCard>{/if}
   <!-- ===== KPI strip (kept bracketed — these are the page's headline metrics) -->
@@ -274,7 +288,7 @@
                   <BSwitch
                     size="default"
                     checked={plugin.enabled}
-                    disabled={processing.includes(plugin.name) || !!activationBlockedReason(plugin, pluginDisplayName, $_) || !!selected}
+                    disabled={processing.includes(plugin.name) || !!activationBlockedReason(plugin, pluginDisplayName, $_) || !!selected || writeBlocked}
                     onchange={(newChecked) => requestToggle(plugin, newChecked)}
                     description={plugin.enabled ? $_('plugins.disable') : $_('plugins.enable')}
                   />

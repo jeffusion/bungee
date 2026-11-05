@@ -261,9 +261,30 @@ describe('canonical bounded polling', () => {
       await expect(waitForFixturePublication({ base: `http://127.0.0.1:${server.port}`, revision: 2, childExited: () => true }))
         .rejects.toThrow('fixture master exited');
       expect(requests).toBe(2);
-      server.reload({ fetch: () => Response.json({ publication: { recovery: { state: 'stopped' } } }) });
+      server.reload({ fetch: () => Response.json({ publication: { recovery: {
+        state: 'stopped', target_revision: 2, final_reason_code: 'deterministic_worker_rejection',
+      } } }) });
       await expect(waitForFixturePublication({ base: `http://127.0.0.1:${server.port}`, revision: 2, childExited: () => false }))
         .rejects.toThrow('fixture publication stopped');
+      // A stopped recovery for another revision is terminal only when its outcome is unknown.
+      server.reload({ fetch: () => Response.json({ publication: { recovery: {
+        state: 'stopped', target_revision: 1, final_reason_code: 'safety_outcome_unknown',
+      } } }) });
+      await expect(waitForFixturePublication({ base: `http://127.0.0.1:${server.port}`, revision: 2, childExited: () => false }))
+        .rejects.toThrow('fixture publication stopped');
+      // Historical non-safety stops for another revision must neither short-circuit readiness
+      // nor let a mismatched serving revision through.
+      requests = 0;
+      server.reload({ fetch: () => {
+        requests += 1;
+        return requests === 1
+          ? Response.json({ publication: { serving_complete: true, serving_revision: 1, recovery: {
+            state: 'stopped', target_revision: 1, final_reason_code: 'deterministic_worker_rejection',
+          } } })
+          : Response.json({ publication: { serving_complete: true, serving_revision: 2 } });
+      } });
+      await waitForFixturePublication({ base: `http://127.0.0.1:${server.port}`, revision: 2, childExited: () => false, timeoutMs: 2_000 });
+      expect(requests).toBe(2);
     } finally { await server.stop(true); }
   });
 
@@ -1304,13 +1325,17 @@ async function awaitBPublication(port: number, mutationId: string, cancellation:
 
 function durableRevision(dbPath: string): number {
   const database = new Database(dbPath, { readonly: true, strict: true });
-  try { return database.query<{ active_revision: number }, []>('SELECT active_revision FROM configuration_state WHERE id=1').get()?.active_revision ?? -1; }
+  try {
+    database.exec('PRAGMA busy_timeout = 5000');
+    return database.query<{ active_revision: number }, []>('SELECT active_revision FROM configuration_state WHERE id=1').get()?.active_revision ?? -1;
+  }
   finally { database.close(true); }
 }
 
 function durableController(dbPath: string): { readonly instanceId: string; readonly epoch: number; readonly controllerId: string } | null {
   const database = new Database(dbPath, { readonly: true, strict: true });
   try {
+    database.exec('PRAGMA busy_timeout = 5000');
     const row = database.query<{ instance_id: string; controller_epoch: number; current_controller_id: string | null }, []>(
       'SELECT instance_id, controller_epoch, current_controller_id FROM supervision_state WHERE id=1',
     ).get();

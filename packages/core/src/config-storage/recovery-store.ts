@@ -158,21 +158,36 @@ function readRecoveryRows(db: Database, sql: string, ...params: (string | number
   return sqliteAll<RecoveryRow, (string | number)[]>(db, sql, ...params).map(recoveryFromRow);
 }
 
+/**
+ * Any active reconciliation or a stopped safety-unknown attempt blocks a new application
+ * owner. The query is global so a newer saved revision cannot hide an older barrier.
+ */
+export function readPublicationRecoveryBarrier(
+  db: Database, excludeRecoveryId: string | null = null,
+): ConfigurationRecovery | null {
+  if (excludeRecoveryId !== null) requireRecoveryId(excludeRecoveryId);
+  // Exclude before LIMIT: a newer legal recovery must never hide an older stopped-unknown row.
+  const exclusion = excludeRecoveryId === null ? '' : ' AND recovery_id<>?';
+  return readRecoveryRows(db, `${RECOVERY_SELECT}
+    WHERE (state IN ('scheduled','running')
+       OR (state='stopped' AND final_reason_code='safety_outcome_unknown'))${exclusion}
+    ORDER BY CASE WHEN state IN ('scheduled','running') THEN 0 ELSE 1 END,
+      recovery_sequence DESC LIMIT 1`,
+  ...(excludeRecoveryId === null ? [] : [excludeRecoveryId]))[0] ?? null;
+}
+
 export function readLatestRecovery(db: Database, targetRevision: number): ConfigurationRecovery | null {
   return readRecoveryRows(db, `${RECOVERY_SELECT} WHERE target_revision=?
     ORDER BY recovery_sequence DESC LIMIT 1`, targetRevision)[0] ?? null;
 }
 
-export function readCurrentRecovery(db: Database, targetRevision: number): ConfigurationRecovery | null {
-  return readRecoveryRows(db, `${RECOVERY_SELECT} WHERE target_revision=?
+/** The newest recovery attempt is authoritative, independent of how far saves advanced. */
+export function readCurrentRecovery(db: Database): ConfigurationRecovery | null {
+  return readRecoveryRows(db, `${RECOVERY_SELECT}
     ORDER BY CASE WHEN state IN ('scheduled','running') THEN 0 ELSE 1 END,
-      recovery_sequence DESC LIMIT 1`, targetRevision)[0] ?? null;
+      recovery_sequence DESC LIMIT 1`)[0] ?? null;
 }
 
-export function readActiveRecovery(db: Database, targetRevision: number): ConfigurationRecovery | null {
-  return readRecoveryRows(db, `${RECOVERY_SELECT} WHERE target_revision=? AND state IN ('scheduled','running')
-    ORDER BY recovery_sequence DESC LIMIT 1`, targetRevision)[0] ?? null;
-}
 
 function requireRecoveryId(recoveryId: string): void {
   if (typeof recoveryId !== 'string' || !isLowercaseUuid(recoveryId)) {
@@ -226,14 +241,6 @@ function sameIdentity(recovery: ConfigurationRecovery, trigger: ConfigurationRec
   return recovery.trigger === trigger && recovery.source_mutation_id === sourceMutationId && recovery.target_revision === targetRevision;
 }
 
-function requireCurrentTarget(db: Database, recovery: ConfigurationRecovery): void {
-  const currentRevision = sqliteGet<{ readonly active_revision: number }, []>(db,
-    'SELECT active_revision FROM configuration_state WHERE id=1')?.active_revision;
-  if (currentRevision !== recovery.target_revision) {
-    throw new ConfigRepositoryError('stale_revision', 'recovery target revision is no longer active');
-  }
-}
-
 function requireSource(db: Database, sourceMutationId: string): { readonly committed_revision: number } {
   const source = sqliteGet<{ readonly state: string; readonly error_code: string | null; readonly committed_revision: number }, [string]>(
     db, 'SELECT state,error_code,committed_revision FROM configuration_operations WHERE mutation_id=?', sourceMutationId,
@@ -248,8 +255,7 @@ function requireSource(db: Database, sourceMutationId: string): { readonly commi
 function requireNoActivePublication(db: Database): void {
   const active = sqliteGet<{ readonly mutation_id: string }, []>(db,
     `SELECT mutation_id FROM configuration_operations
-     WHERE committed_revision=(SELECT active_revision FROM configuration_state WHERE id=1)
-       AND state IN ('committed','publishing','draining') LIMIT 1`);
+     WHERE state IN ('committed','publishing','draining') LIMIT 1`);
   if (active !== null) invalid('an active publication already exists');
 }
 
@@ -275,8 +281,9 @@ function insertRecovery(
     }
     return existing;
   }
-  const active = readActiveRecovery(db, targetRevision);
-  if (active !== null) {
+  const active = readRecoveryRows(db, `${RECOVERY_SELECT} WHERE target_revision=? AND state IN ('scheduled','running')
+    ORDER BY recovery_sequence DESC LIMIT 1`, targetRevision)[0];
+  if (active !== undefined) {
     throw new ConfigRepositoryError('recovery_in_progress', 'target revision already has an active recovery', undefined, active);
   }
   const latest = readLatestRecovery(db, targetRevision);
@@ -342,6 +349,11 @@ export function createManualRecovery(
     throw new ConfigRepositoryError('source_not_retryable', 'recovery source operation is not retryable');
   }
   requireNoActivePublication(db);
+  const barrier = readPublicationRecoveryBarrier(db);
+  if (barrier !== null) {
+    throw new ConfigRepositoryError('recovery_in_progress',
+      'configuration application is blocked by an unresolved recovery', undefined, barrier);
+  }
   return insertRecovery(db, recoveryId, sourceMutationId, expectedRevision, 'manual', now);
 }
 
@@ -350,7 +362,12 @@ export function claimRecoveryAttempt(
 ): ConfigurationRecovery {
   const recovery = readRecovery(db, recoveryId);
   if (recovery === null) invalid('recovery was not found');
-  requireCurrentTarget(db, recovery);
+  requireNoActivePublication(db);
+  const barrier = readPublicationRecoveryBarrier(db, recoveryId);
+  if (barrier !== null) {
+    throw new ConfigRepositoryError('recovery_in_progress',
+      'configuration application is blocked by an unresolved recovery', undefined, barrier);
+  }
   requireAttempt(previousAttemptCount);
   requireNow(now);
   if (recovery.state === 'running' && recovery.attempt_count === previousAttemptCount + 1) return recovery;
@@ -378,7 +395,6 @@ export function scheduleRecoveryRetry(
 ): ConfigurationRecovery {
   const recovery = readRecovery(db, recoveryId);
   if (recovery === null) invalid('recovery was not found');
-  requireCurrentTarget(db, recovery);
   requireAttempt(attemptCount);
   requireNow(nextRetryAt);
   if (recovery.state === 'scheduled' && recovery.attempt_count === attemptCount && recovery.next_retry_at === nextRetryAt) return recovery;
@@ -415,7 +431,6 @@ function terminalTransition(
   if ((state === 'succeeded' && recovery.state !== 'running' && recovery.state !== 'scheduled') ||
       (state === 'stopped' && recovery.state !== 'running' && recovery.state !== 'scheduled') ||
       recovery.attempt_count !== attemptCount) throw new ConfigRepositoryError('cas_conflict', 'recovery terminal transition CAS failed');
-  if (state === 'succeeded') requireCurrentTarget(db, recovery);
   if (state === 'stopped' && finalReasonCode === 'revision_superseded') requireRevisionDrift(db, recovery);
   requireReasonCompatible(db, recovery, finalReasonCode);
   requireTimestamp(now, recovery);
@@ -448,7 +463,6 @@ export function requeueRecovery(
 ): ConfigurationRecovery {
   const recovery = readRecovery(db, recoveryId);
   if (recovery === null) invalid('recovery was not found');
-  requireCurrentTarget(db, recovery);
   requireAttempt(attemptCount);
   requireNow(now);
   if (attemptCount >= recovery.max_attempts) {
@@ -465,7 +479,7 @@ export function requeueRecovery(
   return queued;
 }
 
-export function verifyRecoveryIntegrity(db: Database, allowActiveRecoveryDrift = false): void {
+export function verifyRecoveryIntegrity(db: Database, _allowActiveRecoveryDrift = false): void {
   const rows = readRecoveryRows(db, `${RECOVERY_SELECT} ORDER BY recovery_sequence`);
   const sequences = sqliteAll<{ readonly recovery_sequence: number; readonly created_at: number }, []>(db,
     'SELECT recovery_sequence,created_at FROM configuration_recoveries ORDER BY recovery_sequence');
@@ -514,9 +528,9 @@ export function verifyRecoveryIntegrity(db: Database, allowActiveRecoveryDrift =
     if (recovery.final_reason_code === 'revision_superseded' && recovery.target_revision >= currentRevision) {
       corrupt('superseded recovery target is not older than the active revision');
     }
-    if (!allowActiveRecoveryDrift && (recovery.state === 'scheduled' || recovery.state === 'running') &&
-        recovery.target_revision !== currentRevision) {
-      corrupt('active recovery does not target the current revision');
+    // Saves may advance the latest revision while an attempt still owns its target.
+    if (recovery.target_revision > currentRevision) {
+      corrupt('recovery target revision is newer than the active revision');
     }
     if (recovery.state === 'scheduled' || recovery.state === 'running') activeByTarget.add(recovery.target_revision);
   }

@@ -22,16 +22,22 @@ type ConfigurationOperationBase = {
   readonly target_worker_count: number;
   readonly drain_recovery_generation: number;
   readonly last_drain_recovery_previous_generation: number | null;
+  readonly plugin_catalog_hash: Sha256Digest | null;
+  readonly cancel_requested: boolean;
+  readonly prepare_started: boolean;
   readonly created_at: number;
   readonly updated_at: number;
 };
 
 export type ConfigurationOperation = ConfigurationOperationBase & (
+  | { readonly state: 'pending'; readonly result_status: null; readonly error_code: null; readonly error_detail: null }
   | { readonly state: 'committed' | 'publishing' | 'draining'; readonly result_status: null;
       readonly error_code: null; readonly error_detail: null }
   | { readonly state: 'converged'; readonly result_status: 200; readonly error_code: null; readonly error_detail: null }
   | { readonly state: 'degraded'; readonly result_status: 202;
       readonly error_code: 'replacement_convergence_failed' | 'old_worker_drain_failed' | 'control_readiness_failed'; readonly error_detail: string }
+  | { readonly state: 'superseded'; readonly result_status: 409;
+      readonly error_code: 'revision_superseded'; readonly error_detail: string }
 );
 
 export type ConfigurationOperationWorker = {
@@ -142,27 +148,33 @@ type ValidationResponse = {
 };
 
 export type ConfigurationCommitOptions = {
-  /** Entity editors acknowledge durable storage; settings may still wait for publication. */
+  /** Persistence ACK ends a save; 'converged' waits for application and is opt-in only. */
   readonly completion?: 'committed' | 'converged';
   readonly nextAuthorization?: string;
   readonly managementSetup?: unknown;
   readonly timeoutMs?: number;
   readonly pollIntervalMs?: number;
-  /** Page-memory identity before the only write. Persist tracking only after onOperation. */
+  /** Called once before the only write. Retain this identity until the ACK is validated or the write is definitively rejected. */
   readonly onDispatch?: (mutationId: string) => void;
+  /** Called with a validated ACK: saved, not necessarily applied. */
   readonly onOperation?: (state: ConfigurationOperationState) => void;
 };
 
 export class ConfigurationStaleError extends Error {
   readonly name = 'ConfigurationStaleError';
   constructor(readonly expectedRevision: number, readonly response: unknown) {
-    super(`Configuration revision ${expectedRevision} is stale`);
+    super('The configuration changed. Reload it and review your changes before saving again.');
   }
 }
 
 export class ConfigurationValidationError extends Error {
   readonly name = 'ConfigurationValidationError';
   constructor(readonly errors: unknown) { super('Configuration validation failed'); }
+}
+
+export class ConfigurationRouteCopyProtectedError extends Error {
+  readonly name = 'ConfigurationRouteCopyProtectedError';
+  constructor() { super('受保护路由不能直接复制，以免副本丢失访问限制。请创建新路由并配置访问权限。'); }
 }
 
 export class ConfigurationOperationDegradedError extends Error {
@@ -175,38 +187,21 @@ export class ConfigurationOperationDegradedError extends Error {
 export class ConfigurationOperationTimeoutError extends Error {
   readonly name = 'ConfigurationOperationTimeoutError';
   constructor(readonly mutationId: string, readonly timeoutMs: number) {
-    super(`Stopped waiting for configuration operation ${mutationId} after ${timeoutMs}ms; the backend operation has not been cancelled or declared failed`);
+    super('暂时无法确认配置是否生效，请稍后刷新状态。');
   }
 }
 
 export class ConfigurationSubmissionUnknownError extends Error {
   readonly name = 'ConfigurationSubmissionUnknownError';
   constructor(readonly mutationId: string, cause: unknown) {
-    super(`保存结果尚未确认，请在全局设置中查询操作 ${mutationId}，不要重复提交。`, { cause });
+    super('暂时无法确认配置是否保存成功，请先确认结果再保存，不要重复保存。', { cause });
   }
 }
 
-export class ConfigurationOperationConflictError extends Error {
-  readonly name = 'ConfigurationOperationConflictError';
-  constructor(
-    readonly operationId: string,
-    readonly revision: number,
-    readonly state: 'committed' | 'publishing' | 'draining',
-  ) {
-    super(`Configuration operation ${operationId} is ${state} at revision ${revision}`);
-  }
-}
-
-export class ConfigurationOperationIdentityError extends Error {
-  readonly name = 'ConfigurationOperationIdentityError';
-  constructor(readonly requestedOperationId: string, readonly acceptedOperationId: string) {
-    super(`Configuration operation identity mismatch: requested ${requestedOperationId}, accepted ${acceptedOperationId}`);
-  }
-}
 
 export class ConfigurationNextAuthorizationRequiredError extends Error {
   readonly name = 'ConfigurationNextAuthorizationRequiredError';
-  constructor() { super('A candidate authorization token is required when changing authentication'); }
+  constructor() { super('A new access token is required when changing authentication'); }
 }
 
 
@@ -224,10 +219,7 @@ export async function waitForConfigurationOperation(
   const pollIntervalMs = options.pollIntervalMs ?? 1000;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() <= deadline) {
-    const state = await api.get<ConfigurationOperationState>(
-      `/config/operations/${mutationId}`,
-      { headers: options.headers, preserveSessionOnUnauthorized: true },
-    );
+    const state = await readConfigurationOperation(mutationId, options.headers);
     options.onOperation?.(state);
     const terminal = inspectTerminal(state);
     if (terminal !== null) return terminal;
@@ -239,9 +231,11 @@ export async function waitForConfigurationOperation(
 export function inspectTerminal(state: ConfigurationOperationState): ConfigurationOperationState | null {
   switch (state.operation.state) {
     case 'converged':
+    case 'superseded':
       return state;
     case 'degraded':
       throw new ConfigurationOperationDegradedError(state.operation);
+    case 'pending':
     case 'committed':
     case 'publishing':
     case 'draining':
@@ -253,14 +247,53 @@ function apiErrorBody(error: ApiError): { readonly error?: unknown; readonly err
   return typeof error.body === 'object' && error.body !== null ? error.body : {};
 }
 
-function operationConflict(body: unknown): ConfigurationOperationConflictError | null {
-  if (typeof body !== 'object' || body === null
-    || !('error' in body) || body.error !== 'operation_in_progress'
-    || !('operation_id' in body) || typeof body.operation_id !== 'string'
-    || !('revision' in body) || typeof body.revision !== 'number'
-    || !('state' in body)
-    || (body.state !== 'committed' && body.state !== 'publishing' && body.state !== 'draining')) return null;
-  return new ConfigurationOperationConflictError(body.operation_id, body.revision, body.state);
+
+function trustedOperation(state: ConfigurationOperationState | null | undefined, mutationId: string, expectedRevision?: number): boolean {
+  if (!state || typeof state !== 'object' || typeof state.operation !== 'object' || state.operation === null) return false;
+  const operation = state.operation as Partial<ConfigurationOperation>;
+  if (operation.mutation_id !== mutationId) return false;
+  if (typeof operation.committed_revision !== 'number' || !Number.isSafeInteger(operation.committed_revision) || operation.committed_revision <= 0
+    || typeof operation.expected_revision !== 'number' || !Number.isSafeInteger(operation.expected_revision) || operation.expected_revision <= 0
+    || operation.committed_revision !== operation.expected_revision + 1 || !Array.isArray(state.workers)
+    || (expectedRevision !== undefined && operation.expected_revision !== expectedRevision)
+    || operation.result_status !== (operation.state === 'converged' ? 200 : operation.state === 'degraded' ? 202 : operation.state === 'superseded' ? 409 : null)) return false;
+  return ['pending', 'committed', 'publishing', 'draining', 'converged', 'degraded', 'superseded']
+    .includes(String(operation.state));
+}
+
+export function trustedConfigurationOperation(state: ConfigurationOperationState | null | undefined, mutationId: string, expectedRevision?: number): state is ConfigurationOperationState {
+  return trustedOperation(state, mutationId, expectedRevision);
+}
+
+function trustedAccepted<T extends AcceptedConfigurationOperation>(accepted: T | null | undefined, mutationId: string, expectedRevision?: number): accepted is T {
+  return !!accepted && accepted.operation_id === mutationId && trustedOperation(accepted, mutationId, expectedRevision)
+    && accepted.revision === accepted.operation.committed_revision;
+}
+
+/** Any outcome not proven by this exact identity stays unknown and keeps the mutation ID. */
+async function resolveUnknown(mutationId: string, pollHeaders: Headers | undefined, cause: unknown, expectedRevision?: number): Promise<AcceptedConfigurationOperation> {
+  try {
+    const state = await getConfigurationOperation(mutationId, pollHeaders);
+    if (!trustedOperation(state, mutationId, expectedRevision)) throw new ConfigurationSubmissionUnknownError(mutationId, cause);
+    return { ...state, operation_id: mutationId, revision: state.operation.committed_revision };
+  } catch (error) {
+    if (error instanceof ConfigurationSubmissionUnknownError) throw error;
+    throw new ConfigurationSubmissionUnknownError(mutationId, cause);
+  }
+}
+
+const preCommitServerCodes = new Set(['control_recovering', 'control_readiness_failed']);
+
+/** True only when the server proved the write was not committed. */
+export function isDefinitiveConfigurationRejection(error: unknown): boolean {
+  if (error instanceof ConfigurationStaleError || error instanceof ConfigurationValidationError
+    || error instanceof ConfigurationOperationDegradedError || error instanceof ConfigurationRouteCopyProtectedError) return true;
+  if (!(error instanceof ApiError)) return false;
+  if (error.status >= 500) {
+    const code = apiErrorBody(error).error;
+    return typeof code === 'string' && preCommitServerCodes.has(code);
+  }
+  return error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 425;
 }
 
 export async function getConfigSnapshot(headers?: Headers): Promise<ConfigurationSnapshot> {
@@ -285,8 +318,33 @@ export async function getRuntimeConfig(signal?: AbortSignal, headers?: Headers, 
   } finally { clearTimeout(timer!); signal?.removeEventListener('abort', abort); }
 }
 
+function supersededOperationState(body: unknown, mutationId: string): ConfigurationOperationState | null {
+  if (typeof body !== 'object' || body === null) return null;
+  const operation = (body as { operation?: unknown }).operation;
+  if (typeof operation !== 'object' || operation === null) return null;
+  const value = operation as Record<string, unknown>;
+  if (value.mutation_id !== mutationId || value.state !== 'superseded'
+    || value.result_status !== 409 || value.error_code !== 'revision_superseded') return null;
+  const workers = (body as { workers?: unknown }).workers;
+  return { operation: operation as ConfigurationOperation, workers: Array.isArray(workers) ? workers as ConfigurationOperationWorker[] : [] };
+}
+
+async function readConfigurationOperation(mutationId: string, headers?: Headers): Promise<ConfigurationOperationState> {
+  try {
+    return await api.get(`/config/operations/${encodeURIComponent(mutationId)}`, { headers, preserveSessionOnUnauthorized: true });
+  } catch (error) {
+    // A superseded terminal is reported as 409. Recognize it only when the body
+    // proves this exact identity; anything else stays a read error.
+    if (error instanceof ApiError) {
+      const state = supersededOperationState(error.body, mutationId);
+      if (state !== null) return state;
+    }
+    throw error;
+  }
+}
+
 export function getConfigurationOperation(mutationId: string, headers?: Headers): Promise<ConfigurationOperationState> {
-  return api.get(`/config/operations/${encodeURIComponent(mutationId)}`, { headers, preserveSessionOnUnauthorized: true });
+  return readConfigurationOperation(mutationId, headers);
 }
 
 export function validateAggregate(aggregate: ConfigurationAggregate): Promise<ValidationResponse> {
@@ -311,9 +369,14 @@ function prepareNextAuthorization(
   _aggregate: ConfigurationAggregate,
   options: ConfigurationCommitOptions,
 ): { readonly headers: Headers; readonly pollHeaders: Headers } {
-  const headers = new Headers();
-  if (options.nextAuthorization) headers.set('X-Bungee-Next-Authorization', options.nextAuthorization.startsWith('Bearer ') ? options.nextAuthorization : `Bearer ${options.nextAuthorization}`);
-  return { headers, pollHeaders: new Headers() };
+  const headers = new Headers(), pollHeaders = new Headers();
+  if (options.nextAuthorization) {
+    const candidate = options.nextAuthorization.startsWith('Bearer ') ? options.nextAuthorization : `Bearer ${options.nextAuthorization}`;
+    headers.set('X-Bungee-Next-Authorization', candidate);
+    // A reconciled read after a lost response must use the candidate credential that the write proved.
+    pollHeaders.set('Authorization', candidate);
+  }
+  return { headers, pollHeaders };
 }
 
 export async function commitConfiguration(
@@ -346,42 +409,33 @@ async function submitConfigurationOperation(
   expectedRevision?: number,
 ): Promise<ConfigurationOperationState> {
   options.onDispatch?.(mutationId);
-  let accepted: AcceptedConfigurationOperation;
+  let accepted: AcceptedConfigurationOperation | null = null;
   try {
     accepted = await submit();
   } catch (error) {
-    if (!(error instanceof ApiError)) {
-      if (options.completion !== 'committed') throw error;
-      // The write may have committed before its response was lost. Query its UUID;
-      // never turn a transport failure into another configuration write.
-      try {
-        const state = await getConfigurationOperation(mutationId, pollHeaders);
-        if (state.operation.mutation_id !== mutationId) {
-          throw new ConfigurationOperationIdentityError(mutationId, state.operation.mutation_id);
-        }
-        accepted = { ...state, operation_id: mutationId, revision: state.operation.committed_revision };
-      } catch (queryError) {
-        if (queryError instanceof ConfigurationOperationIdentityError) throw queryError;
-        throw new ConfigurationSubmissionUnknownError(mutationId, error);
+    if (isDefinitiveConfigurationRejection(error)) {
+      if (error instanceof ApiError) {
+        const body = apiErrorBody(error);
+        if (body.error === 'route_copy_protected') throw new ConfigurationRouteCopyProtectedError();
+        if (error.status === 409 && expectedRevision !== undefined) throw new ConfigurationStaleError(expectedRevision, error.body);
+        if (error.status === 422) throw new ConfigurationValidationError(body.errors);
       }
-    } else {
-      const body = apiErrorBody(error);
-      const conflict = operationConflict(error.body);
-      if (conflict !== null) throw conflict;
-      if (body.error === 'route_copy_protected') throw new Error('受保护路由不能直接复制，以免副本丢失访问限制。请创建新路由并配置访问权限。');
-      if (error.status === 409 && expectedRevision !== undefined) throw new ConfigurationStaleError(expectedRevision, error.body);
-      if (error.status === 422) throw new ConfigurationValidationError(body.errors);
       throw error;
     }
+    // The write may have committed before its response was lost or unconfirmed. Only the
+    // original identity can prove the outcome; never accept another ID or resubmit.
+    accepted = await resolveUnknown(mutationId, pollHeaders, error, expectedRevision);
   }
 
-  if (accepted.operation_id !== mutationId) {
-    throw new ConfigurationOperationIdentityError(mutationId, accepted.operation_id);
-  }
+  // A 2xx with a malformed or foreign identity is not an ACK. Reconcile this ID once;
+  // anything still unproven keeps the marker for an explicit unknown result.
+  const confirmed = trustedAccepted(accepted, mutationId, expectedRevision)
+    ? accepted
+    : await resolveUnknown(mutationId, pollHeaders, new Error('untrusted_ack'), expectedRevision);
 
-  options.onOperation?.(accepted);
-  if (options.completion === 'committed') return accepted;
-  const terminal = inspectTerminal(accepted) ?? await waitForConfigurationOperation(mutationId, {
+  options.onOperation?.(confirmed);
+  if (options.completion === 'committed') return confirmed;
+  const terminal = inspectTerminal(confirmed) ?? await waitForConfigurationOperation(mutationId, {
     timeoutMs: options.timeoutMs ?? 15_000,
     pollIntervalMs: options.pollIntervalMs,
     headers: pollHeaders,
@@ -419,33 +473,9 @@ export async function importConfig(
   const { headers, pollHeaders } = prepareNextAuthorization(snapshot, envelope.aggregate, options);
   // Same UUID-v4 wire contract on LAN HTTP, where native randomUUID may be unavailable.
   const mutationId = typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : uuidv4();
-  options.onDispatch?.(mutationId);
-
-  let accepted: AcceptedImportOperation;
-  try {
-    accepted = await api.post<AcceptedImportOperation>('/config/import', {
-      expected_revision: snapshot.revision, mutation_id: mutationId, envelope, ...(options.managementSetup?{managementSetup:options.managementSetup}:{}),
-    }, { headers });
-  } catch (error) {
-    if (!(error instanceof ApiError)) throw error;
-    const conflict = operationConflict(error.body);
-    if (conflict !== null) throw conflict;
-    if (error.status === 409) throw new ConfigurationStaleError(snapshot.revision, error.body);
-    if (error.status === 422) throw new ConfigurationValidationError(apiErrorBody(error).errors);
-    throw error;
-  }
-
-  if (accepted.operation_id !== mutationId) {
-    throw new ConfigurationOperationIdentityError(mutationId, accepted.operation_id);
-  }
-  options.onOperation?.(accepted);
-  const terminal = inspectTerminal(accepted) ?? await waitForConfigurationOperation(accepted.operation_id, {
-    timeoutMs: options.timeoutMs,
-    pollIntervalMs: options.pollIntervalMs,
-    headers: pollHeaders,
-    onOperation: options.onOperation,
-  });
-  return terminal;
+  return submitConfigurationOperation(mutationId, () => api.post<AcceptedImportOperation>('/config/import', {
+    expected_revision: snapshot.revision, mutation_id: mutationId, envelope, ...(options.managementSetup?{managementSetup:options.managementSetup}:{}),
+  }, { headers }), options, pollHeaders, snapshot.revision);
 }
 
 export async function commitLogicalConfiguration(

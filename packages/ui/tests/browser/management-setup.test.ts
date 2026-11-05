@@ -8,22 +8,22 @@ import { createAuthRuntime } from '../helpers/auth/runtime';
 import {menuSnapshot, fulfillMenuIcons} from '../helpers/menus';
 
 const {authRuntime} = createAuthRuntime();
-const activationOperationId = '10000000-0000-4000-8000-000000000009';
+let activationOperationId = '10000000-0000-4000-8000-000000000009';
 
 test('management setup gates protected requests, confirms initialization, and joins the ordinary login shell', async () => {
   const {runtime, browser} = await authRuntime();
-  for (const scenario of ['setup', 'unavailable', 'foreign-component', 'activation-uninitialized', 'activation-initialize', 'activation-ready', 'activation-unavailable', 'activation-login-unavailable', 'activation-changed', 'activation-initialized-elsewhere', 'activation-conflict', 'activation-commit-failed', 'activation-recover', 'activation-initialize-recover', 'activation-initialize-draining', 'activation-verify-draining'] as const) {
+  for (const scenario of ['setup', 'unavailable', 'foreign-component', 'activation-uninitialized', 'activation-initialize', 'activation-ready', 'activation-unavailable', 'activation-login-unavailable', 'activation-changed', 'activation-initialized-elsewhere', 'activation-conflict', 'activation-rejected', 'activation-recover', 'activation-initialize-recover', 'activation-initialize-draining', 'activation-verify-draining'] as const) {
       const context = await browser.newContext({ viewport: { width: 390, height: 1000 }, locale: 'zh-CN' });
       try {
         await context.addInitScript(() => localStorage.setItem('locale', 'zh-CN'));
         const page = await context.newPage();
         const errors: string[] = [], requests: string[] = [];
         page.on('pageerror', error => errors.push(error.message));
-        let expectedEnableFailure = ['activation-conflict', 'activation-commit-failed'].includes(scenario) ? 1 : 0;
+        let expectedEnableFailure = ['activation-conflict', 'activation-rejected'].includes(scenario) ? 1 : 0;
         page.on('console', message => {
           if (message.type() !== 'error') return;
           if (expectedEnableFailure && message.location().url === runtime.origin + '/api/plugins/user-auth/enable'
-            && message.text().includes(scenario === 'activation-conflict' ? '409' : '500')) { expectedEnableFailure--; return; }
+            && message.text().includes(scenario === 'activation-conflict' ? '409' : '422')) { expectedEnableFailure--; return; }
           errors.push(message.text());
         });
         page.on('requestfailed', request => { errors.push(`${request.method()} ${request.url()}: ${request.failure()?.errorText}`); });
@@ -41,7 +41,7 @@ test('management setup gates protected requests, confirms initialization, and jo
         const provider = { name: manifest.name, ...manifest.management, loginComponent,
           ...(scenario === 'foreign-component' ? { setupComponent: 'TokenStatsChart' } : {}) };
         const config = configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null,
-          retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 }));
+          retryable: false, serving_complete: true, serving_revision: 2, target_revision: 2 }));
         await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/, async route => {
           const request = route.request(), url = new URL(request.url());
           requests.push(`${request.method()} ${url.pathname}`);
@@ -59,16 +59,21 @@ test('management setup gates protected requests, confirms initialization, and jo
           }
           if (request.method() === 'POST' && url.pathname === '/api/plugins/user-auth/enable') {
             enableAttempts++;
-            expect(request.postDataJSON()).toEqual({managementSetup: accountReady
+            const toggleBody = request.postDataJSON();
+            expect(Object.keys(toggleBody).sort()).toEqual(['managementSetup','mutation_id']);
+            expect(toggleBody.mutation_id).toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/);
+            expect(toggleBody.managementSetup).toEqual(accountReady
               ? {operation:'verify',username:'owner',password:'fixture-password'}
-              : {operation:'initialize',username:'owner',password:'fixture-password',passwordConfirmation:'fixture-password'}});
+              : {operation:'initialize',username:'owner',password:'fixture-password',passwordConfirmation:'fixture-password'});
             accountReady = true;
-            if (enableAttempts === 1 && ['activation-conflict', 'activation-commit-failed'].includes(scenario)) {
-              return route.fulfill({status: scenario === 'activation-conflict' ? 409 : 500,
-                json:{error: scenario === 'activation-conflict' ? 'bootstrap_conflict' : 'configuration_commit_failed'}});
+            if (enableAttempts === 1 && ['activation-conflict', 'activation-rejected'].includes(scenario)) {
+              return route.fulfill({status: scenario === 'activation-conflict' ? 409 : 422,
+                json:{error: scenario === 'activation-conflict' ? 'bootstrap_conflict' : 'invalid_configuration',
+                  errors: scenario === 'activation-rejected' ? [{path:'plugins',message:'invalid activation'}] : undefined}});
             }
             selected = true;
-            return route.fulfill({status:202,json:{operation_id:activationOperationId,operation:{mutation_id:activationOperationId,state:backgroundPublication ? 'draining' : 'committed',result_status:null},workers:[]}});
+            activationOperationId = toggleBody.mutation_id;
+            return route.fulfill({status:202,json:{operation_id:activationOperationId,operation:{mutation_id:activationOperationId,expected_revision:1,committed_revision:2,state:backgroundPublication ? 'draining' : 'committed',result_status:null},workers:[]}});
           }
           if (['GET','POST'].includes(request.method()) && url.pathname === '/api/auth/setup') {
             if (scenario === 'unavailable') return json({});
@@ -110,12 +115,12 @@ test('management setup gates protected requests, confirms initialization, and jo
           if (request.method() === 'GET' && url.pathname === '/api/config/runtime') {
             if (!backgroundPublication || !selected) return json(config);
             return json(configurationRuntimeFixture(publicationFixture({
-              operation:{operation_id:activationOperationId,committed_revision:1,state:publicationConverged ? 'converged' : 'draining',
+              operation:{operation_id:activationOperationId,committed_revision:2,state:publicationConverged ? 'converged' : 'draining',
                 result_status:publicationConverged ? 200 : null,error_code:null,updated_at:1},
-              recovery:null,retryable:false,serving_complete:true,serving_revision:1,target_revision:1,
+              recovery:null,retryable:false,serving_complete:true,serving_revision:2,target_revision:2,
             })));
           }
-          if (request.method() === 'GET' && url.pathname === '/api/config') return json({ revision: 1, content_hash: config.content_hash, config: config.config });
+          if (request.method() === 'GET' && url.pathname === '/api/config') return json({ revision: 2, content_hash: config.content_hash, config: config.config });
           if (request.method() === 'GET' && url.pathname === '/api/runtime/upstreams') return json({ schema: 'bungee-runtime-upstreams-v1', generated_at: Date.now(),
             availability: 'complete', reason: null, admission: { revision: 1 }, workers: { observed: [], missing: [] }, upstreams: [] });
           if (request.method() === 'GET' && url.pathname === '/api/stats/dashboard') return json({ startTime: Date.now() - 3600000, endTime: Date.now(), range: '1h',
@@ -198,7 +203,7 @@ test('management setup gates protected requests, confirms initialization, and jo
             expect(enableAttempts).toBe(0);
           } else {
             await (accountReady ? verify : create).click();
-            if (scenario === 'activation-conflict' || scenario === 'activation-commit-failed') {
+            if (scenario === 'activation-conflict' || scenario === 'activation-rejected') {
               await expect(dialog.getByRole('alert')).toBeVisible();
               await expect(verify).toBeEnabled();
               await expect(confirmation).toHaveCount(0);
@@ -216,7 +221,7 @@ test('management setup gates protected requests, confirms initialization, and jo
             await expect(dialog.getByRole('button', {name:'完成',exact:true})).toBeVisible();
             expect(authenticated).toBe(true);
             expect(loginAttempts).toBe(recoverSession ? 2 : 1);
-            expect(enableAttempts).toBe(['activation-conflict', 'activation-commit-failed'].includes(scenario) ? 2 : 1);
+            expect(enableAttempts).toBe(['activation-conflict', 'activation-rejected'].includes(scenario) ? 2 : 1);
             expect(requests.some(value => value.startsWith('GET /api/config/operations/'))).toBe(false);
             expect(await page.evaluate(() => JSON.parse(sessionStorage.getItem('bungee:settings-publication')!)))
               .toEqual({version:1,mutationId:activationOperationId,accepted:true});
@@ -225,12 +230,10 @@ test('management setup gates protected requests, confirms initialization, and jo
               expect(publicationConverged).toBe(false);
               await expect(dialog.locator('form')).toHaveAttribute('aria-busy','false');
               await dialog.getByRole('button', {name:'完成',exact:true}).click();
-              const banner = page.getByTestId('configuration-publication-banner');
-              await expect(banner).toBeVisible();
+              await expect(page.getByTestId('page-plugins')).toBeVisible();
+              await expect(page.getByTestId('page-plugins').getByRole('switch')).toBeChecked();
               expect(enableAttempts).toBe(1);
               publicationConverged = true;
-              await expect(banner).toHaveCount(0);
-              expect(enableAttempts).toBe(1);
             }
             if (recoverSession) {
               expect(setupReads).toBe(2);

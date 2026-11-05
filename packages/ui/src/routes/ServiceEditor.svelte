@@ -3,7 +3,7 @@
   import { pop } from 'svelte-spa-router';
   import { sortBy } from 'lodash-es';
   import { ServicesAPI, ServiceStaleError, type Service, type ServiceBaseline } from '$api/services';
-  import { ConfigurationStaleError, ConfigurationOperationTimeoutError } from '$api/config';
+  import { ConfigurationStaleError } from '$api/config';
   import { validateServiceReferences } from '$validation/service-references';
   import { ManagedBindingError } from '$api/config-adapters';
   import { consumeSourceHandoff, prepareSourceHandoff } from '$api/source-handoff';
@@ -22,11 +22,13 @@
   import EditorNavigation from '$components/shell/EditorNavigation.svelte';
   import { getServiceConsumers, getServiceHealthAggregate, getRouteFeatureBadges } from '$utils/route-service-view-model';
   import { toast } from '$stores/toast';
+  import { editorDirty } from '$stores/navigation-guard';
+  import { configurationWrite } from '$stores/configuration-write';
   import { _ } from '$i18n';
   import { isLoading } from 'svelte-i18n';
   import { v4 as uuidv4 } from 'uuid';
 import { isEditorShortcutBlocked, isModifierPressed } from '$utils/platform';
-import { LoadingIndicator, PanelCard, StatusBadge, StatusDot } from '$components/industrial';
+import { LoadingIndicator, PanelCard, StatusBadge, StatusDot, SystemAlertBar } from '$components/industrial';
 import { Input } from '$components/ui/input';
 import { Textarea } from '$components/ui/textarea';
 import { Button } from '$components/ui/button';
@@ -60,6 +62,15 @@ let service = $state<Service>({
   load_balancing: undefined,
   plugins: [],
 });
+  let savedSignature = $state('');
+  let baselineReady = $state(false);
+  const dirty = $derived(baselineReady && JSON.stringify(service) !== savedSignature);
+  const unresolvedWrite = $derived(!saving && !!$configurationWrite.pending && !$configurationWrite.pending.accepted);
+  const saveBlocked = $derived(unresolvedWrite || $configurationWrite.corrupt);
+  $effect(() => {
+    if (!loading && !baselineReady) { savedSignature = JSON.stringify(service); baselineReady = true; }
+  });
+  $effect(() => { editorDirty.set(dirty); });
 
   let errors = $state<ValidationError[]>([]);
   let weightErrors = $state<ValidationError[]>([]);
@@ -170,6 +181,7 @@ let service = $state<Service>({
       health_check: loaded.service.health_check ?? { enabled: false },
       failover: loaded.service.failover ?? { enabled: false },
     };
+    savedSignature = JSON.stringify(service); baselineReady = true;
     conflictMessage = '';
   }
 
@@ -179,7 +191,7 @@ let service = $state<Service>({
       try {
         await loadExistingService();
       } catch (error: any) {
-        conflictMessage = error.message || '重新加载失败，当前草稿仍保留。';
+        conflictMessage = error.message || '重新加载失败，未保存的更改已保留。';
       } finally {
         reloading = false;
       }
@@ -187,7 +199,8 @@ let service = $state<Service>({
   }
 
   async function handleSave() {
-    if (!isValid || saving || loading || reloading || conflictMessage) return;
+    if (!isValid || saving || loading || reloading || conflictMessage || saveBlocked) return;
+    const beforeSave = JSON.stringify(service);
     try {
       saving = true;
       await performValidation();
@@ -198,28 +211,39 @@ let service = $state<Service>({
       };
       if (isEditMode) {
         if (!baseline) return;
-        await ServicesAPI.update(originalName, sortedService, baseline);
-        toast.show($_('serviceEditor.serviceUpdated'), 'success');
+        baseline = await ServicesAPI.update(originalName, sortedService, baseline);
+        originalName = sortedService.name;
       } else {
-        await ServicesAPI.create(sortedService);
-        toast.show($_('serviceEditor.serviceSaved'), 'success');
+        baseline = await ServicesAPI.create(sortedService);
+        originalName = sortedService.name;
+        isEditMode = true;
+        // Continue editing the persisted entity; a reload keeps the edit route.
+        replaceEditorPath(sortedService.name);
         localStorage.removeItem('bungee-service-draft');
       }
-      pop();
+      savedSignature = beforeSave;
+      toast.show($_('editor.saved'), 'success');
     } catch (e: any) {
       if (e instanceof ServiceStaleError || e instanceof ConfigurationStaleError) {
         conflictMessage = e instanceof ServiceStaleError ? e.message
-          : '保存期间配置发生变化，未保存任何修改。当前草稿仍保留，请重新加载最新版本后再编辑。';
+          : '保存期间配置发生变化，本次未保存。未保存的更改已保留，请重新加载配置后再保存。';
         toast.show(conflictMessage, 'error');
         return;
       }
-      toast.show(e instanceof ConfigurationOperationTimeoutError ? $_('configurationSave.waitingStopped') : e.message || $_('serviceEditor.saveFailed'), e instanceof ConfigurationOperationTimeoutError ? 'warning' : 'error');
+      toast.show(e.message || $_('serviceEditor.saveFailed'), 'error');
     } finally {
       saving = false;
     }
   }
 
+  function replaceEditorPath(name: string) {
+    const target = `/services/edit/${encodeURIComponent(name)}`;
+    if (window.location.hash.slice(1).split('?')[0] === target) return;
+    window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}#${target}`);
+  }
+
   function handleCancel() {
+    if (!dirty) { pop(); return; }
     showConfirm(
       $_('confirmDialog.cancelTitle'),
       $_('confirmDialog.cancelMessage'),
@@ -273,6 +297,8 @@ let service = $state<Service>({
         console.error('Failed to restore draft:', e);
       }
     }
+    // A new-service handoff draft is unsaved: baseline the empty initial draft before applying it.
+    if (!isEditMode && !baselineReady) { savedSignature = JSON.stringify(service); baselineReady = true; }
     let focusIndex = -1;
     if (consumed.handoff && !conflictMessage && (!isEditMode || baseline)) {
       const before = JSON.stringify(service);
@@ -293,6 +319,7 @@ let service = $state<Service>({
 
   onDestroy(() => {
     lifetime.abort();
+    editorDirty.set(false);
     window.removeEventListener('keydown', handleKeydown);
     if (autoSaveInterval) clearInterval(autoSaveInterval);
   });
@@ -585,6 +612,12 @@ let service = $state<Service>({
   <!-- ===== Bottom action bar ===================================== -->
   <div class="fixed bottom-0 left-0 right-0 bg-carbon-950 border-t border-carbon-600 shadow-industrial-lg z-40" bind:offsetHeight={actionsHeight}>
     <div class="nx-page py-3">
+      {#if saveBlocked}
+        <SystemAlertBar tone="warn" class="mb-3">
+          <p class="text-sm text-zinc-300" role="status">{$_(unresolvedWrite ? 'editor.unknownPending' : 'settings.storageError')}
+            <a href="/#/config" class="text-nexus-300 underline">{$_('editor.reconcile')}</a></p>
+        </SystemAlertBar>
+      {/if}
       <div class="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
         <div class="flex items-center gap-4 min-w-0">
           {#if conflictMessage}
@@ -618,10 +651,10 @@ let service = $state<Service>({
         </div>
 
         <div class="flex items-center justify-end gap-2">
-          <Button variant="ghost" onclick={handleCancel} disabled={saving}>
-            {$_('common.cancel')}
+          <Button variant="ghost" onclick={handleCancel} disabled={saving} data-testid="service-editor-back">
+            {dirty ? $_('common.cancel') : $_('common.backToList')}
           </Button>
-          <Button variant="default" disabled={!isValid || saving || loading || reloading || !!conflictMessage} onclick={handleSave} data-testid="service-save-button">
+          <Button variant="default" disabled={!isValid || saving || loading || reloading || !!conflictMessage || saveBlocked} onclick={handleSave} data-testid="service-save-button">
             {#if saving}
               <LoadingIndicator label="" size="xs" centered={false} />
             {:else}

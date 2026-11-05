@@ -7,6 +7,7 @@ import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { ConfigRepository, ConfigRepositoryError, hashConfigurationContent, hashConfigurationRequest,
   type ConfigRepositoryOptions } from '../../src/config-storage';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
+import { settleWorkerLaunch } from '../helpers/worker-launch';
 
 setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
@@ -31,11 +32,19 @@ function commit(repository: ConfigRepository, mutationId: string, revision = 1, 
     kind: 'config', created_at: NOW + revision, target_worker_slots: slots }).kind).toBe('committed');
 }
 
+const CATALOG = `sha256:${'9'.repeat(64)}` as const;
+
+function claim(repository: ConfigRepository): void {
+  repository.claimPublicationTarget(CATALOG, NOW);
+}
+
 function replacementFailure(repository: ConfigRepository, mutationId: string): void {
   commit(repository, mutationId);
+  claim(repository);
   repository.beginPublication(mutationId, NOW + 2);
   repository.beginWorkerAttempt(mutationId, 0, 0, 'initial', NOW + 3);
   repository.recordWorkerResult(mutationId, 0, { kind: 'failed', attempt_no: 1, error: 'worker rejected' }, NOW + 4);
+  settleWorkerLaunch(repository, mutationId, 0, 1, NOW + 5);
   repository.finalizePublication(mutationId, {
     outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'worker rejected', recovery_disposition: 'retryable',
   }, NOW + 5);
@@ -538,6 +547,7 @@ describe('durable configuration recoveries', () => {
       if (stage === 'after_automatic_recovery') throw failure;
     } });
     commit(repository, 'atomic-fault');
+    claim(repository);
     repository.beginPublication('atomic-fault', NOW + 2);
     repository.beginWorkerAttempt('atomic-fault', 0, 0, 'initial', NOW + 3);
     repository.recordWorkerResult('atomic-fault', 0, { kind: 'failed', attempt_no: 1, error: 'failure' }, NOW + 4);
@@ -565,13 +575,12 @@ describe('durable configuration recoveries', () => {
       recovery_id: recoveryId, source_mutation_id: 'auto-recovery', target_revision: 2,
       trigger: 'automatic', state: 'scheduled', attempt_count: 0, max_attempts: 6, next_retry_at: NOW + 255,
     });
-    expect(repository.commit({ mutation_id: 'blocked-by-recovery', expected_revision: 2, aggregate: AGGREGATE,
-      kind: 'config', created_at: NOW + 6, target_worker_slots: [0] })).toEqual({
-      kind: 'recovery_in_progress', recovery_id: recovery.recovery_id, target_revision: 2, state: 'scheduled',
-    });
     expectRecoveryError(() => repository.createManualRecovery(
       'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'auto-recovery', 2, NOW + 7,
     ), 'recovery_in_progress');
+    expect(repository.commit({ mutation_id: 'saved-during-recovery', expected_revision: 2, aggregate: AGGREGATE,
+      kind: 'config', created_at: NOW + 6, target_worker_slots: [0] }).kind).toBe('committed');
+    expectRecoveryError(() => repository.claimPublicationTarget(CATALOG, NOW + 6), 'recovery_in_progress');
     expectRecoveryError(() => repository.stopRecovery(
       recovery.recovery_id, 0, 'deterministic_control_failure', 'wrong category', NOW + 7,
     ), 'source_not_retryable');
@@ -591,9 +600,11 @@ describe('durable configuration recoveries', () => {
     ] as const).entries()) {
       const offset = index * 10;
       commit(repository, mutationId, index + 1);
+      claim(repository);
       repository.beginPublication(mutationId, NOW + offset + 2);
       repository.beginWorkerAttempt(mutationId, 0, 0, 'initial', NOW + offset + 3);
       repository.recordWorkerResult(mutationId, 0, { kind: 'failed', attempt_no: 1, error: 'failure' }, NOW + offset + 4);
+      settleWorkerLaunch(repository, mutationId, 0, 1, NOW + offset + 5);
       repository.finalizePublication(mutationId, {
         outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'failure',
         recovery_disposition: disposition,
@@ -614,9 +625,11 @@ describe('durable configuration recoveries', () => {
     const opened = open();
     const { repository, dbPath } = opened;
     commit(repository, 'fatal-reopen');
+    claim(repository);
     repository.beginPublication('fatal-reopen', NOW + 2);
     repository.beginWorkerAttempt('fatal-reopen', 0, 0, 'initial', NOW + 3);
     repository.recordWorkerResult('fatal-reopen', 0, { kind: 'failed', attempt_no: 1, error: 'fatal source' }, NOW + 4);
+    settleWorkerLaunch(repository, 'fatal-reopen', 0, 1, NOW + 5);
     repository.finalizePublication('fatal-reopen', {
       outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'fatal source', recovery_disposition: 'fatal',
     }, NOW + 5);
@@ -738,34 +751,26 @@ describe('durable configuration recoveries', () => {
       const mutation = `race-commit-${round}`;
       const actions = round % 2 === 0 ? ['manual', 'commit'] as const : ['commit', 'manual'] as const;
       const outcomes = await runRaceRound(repository, dbPath, actions, source, mutation, recoveryId, round);
-      expect(outcomes.filter((outcome) => outcome.ok)).toHaveLength(1);
-      expect(outcomes.filter((outcome) => !outcome.ok)).toHaveLength(1);
-      const winner = outcomes.find((outcome) => outcome.ok);
-      if (winner === undefined) throw new Error('race winner missing');
-      expect(winner.kind).toBe(winner.action === 'manual' ? 'manual' : 'committed');
-      const loser = outcomes.find((outcome) => !outcome.ok);
-      if (loser === undefined) throw new Error('race loser missing');
-      if (winner.action === 'manual') {
-        expect(winner).toMatchObject({ recovery_id: recoveryId });
-        expect(loser).toMatchObject({ action: 'commit', code: 'recovery_in_progress' });
-        expect(repository.getSnapshot().revision).toBe(2);
-        expect(repository.getOperation(mutation)).toBeNull();
-        expect(repository.getRecovery(recoveryId)).toMatchObject({
-          source_mutation_id: source, target_revision: 2, trigger: 'manual', state: 'scheduled',
-        });
-        expect(activeRecoveryCount(repository)).toBe(1);
+      const commit = outcomes.find((outcome) => outcome.action === 'commit');
+      const manual = outcomes.find((outcome) => outcome.action === 'manual');
+      // Saves no longer wait for reconciliation: the commit always persists, while the
+      // manual recovery either wins the earlier revision or observes it as stale.
+      expect(commit).toMatchObject({ ok: true, revision: 3 });
+      if (manual?.ok) expect(manual).toMatchObject({ recovery_id: recoveryId });
+      else expect(manual).toMatchObject({ code: 'stale_revision' });
+      // This fixture deliberately permits independent processes; the master normally owns
+      // the configuration lock. Its cache stays at the last locally confirmed revision.
+      expect(repository.getSnapshot().revision).toBe(2);
+      repository.close();
+      REPOSITORIES.splice(REPOSITORIES.indexOf(repository), 1);
+      const restarted = ConfigRepository.open(dbPath);
+      REPOSITORIES.push(restarted);
+      expect(restarted.getSnapshot().revision).toBe(3);
+      expect(restarted.getOperation(mutation)).toMatchObject({ mutation_id: mutation, committed_revision: 3 });
+      if (manual?.ok) {
+        expect(restarted.getRecovery(recoveryId)).toMatchObject({ source_mutation_id: source, target_revision: 2, state: 'scheduled' });
+        expect(activeRecoveryCount(restarted)).toBe(1);
       } else {
-        expect(winner).toMatchObject({ revision: 3 });
-        expect(loser).toMatchObject({ action: 'manual', code: 'stale_revision' });
-        // This fixture deliberately permits independent processes; the master normally owns
-        // the configuration lock. Its cache stays at the last locally confirmed revision.
-        expect(repository.getSnapshot().revision).toBe(2);
-        repository.close();
-        REPOSITORIES.splice(REPOSITORIES.indexOf(repository), 1);
-        const restarted = ConfigRepository.open(dbPath);
-        REPOSITORIES.push(restarted);
-        expect(restarted.getSnapshot().revision).toBe(3);
-        expect(restarted.getOperation(mutation)).toMatchObject({ mutation_id: mutation, committed_revision: 3 });
         expect(restarted.getRecovery(recoveryId)).toBeNull();
         expect(activeRecoveryCount(restarted)).toBe(0);
       }
@@ -776,6 +781,31 @@ describe('durable configuration recoveries', () => {
     for (const negative of ['extra', 'terminal-before-start', 'eof-residual', 'duplicate-after-error'] as const) {
       await expectNegativeRaceCase(negative);
     }
+  });
+
+  test('manual and newer recovery claims cannot hide a stopped safety-unknown barrier', () => {
+    const { repository } = open();
+    replacementFailure(repository, 'unknown-old');
+    const oldId = repository['db'].query<{ readonly recovery_id: string }, [string]>(
+      'SELECT recovery_id FROM configuration_recoveries WHERE source_mutation_id=?',
+    ).get('unknown-old')?.recovery_id;
+    if (oldId === undefined) throw new Error('automatic recovery missing');
+    repository.claimRecoveryAttempt(oldId, 0, NOW + 300);
+    repository.stopRecovery(oldId, 1, 'safety_outcome_unknown', 'exit state unknown', NOW + 301);
+
+    expectRecoveryError(() => repository.createManualRecovery(
+      'dddddddd-dddd-4ddd-8ddd-dddddddddddd', 'unknown-old', 2, NOW + 302,
+    ), 'recovery_in_progress');
+
+    const newerId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    repository['db'].run(`INSERT INTO configuration_recoveries
+      (recovery_id,source_mutation_id,target_revision,trigger,state,attempt_count,max_attempts,
+       next_retry_at,created_at,updated_at)
+      VALUES (?,?,2,'automatic','scheduled',0,6,?,?,?)`,
+    [newerId, 'unknown-old', NOW + 500, NOW + 303, NOW + 303]);
+
+    expect(repository.getPublicationRecoveryBarrier(newerId)?.recovery_id).toBe(oldId);
+    expectRecoveryError(() => repository.claimRecoveryAttempt(newerId, 0, NOW + 304), 'recovery_in_progress');
   });
 
   test('supports manual idempotency, CAS attempt transitions, exact retry times, and reopen requeue', () => {
@@ -821,9 +851,11 @@ describe('durable configuration recoveries', () => {
   test('does not schedule recovery for old-worker drain failure and rejects stale manual source', () => {
     const { repository } = open();
     commit(repository, 'drain-failure');
+    claim(repository);
     repository.beginPublication('drain-failure', NOW + 2);
     repository.beginWorkerAttempt('drain-failure', 0, 0, 'initial', NOW + 3);
     repository.recordWorkerResult('drain-failure', 0, { kind: 'converged', attempt_no: 1, applied_revision: 2 }, NOW + 4);
+    settleWorkerLaunch(repository, 'drain-failure', 0, 1, NOW + 5);
     repository.markDraining('drain-failure', NOW + 5);
     repository.finalizePublication('drain-failure', {
       outcome: 'degraded', error_code: 'old_worker_drain_failed', error_detail: 'drain failed', recovery_disposition: 'retryable', old_workers_exited: true,
@@ -873,7 +905,7 @@ describe('durable configuration recoveries', () => {
       VALUES ('cccccccc-cccc-4ccc-8ccc-cccccccccccc','priority-source',2,'manual','scheduled',0,6,${NOW + 101},${NOW + 101})`)).toThrow();
   });
 
-  test('rejects recovery side effects after the active revision drifts', () => {
+  test('keeps recovery bound to its own target after the active revision drifts', () => {
     const { repository } = open();
     replacementFailure(repository, 'drift-source');
     const automaticId = repository['db'].query<{ readonly recovery_id: string }, [string]>(
@@ -897,18 +929,20 @@ describe('durable configuration recoveries', () => {
        last_begin_reason,state,applied_revision,last_error,updated_at)
       VALUES ('drift-target',0,3,0,1,0,'initial','converged',3,NULL,${NOW + 10})`);
     db.run('UPDATE configuration_state SET active_revision=3,updated_at=? WHERE id=1', [NOW + 10]);
-    // Cached reads never scan SQL; global sequence and historical drift belong to maintenance.
+    // Cached reads never scan SQL; a valid newer revision does not invalidate its own target.
     expect(repository.getSnapshot().revision).toBe(2);
-    expectRecoveryError(() => repository.verify(), 'schema_corrupt');
-    expectRecoveryError(() => repository.claimRecoveryAttempt(manualId, 0, NOW + 11), 'stale_revision');
-    const stopped = repository.stopRecovery(manualId, 0, 'revision_superseded', null, NOW + 12);
+    expect(() => repository.verify()).not.toThrow();
+    expect(repository.claimRecoveryAttempt(manualId, 0, NOW + 11)).toMatchObject({
+      state: 'running', attempt_count: 1,
+    });
+    const stopped = repository.stopRecovery(manualId, 1, 'revision_superseded', null, NOW + 12);
     expect(stopped).toMatchObject({
       state: 'stopped', final_reason_code: 'revision_superseded',
     });
     expect(repository.succeedRecovery(automaticId, 0, 'already_serving', null, NOW + 13)).toMatchObject({
       state: 'succeeded', final_reason_code: 'already_serving',
     });
-    expect(repository.stopRecovery(manualId, 0, 'revision_superseded', null, NOW + 14)).toEqual(stopped);
+    expect(repository.stopRecovery(manualId, 1, 'revision_superseded', null, NOW + 14)).toEqual(stopped);
   });
 
   test('rejects invalid running fields and invalid terminal reasons with typed failures', () => {

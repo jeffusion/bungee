@@ -7,12 +7,10 @@ import {
   importConfig,
   validateImport,
   commitConfiguration,
-  getConfigurationOperation,
   type ConfigurationSnapshot,
   type ConfigurationImportPreview,
 } from '../../../src/api/config';
 import { preCommitRejection } from '../../../src/components/domain/config/publication-state';
-import { ApiError } from '../../../src/api/client';
 
 const activeAggregate: ConfigurationAggregate = {
   logical_configuration: { auth: { enabled: true, tokens: ['current-token'] }, services: [], routes: [], plugins: [] },
@@ -74,6 +72,8 @@ function acceptedImport(state: 'committed' | 'converged' | 'degraded'): MockResp
     revision: 8,
     operation: {
       mutation_id: operationId,
+      expected_revision: 7,
+      committed_revision: 8,
       state,
       result_status: state === 'converged' ? 200 : state === 'degraded' ? 202 : null,
       error_code: state === 'degraded' ? 'replacement_convergence_failed' : null,
@@ -113,7 +113,7 @@ describe('configuration snapshot import', () => {
     const requests: RequestRecord[] = [];
     install(requests, [
       acceptedImport('committed'),
-      () => Response.json({ operation: { mutation_id: lastMutationId, state: 'converged', result_status: 200 }, workers: [] }),
+      () => Response.json({ operation: { mutation_id: lastMutationId, expected_revision: 7, committed_revision: 8, state: 'converged', result_status: 200 }, workers: [] }),
     ]);
 
     // When
@@ -197,16 +197,16 @@ test('import timeout retains the dispatched identity and performs no second POST
 });
 
 for (const method of ['PUT', 'import'] as const) {
-  test(`${method}: committed write returning repository_unavailable stays unaccepted until the same identity is queried`, async () => {
+  test(`${method}: a committed write whose response is lost is reconciled by the original identity`, async () => {
     const requests: RequestRecord[] = [], dispatched: string[] = [];
-    let revision = snapshot.revision, operation: { mutation_id: string; state: string; committed_revision: number } | null = null;
+    let revision = snapshot.revision, operation: { mutation_id: string; state: string; expected_revision: number; committed_revision: number; result_status: null } | null = null;
     let accepted = false, observations = 0;
     const candidate = envelope(['next-token']), before = JSON.stringify(candidate);
     const values = install(requests, [
       init => {
         const body = JSON.parse(String(init?.body));
         revision++;
-        operation = { mutation_id: body.mutation_id, state: 'committed', committed_revision: revision };
+        operation = { mutation_id: body.mutation_id, state: 'committed', expected_revision: snapshot.revision, committed_revision: revision, result_status: null };
         return Response.json({ error: 'repository_unavailable' }, { status: 503 });
       },
       init => {
@@ -214,22 +214,17 @@ for (const method of ['PUT', 'import'] as const) {
         return Response.json({ operation, workers: [] });
       },
     ]);
-    const options = { nextAuthorization: 'next-token', onDispatch: (id: string) => dispatched.push(id),
+    const options = { nextAuthorization: 'next-token', completion: 'committed' as const, onDispatch: (id: string) => dispatched.push(id),
       onOperation: () => { accepted = true; observations++; } };
-    const error = await rejection(method === 'PUT' ? commitConfiguration(snapshot, candidate.aggregate, options) : importConfig(snapshot, candidate, options));
+    const result = await (method === 'PUT' ? commitConfiguration(snapshot, candidate.aggregate, options) : importConfig(snapshot, candidate, options));
     expect(revision).toBe(snapshot.revision + 1);
     expect(operation).not.toBeNull();
-    expect(error).toBeInstanceOf(ApiError);
-    expect((error as ApiError).status).toBe(503);
-    expect((error as ApiError).body).toEqual({ error: 'repository_unavailable' });
-    expect(accepted).toBe(false); expect(observations).toBe(0);
-    expect(preCommitRejection(error, accepted)).toBeNull();
-    expect(requests).toHaveLength(1); expect(dispatched).toHaveLength(1);
+    expect(result.operation.mutation_id).toBe(dispatched[0]);
+    expect(result.operation.state).toBe('committed');
+    expect(accepted).toBe(true); expect(observations).toBe(1);
+    expect(requests).toHaveLength(2); expect(dispatched).toHaveLength(1);
     expect(JSON.stringify(candidate)).toBe(before);
     expect(values.get('bungee_auth_token')).toBe('current-token');
-    const found = await getConfigurationOperation(dispatched[0], new Headers({ Authorization: 'Bearer next-token' }));
-    expect(found.operation.mutation_id).toBe(dispatched[0]);
-    expect(found.operation.state).toBe('committed');
     expect(requests[1].url).toBe(`/api/config/operations/${dispatched[0]}`);
     expect(requests.filter(r => r.init?.method === 'PUT' || r.init?.method === 'POST')).toHaveLength(1);
   });
@@ -242,15 +237,22 @@ for (const method of ['PUT', 'import'] as const) {
         : failure === 'read' ? () => new Response(new ReadableStream({ start(controller) { controller.error(new Error('SECRET')); } }), { status: 503 })
         : failure === 'nonJSON' ? new Response('SECRET', { status })
         : Response.json({ error: code, reason: 'lease_margin', message: 'SECRET' }, { status });
-      const values = install(requests, [...(failure === 'accepted503' ? [acceptedImport('committed')] : []), response]);
+      const queried = !['control_recovering', 'control_readiness_failed', 'accepted503'].includes(failure);
+      const values = install(requests, [...(failure === 'accepted503' ? [acceptedImport('committed')] : []), response,
+        ...(queried ? [Response.json({ error: 'operation_not_found' }, { status: 404 })] : [])]);
       const candidate = envelope(['next-token']), before = JSON.stringify(candidate);
       let accepted = false;
       const options = { nextAuthorization: 'next-token', onOperation: () => { accepted = true; }, pollIntervalMs: 0 };
       const error = await rejection(method === 'PUT' ? commitConfiguration(snapshot, candidate.aggregate, options) : importConfig(snapshot, candidate, options));
       expect(!!preCommitRejection(error, accepted)).toBe(['control_recovering', 'control_readiness_failed'].includes(failure));
       expect(requests.filter(r => r.init?.method === 'PUT' || r.init?.method === 'POST')).toHaveLength(1);
-      expect(requests).toHaveLength(failure === 'accepted503' ? 2 : 1);
+      expect(requests).toHaveLength(failure === 'accepted503' ? 2 : queried ? 2 : 1);
       expect(accepted).toBe(failure === 'accepted503');
+      if (queried) {
+        const id = JSON.parse(String(requests[0]?.init?.body)).mutation_id;
+        expect(new URL(requests[1]!.url, 'http://ui.test').pathname).toBe(`/api/config/operations/${id}`);
+        expect(new Headers(requests[1]!.init?.headers).get('Authorization')).toBe('Bearer next-token');
+      }
       expect(JSON.stringify(candidate)).toBe(before);
       expect(values.get('bungee_auth_token')).toBe('current-token');
     });

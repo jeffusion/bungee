@@ -72,6 +72,8 @@ export async function initializePluginRuntime(
     services?: PluginServiceHost;
     /** Host gate awaited before any plugin handler is created. */
     beforeBootstrap?: (signal: AbortSignal) => Promise<void>;
+    /** Cancels cooperative plugin initialization during worker shutdown. */
+    signal?: AbortSignal;
   } = {},
 ): Promise<PluginRuntimeOrchestratorApplyResult> {
   await cleanupPluginRegistry();
@@ -83,7 +85,7 @@ export async function initializePluginRuntime(
     options.beforeBootstrap,
   );
 
-  const result = await pluginRuntimeOrchestrator.applyConfig(config);
+  const result = await pluginRuntimeOrchestrator.applyConfig(config, options.signal);
   pluginRegistry = pluginRuntimeOrchestrator.getPluginRegistry();
 
   logger.debug({ generation: result.generation }, 'Plugin runtime initialized via orchestrator');

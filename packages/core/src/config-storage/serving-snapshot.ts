@@ -34,7 +34,8 @@ function canonicalAggregate(
   return { aggregateJson, contentHash: hashConfigurationContent(result.value) };
 }
 
-export function appendServingSnapshot(
+/** Store the immutable aggregate under a catalog identity without opening a transaction. */
+export function writeServingSnapshot(
   db: Database,
   snapshot: RepositorySnapshot,
   pluginCatalogHash: Sha256Digest,
@@ -48,34 +49,38 @@ export function appendServingSnapshot(
   if (normalized.contentHash !== snapshot.content_hash) {
     invalid('configuration aggregate content hash does not match');
   }
+  const revision = sqliteGet<RevisionRow, [number]>(
+    db,
+    'SELECT revision,content_hash FROM configuration_revisions WHERE revision=?',
+    snapshot.revision,
+  );
+  if (revision === null || revision.content_hash !== snapshot.content_hash) {
+    invalid('serving snapshot revision does not match configuration history');
+  }
+  const existing = sqliteGet<ServingSnapshotRow, [number, string, string]>(
+    db,
+    `SELECT revision,content_hash,plugin_catalog_hash,aggregate_json
+     FROM configuration_serving_snapshots
+     WHERE revision=? AND content_hash=? AND plugin_catalog_hash=?`,
+    snapshot.revision, snapshot.content_hash, pluginCatalogHash,
+  );
+  if (existing !== null) {
+    if (existing.aggregate_json !== normalized.aggregateJson) {
+      corrupt('configuration serving snapshot is immutable and inconsistent');
+    }
+    return;
+  }
+  db.run(`INSERT INTO configuration_serving_snapshots
+    (revision,content_hash,plugin_catalog_hash,aggregate_json) VALUES (?,?,?,?)`,
+    [snapshot.revision, snapshot.content_hash, pluginCatalogHash, normalized.aggregateJson]);
+}
 
-  const transaction = db.transaction(() => {
-    const revision = sqliteGet<RevisionRow, [number]>(
-      db,
-      'SELECT revision,content_hash FROM configuration_revisions WHERE revision=?',
-      snapshot.revision,
-    );
-    if (revision === null || revision.content_hash !== snapshot.content_hash) {
-      invalid('serving snapshot revision does not match configuration history');
-    }
-    const existing = sqliteGet<ServingSnapshotRow, [number, string, string]>(
-      db,
-      `SELECT revision,content_hash,plugin_catalog_hash,aggregate_json
-       FROM configuration_serving_snapshots
-       WHERE revision=? AND content_hash=? AND plugin_catalog_hash=?`,
-      snapshot.revision, snapshot.content_hash, pluginCatalogHash,
-    );
-    if (existing !== null) {
-      if (existing.aggregate_json !== normalized.aggregateJson) {
-        corrupt('configuration serving snapshot is immutable and inconsistent');
-      }
-      return;
-    }
-    db.run(`INSERT INTO configuration_serving_snapshots
-      (revision,content_hash,plugin_catalog_hash,aggregate_json) VALUES (?,?,?,?)`,
-      [snapshot.revision, snapshot.content_hash, pluginCatalogHash, normalized.aggregateJson]);
-  });
-  transaction.immediate();
+export function appendServingSnapshot(
+  db: Database,
+  snapshot: RepositorySnapshot,
+  pluginCatalogHash: Sha256Digest,
+): void {
+  db.transaction(() => writeServingSnapshot(db, snapshot, pluginCatalogHash)).immediate();
 }
 
 export function getServingSnapshot(

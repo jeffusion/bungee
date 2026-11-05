@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { AppConfig } from '@jeffusion/bungee-types';
-import { PluginRuntimeOrchestrator } from '../../../src/plugin-runtime-orchestrator';
+import { PluginRuntimeInitializationCleanupError, PluginRuntimeOrchestrator } from '../../../src/plugin-runtime-orchestrator';
 import {
   cleanupPluginRegistry,
   getPluginRegistry,
@@ -92,6 +92,48 @@ export default class ManifestRuntimePlugin {
   }
 }
 `);
+  return entryPath;
+}
+
+function writeSignalPlugin(root: string, marker: string): string {
+  const entryPath = join(root, 'signal-plugin', 'index.ts');
+  mkdirSync(dirname(entryPath), { recursive: true });
+  writeFileSync(entryPath, `
+const state = globalThis[${JSON.stringify(marker)}] ??= {};
+export default class SignalPlugin {
+  static name = 'signal-plugin';
+  static version = '1.0.0';
+  async init(context) {
+    state.signal = context.signal;
+    if (context.signal === undefined) throw new Error('init context signal is missing');
+    await new Promise((_resolve, reject) => {
+      if (context.signal.aborted) return reject(context.signal.reason);
+      context.signal.addEventListener('abort', () => reject(context.signal.reason), { once: true });
+    });
+  }
+  bodyRequirements() { return { request: 'none' }; }
+  register() {}
+  async onDestroy() { state.destroyed = true; }
+}
+`);
+  writeRuntimeTestManifest(entryPath, 'signal-plugin');
+  return entryPath;
+}
+
+function writePartialCleanupPlugin(root: string): string {
+  const entryPath = join(root, 'partial-cleanup-plugin', 'index.ts');
+  mkdirSync(dirname(entryPath), { recursive: true });
+  writeFileSync(entryPath, `
+export default class PartialCleanupPlugin {
+  static name = 'partial-cleanup-plugin';
+  static version = '1.0.0';
+  async init() { throw new Error('init failed'); }
+  bodyRequirements() { return { request: 'none' }; }
+  register() {}
+  async onDestroy() { throw new Error('destruction failed'); }
+}
+`);
+  writeRuntimeTestManifest(entryPath, 'partial-cleanup-plugin');
   return entryPath;
 }
 
@@ -186,6 +228,36 @@ describe('plugin runtime reconcile orchestrator', () => {
       expect(pluginState?.state.runtime.currentGeneration).toBe(1);
       expect(pluginState?.state.runtime.servingGeneration).toBe(1);
     });
+
+  test('partial instance cleanup failure propagates as initialization cleanup failure', async () => {
+    const root = createTempRoot();
+    const pluginPath = writePartialCleanupPlugin(root);
+
+    await expect(initializePluginRuntime(
+      { plugins: [{ name: 'partial-cleanup-plugin', path: pluginPath, enabled: true }], routes: [] },
+      { basePath: root, activatedPluginNames: ['partial-cleanup-plugin'] },
+    )).rejects.toBeInstanceOf(PluginRuntimeInitializationCleanupError);
+  });
+
+  test('worker initialization passes its shutdown signal into the plugin context and settles on abort', async () => {
+    const root = createTempRoot();
+    const marker = `signal-plugin:${crypto.randomUUID()}`;
+    const pluginPath = writeSignalPlugin(root, marker);
+    const controller = new AbortController();
+    const pending = initializePluginRuntime(
+      { plugins: [{ name: 'signal-plugin', path: pluginPath, enabled: true }], routes: [] },
+      { basePath: root, activatedPluginNames: ['signal-plugin'], signal: controller.signal },
+    );
+    const state = (globalThis as typeof globalThis & Record<string, { signal?: AbortSignal; destroyed?: boolean }>);
+    while (state[marker]?.signal === undefined) await Bun.sleep(1);
+    expect(state[marker].signal).toBe(controller.signal);
+
+    controller.abort(new Error('worker shutdown'));
+
+    await expect(pending).rejects.toThrow('worker shutdown');
+    expect(state[marker].destroyed).toBe(true);
+    expect(controller.signal.aborted).toBe(true);
+  });
 
   test('runtime status keys stay on logical plugin name when class name differs', async () => {
     const root = createTempRoot();

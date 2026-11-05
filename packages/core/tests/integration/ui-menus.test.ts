@@ -100,7 +100,7 @@ function fixture() {
   }});
   const api=createConfigControlApi({repository:configurationRepositoryFixture(repository),managementAuth:auth.managementAuth,
     menuApi,admission:{snapshot:()=>[]},workerCount:1,clock:{now:()=>0},resolveAuthToken:v=>v,parseAggregate:parseNormalizeCompileAggregate,
-    publicationTasks:{enqueue(){publicationCalls++;}},isMutationReady:()=>true});
+    publicationTasks:{wake(){publicationCalls++;}},isMutationReady:()=>true});
   const send=(path:string,init:RequestInit={},authenticated=true)=>api.handle(new Request(`http://control.test${path}`,{
     ...init,headers:{...(authenticated ? {authorization:`Bearer ${auth.current.token}`} : {}),...init.headers},
   }));

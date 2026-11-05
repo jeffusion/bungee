@@ -98,7 +98,7 @@ Usage counts are replacement totals for the specified attempt, applied to its or
 
   program
     .command('export')
-    .description('Export current configuration from the Management server as a versioned snapshot JSON')
+    .description('Export the current configuration from the Management server as a JSON file')
     .requiredOption('-o, --file <path>', 'Output file path')
     .option('-p, --port <port>', 'Management server port', DEFAULT_MANAGEMENT_PORT)
     .option('-H, --host <host>', 'Management server host', 'localhost')
@@ -107,8 +107,8 @@ Usage counts are replacement totals for the specified attempt, applied to its or
 
   program
     .command('import')
-    .description('Restore configuration on the Management server from a versioned snapshot JSON')
-    .requiredOption('-f, --file <path>', 'Snapshot file path')
+    .description('Save a configuration file on the Management server')
+    .requiredOption('-f, --file <path>', 'Configuration file path')
     .option('-p, --port <port>', 'Management server port', DEFAULT_MANAGEMENT_PORT)
     .option('-H, --host <host>', 'Management server host', 'localhost')
     .option('-t, --token <token>', 'Management auth token')

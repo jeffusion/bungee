@@ -19,11 +19,12 @@ import {
   type PublicationScheduler,
   type ServingConfigWorker,
   type WorkerAdmissionController,
+  type CreationPermit,
 } from './coordinator-types';
 import { classifyRecoveryError } from './recovery-disposition';
 import { allDrainExitsConfirmed, drainFailures, drainWorkersUntilKnown } from './drain-workers';
 import { waitForAdmissionHandoff, type AdmissionHandoffResult } from './admission-handoff';
-import { cleanupConfirmed, OwnedProcessCollection } from './process-cleanup';
+import { cleanupConfirmed, candidateResourcesReleased, OwnedProcessCollection, type ProcessCleanupResult } from './process-cleanup';
 import { waitForApply } from './worker-wait';
 import { ProcessIdentityAllocator, validateReplacementProcess } from './process-identity';
 
@@ -37,6 +38,22 @@ type PublicationStderr = {
 };
 
 const PUBLICATION_CANCELLED = Symbol('bungee.publication.cancelled');
+const PUBLICATION_TARGET_UPDATED = Symbol('bungee.publication.targetUpdated');
+
+type PublicationTargetUpdated = Error & {
+  readonly [PUBLICATION_TARGET_UPDATED]: true;
+};
+
+function publicationTargetUpdated(): PublicationTargetUpdated {
+  const error = new Error('configuration target was updated during startup') as PublicationTargetUpdated;
+  Object.defineProperty(error, PUBLICATION_TARGET_UPDATED, { value: true });
+  return error;
+}
+
+export function isPublicationTargetUpdated(error: unknown): error is PublicationTargetUpdated {
+  return typeof error === 'object' && error !== null
+    && (error as Partial<PublicationTargetUpdated>)[PUBLICATION_TARGET_UPDATED] === true;
+}
 
 type PublicationCancellation = Error & {
   readonly [PUBLICATION_CANCELLED]: true;
@@ -73,10 +90,14 @@ export type PublicationRunOptions = {
   readonly oldWorkers: readonly ServingConfigWorker[];
   readonly pluginCatalogHash: Sha256Digest;
   readonly admission: WorkerAdmissionController;
+  readonly latestRevision: () => number;
   readonly recoveringMaster: boolean;
   readonly priorAttemptExited?: boolean;
   readonly recoveredActive?: { readonly workers: readonly ServingConfigWorker[]; readonly admission: import('./coordinator-types').PreparedWorkerAdmission };
   readonly confirmPreviousWorkersExited?: (replacements: readonly ServingConfigWorker[]) => Promise<boolean>;
+  /** Shared creation gate; called immediately before any replacement is forked. */
+  readonly ensureCreationPermitted: () => Promise<CreationPermit>;
+  readonly updateSignal?: AbortSignal;
   readonly signal?: PublicationCancellationSignal;
   readonly stderr?: PublicationStderr;
 };
@@ -154,15 +175,19 @@ function retiredOutcomeUnknown(
     pending: [...options.owned.pending(), ...oldWorkers.map(({ private_port: _privatePort, ...worker }) => worker)] };
 }
 
-function addAttempt(
+async function addAttempt(
   options: PublicationRunOptions,
   active: ActiveConfigurationPublication,
   target: ConfigurationOperationWorker,
   identity: ConfigProcessIdentity,
   attempts: readonly ReplacementAttempt[],
-): ReplacementAttempt {
+): Promise<ReplacementAttempt> {
   throwIfPublicationCancelled(options.signal);
-  const process = options.workerFactory.spawn(identity);
+  const process = await options.workerFactory.spawn(identity, {
+    mutation_id: active.operation.mutation_id,
+    committed_revision: active.operation.committed_revision,
+    attempt_no: target.attempt_no,
+  });
   if (options.oldWorkers.some(({ process: current }) => current === process)
     || attempts.some(({ process: current }) => current === process)) {
     throw new MasterConfigPublicationError('invalid_options', 'spawned worker reuses an existing process object');
@@ -197,9 +222,84 @@ async function beginAttempts(
       recovery ? 'master_recovery' : target.attempt_no === 0 ? 'initial' : 'retry', options.clock.now(),
     );
     throwIfPublicationCancelled(options.signal);
-    attempts.push(addAttempt(options, active, begun, identity, attempts));
+    attempts.push(await addAttempt(options, active, begun, identity, attempts));
   }
   return attempts;
+}
+
+type CandidateCleanup = {
+  readonly results: readonly ProcessCleanupResult[];
+  /** Durable exit proof could not be written; the caller must not report success. */
+  readonly evidenceError?: unknown;
+};
+
+async function cleanupCandidates(options: PublicationRunOptions): Promise<CandidateCleanup> {
+  const candidates = [...options.owned.pending(), ...options.owned.serving()];
+  const results = await options.owned.cleanup(options.scheduler, options.drainTimeoutMs);
+  const released = results.filter(result => candidateResourcesReleased([result]));
+  if (released.length === 0) return { results };
+  // Candidate exit evidence only exists for committing/publishing owners. A draining
+  // recovery replacement is settled exclusively through the launch ledger.
+  let candidateOwner: boolean;
+  try {
+    const owner = await options.repository.getActivePublication();
+    candidateOwner = owner !== null
+      && (owner.operation.state === 'committed' || owner.operation.state === 'publishing');
+  } catch (error) {
+    return { results, evidenceError: error };
+  }
+  if (!candidateOwner) return { results };
+  for (const result of released) {
+    const candidate = candidates.find(worker => worker.process === result.process);
+    // A pre-ledger serving worker owns no candidate attempt, so it has no evidence to record.
+    if (candidate?.publication === null) continue;
+    if (candidate === undefined || options.repository.recordPublicationCandidateExit === undefined) {
+      return { results, evidenceError: new TypeError('candidate exit evidence cannot be associated with its publication') };
+    }
+    try {
+      await options.repository.recordPublicationCandidateExit(
+        candidate.publication.mutation_id, candidate.revision, result.process.slot,
+        candidate.publication.attempt_no, { kind: 'exited', cleanup: 'released' }, options.clock.now(),
+      );
+    } catch (error) {
+      return { results, evidenceError: error };
+    }
+  }
+  return { results };
+}
+
+async function releaseCancelledCandidate(
+  options: PublicationRunOptions,
+  active: ActiveConfigurationPublication,
+  attempts: readonly ReplacementAttempt[],
+  oldWorkers: readonly ServingConfigWorker[],
+): Promise<MasterPublicationOutcome> {
+  const cleanup = await cleanupCandidates(options);
+  if (cleanup.evidenceError !== undefined) {
+    return { kind: 'outcome_unknown', fatal: true, code: 'repository_failure',
+      error: cleanup.evidenceError, serving: oldWorkers, pending: options.owned.pending() };
+  }
+  const byProcess = new Map(cleanup.results.map(result => [result.process, result]));
+  const allReleased = cleanup.results.length === attempts.length && attempts.every((attempt) => {
+    const result = byProcess.get(attempt.process);
+    return result !== undefined && candidateResourcesReleased([result]);
+  });
+  if (!cleanupConfirmed(cleanup.results) || !allReleased) {
+    return { kind: 'outcome_unknown', fatal: false, code: 'worker_exit_unconfirmed',
+      error: { cause: new Error('cancelled candidate exit or cleanup is unconfirmed'), cleanup: cleanup.results },
+      serving: [...oldWorkers, ...options.owned.serving()], pending: options.owned.pending() };
+  }
+  const mutationId = active.operation.mutation_id;
+  const committedRevision = active.operation.committed_revision;
+  try {
+    const operation = await options.repository.confirmPublicationCandidateExited!(
+      mutationId, committedRevision, options.clock.now(),
+    );
+    return { kind: 'superseded', operation, serving: oldWorkers };
+  } catch (error) {
+    return { kind: 'outcome_unknown', fatal: true, code: 'repository_failure',
+      error, serving: oldWorkers, pending: [] };
+  }
 }
 
 async function awaitReplacements(
@@ -208,6 +308,18 @@ async function awaitReplacements(
   attempts: readonly ReplacementAttempt[],
 ): Promise<readonly PublicationFailure[]> {
   publicationPhase(options, active, 'awaitReplacements', 'enter');
+  let interrupt!: (error: unknown) => void;
+  const interrupted = new Promise<never>((_resolve, reject) => { interrupt = reject; });
+  const updated = () => interrupt(publicationTargetUpdated());
+  const stopped = () => {
+    try { throwIfPublicationCancelled(options.signal); }
+    catch (error) { interrupt(error); }
+  };
+  options.updateSignal?.addEventListener('abort', updated, { once: true });
+  options.signal?.addEventListener('abort', stopped, { once: true });
+  if (options.signal?.aborted) stopped();
+  if (options.updateSignal?.aborted) updated();
+  const waiters: Array<{ readonly slot: number; readonly handle: ReturnType<typeof waitForApply> }> = [];
   let settled: PromiseSettledResult<PublicationFailure | null>[];
   try {
     settled = await Promise.allSettled(attempts.map(async (attempt) => {
@@ -215,6 +327,7 @@ async function awaitReplacements(
         expected: { revision: active.snapshot.revision, contentHash: active.snapshot.content_hash,
           pluginCatalogHash: options.pluginCatalogHash, publication: attempt.publication },
         scheduler: options.scheduler, timeoutMs: options.applyTimeoutMs });
+      waiters.push({ slot: attempt.target.worker_slot, handle: waiting });
       throwIfPublicationCancelled(options.signal);
       const send: Promise<PublicationFailure | null> = attempt.process.send(
         command(active, attempt, options.pluginCatalogHash)).then(
@@ -222,13 +335,14 @@ async function awaitReplacements(
         (error): PublicationFailure => ({ slot: attempt.target.worker_slot, code: 'apply_failed',
           detail: processError(error, 'worker start command failed'), recovery_disposition: 'retryable' }),
       );
-      const decision = await Promise.race([
+      const decisionPromise = Promise.race([
         waiting.result,
         send.then((sendFailure) => {
           if (sendFailure !== null) waiting.fail(sendFailure);
           return waiting.result;
         }),
       ]);
+      const decision = await Promise.race([decisionPromise, interrupted]);
       throwIfPublicationCancelled(options.signal);
       if (decision.kind === 'ready') options.owned.promote(
         attempt.process, decision.evidence.private_port, decision.evidence.boot_nonce,
@@ -245,13 +359,18 @@ async function awaitReplacements(
       return decision.kind === 'failed' ? decision.failure : null;
     }));
   } finally {
+    options.updateSignal?.removeEventListener('abort', updated);
+    options.signal?.removeEventListener('abort', stopped);
+    for (const { slot, handle } of waiters) handle.fail({ slot, code: 'apply_failed', detail: 'candidate startup observation ended', recovery_disposition: 'retryable' });
     publicationPhase(options, active, 'awaitReplacements', 'exit');
   }
   const failures: PublicationFailure[] = [];
   let repositoryError: unknown;
   for (const result of settled) {
-    if (result.status === 'rejected') repositoryError ??= result.reason;
-    else if (result.value !== null) failures.push(result.value);
+    if (result.status === 'rejected') {
+      if (isPublicationTargetUpdated(result.reason)) throw result.reason;
+      repositoryError ??= result.reason;
+    } else if (result.value !== null) failures.push(result.value);
   }
   if (repositoryError !== undefined) throw repositoryError;
   return failures;
@@ -263,10 +382,14 @@ async function cleanupFailure(
   error: unknown,
   code: 'repository_failure' | 'recovery_replacements_failed',
 ): Promise<MasterPublicationOutcome> {
-  const cleanup = await options.owned.cleanup(options.scheduler, options.drainTimeoutMs);
-  if (!cleanupConfirmed(cleanup)) {
-      return { kind: 'outcome_unknown', fatal: true, code: 'worker_exit_unconfirmed',
-      error: { cause: error, cleanup }, serving: [...oldWorkers, ...options.owned.serving()],
+  const cleanup = await cleanupCandidates(options);
+  if (cleanup.evidenceError !== undefined) {
+    return { kind: 'outcome_unknown', fatal: true, code: 'repository_failure',
+      error: cleanup.evidenceError, serving: oldWorkers, pending: options.owned.pending() };
+  }
+  if (!cleanupConfirmed(cleanup.results) || cleanup.results.some(result => !candidateResourcesReleased([result]))) {
+      return { kind: 'outcome_unknown', fatal: false, code: 'worker_exit_unconfirmed',
+      error: { cause: error, cleanup: cleanup.results }, serving: [...oldWorkers, ...options.owned.serving()],
       pending: options.owned.pending() };
   }
   return code === 'recovery_replacements_failed'
@@ -277,10 +400,14 @@ async function cleanupFailure(
 async function cleanupPreCommitFailure(
   options: PublicationRunOptions, oldWorkers: readonly ServingConfigWorker[], error: unknown,
 ): Promise<MasterPublicationOutcome> {
-  const cleanup = await options.owned.cleanup(options.scheduler, options.drainTimeoutMs);
-  if (!cleanupConfirmed(cleanup)) {
-    return { kind: 'outcome_unknown', fatal: true, code: 'worker_exit_unconfirmed',
-      error: { cause: error, cleanup }, serving: [...oldWorkers, ...options.owned.serving()], pending: options.owned.pending() };
+  const cleanup = await cleanupCandidates(options);
+  if (cleanup.evidenceError !== undefined) {
+    return { kind: 'outcome_unknown', fatal: true, code: 'repository_failure',
+      error: cleanup.evidenceError, serving: oldWorkers, pending: options.owned.pending() };
+  }
+  if (!cleanupConfirmed(cleanup.results) || cleanup.results.some(result => !candidateResourcesReleased([result]))) {
+    return { kind: 'outcome_unknown', fatal: false, code: 'worker_exit_unconfirmed',
+      error: { cause: error, cleanup: cleanup.results }, serving: [...oldWorkers, ...options.owned.serving()], pending: options.owned.pending() };
   }
   if (classifyRecoveryError(error) === 'fatal') {
     return { kind: 'outcome_unknown', fatal: true, code: 'repository_failure',
@@ -325,23 +452,67 @@ export async function runPublication(
     }
     let refreshed = await options.repository.getActivePublication();
     if (refreshed === null) throw new TypeError('active publication disappeared');
-    let attemptsAlreadyBegun = false;
-    if (initialState === 'draining' && options.priorAttemptExited === true) {
-      await options.repository.beginDrainingRecovery(refreshed.operation.mutation_id, refreshed.operation.drain_recovery_generation, options.clock.now());
-      refreshed = await options.repository.getActivePublication();
-      if (refreshed === null) throw new Error('active publication disappeared after confirmed prior attempt exit');
-      attemptsAlreadyBegun = true;
+    if (options.recoveredActive === undefined && refreshed.operation.cancel_requested
+      && !refreshed.operation.prepare_started && refreshed.operation.state !== 'draining') {
+      const started = refreshed.targets.filter(target => target.attempt_no > 0);
+      if (started.length > 0 && options.priorAttemptExited !== true) {
+        return { kind: 'outcome_unknown', fatal: false, code: 'control_recovering',
+          error: new TypeError('cancelled candidate occupancy must be cleaned and proven before restart'),
+          serving: oldWorkers, pending: [] };
+      }
+      try {
+        const operation = await options.repository.confirmPublicationCandidateExited!(
+          refreshed.operation.mutation_id, refreshed.operation.committed_revision, options.clock.now(),
+        );
+        return { kind: 'superseded', operation, serving: oldWorkers };
+      } catch (error) {
+        return { kind: 'outcome_unknown', fatal: true, code: 'repository_failure',
+          error, serving: oldWorkers, pending: [] };
+      }
     }
     let failures: readonly PublicationFailure[] = [];
+    let attempts: readonly ReplacementAttempt[] = [];
     if (options.recoveredActive !== undefined) {
       for (const worker of options.recoveredActive.workers) options.owned.adoptServing(worker);
       preparedAdmission = options.recoveredActive.admission;
       admissionCommitted = true;
       admissionCommitMayHaveBeenSent = true;
-      options.workerFactory.markCommitted(options.recoveredActive.workers.map(worker => worker.process));
+      await options.workerFactory.markCommitted(options.recoveredActive.workers.map(worker => worker.process));
     } else {
-      const attempts = await beginAttempts(options, refreshed, options.recoveringMaster, attemptsAlreadyBegun);
-      failures = await awaitReplacements(options, refreshed, attempts);
+      const permit = await options.ensureCreationPermitted();
+      if (!permit.allowed) {
+        return { kind: 'outcome_unknown', fatal: false, code: 'control_recovering',
+          error: permit.error, serving: oldWorkers, pending: [] };
+      }
+      // The permit may have waited while shutdown began: never fence a new recovery
+      // generation after cancellation, even though creation was still allowed.
+      throwIfPublicationCancelled(options.signal);
+      let attemptsAlreadyBegun = false;
+      if (initialState === 'draining' && options.priorAttemptExited === true) {
+        await options.repository.beginDrainingRecovery(refreshed.operation.mutation_id, refreshed.operation.drain_recovery_generation, options.clock.now());
+        refreshed = await options.repository.getActivePublication();
+        if (refreshed === null) throw new Error('active publication disappeared after confirmed prior attempt exit');
+        attemptsAlreadyBegun = true;
+      }
+      attempts = await beginAttempts(options, refreshed, options.recoveringMaster, attemptsAlreadyBegun);
+      try {
+        failures = await awaitReplacements(options, refreshed, attempts);
+      } catch (error) {
+        if (!isPublicationTargetUpdated(error) || options.latestRevision() <= refreshed.operation.committed_revision) throw error;
+        try {
+          await options.repository.requestPublicationCancellation!(
+            refreshed.operation.mutation_id, refreshed.operation.committed_revision, options.clock.now(),
+          );
+        } catch (cancelError) {
+          if ((cancelError as { readonly code?: unknown }).code !== 'cancellation_not_permitted') throw cancelError;
+          throw error;
+        }
+        const decision = await options.repository.enterPublicationPrepare!(
+          refreshed.operation.mutation_id, refreshed.operation.committed_revision, options.clock.now(),
+        );
+        if (decision.kind !== 'cancelled') throw error;
+        return await releaseCancelledCandidate(options, refreshed, attempts, oldWorkers);
+      }
     }
     throwIfPublicationCancelled(options.signal);
     if (failures.length > 0) {
@@ -364,6 +535,27 @@ export async function runPublication(
     }
     throwIfPublicationCancelled(options.signal);
     const mutationId = refreshed.operation.mutation_id;
+    if (options.recoveredActive === undefined && options.repository.enterPublicationPrepare !== undefined) {
+      const committedRevision = refreshed.operation.committed_revision;
+      const latestRevision = options.latestRevision();
+      if (latestRevision > committedRevision
+        && options.repository.requestPublicationCancellation !== undefined) {
+        try {
+          await options.repository.requestPublicationCancellation(
+            mutationId, committedRevision, options.clock.now(),
+          );
+        } catch (error) {
+          // A preparation lease that already won the race keeps the original publication.
+          if ((error as { readonly code?: unknown }).code !== 'cancellation_not_permitted') throw error;
+        }
+      }
+      const decision = await options.repository.enterPublicationPrepare(
+        mutationId, committedRevision, options.clock.now(),
+      );
+      if (decision.kind === 'cancelled') {
+        return await releaseCancelledCandidate(options, refreshed, attempts, oldWorkers);
+      }
+    }
     if (options.recoveredActive === undefined && options.repository.freezePublicationServingSet !== undefined) {
       await options.repository.freezePublicationServingSet(mutationId, refreshed.operation.drain_recovery_generation,
         options.owned.serving().map(worker => {
@@ -426,15 +618,23 @@ export async function runPublication(
         publicationPhase(options, refreshed, 'admission.commit', 'enter');
         try {
           await preparedAdmission.commit();
-          admissionCommitted = true;
-          options.workerFactory.markCommitted(options.owned.serving().map(({ process }) => process));
+        } catch (error) {
+          if (controlOutcomeUnknown(error)) throw error;
+          try { await preparedAdmission.abort(); } catch (abortError) { throw new AggregateError([error, abortError], 'worker admission abort failed'); }
+          throw error;
         } finally {
           publicationPhase(options, refreshed, 'admission.commit', 'exit');
         }
+        // The group is admitted from here on: a failure to persist the durable
+        // admitted fact must never abort it, and must never report success.
+        admissionCommitted = true;
+        await options.workerFactory.markCommitted(options.owned.serving().map(({ process }) => process));
         throwIfPublicationCancelled(options.signal, true);
       } catch (error) {
         if (controlOutcomeUnknown(error)) throw error;
-        try { await preparedAdmission.abort(); } catch (abortError) { throw new AggregateError([error, abortError], 'worker admission abort failed'); }
+        if (!admissionCommitted) {
+          try { await preparedAdmission.abort(); } catch (abortError) { throw new AggregateError([error, abortError], 'worker admission abort failed'); }
+        }
         throw error;
       }
     }
@@ -534,10 +734,15 @@ export async function runPublication(
       if (preparedAdmission !== null) {
         try { await preparedAdmission.abort(); } catch (cause) { abortError = cause; }
       }
-      const cleanup = await options.owned.cleanup(options.scheduler, options.drainTimeoutMs);
-      if (!cleanupConfirmed(cleanup)) {
+      const cleanup = await cleanupCandidates(options);
+      if (cleanup.evidenceError !== undefined) {
+        return { kind: 'outcome_unknown', fatal: true, code: 'repository_failure',
+          error: cleanup.evidenceError, serving: [...oldWorkers, ...options.owned.serving()],
+          pending: options.owned.pending() };
+      }
+      if (!cleanupConfirmed(cleanup.results) || cleanup.results.some(result => !candidateResourcesReleased([result]))) {
         return { kind: 'outcome_unknown', fatal: true, code: 'worker_exit_unconfirmed',
-          error: { cause: error, cleanup }, serving: [...oldWorkers, ...options.owned.serving()],
+          error: { cause: error, cleanup: cleanup.results }, serving: [...oldWorkers, ...options.owned.serving()],
           pending: options.owned.pending() };
       }
       if (abortError !== undefined) Object.defineProperty(error, 'cause', { value: abortError });

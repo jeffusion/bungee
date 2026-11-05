@@ -32,6 +32,7 @@ import type {
   ServingConfigWorker,
   WorkerAdmissionController,
   PreparedWorkerAdmission,
+  CreationPermit,
 } from '../config-publication';
 import {
   isPublicationCancelled,
@@ -41,7 +42,6 @@ import {
 import {
   MasterIngressController,
   type MasterIngressControllerOptions,
-  type MasterIngressMutationReadiness,
   type MasterIngressRecoveryEvent,
   type MasterIngressRecoveryResult,
   type MasterIngressStartupFailureDisposition,
@@ -128,6 +128,13 @@ export type MasterProcessRepository = Pick<AsyncConfigRepository,
   | 'stopPublicationRetirement' | 'retryPublicationRetirement' | 'markPublicationRetirementReleased' | 'getRetiredWorkerInstanceIds'
   | 'getRetirementDescriptorCleanupState' | 'getRuntimeRecoveryBudget' | 'getRuntimeRecoveryStartupGate'
   | 'getPublicationRetirementRetry' | 'requestPublicationRetirementRetry'
+  | 'claimPublicationTarget' | 'requestPublicationCancellation' | 'enterPublicationPrepare'
+  | 'recordPublicationCandidateExit' | 'confirmPublicationCandidateExited'
+  | 'getPublicationRecoveryBarrier'
+  | 'getOutstandingPublicationCandidates'
+  | 'registerWorkerLaunch' | 'fenceWorkerLaunchNotStarted' | 'recordWorkerLaunchAdmitted'
+  | 'recordWorkerLaunchExit' | 'getWorkerLaunch' | 'getWorkerLaunchAllocationFacts'
+  | 'getWorkerLaunchInventory' | 'getUnsettledWorkerLaunches'
   | 'freezePublicationRetirementDrainStart'
   | 'consumeRuntimeRecoveryRestartTicket' | 'observeRuntimeRecoveryHealth'>
   & Partial<Pick<AsyncConfigRepository, 'getMenuLayout' | 'putMenuLayout'>>;
@@ -148,6 +155,8 @@ export type MasterProcessWorkerFactory = ConfigPublicationWorkerFactory & Master
   retireForIngressBootChange(request: IngressBootWorkerCleanupRequest): Promise<IngressBootWorkerCleanupResult>;
   discoverAndAdopt(admission: import('../ingress').AdmissionSet): Promise<SupervisedAdoptionResult>;
   cleanupAuthenticatedOrphans?(registry: import('../ingress').AdmissionRegistryStatus): Promise<AuthenticatedOrphanCleanupResult>;
+  /** Debt-only pass in the serialized queue: settle launch facts, never fork or terminate. */
+  settleWorkerLaunchDebt?(registry: import('../ingress').AdmissionRegistryStatus): Promise<import('./supervised-worker-factory').WorkerLaunchDebtSettlement>;
   confirmPreviousWorkersExited?(registry: import('../ingress').AdmissionRegistryStatus, replacements: readonly ServingConfigWorker[]): Promise<boolean>;
   recoverRetiredWorkers?(retirement: import('../config-storage/retirement-store').PublicationRetirement): Promise<readonly ServingConfigWorker[]>;
 };
@@ -165,11 +174,13 @@ export interface MasterProcessCoordinator extends MasterRuntimeCoordinator {
     existingWorkers?: readonly ServingConfigWorker[],
     retireWorkers?: readonly ServingConfigWorker[],
     signal?: PublicationCancellationSignal,
+    recoveryId?: string,
   ): Promise<import('../config-publication').StartupPublicationOutcome>;
   publish(
     active: ActiveConfigurationPublication,
     oldWorkers: readonly ServingConfigWorker[],
     signal?: PublicationCancellationSignal,
+    updateSignal?: AbortSignal,
   ): Promise<MasterPublicationOutcome>;
 }
 
@@ -301,6 +312,14 @@ async function controlReadinessFailure(
 ): Promise<MasterPublicationOutcome> {
   logger.error({ error: serializeErrorChain(error), phase, mutationId: active.operation.mutation_id, revision: active.snapshot.revision },
     'Plugin control readiness failed before configuration publication');
+  // Started attempts are durable budget. Control readiness must not terminalize
+  // (and thereby release) them while their processes may still exist.
+  if (active.targets.some(({ attempt_no }) => attempt_no > 0)) {
+    return {
+      kind: 'degraded', http_status: 202, error_code: 'control_readiness_failed',
+      failures: [], operation: active.operation, serving, recovery_disposition: classifyControlError(error),
+    };
+  }
   const operation = await repository.finalizePublication(
     active.operation.mutation_id,
     { outcome: 'degraded', error_code: 'control_readiness_failed', error_detail: 'plugin control readiness failed',
@@ -898,8 +917,12 @@ export async function startMasterComposition(
       await leaseState?.transact([{key:id,expectedVersion:previous?.version ?? 0,value:lease ? {...lease} : null}]);
       if (lease) stateLeases.set(id,lease); else stateLeases.delete(id);
     };
-    const retainedControlNames = (snapshot: RepositorySnapshot): readonly string[] => {
-      const names = new Set([...activeControlNames(snapshot,catalog), ...[...stateLeases.values()].map(value=>value.plugin)]);
+    const retainedControlNames = async (snapshot?: RepositorySnapshot): Promise<readonly string[]> => {
+      const names = new Set<string>([...[...stateLeases.values()].map(value=>value.plugin)]);
+      if (snapshot !== undefined) for (const name of activeControlNames(snapshot,catalog)) names.add(name);
+      const owner = await resources.repository!.getActivePublication();
+      if (owner !== null) for (const name of activeControlNames(owner.snapshot, catalog)) names.add(name);
+      try { const management = managementAuth.selected(); if (management !== null) names.add(management); } catch { /* invalid management state is reported by the control API */ }
       const registry = resources.ingressController?.trustedAdmissionRegistryIfFresh?.();
       for (const serving of [registry?.active,...(registry?.retired ?? [])]) {
         if (!serving) continue;
@@ -964,7 +987,7 @@ export async function startMasterComposition(
         if (call.method === 'settle' || call.method === 'cancel') {
           if (!await publishDataState(undefined,undefined,[{plugin:call.plugin,keyId:call.target.principal.keyId}])) throw new Error('state_publication_pending');
           await saveStateLease(id,null);
-          await resources.pluginControl!.reconcile(retainedControlNames(resources.repository!.getSnapshot()));
+          await resources.pluginControl!.reconcile(await retainedControlNames());
         }
         return result;
         };
@@ -1078,6 +1101,8 @@ export async function startMasterComposition(
     let recoveredCallback: (event: MasterIngressRecoveryEvent) => Promise<MasterIngressRecoveryResult | void> = async (event) =>
       event.kind === 'new_boot' ? 'retryable' : undefined;
     let admissionRecovering = false;
+    let candidateOccupancyUnconfirmed = false;
+    let orphanCleanupExitUnknown = false;
     if (dependencies.createIngressController !== undefined) {
       resources.ingressController = dependencies.createIngressController({
         rootKey: material!.key,
@@ -1117,17 +1142,25 @@ export async function startMasterComposition(
               && candidate.private_port === worker.private_port))) {
             trackedAdmission.adoptCommitted(startupServing, target);
             const snapshotsReady = await trackRememberedServing(startupServing);
-            resources.workerFactory!.markCommitted(startupServing.map(({ process }) => process));
+            await resources.workerFactory!.markCommitted(startupServing.map(({ process }) => process));
+            await refreshCandidateOccupancy();
             const current = resources.repository!.getSnapshot();
             admissionRecovering = !snapshotsReady || target.revision !== current.revision
               || target.content_hash !== current.content_hash || target.plugin_catalog_hash !== catalog.hash;
-            await resources.pluginControl?.reconcile(retainedControlNames(current)).catch(error => logger.warn({error:serializeErrorChain(error)},'Control reconciliation degraded; serving admission retained'));
+            const servingSnapshot = target.revision === current.revision
+              && target.content_hash === current.content_hash && target.plugin_catalog_hash === catalog.hash
+              ? current
+              : cachedSnapshot({ revision: target.revision, content_hash: target.content_hash,
+                plugin_catalog_hash: target.plugin_catalog_hash });
+            if (servingSnapshot !== null) {
+              await resources.pluginControl?.reconcile(await retainedControlNames(servingSnapshot)).catch(error => logger.warn({error:serializeErrorChain(error)},'Control reconciliation degraded; serving admission retained'));
+            }
           }
           resources.pluginControlBridge?.syncActiveAdmission();
         },
       });
       await resources.ingressController.connect();
-      admissionRecovering = resources.ingressController.hasTrustedActiveAdmission?.() === true;
+      admissionRecovering = resources.ingressController.hasTrustedActiveAdmission() === true;
       const registry = resources.ingressController.trustedAdmissionRegistryIfFresh();
       for (const serving of [registry?.active, registry?.prepared, ...(registry?.retired ?? [])]) if (serving) await loadSnapshot(serving);
     }
@@ -1187,6 +1220,8 @@ export async function startMasterComposition(
     let startupRecoveryFailure: Error | null = null;
     const evidenceKey = (worker: Pick<ServingConfigWorker, 'revision' | 'content_hash' | 'plugin_catalog_hash'>): string =>
       `${worker.revision}:${worker.content_hash}:${worker.plugin_catalog_hash}`;
+    const claimPublication = (): Promise<ActiveConfigurationPublication | null> =>
+      resources.repository!.claimPublicationTarget(catalog.hash, dependencies.clock.now());
     const trackServing = (
       workers: readonly ServingConfigWorker[],
       snapshot: ReturnType<MasterProcessRepository['getSnapshot']>,
@@ -1385,7 +1420,7 @@ export async function startMasterComposition(
                 }
                 await trackRememberedServing(workers, admissionSignal);
                 throwIfPublicationCancelled(admissionSignal);
-                if (runtimeReady) resources.workerFactory!.markCommitted(workers.map(({ process }) => process));
+                if (runtimeReady) await resources.workerFactory!.markCommitted(workers.map(({ process }) => process));
                 committedAdmission = workers;
                 if (workers.length === options.workerCount && !ingressBootRecoveryGate.isActive()) admissionRecovering = false;
                 syncPluginControlAdmission();
@@ -1427,7 +1462,13 @@ export async function startMasterComposition(
                   if (resources.ingressController !== null && resources.workerFactory !== null
                     && resources.workerFactory.cleanupAuthenticatedOrphans !== undefined) {
                     const status = await resources.ingressController.status();
-                    await resources.workerFactory.cleanupAuthenticatedOrphans(status.registry);
+                    const cleanup = await resources.workerFactory.cleanupAuthenticatedOrphans(status.registry);
+                    // The cleanup pass and the durable ledger both have to be clean;
+                    // a successful descriptor pass alone never clears the gate.
+                    orphanCleanupExitUnknown = cleanup.exitUnknown.length > 0;
+                    await refreshCandidateOccupancy();
+                    if (candidateOccupancyUnconfirmed) admissionRecovering = true;
+                    else { publicationBlocked = false; publicationTasks.wake(); }
                   }
                 }
               },
@@ -1473,6 +1514,88 @@ export async function startMasterComposition(
       },
       clear() { committedAdmission = []; resources.admission!.clear(); syncPluginControlAdmission(); },
       acquire: resources.admission.acquire.bind(resources.admission),
+    };
+    /**
+     * Durable launch debt from the complete inventory (admitted, historical owners and
+     * allocation-less startup launches included). Only fresh signed registry members are
+     * legal occupancy; historical admitted facts are never released merely by being old.
+     */
+    const readCreationFacts = async (): Promise<{
+      readonly trusted: boolean;
+      readonly registry: import('../ingress').AdmissionRegistryStatus | null;
+      readonly legal: number;
+      readonly debt: number;
+    }> => {
+      const ingress = resources.ingressController;
+      let registry: import('../ingress').AdmissionRegistryStatus | null = null;
+      let trusted = false;
+      if (ingress !== null) {
+        try {
+          registry = (await ingress.status()).registry;
+          trusted = true;
+        } catch {
+          trusted = false;
+        }
+      }
+      const legal = new Set<string>();
+      if (registry !== null) for (const set of [registry.active, registry.prepared, ...registry.retired]) {
+        for (const worker of set?.workers ?? []) {
+          legal.add(`${worker.master_generation}:${worker.worker_instance_id}:${worker.worker_slot}`);
+        }
+      }
+      let debt = 0;
+      for (const entry of await resources.repository!.getWorkerLaunchInventory()) {
+        if (entry.kind === 'reservation') { debt += 1; continue; }
+        const { master_generation, worker_instance_id, worker_slot } = entry.launch.identity;
+        if (!legal.has(`${master_generation}:${worker_instance_id}:${worker_slot}`)) debt += 1;
+      }
+      return { trusted, registry, legal: legal.size, debt };
+    };
+    /**
+     * The single creation permit for both real forks. It runs in the existing
+     * serialized queue: debt-only settlement first, then a fresh authority read.
+     * Retained active/prepared/retired members count against the 2N budget, and
+     * unknown/historical debt always blocks. It never forks or terminates.
+     */
+    const ensureCreationPermitted = async (): Promise<CreationPermit> => {
+      let facts: Awaited<ReturnType<typeof readCreationFacts>>;
+      try { facts = await readCreationFacts(); }
+      catch (error) { return { allowed: false, error }; }
+      if (facts.trusted && facts.debt > 0 && resources.workerFactory?.settleWorkerLaunchDebt !== undefined) {
+        try {
+          await resources.workerFactory.settleWorkerLaunchDebt(facts.registry!);
+        } catch { /* unproven debt remains blocking below */ }
+        try { facts = await readCreationFacts(); }
+        catch (error) { return { allowed: false, error }; }
+      }
+      // Every final check runs on the same facts, including after debt settlement.
+      if (!facts.trusted || facts.registry === null) {
+        return { allowed: false, error: new Error('trusted ingress registry is unavailable for worker creation') };
+      }
+      if (facts.debt > 0) {
+        return { allowed: false, error: new Error('durable worker launch debt is unsettled') };
+      }
+      // A new cohort starts only from one released serving generation: an in-flight
+      // prepared admission or any unreleased retired member already owns budget.
+      if (facts.registry.prepared !== null || facts.registry.retired.length > 0) {
+        return { allowed: false, error: new Error('the previous worker cohort has not been released') };
+      }
+      if (facts.legal > options.workerCount) {
+        return { allowed: false, error: new Error('legal worker occupancy exceeds one cohort') };
+      }
+      return { allowed: true };
+    };
+    /** Re-reads durable facts; a failed read stays blocking. */
+    const refreshCandidateOccupancy = async (): Promise<boolean> => {
+      try {
+        const facts = await readCreationFacts();
+        const denied = (resources.ingressController !== null && !facts.trusted) || facts.debt > 0;
+        candidateOccupancyUnconfirmed = orphanCleanupExitUnknown || denied;
+      } catch {
+        candidateOccupancyUnconfirmed = true;
+      }
+      if (candidateOccupancyUnconfirmed) admissionRecovering = true;
+      return candidateOccupancyUnconfirmed;
     };
     const inflightSnapshots = new Map<string, number>();
     const pruneServing = (): void => {
@@ -1522,6 +1645,7 @@ export async function startMasterComposition(
       rootKey: material?.key ?? new Uint8Array(32),
       runtimeWorkersDirectory: resolve(options.configDbPath, '..', 'runtime', 'workers'),
       retirementRepository: resources.repository,
+      launchRepository: resources.repository,
        masterControlPort: options.masterControlPort,
       authority: {
         controller_epoch: supervisionState?.controller_epoch ?? 0,
@@ -1581,9 +1705,22 @@ export async function startMasterComposition(
       try {
         const registry = (await resources.ingressController.status()).registry;
         const cleanup = await resources.workerFactory.cleanupAuthenticatedOrphans(registry);
-        if (cleanup.exitUnknown.length > 0) admissionRecovering = true;
+        // Descriptor discovery alone is not inventory proof: an attempt may exist
+        // without any surviving descriptor, so the durable ledger is always read.
+        orphanCleanupExitUnknown = cleanup.exitUnknown.length > 0;
+        await refreshCandidateOccupancy();
+        if (candidateOccupancyUnconfirmed) admissionRecovering = true;
       } catch (error) {
         logger.warn({ error: serializeErrorChain(error) }, 'Authenticated orphan cleanup is retryable');
+        orphanCleanupExitUnknown = true;
+        candidateOccupancyUnconfirmed = true;
+        admissionRecovering = true;
+      }
+    } else {
+      orphanCleanupExitUnknown = false;
+      await refreshCandidateOccupancy();
+      if (candidateOccupancyUnconfirmed) {
+        // With no ingress cleanup authority, durable candidate attempts cannot be proven exited.
         admissionRecovering = true;
       }
     }
@@ -1620,12 +1757,16 @@ export async function startMasterComposition(
         trackedAdmission.adoptCommitted(adoption.serving, remoteAdmission);
         startupServing = adoption.serving;
         const snapshotsReady = await trackRememberedServing(adoption.serving);
-        resources.workerFactory.markCommitted(adoption.serving.map(({ process }) => process));
+        await resources.workerFactory.markCommitted(adoption.serving.map(({ process }) => process));
+        // Signed adoption of the active generation is legal serving; it may clear
+        // launch debt that was unadmitted only because the previous master crashed
+        // before persisting it. Descriptor cleanup debt never clears here.
+        await refreshCandidateOccupancy();
         const recovery = await resources.repository.getCurrentRecovery?.() ?? null;
         const exactCurrent = isExactServingTarget(adoption.serving, adoption.serving, current,
           catalog.hash, options.workerCount, resources.workerFactory);
         if (recovery === null || recovery.state === 'succeeded' || exactCurrent) {
-          await resources.pluginControl?.reconcile(retainedControlNames(current)).catch(error => logger.warn({error:serializeErrorChain(error)},'Control reconciliation degraded; serving admission retained'));
+          await resources.pluginControl?.reconcile(await retainedControlNames()).catch(error => logger.warn({error:serializeErrorChain(error)},'Control reconciliation degraded; serving admission retained'));
         } else {
           const first = adoption.serving[0];
           const oldSnapshot = first === undefined || adoption.serving.some((worker) =>
@@ -1637,7 +1778,7 @@ export async function startMasterComposition(
           if (oldSnapshot === null) {
             throw new MasterRuntimeError('startup_incomplete', 'adopted admission has no verified historical snapshot');
           }
-          await resources.pluginControl?.reconcile(retainedControlNames(oldSnapshot)).catch(error => logger.warn({error:serializeErrorChain(error)},'Control reconciliation degraded; serving admission retained'));
+          await resources.pluginControl?.reconcile(await retainedControlNames(oldSnapshot)).catch(error => logger.warn({error:serializeErrorChain(error)},'Control reconciliation degraded; serving admission retained'));
         }
         syncPluginControlAdmission();
         admissionRecovering = !snapshotsReady || !(remoteAdmission.revision === current.revision
@@ -1663,6 +1804,7 @@ export async function startMasterComposition(
       drainTimeoutMs: options.drainTimeoutMs,
       pluginCatalogHash: catalog.hash,
       admission: trackedAdmission,
+      ensureCreationPermitted,
       masterGeneration,
       recoverActiveServingWorkers: async (active) => {
         const ingress = resources.ingressController;
@@ -1685,7 +1827,7 @@ export async function startMasterComposition(
         trackedAdmission.adoptCommitted(adoption.serving, serving);
         startupServing = adoption.serving;
         await trackRememberedServing(adoption.serving);
-        resources.workerFactory!.markCommitted(adoption.serving.map(worker => worker.process));
+        await resources.workerFactory!.markCommitted(adoption.serving.map(worker => worker.process));
         syncPluginControlAdmission();
         return {workers: adoption.serving, admission};
       },
@@ -1738,8 +1880,20 @@ export async function startMasterComposition(
       },
     });
     let recoveryRunner: ConfigurationRecoveryRunner | null = null;
-    let activePublicationObserved = false;
     let publicationFatalReported = false;
+    let publicationBlocked = false;
+    let activeUpdate: AbortController | null = null;
+    /**
+     * A held owner's nonfatal control_recovering is evidence debt, not a terminal stop.
+     * Re-enter the existing serialized recovery queue to re-prove it without forking.
+     */
+    const requestHeldOwnerObservation = (
+      outcome: MasterPublicationOutcome | null, active: ActiveConfigurationPublication | null,
+    ): void => {
+      if (active === null || outcome === null || outcome.kind !== 'outcome_unknown'
+        || outcome.fatal || outcome.code !== 'control_recovering') return;
+      void recoveryRunner?.wake(true);
+    };
     const consumePublicationRecovery = (outcome: MasterPublicationOutcome): void => {
       if (outcome.kind === 'outcome_unknown' && !outcome.fatal) {
         return;
@@ -1759,10 +1913,15 @@ export async function startMasterComposition(
       async recoverAndPublish(signal?: PublicationCancellationSignal) {
         return withSnapshotRetention(async (pin) => {
           assertIngressBootRecoveryGateOpen();
+          // Candidate debt blocks a new fork, never an existing owner's exit/cleanup
+          // proof: the base coordinator must be able to fence reservations and adopt
+          // signed serving before the gate is re-read.
           const gateGeneration = ingressBootRecoveryGate.generation;
           throwIfPublicationCancelled(signal);
           let active: ActiveConfigurationPublication | null;
-          try { active = await resources.repository!.getActivePublication(); activePublicationObserved = active !== null; }
+          try {
+            active = await claimPublication();
+          }
           catch (error) {
             const code = errorCode(error);
             if (terminalRecoveryCode(code)) {
@@ -1789,13 +1948,12 @@ export async function startMasterComposition(
             await rememberSnapshot(active.snapshot, signal);
             try {
               throwIfPublicationCancelled(signal);
-              await resources.pluginControl?.reconcile(retainedControlNames(active.snapshot));
+              await resources.pluginControl?.reconcile(await retainedControlNames(active.snapshot));
               throwIfPublicationCancelled(signal);
             } catch (error) {
               if (isPublicationCancelled(error)) throw error;
               admissionRecovering = true;
               const failure = await controlReadinessFailure(resources.repository!, active, [], error, dependencies.clock.now(), 'recover');
-              activePublicationObserved = false;
               consumePublicationRecovery(failure);
               return failure;
             }
@@ -1810,21 +1968,28 @@ export async function startMasterComposition(
             ? ingressBootRecoveryGate.signal
             : AbortSignal.any([signal, ingressBootRecoveryGate.signal]);
           const outcome = await baseCoordinator.recoverAndPublish(guardedSignal);
-          if (outcome?.kind !== 'outcome_unknown') activePublicationObserved = false;
+          requestHeldOwnerObservation(outcome, active);
+          await refreshCandidateOccupancy();
+          if (outcome !== null && outcome.kind !== 'outcome_unknown') {
+            publicationBlocked = false;
+            if (typeof resources.repository!.claimPublicationTarget === 'function') publicationTasks.wake();
+          }
           assertIngressBootRecoveryGeneration(gateGeneration);
           throwIfPublicationCancelled(signal);
           if (outcome !== null && active !== null) trackServing(outcome.serving, active.snapshot);
           return outcome;
         });
       },
-      async startCurrent(snapshot, existingWorkers, retireWorkers = [], signal?: PublicationCancellationSignal) {
+      async startCurrent(snapshot, existingWorkers, retireWorkers = [], signal?: PublicationCancellationSignal,
+        recoveryId?: string) {
         return withSnapshotRetention(async () => {
           assertIngressBootRecoveryGateOpen();
           const gateGeneration = ingressBootRecoveryGate.generation;
           throwIfPublicationCancelled(signal);
-          const durableRecovery = await resources.repository!.getCurrentRecovery?.() ?? null;
-          if (signal === undefined && !runtimeReady && durableRecovery !== null
-            && (durableRecovery.state === 'scheduled' || durableRecovery.state === 'running' || durableRecovery.state === 'stopped')) {
+          // Global barrier, re-read every time: only the exact recovery currently being
+          // executed may exclude itself, and an older stopped-unknown still blocks.
+          const barrier = await resources.repository!.getPublicationRecoveryBarrier(recoveryId ?? null);
+          if (barrier !== null) {
             const serving = trackedAdmission.snapshot();
             startupServing = serving;
             admissionRecovering = true;
@@ -1841,7 +2006,7 @@ export async function startMasterComposition(
           await rememberSnapshot(snapshot, signal);
           try {
             throwIfPublicationCancelled(signal);
-            await resources.pluginControl?.reconcile(retainedControlNames(snapshot));
+            await resources.pluginControl?.reconcile(await retainedControlNames(snapshot));
             throwIfPublicationCancelled(signal);
           } catch (error) {
             if (isPublicationCancelled(error)) throw error;
@@ -1870,21 +2035,18 @@ export async function startMasterComposition(
           return outcome;
         }, snapshot);
       },
-      async publish(active, oldWorkers, signal) {
+      async publish(active, oldWorkers, signal, updateSignal) {
         return withSnapshotRetention(async () => {
-          activePublicationObserved = true;
           await rememberSnapshot(active.snapshot);
           try {
-            await resources.pluginControl?.reconcile(retainedControlNames(active.snapshot));
+            await resources.pluginControl?.reconcile(await retainedControlNames(active.snapshot));
           } catch (error) {
             admissionRecovering = true;
             const failure = await controlReadinessFailure(resources.repository!, active, oldWorkers, error, dependencies.clock.now(), 'publish');
-            activePublicationObserved = false;
             consumePublicationRecovery(failure);
             return failure;
           }
-          const outcome = await baseCoordinator.publish(active, oldWorkers, signal);
-          if (outcome.kind !== 'outcome_unknown') activePublicationObserved = false;
+          const outcome = await baseCoordinator.publish(active, oldWorkers, signal, updateSignal);
           trackServing(outcome.serving, active.snapshot);
           consumePublicationRecovery(outcome);
           return outcome;
@@ -1892,7 +2054,31 @@ export async function startMasterComposition(
       },
     };
     const publicationTasks = new PublicationTaskManager({
-      publish: (active, oldWorkers, signal) => coordinator.publish(active, oldWorkers, signal),
+      onWake: () => { activeUpdate?.abort('newer configuration target'); },
+      publish: async (signal) => {
+        if (publicationBlocked) return null;
+        if (ingressBootRecoveryGate.isActive()) return null;
+        let active: ActiveConfigurationPublication | null;
+        try {
+          active = await claimPublication();
+        } catch (error) {
+          if (errorCode(error) === 'recovery_in_progress') return null;
+          if (terminalRecoveryCode(errorCode(error))) throw error;
+          return { kind: 'outcome_unknown', fatal: false, code: 'recovery_replacements_failed',
+            error, serving: trackedAdmission.snapshot(), pending: [] };
+        }
+        if (active === null || ingressBootRecoveryGate.isActive()) return null;
+        const update = new AbortController();
+        activeUpdate = update;
+        try {
+          const outcome = await coordinator.publish(active, trackedAdmission.snapshot(), signal, update.signal);
+          if (outcome.kind === 'outcome_unknown') publicationBlocked = true;
+          requestHeldOwnerObservation(outcome, active);
+          return outcome;
+        } finally {
+          if (activeUpdate === update) activeUpdate = null;
+        }
+      },
     });
     recoveryRunner = new ConfigurationRecoveryRunner({
       repository: resources.repository,
@@ -1903,6 +2089,7 @@ export async function startMasterComposition(
       pluginCatalogHash: catalog.hash,
       now: dependencies.clock.now,
       scheduler: dependencies.configurationRecoveryScheduler,
+      onRecovered: () => { publicationBlocked = false; },
       onFatal: (error) => {
         if (!runtimeReady) startupRecoveryFailure = error;
         if (runtimeStarted) runtime?.reportAsynchronousFailure(new MasterRuntimeError('startup_incomplete', 'master recovery failed', error));
@@ -1927,7 +2114,7 @@ export async function startMasterComposition(
     communicationTimer.unref?.();
     const healthTimer = setInterval(() => {
       if (communicationStopped || !configurationStorageHealthy) return;
-      const ingressFresh = resources.ingressController?.trustedActiveAdmissionIfFresh();
+      const ingressFresh = resources.ingressController?.trustedActiveAdmissionIfFresh?.();
       const healthy = runtimeReady && !runtimeStopping && pluginStorageHealthy && resources.stats?.healthy?.() !== false
         && managementAuth.available() && !!ingressFresh
         && trackedAdmission.snapshot().length === options.workerCount;
@@ -1989,24 +2176,8 @@ export async function startMasterComposition(
         }
       }).then((result) => result.kind === 'complete' ? 'complete' : result.kind === 'fatal' ? 'fatal' : 'retryable');
     };
-    const mutationReadiness = (): MasterIngressMutationReadiness | { readonly ready: false; readonly reason: 'ingress_unavailable' | 'admission_recovering' | 'readiness_check_failed' } => {
-      if (!configurationStorageHealthy || !pluginStorageHealthy) return {ready:false,reason:'readiness_check_failed'};
-      const controller = resources.ingressController;
-      if (controller === null) return { ready: false, reason: 'ingress_unavailable' };
-      if (admissionRecovering) return { ready: false, reason: 'admission_recovering' };
-      const controllerReadiness = controller.mutationReadiness();
-      if (!controllerReadiness.ready) return controllerReadiness;
-      try {
-        const snapshot = resources.repository!.getSnapshot();
-        const evidence = {
-          revision: snapshot.revision, content_hash: snapshot.content_hash, plugin_catalog_hash: catalog.hash,
-          hasActiveOperation: activePublicationObserved,
-        };
-        return controller.mutationReadiness(evidence);
-      } catch {
-        return { ready: false, reason: 'readiness_check_failed' };
-      }
-    };
+    const mutationReadiness = (): true | { readonly ready: false; readonly reason: 'readiness_check_failed' } =>
+      configurationStorageHealthy && pluginStorageHealthy ? true : { ready: false, reason: 'readiness_check_failed' };
     let runtimePublicationEligible = false;
     const runtimePublicationAbort = new AbortController();
     const revokeRuntimePublication = (): void => {
@@ -2149,6 +2320,9 @@ export async function startMasterComposition(
         controlNames: new Set((catalog.records?.() ?? [])
           .filter(({ manifest }) => manifest.control !== undefined)
           .map(({ name }) => name)),
+        managementNames: new Set((catalog.records?.() ?? [])
+          .filter(({ manifest }) => manifest.management !== undefined)
+          .map(({ name }) => name)),
         status: (name) => resources.pluginControl!.status(name),
         activate: (name) => resources.pluginControl!.activate(name),
         deactivate: (name) => resources.pluginControl!.deactivate(name),
@@ -2202,7 +2376,6 @@ export async function startMasterComposition(
       },
       statsApi: resources.stats ?? undefined,
       onConfigurationCommitted: async (snapshot) => {
-        activePublicationObserved = true;
         resources.stats?.configureLogging?.(snapshot.aggregate.logical_configuration.logging);
       },
       runtimeUpstreams: () => runtimeUpstreams({
@@ -2456,7 +2629,7 @@ export async function startMasterComposition(
       throw new ComponentRecoveryStopped(dependencies.runtimeRecovery.reason ?? 'startup_failure');
     }
     runtimePublicationEligible = true;
-    resources.workerFactory.markCommitted(trackedAdmission.snapshot().map(({ process }) => process));
+    await resources.workerFactory.markCommitted(trackedAdmission.snapshot().map(({ process }) => process));
     syncPluginControlAdmission();
     runtimeReady = true;
     const signals = dependencies.installSignalHandlers({ shutdown: coordinateShutdown });

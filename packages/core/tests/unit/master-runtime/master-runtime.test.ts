@@ -27,7 +27,8 @@ function operation(
   return {
     mutation_id: 'runtime-test', request_hash: HASH, expected_revision: 3, committed_revision: 4,
     kind: 'config', target_worker_count: 2, drain_recovery_generation: 0,
-    last_drain_recovery_previous_generation: null, created_at: 1, updated_at: 2,
+    last_drain_recovery_previous_generation: null, plugin_catalog_hash: CATALOG_HASH,
+    cancel_requested: false, prepare_started: true, created_at: 1, updated_at: 2,
     state: 'degraded', result_status: 202, error_code: errorCode, error_detail: 'recovery',
   };
 }
@@ -98,7 +99,7 @@ function fixture(input: Scenario = {}) {
       },
     },
     publicationTasks: {
-      enqueue() {}, async enqueueRecovery(task) { return task(); }, setFatalHandler() {}, async stop() { fail('publication.stop'); },
+      wake() {}, async enqueueRecovery(task) { return task(); }, setFatalHandler() {}, async stop() { fail('publication.stop'); },
     },
     admission: {
       prepare() { return Promise.resolve({ async commit() {}, async abort() {}, async releaseRetiredAfterExitProof() {} }); },
@@ -348,7 +349,7 @@ test('cancels startup recovery synchronously before the coordinator gate opens',
         return { kind: 'startup_failed', failures: [], serving: [] };
       },
     },
-    publicationTasks: { enqueue() {}, async enqueueRecovery(task) { return task(); }, setFatalHandler() {}, async stop() { events.push('publication.stop'); } },
+    publicationTasks: { wake() {}, async enqueueRecovery(task) { return task(); }, setFatalHandler() {}, async stop() { events.push('publication.stop'); } },
     admission: { prepare() { throw new Error('unused'); }, adoptCommitted() {}, snapshot: () => [], clear() { events.push('admission.clear'); } },
     publicListener: { port: null, start() {}, async stop() { events.push('listener.stop'); } },
     workerPool: {

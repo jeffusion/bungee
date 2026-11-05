@@ -8,6 +8,7 @@ import { ConfigRepository, AsyncConfigRepository } from '../../src/config-storag
 import { CONFIG_MIGRATIONS, migrateConfigurationDatabase } from '../../src/config-storage/migrations';
 import { verifySchemaFingerprint } from '../../src/config-storage/schema-fingerprint';
 import { CONFIG_SCHEMA_STATEMENTS } from '../../src/config-storage/schema';
+import { settleWorkerLaunch } from '../helpers/worker-launch';
 
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), 'bungee-retirement-store-'));
@@ -15,12 +16,14 @@ function fixture() {
   return { directory, path, repository: ConfigRepository.open(path) };
 }
 const BOOT = 'kernel-monotonic-v1:linux:11111111-1111-4111-8111-111111111111';
+const CATALOG = `sha256:${'a'.repeat(64)}` as const;
 
 test('cleanup retry acceptance survives reopen and cannot change attempt identity or deadlines',()=>{
   const {directory,path,repository}=fixture(); const requestId=randomUUID();
   try {
     repository.commit({mutation_id:'cleanup-request',expected_revision:1,kind:'config',created_at:1,target_worker_slots:[],
       aggregate:{logical_configuration:{services:[],routes:[],plugins:[]},plugin_activations:[]}});
+    repository.claimPublicationTarget(CATALOG,2);
     repository.beginPublication('cleanup-request',2);repository.markDraining('cleanup-request',3);
     const member={identity:{master_generation:randomUUID(),worker_instance_id:randomUUID(),worker_slot:0},boot_nonce:randomUUID(),pid:123,
       private_port:4567,revision:1,content_hash:repository.getSnapshot().content_hash,plugin_catalog_hash:repository.getSnapshot().content_hash,
@@ -78,6 +81,7 @@ test('migration 2 rollback and reopen preserve multiple operation, worker and re
         target_worker_slots: [0, 1], aggregate: { logical_configuration: { services: [], routes: [], plugins: [],
           auth: { enabled: true, tokens: [`fixture-token-${round}`] } }, plugin_activations: [] } }).kind).toBe('committed');
       repository.appendServingSnapshot(repository.getSnapshot(), repository.getSnapshot().content_hash);
+      repository.claimPublicationTarget(CATALOG, now + 1);
       repository.beginPublication(mutation, now + 1);
       for (const slot of [0, 1]) {
         repository.beginWorkerAttempt(mutation, slot, 0, 'initial', now + 2);
@@ -86,6 +90,7 @@ test('migration 2 rollback and reopen preserve multiple operation, worker and re
         repository.recordWorkerResult(mutation, slot, slot === 0
           ? { kind: 'failed', attempt_no: 1, error: 'fixture rejection' }
           : { kind: 'converged', attempt_no: 1, applied_revision: round + 2 }, now + 3);
+        settleWorkerLaunch(repository, mutation, slot, 1, now + 4);
       }
       repository.finalizePublication(mutation, { outcome: 'degraded', error_code: 'replacement_convergence_failed',
         error_detail: 'fixture rejection', recovery_disposition: 'retryable' }, now + 4);
@@ -109,9 +114,15 @@ test('migration 2 rollback and reopen preserve multiple operation, worker and re
     db.run('DROP TABLE routes');
     db.run(CONFIG_SCHEMA_STATEMENTS.find(statement=>statement.startsWith('CREATE TABLE routes'))!);
     db.run('DROP TABLE management_protection');
-    db.run('ALTER TABLE configuration_operations DROP COLUMN management_provider');
-    db.run('ALTER TABLE configuration_operations DROP COLUMN offline_management');
-    for (const table of ['ui_menu_layout', 'configuration_retirement_retry_requests','configuration_retirement_evidence', 'configuration_retirements', 'configuration_publication_serving_sets', 'runtime_recovery_tickets', 'runtime_recovery_budget']) {
+    const operationColumns = 'mutation_id,request_hash,expected_revision,committed_revision,kind,target_worker_count,state,result_status,error_code,error_detail,drain_recovery_generation,last_drain_recovery_previous_generation,created_at,updated_at';
+    db.run(`CREATE TABLE operations_v1 AS SELECT ${operationColumns} FROM configuration_operations`);
+    db.run('DROP TABLE configuration_operations');
+    db.run(CONFIG_SCHEMA_STATEMENTS.find(statement => statement.startsWith('CREATE TABLE configuration_operations'))!);
+    for (const trigger of CONFIG_SCHEMA_STATEMENTS.filter(statement =>
+      statement.startsWith('CREATE TRIGGER configuration_operations_terminal'))) db.run(trigger);
+    db.run(`INSERT INTO configuration_operations (${operationColumns}) SELECT ${operationColumns} FROM operations_v1`);
+    db.run('DROP TABLE operations_v1');
+    for (const table of ['ui_menu_layout', 'configuration_worker_launch_facts', 'configuration_worker_launch_intents', 'configuration_publication_candidate_evidence', 'configuration_retirement_retry_requests','configuration_retirement_evidence', 'configuration_retirements', 'configuration_publication_serving_sets', 'runtime_recovery_tickets', 'runtime_recovery_budget']) {
       db.run(`DROP TABLE ${table}`);
     }
     db.run('DELETE FROM schema_migrations WHERE version>=2');
@@ -158,6 +169,7 @@ test('retirement membership and confirmed exit stay immutable across stopped ret
       boot_nonce: randomUUID(), pid: 123, private_port: 4567, revision: 1, content_hash: repository.getSnapshot().content_hash,
       plugin_catalog_hash: repository.getSnapshot().content_hash, publication: null, guard: null,
       drain_id: randomUUID(), deadline_boot_id: BOOT, start_deadline_ns: '987654321' };
+    repository.claimPublicationTarget(CATALOG, 1);
     repository.freezePublicationRetirement('retirement', 0, [member], 1);
     expect(() => repository.freezePublicationRetirement('retirement', 0, [{ ...member, start_deadline_ns: '987654322' }], 2)).toThrow('already frozen');
     repository.recordPublicationRetirementEvidence('retirement', instance, 'unknown', 'unknown', 2);
@@ -242,6 +254,7 @@ test('C deadline starts once after handoff and survives stopped retry and reopen
   const {directory,path,repository}=fixture();
   try {
     repository.commit({mutation_id:'drain-start',expected_revision:1,kind:'config',created_at:1,target_worker_slots:[],aggregate:{logical_configuration:{services:[],routes:[],plugins:[]},plugin_activations:[]}});
+    repository.claimPublicationTarget(CATALOG,2);
     repository.beginPublication('drain-start',2);repository.markDraining('drain-start',3);
     const member={identity:{master_generation:randomUUID(),worker_instance_id:randomUUID(),worker_slot:0},boot_nonce:randomUUID(),pid:123,private_port:4567,revision:1,
       content_hash:repository.getSnapshot().content_hash,plugin_catalog_hash:repository.getSnapshot().content_hash,publication:null,guard:null,

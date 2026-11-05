@@ -23,6 +23,7 @@ import { readRepositorySnapshot, verifyRepositoryIntegrity } from '../../src/con
 import { CONFIG_MIGRATIONS, migrateConfigurationDatabase } from '../../src/config-storage/migrations';
 import { verifySchemaFingerprint } from '../../src/config-storage/schema-fingerprint';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
+import { settleWorkerLaunch } from '../helpers/worker-launch';
 
 setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
@@ -572,14 +573,17 @@ describe('ConfigRepository normalized commits', () => {
       const committed = repository.commit(command(mutationId, 1, EMPTY_AGGREGATE, 'config', 1_700_000_000_001, [0]));
       expect(committed.kind).toBe('committed');
       if (committed.kind !== 'committed') continue;
+      repository.claimPublicationTarget(`sha256:${'d'.repeat(64)}`, 1_700_000_000_001);
       if (phase !== 'committed') repository.beginPublication(mutationId, 1_700_000_000_002);
       if (phase === 'draining') {
         repository.beginWorkerAttempt(mutationId, 0, 0, 'initial', 1_700_000_000_003);
         repository.recordWorkerResult(mutationId, 0, {
           kind: 'converged', attempt_no: 1, applied_revision: 2,
         }, 1_700_000_000_004);
+        settleWorkerLaunch(repository, mutationId, 0, 1, 1_700_000_000_005);
         repository.markDraining(mutationId, 1_700_000_000_005);
         repository.beginDrainingRecovery(mutationId, 0, 1_700_000_000_006);
+        settleWorkerLaunch(repository, mutationId, 0, 2, 1_700_000_000_006);
       }
       const before = repository.getOperationState(mutationId);
       const terminal = repository.finalizePublication(mutationId, {
@@ -657,7 +661,7 @@ describe('ConfigRepository normalized commits', () => {
     expect(result.operation).toMatchObject({
       mutation_id: 'rich-commit', expected_revision: 1, committed_revision: 2,
       request_hash: hashConfigurationRequest({ kind: 'config', expected_revision: 1, aggregate, target_worker_slots: [0] }),
-      state: 'committed', result_status: null, error_code: null,
+      state: 'pending', result_status: null, error_code: null,
     });
     expect(rows).toEqual({ services: 1, routes: 2, upstreams: 2, bindings: 4, activations: 2 });
     expect(servicePolicy).toBe('{}');
@@ -711,11 +715,13 @@ describe('ConfigRepository normalized commits', () => {
 
     // When
     const before = repository.commit({ ...firstCommand, created_at: firstCommand.created_at + 10_000 });
+    repository.claimPublicationTarget(`sha256:${'d'.repeat(64)}`, firstCommand.created_at);
     repository.beginPublication('duplicate', firstCommand.created_at + 1);
     repository.beginWorkerAttempt('duplicate', 0, 0, 'initial', firstCommand.created_at + 2);
     repository.recordWorkerResult('duplicate', 0, {
       kind: 'failed', attempt_no: 1, error: 'failed',
     }, firstCommand.created_at + 3);
+    settleWorkerLaunch(repository, 'duplicate', 0, 1, firstCommand.created_at + 4);
     repository.finalizePublication('duplicate', {
       outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'failed', recovery_disposition: 'retryable',
     }, firstCommand.created_at + 4);
@@ -735,7 +741,7 @@ describe('ConfigRepository normalized commits', () => {
     expect(after.kind).toBe('duplicate');
     if (before.kind === 'duplicate' && after.kind === 'duplicate') {
       expect(before.operation.committed_revision).toBe(2);
-      expect(before.operation.state).toBe('committed');
+      expect(before.operation.state).toBe('pending');
       expect(after.operation).toMatchObject({
         mutation_id: before.operation.mutation_id,
         committed_revision: before.operation.committed_revision,
@@ -788,11 +794,13 @@ describe('ConfigRepository normalized commits', () => {
     const initial = richAggregate();
     const { repository } = openRepository({ compileOptions: COMPILE_OPTIONS });
     expect(repository.commit(command('initial-auth', 1, initial)).kind).toBe('committed');
+    repository.claimPublicationTarget(`sha256:${'d'.repeat(64)}`, 1_700_000_000_000);
     repository.beginPublication('initial-auth', 1_700_000_000_001);
     repository.beginWorkerAttempt('initial-auth', 0, 0, 'initial', 1_700_000_000_002);
     repository.recordWorkerResult('initial-auth', 0, {
       kind: 'failed', attempt_no: 1, error: 'failed',
     }, 1_700_000_000_003);
+    settleWorkerLaunch(repository, 'initial-auth', 0, 1, 1_700_000_000_004);
     repository.finalizePublication('initial-auth', {
       outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'failed', recovery_disposition: 'retryable',
     }, 1_700_000_000_004);
@@ -1132,7 +1140,7 @@ describe('ConfigRepository schema enforcement and corruption handling', () => {
       WHERE type='table' AND name NOT LIKE 'sqlite_%'`).all();
 
     // When / Then
-    expect(definitions).toHaveLength(23);
+    expect(definitions).toHaveLength(26);
     expect(definitions.every(({ sql }) => sql.includes('STRICT'))).toBe(true);
     expect(() => inspector.run(`INSERT INTO services (id,position,name,policy_json)
       VALUES ('10000000-0000-4000-8000-000000000099','wrong','bad','{}')`)).toThrow();
@@ -1155,6 +1163,9 @@ describe('ConfigRepository schema enforcement and corruption handling', () => {
       'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','config',1)`)).toThrow();
     expect(() => inspector.run(`INSERT INTO services (id,position,name,policy_json)
       VALUES ('10000000-0000-4000-8000-000000000098',9007199254740992,'unsafe','{}')`)).toThrow();
+    expect(() => inspector.run(`INSERT INTO configuration_publication_candidate_evidence
+      (mutation_id,worker_slot,attempt_no,exit_kind,cleanup,updated_at)
+      VALUES ('missing-owner',0,0,'exited','released',1)`)).toThrow();
     inspector.close(true);
   });
 

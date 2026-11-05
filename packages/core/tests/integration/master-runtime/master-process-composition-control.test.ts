@@ -30,6 +30,23 @@ import {
 const HASH = `sha256:${'a'.repeat(64)}` as const;
 const MASTER_GENERATION = '10000000-0000-4000-8000-000000000001';
 const ANONYMOUS_MANAGEMENT_PROTECTION = Object.freeze({required:false, selectedProvider:null, generation:0});
+const PUBLICATION_REPOSITORY_STUBS = {
+  claimPublicationTarget: async () => null,
+  requestPublicationCancellation: async () => { throw new Error('no publication owner'); },
+  enterPublicationPrepare: async () => ({ kind: 'granted' as const, operation: {} as never }),
+  recordPublicationCandidateExit: async () => undefined,
+  confirmPublicationCandidateExited: async () => { throw new Error('no publication owner'); },
+  getOutstandingPublicationCandidates: async () => [],
+  registerWorkerLaunch: async () => { throw new Error('unused launch fake'); },
+  fenceWorkerLaunchNotStarted: async () => { throw new Error('unused launch fake'); },
+  recordWorkerLaunchAdmitted: async () => { throw new Error('unused launch fake'); },
+  recordWorkerLaunchExit: async () => { throw new Error('unused launch fake'); },
+  getWorkerLaunch: async () => null,
+  getWorkerLaunchAllocationFacts: async () => null,
+  getWorkerLaunchInventory: async () => [],
+  getPublicationRecoveryBarrier: async () => null,
+  getUnsettledWorkerLaunches: async () => [],
+};
 
 function identity(slot: number): ConfigProcessIdentity {
   return {
@@ -146,6 +163,7 @@ test('composition retains ACKed serving/draining snapshots and installs the peer
       appendServingSnapshot: async () => { publicationOrder.push('append'); },
       getServingSnapshot: async () => null,
       getActivePublication: async () => null,
+      ...PUBLICATION_REPOSITORY_STUBS,
       getOperationState: async (mutationId: string) => mutationCommits.includes(mutationId)
         ? { operation: { mutation_id: mutationId, state: 'converged', committed_revision: current.revision }, workers: [] } : null,
       getCurrentOperationState: async () => null,
@@ -445,10 +463,9 @@ test('composition retains ACKed serving/draining snapshots and installs the peer
       expect((await mutation()).status).toBe(202);
       expect(mutationCommits).toHaveLength(beforeCommit + 1);
       notifyUnavailable(second.process);
-      const blocked = await mutation();
-      expect(blocked.status).toBe(503);
-      expect(await blocked.json()).toEqual({ error: 'control_recovering', reason: 'admission_recovering' });
-      expect(mutationCommits).toHaveLength(beforeCommit + 1);
+      const stillSaving = await mutation();
+      expect(stillSaving.status).toBe(202);
+      expect(mutationCommits).toHaveLength(beforeCommit + 2);
       await composedCoordinator!.publish(active, []);
       expect((await mutation()).status).toBe(202);
     }
@@ -487,6 +504,7 @@ test('malformed plugin secret keys fail the composition boundary instead of beco
     getSnapshot: () => { throw new Error('unreachable'); },
     getManagementProtection: () => { throw new Error('unreachable'); },
     refreshControlProjection: async () => { throw new Error('unreachable'); }, getActivePublication: async () => null,
+      ...PUBLICATION_REPOSITORY_STUBS,
     getOperationState: () => null, getCurrentOperationState: async () => null, commit: () => null, beginPublication: () => null,
     beginWorkerAttempt: () => null, beginDrainingRecovery: () => null, recordWorkerResult: () => null,
     markDraining: () => null, finalizePublication: () => null,
@@ -553,14 +571,17 @@ test.each(['stopped', 'publication-failure'] as const)('selected generic authent
     if (committed.kind !== 'committed') throw new Error('management fixture selection was not committed');
     let current = committed.snapshot;
     expect(configuration.getManagementProtection()).toEqual({required:true,selectedProvider:provider,generation:1});
-    const recovery = {recovery_id:'60000000-0000-4000-8000-000000000001',state:'stopped',target_revision:current.revision,attempt_count:1,max_attempts:6,next_retry_at:null,final_reason_code:'fatal_source_failure'};
+    const recovery = {recovery_id:'60000000-0000-4000-8000-000000000001',state:'stopped',target_revision:current.revision,attempt_count:1,max_attempts:6,next_retry_at:null,final_reason_code:'safety_outcome_unknown'};
     let activePublication: any = null;
     let controlFailures = 0;
     const repository = {getSnapshot:()=>current,
       getManagementProtection:()=>configuration!.getManagementProtection(),
-      refreshControlProjection:async()=>({snapshot:current,managementProtection:configuration!.getManagementProtection()}),getServingSnapshot:async()=>null,appendServingSnapshot:async()=>{},getActivePublication:async()=>activePublication,
+      refreshControlProjection:async()=>({snapshot:current,managementProtection:configuration!.getManagementProtection()}),getServingSnapshot:async()=>null,appendServingSnapshot:async()=>{},getActivePublication:async()=>activePublication,...PUBLICATION_REPOSITORY_STUBS,
+      claimPublicationTarget: async () => activePublication,
       finalizePublication:async()=>{controlFailures++;return {state:'degraded',error_code:'control_readiness_failed'};},
-      getCurrentOperationState:async()=>null,getCurrentRecovery:async()=>mode==='stopped' ? recovery : null,getRecovery:async()=>recovery,close:async()=>{configuration?.close();configuration=undefined;}};
+      getCurrentOperationState:async()=>null,getCurrentRecovery:async()=>mode==='stopped' ? recovery : null,
+      getPublicationRecoveryBarrier:async()=>mode==='stopped' ? recovery : null,
+      getRecovery:async()=>recovery,close:async()=>{configuration?.close();configuration=undefined;}};
     let admissionCache: Map<string, RepositorySnapshot> | undefined;
     const initial = current;
     const originalSet = Map.prototype.set;
@@ -601,7 +622,7 @@ test.each(['stopped', 'publication-failure'] as const)('selected generic authent
         current = { ...current, revision };
         const outcome = await composedCoordinator!.startCurrent(current);
         expect(outcome).toMatchObject({ kind: 'startup_degraded', error_code: 'control_readiness_failed' });
-        activePublication = { snapshot: current, operation: { mutation_id: crypto.randomUUID() } };
+        activePublication = { snapshot: current, operation: { mutation_id: crypto.randomUUID() }, targets: [] };
         expect(await composedCoordinator!.publish(activePublication, [])).toMatchObject({ kind: 'degraded', error_code: 'control_readiness_failed' });
         expect(await composedCoordinator!.recoverAndPublish()).toMatchObject({ kind: 'degraded', error_code: 'control_readiness_failed' });
         activePublication = null;
@@ -698,6 +719,7 @@ test('does not create an in-memory retry loop without a durable recovery row', a
     getManagementProtection: () => ANONYMOUS_MANAGEMENT_PROTECTION,
     refreshControlProjection: async () => ({snapshot:current, managementProtection:ANONYMOUS_MANAGEMENT_PROTECTION}),
     getActivePublication: async () => null,
+      ...PUBLICATION_REPOSITORY_STUBS,
     appendServingSnapshot: async () => undefined,
     getServingSnapshot: async () => null,
     getOperationState: () => null,
@@ -848,7 +870,7 @@ test.each(['scheduled', 'running', 'stopped'] as const)(
         attempt_count: recoveryState === 'running' || recoveryState === 'stopped' ? 1 : 0,
         max_attempts: 6 as const,
         next_retry_at: recoveryState === 'scheduled' ? 100 : null,
-        final_reason_code: recoveryState === 'stopped' ? 'fatal_source_failure' as const : null,
+        final_reason_code: recoveryState === 'stopped' ? 'safety_outcome_unknown' as const : null,
         final_reason_detail: recoveryState === 'stopped' ? 'fixture stopped' : null,
         created_at: 1,
         updated_at: 1,
@@ -879,9 +901,16 @@ test.each(['scheduled', 'running', 'stopped'] as const)(
             && key.plugin_catalog_hash === catalog.hash ? oldSnapshot : null,
         appendServingSnapshot: async () => undefined,
         getActivePublication: async () => null,
+      ...PUBLICATION_REPOSITORY_STUBS,
         getOperationState: () => null,
         getCurrentOperationState: async () => null,
         getCurrentRecovery: async () => currentRecovery,
+        getPublicationRecoveryBarrier: (excludeRecoveryId: string | null = null) => {
+          if (currentRecovery.recovery_id === excludeRecoveryId) return null;
+          return currentRecovery.state === 'scheduled' || currentRecovery.state === 'running'
+            || (currentRecovery.state === 'stopped' && currentRecovery.final_reason_code === 'safety_outcome_unknown')
+            ? currentRecovery : null;
+        },
         getRecovery: async () => currentRecovery,
         createManualRecovery: () => currentRecovery,
         claimRecoveryAttempt: (recoveryId: string, previousAttemptCount: number, now: number) => {

@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { ConfigurationOperation } from '../../../src/api/config';
 import { PluginsAPI, setPluginEnabled } from '../../../src/api/plugins';
+import { ConfigurationSubmissionUnknownError } from '../../../src/api/config';
 import { pendingPublicationKey, readPendingPublication } from '../../../src/components/domain/config/workspace';
+import { configurationWrite } from '../../../src/stores/configuration-write';
 
 const originalFetch = globalThis.fetch;
 const originalStorage = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage');
@@ -20,12 +22,16 @@ function install(requests: RequestRecord[], responses: MockResponse[]): void {
     } });
 }
 
-function accepted(operationId: string, state: ConfigurationOperation['state']): MockResponse {
-  return () => Response.json({
+function accepted(state: ConfigurationOperation['state']): MockResponse {
+  return init => {
+    const operationId = JSON.parse(String(init?.body)).mutation_id;
+    return Response.json({
     operation_id: operationId,
     revision: 8,
     operation: {
       mutation_id: operationId,
+      expected_revision: 7,
+      committed_revision: 8,
       state,
       result_status: state === 'converged' ? 200 : state === 'degraded' ? 202 : null,
       error_code: state === 'degraded' ? 'replacement_convergence_failed' : null,
@@ -33,6 +39,7 @@ function accepted(operationId: string, state: ConfigurationOperation['state']): 
     },
     workers: [],
   }, { status: 202 });
+  };
 }
 
 beforeEach(() => {
@@ -40,6 +47,7 @@ beforeEach(() => {
   Object.defineProperty(globalThis, 'sessionStorage', {configurable:true, value:{
     setItem:(key:string,value:string) => stored.set(key,value),
     getItem:(key:string) => stored.get(key) ?? null,
+    removeItem:(key:string) => stored.delete(key),
   }});
 });
 afterEach(() => {
@@ -73,22 +81,24 @@ describe('plugin activation', () => {
 
   test.each(['committed','publishing','draining','converged','degraded'] as const)('retains the durable ACK in state %s without waiting for publication', async state => {
     const requests: RequestRecord[] = [];
-    install(requests, [accepted(operationId, state)]);
+    install(requests, [accepted(state)]);
     expect(await setPluginEnabled('demo', false)).toBe('committed');
     expect(requests.map(request => request.url)).toEqual(['/api/plugins/demo/disable']);
-    expect(readPendingPublication()).toEqual({mutationId:operationId, accepted:true});
+    const id = JSON.parse(String(requests[0]?.init?.body)).mutation_id;
+    expect(readPendingPublication()).toEqual({mutationId:id, accepted:true});
   });
 
   test('retains the ACK before login and awaits the authentication handoff only', async () => {
     const requests: RequestRecord[] = [];
-    install(requests, [accepted(operationId, 'draining')]);
+    install(requests, [accepted('draining')]);
     let release!: () => void, entered!: () => void;
     const handoff = new Promise<void>(resolve => { release = resolve; });
     const started = new Promise<void>(resolve => { entered = resolve; });
     let completed = false;
     const pending = setPluginEnabled('user-auth', true, {onAccepted:async state => {
-      expect(state.operation_id).toBe(operationId);
-      expect(readPendingPublication()).toEqual({mutationId:operationId, accepted:true});
+      const id = JSON.parse(String(requests[0]?.init?.body)).mutation_id;
+      expect(state.operation_id).toBe(id);
+      expect(readPendingPublication()).toEqual({mutationId:id, accepted:true});
       entered(); await handoff;
     }}).then(value => { completed = true; return value; });
     await started;
@@ -100,12 +110,13 @@ describe('plugin activation', () => {
 
   test('a failed login preserves the accepted identity without persisting credentials or resubmitting', async () => {
     const requests: RequestRecord[] = [];
-    install(requests, [accepted(operationId, 'committed')]);
+    install(requests, [accepted('committed')]);
     await expect(setPluginEnabled('user-auth', true, {
       managementSetup:{operation:'initialize',username:'owner',password:'fixture-password',passwordConfirmation:'fixture-password'},
       onAccepted:async () => { throw new Error('invalid_credentials'); },
     })).rejects.toThrow('invalid_credentials');
-    expect(readPendingPublication()).toEqual({mutationId:operationId, accepted:true});
+    const id = JSON.parse(String(requests[0]?.init?.body)).mutation_id;
+    expect(readPendingPublication()).toEqual({mutationId:id, accepted:true});
     expect(stored.size).toBe(1);
     expect(stored.get(pendingPublicationKey)).not.toContain('fixture-password');
     expect(requests).toHaveLength(1);
@@ -119,13 +130,61 @@ describe('plugin activation', () => {
     expect(requests).toHaveLength(1);
   });
 
-  test('a malformed ACK is rejected before handoff or tracking', async () => {
+  test('a malformed ACK is reconciled by its identity and stays unconfirmed when unproven', async () => {
     const requests: RequestRecord[] = [];
-    install(requests, [Response.json({revision:8}, {status:202})]);
+    install(requests, [Response.json({revision:8}, {status:202}),
+      Response.json({error:'operation_not_found'}, {status:404})]);
     let called = false;
-    await expect(setPluginEnabled('demo', true, {onAccepted:() => { called = true; }})).rejects.toThrow('not accepted');
+    await expect(setPluginEnabled('demo', true, {onAccepted:() => { called = true; }})).rejects.toBeInstanceOf(ConfigurationSubmissionUnknownError);
+    const id = JSON.parse(String(requests[0]?.init?.body)).mutation_id;
     expect(called).toBe(false);
-    expect(stored.size).toBe(0);
-    expect(requests).toHaveLength(1);
+    // The server accepted something we cannot identify: keep the marker so a new identity is never sent.
+    expect(readPendingPublication()?.accepted).toBe(false);
+    expect(requests.map(request => request.url)).toEqual(['/api/plugins/demo/enable', `/api/config/operations/${id}`]);
+    configurationWrite.clear();
+  });
+
+  test('a foreign lookup identity keeps the original marker', async () => {
+    const requests: RequestRecord[] = [];
+    const foreign = { mutation_id: 'foreign', expected_revision: 7, committed_revision: 8,
+      state: 'committed', result_status: null, error_code: null, error_detail: null };
+    install(requests, [Response.json({ error: 'result_unknown' }, { status: 503 }),
+      Response.json({ operation: foreign, workers: [] })]);
+    await expect(setPluginEnabled('demo', true)).rejects.toBeInstanceOf(ConfigurationSubmissionUnknownError);
+    const id = JSON.parse(String(requests[0]?.init?.body)).mutation_id;
+    expect(requests).toHaveLength(2);
+    expect(readPendingPublication()).toEqual({ mutationId: id, accepted: false });
+    configurationWrite.clear();
+  });
+
+  test('a lost response reconciled to superseded clears tracking and reports replacement, not failure', async () => {
+    const requests: RequestRecord[] = [];
+    install(requests, [
+      () => { throw new TypeError('network'); },
+      () => {
+        const id = JSON.parse(String(requests[0]?.init?.body)).mutation_id;
+        return Response.json({ operation: { mutation_id: id, expected_revision: 7, committed_revision: 8,
+          state: 'superseded', result_status: 409,
+          error_code: 'revision_superseded', error_detail: 'revision was superseded before publication was claimed' }, workers: [] },
+        { status: 409 });
+      },
+    ]);
+    await expect(setPluginEnabled('demo', true)).rejects.toThrow('configuration_superseded');
+    expect(requests.map(request => request.url)).toEqual(['/api/plugins/demo/enable',
+      expect.stringMatching(/^\/api\/config\/operations\//)]);
+    expect(readPendingPublication()).toBeNull();
+  });
+
+  test('refuses a new identity while a prior write result is unconfirmed', async () => {
+    const requests: RequestRecord[] = [];
+    install(requests, []);
+    configurationWrite.markDispatched(operationId);
+    try {
+      await expect(setPluginEnabled('demo', true)).rejects.toThrow('configuration_write_unconfirmed');
+      expect(requests).toHaveLength(0);
+      expect(readPendingPublication()).toEqual({ mutationId: operationId, accepted: false });
+    } finally {
+      configurationWrite.clear();
+    }
   });
 });

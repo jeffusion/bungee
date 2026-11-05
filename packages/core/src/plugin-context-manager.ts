@@ -165,7 +165,8 @@ export class PluginContextManager {
       return;
     }
 
-    // 刷新storage缓存到数据库
+    // 刷新storage缓存到数据库；失败不能在这里吞掉，但仍要继续撤销/移除 context。
+    const cleanupErrors: unknown[] = [];
     if (context.storage && typeof (context.storage as any).flush === 'function') {
       try {
         await (context.storage as any).flush();
@@ -175,13 +176,19 @@ export class PluginContextManager {
           { error, pluginName },
           'Failed to flush plugin storage cache'
         );
+        cleanupErrors.push(error);
       }
     }
 
     // 清理workspaceState (可选，看需求)
     // await context.workspaceState.clear();
 
-    this.revocations.get(pluginName)?.();
+    try {
+      this.revocations.get(pluginName)?.();
+    } catch (error) {
+      globalLogger.error({ error, pluginName }, 'Failed to revoke plugin storage');
+      cleanupErrors.push(error);
+    }
     this.revocations.delete(pluginName);
     this.contexts.delete(pluginName);
 
@@ -189,6 +196,10 @@ export class PluginContextManager {
       { pluginName },
       'Destroyed plugin context'
     );
+
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(cleanupErrors, `plugin context cleanup failed: ${pluginName}`);
+    }
   }
 
   /**
@@ -198,8 +209,14 @@ export class PluginContextManager {
   async destroyAll(): Promise<void> {
     const pluginNames = Array.from(this.contexts.keys());
 
+    const cleanupErrors: unknown[] = [];
     for (const pluginName of pluginNames) {
-      await this.destroyContext(pluginName);
+      try {
+        await this.destroyContext(pluginName);
+      } catch (error) {
+        globalLogger.error({ error, pluginName }, 'Failed to destroy plugin context');
+        cleanupErrors.push(error);
+      }
     }
 
     this.contexts.clear();
@@ -207,6 +224,9 @@ export class PluginContextManager {
     if (PluginContextManager.instance === this) PluginContextManager.instance = null;
     if (globalContextManager === this) globalContextManager = null;
 
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(cleanupErrors, 'plugin context cleanup failed');
+    }
     globalLogger.info('Destroyed all plugin contexts');
   }
 

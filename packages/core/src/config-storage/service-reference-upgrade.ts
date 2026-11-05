@@ -7,7 +7,7 @@ import { hashConfigurationContent, hashConfigurationRequest } from './content-ha
 import { commitTransaction } from './commit-transaction';
 import { prepareCommitCommand } from './prepared-command';
 import { readManagementProtection } from './management-protection';
-import { beginPublication, markDraining, finalizePublication } from './operation-store';
+import { finalizeOfflineOperation } from './operation-store';
 import { ConfigRepositoryError, type ConfigRepositoryOptions } from './repository-types';
 import { verifyRepositoryIntegrity, readRepositorySnapshot } from './repository-snapshot';
 
@@ -58,9 +58,7 @@ export function convertServiceReferenceRevision(db: Database, options: ConfigRep
       aggregate: prepared.aggregate, target_worker_slots: [], management_provider: provider }) };
   const result = commitTransaction(db, command, options, snapshot);
   if (result.kind !== 'committed') throw new ConfigRepositoryError('migration_failed', `service reference revision commit failed (${result.kind})`);
-  beginPublication(db, operationId, now);
-  markDraining(db, operationId, now);
-  finalizePublication(db, operationId, {outcome:'converged',old_workers_exited:true}, now);
+  finalizeOfflineOperation(db, operationId, now);
   // Include materialization, request identity, and hash auditing in the same rollback boundary.
   readRepositorySnapshot(db);
 }

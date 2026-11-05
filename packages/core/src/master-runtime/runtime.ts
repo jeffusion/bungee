@@ -108,7 +108,7 @@ export class MasterRuntime {
       if (this.options.controlListener !== undefined && this.options.controlListener.port === null) {
         throw new MasterRuntimeError('listener_port_unavailable', 'master control listener did not expose a bound port');
       }
-      this.options.workerPool.markCommitted(serving.map(({ process }) => process));
+      await this.options.workerPool.markCommitted(serving.map(({ process }) => process));
       if (this.startupSupervisionFailure !== null) throw this.startupSupervisionFailure;
       this.phase = 'started';
       this.supervisor.started();
@@ -209,6 +209,8 @@ export class MasterRuntime {
         throw new MasterRuntimeError('startup_incomplete', 'recovery did not produce a complete serving set', recovered);
       case 'outcome_unknown':
         if (recovered.fatal) throw new MasterRuntimeError('startup_incomplete', `fatal recovery outcome (${recovered.code})`, recovered);
+        return this.retainedServing();
+      case 'superseded':
         return this.retainedServing();
       default: {
         const unhandled: never = recovered;

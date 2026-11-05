@@ -29,7 +29,10 @@ function command(snapshot: RepositorySnapshot, id: string, names: readonly strin
   return { mutation_id: id, expected_revision: snapshot.revision, kind: 'config', created_at: 100,
     aggregate: { ...snapshot.aggregate, plugin_activations: names.map(plugin_name => ({ plugin_name })) }, target_worker_slots: slots };
 }
+const CATALOG = `sha256:${'7'.repeat(64)}` as const;
+
 function finish(repository: ConfigRepository, id: string): void {
+  repository.claimPublicationTarget(CATALOG, 100);
   repository.beginPublication(id, 101); repository.markDraining(id, 102);
   repository.finalizePublication(id, { outcome: 'converged', old_workers_exited: true }, 103);
 }
@@ -54,8 +57,17 @@ describe('durable management protection', () => {
     db.run('DROP TABLE routes');
     db.run(CONFIG_SCHEMA_STATEMENTS.find(statement=>statement.startsWith('CREATE TABLE routes'))!);
     db.run('DROP TABLE management_protection');
-    db.run('ALTER TABLE configuration_operations DROP COLUMN management_provider');
-    db.run('ALTER TABLE configuration_operations DROP COLUMN offline_management');
+    db.run('DROP TABLE configuration_worker_launch_facts');
+    db.run('DROP TABLE configuration_worker_launch_intents');
+    db.run('DROP TABLE configuration_publication_candidate_evidence');
+    const operationColumns = 'mutation_id,request_hash,expected_revision,committed_revision,kind,target_worker_count,state,result_status,error_code,error_detail,drain_recovery_generation,last_drain_recovery_previous_generation,created_at,updated_at';
+    db.run(`CREATE TABLE operations_v3 AS SELECT ${operationColumns} FROM configuration_operations`);
+    db.run('DROP TABLE configuration_operations');
+    db.run(CONFIG_SCHEMA_STATEMENTS.find(statement => statement.startsWith('CREATE TABLE configuration_operations'))!);
+    for (const trigger of CONFIG_SCHEMA_STATEMENTS.filter(statement =>
+      statement.startsWith('CREATE TRIGGER configuration_operations_terminal'))) db.run(trigger);
+    db.run(`INSERT INTO configuration_operations (${operationColumns}) SELECT ${operationColumns} FROM operations_v3`);
+    db.run('DROP TABLE operations_v3');
     db.run('DELETE FROM schema_migrations WHERE version>=4');
     migrateConfigurationDatabase(db, CONFIG_MIGRATIONS.slice(0, 3));
     const revisions = db.query('SELECT * FROM configuration_revisions').all();
@@ -158,17 +170,13 @@ describe('durable management protection', () => {
     expect(ordinary.getManagementProtection().required).toBe(true);
   });
 
-  test('offline changes reject pending operation and recovery without overwriting either', () => {
+  test('offline changes persist while a target still waits for publication', () => {
     const repository = open(undefined, { offline: true });
     repository.commit(command(repository.getSnapshot(), 'pending', [], [0]));
-    expect(() => repository.setManagementProviderOffline('identity-one', 'denied-pending', 200)).toThrow();
-    repository.beginPublication('pending', 101); repository.beginWorkerAttempt('pending', 0, 0, 'initial', 102);
-    repository.recordWorkerResult('pending', 0, { kind: 'failed', attempt_no: 1, error: 'unavailable' }, 103);
-    repository.finalizePublication('pending', { outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'unavailable', recovery_disposition: 'retryable' }, 104);
-    const recovery = repository.getCurrentRecovery();
-    expect(() => repository.setManagementProviderOffline('identity-one', 'denied-recovery', 200)).toThrow();
-    expect(repository.getCurrentRecovery()).toEqual(recovery);
-    expect(repository.getManagementProtection().required).toBe(false);
+    const changed = repository.setManagementProviderOffline('identity-one', 'offline-after-pending', 200);
+    expect(changed.managementProtection).toEqual({ required: true, selectedProvider: 'identity-one', generation: 1 });
+    expect(repository.getOperation('pending')).toMatchObject({ state: 'pending', committed_revision: 2 });
+    expect(repository.getSnapshot().revision).toBe(3);
   });
 
   test('offline failure is atomic and two stale openers operate on the actual current revision', () => {
@@ -198,6 +206,7 @@ describe('durable management protection', () => {
     const input = command(client.getSnapshot(), 'worker-enable', ['identity-one']);
     expect((await client.commit(input)).kind).toBe('committed');
     expect(client.getManagementProtection()).toEqual({ required: true, selectedProvider: 'identity-one', generation: 1 });
+    expect((await client.claimPublicationTarget(CATALOG, 100))?.operation.mutation_id).toBe('worker-enable');
     await client.beginPublication('worker-enable', 101); await client.markDraining('worker-enable', 102);
     await client.finalizePublication('worker-enable', { outcome: 'converged', old_workers_exited: true }, 103);
     await client.setManagementProviderOffline(null, 'worker-clear', 200);

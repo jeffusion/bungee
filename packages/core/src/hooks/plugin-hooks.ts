@@ -223,6 +223,11 @@ export interface PluginScopeInfo {
  * 插件初始化上下文
  */
 export interface PluginInitContext {
+  /**
+   * Aborts when the worker runtime shuts down. Long-running initialization must
+   * stop waiting cooperatively (pass it to I/O); it is not cleanup evidence.
+   */
+  readonly signal?: AbortSignal;
   /** Host-generated providers have no application binding; configured instances do. */
   readonly initializationKind?: 'automatic-provider' | 'configured';
   /** Host-controlled, dependency-restricted public service facade. */

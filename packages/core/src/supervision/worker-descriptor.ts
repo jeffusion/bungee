@@ -4,14 +4,31 @@ import { mkdir, open, rename, rm, chmod } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { snapshotJsonGraph } from '../config-storage/json-preflight';
 import { canonicalJson } from '../config-storage/content-hash';
-import { validateDigest } from '../config-storage/repository-validation';
+import { validateDigest, validateMutationId } from '../config-storage/repository-validation';
 import { isLowercaseUuid } from '../config-storage/validation';
 import { parseConfigWorkerMessage } from '../config-publication/worker-messages';
 import type { ConfigWorkerRuntimeMessage } from '../config-publication/worker-runtime-contract';
+import type { ConfigPublicationIdentity } from '../config-publication/types';
 import type { SupervisionMac, SupervisionProcessCredential } from './protocol';
 import { SupervisionProtocolError } from './protocol';
 
 export type WorkerDescriptorPhase = 'candidate' | 'serving' | 'draining' | 'stopped';
+
+/**
+ * Signed terminal cleanup record. It is written only after the worker's owned
+ * shutdown cleanup settled, so a coordinator must never derive it from a
+ * shutdown acknowledgement or from process exit alone. A candidate that never
+ * reached `config-ready` has no drain message; this record is its release proof.
+ * `revision`/publication are the last start target observed before initialization
+ * settled, or null when no start command ever began.
+ */
+export type WorkerCleanupEvidence = {
+  readonly cleanup_state: 'success' | 'failed';
+  readonly revision: number | null;
+  readonly content_hash: string | null;
+  readonly plugin_catalog_hash: string | null;
+  readonly publication: ConfigPublicationIdentity | null;
+};
 
 export type WorkerDescriptorEvidence = {
   readonly kind: 'candidate' | 'ready' | 'apply-failed' | 'draining' | 'drained' | 'drain-failed';
@@ -38,6 +55,7 @@ export type WorkerDescriptorBody = {
   readonly plugin_catalog_hash: string | null;
   readonly started_at: number;
   readonly evidence: WorkerDescriptorEvidence;
+  readonly cleanup?: WorkerCleanupEvidence;
 };
 
 export type WorkerDescriptor = WorkerDescriptorBody & { readonly descriptor_mac: SupervisionMac };
@@ -130,6 +148,40 @@ function isDirectorySyncOptional(error: unknown, platform: NodeJS.Platform | str
   return platform === 'win32' && (code === 'EPERM' || code === 'EISDIR' || code === 'ENOTSUP' || code === 'EINVAL');
 }
 
+function parseCleanupEvidence(value: unknown): WorkerCleanupEvidence {
+  const input = plain(value);
+  exact(input, ['cleanup_state', 'revision', 'content_hash', 'plugin_catalog_hash', 'publication']);
+  if (input.cleanup_state !== 'success' && input.cleanup_state !== 'failed') fail('cleanup_state is invalid');
+  const revision = input.revision === null ? null : integer(input, 'revision', 1);
+  const contentHash = input.content_hash === null ? null : text(input, 'content_hash');
+  const pluginCatalogHash = input.plugin_catalog_hash === null ? null : text(input, 'plugin_catalog_hash');
+  if ((revision === null) !== (contentHash === null) || (revision === null) !== (pluginCatalogHash === null)) {
+    fail('cleanup revision and digests must be consistently nullable');
+  }
+  if (revision === null && input.publication !== null) fail('cleanup publication requires a target revision');
+  if (contentHash !== null && !validateDigest(contentHash)) fail('cleanup content_hash is invalid');
+  if (pluginCatalogHash !== null && !validateDigest(pluginCatalogHash)) fail('cleanup plugin_catalog_hash is invalid');
+  let publication: ConfigPublicationIdentity | null = null;
+  if (input.publication !== null) {
+    const candidate = plain(input.publication);
+    exact(candidate, ['mutation_id', 'attempt_no', 'drain_recovery_generation']);
+    const mutationId = text(candidate, 'mutation_id');
+    if (!validateMutationId(mutationId)) fail('cleanup publication mutation_id is invalid');
+    publication = {
+      mutation_id: mutationId,
+      attempt_no: integer(candidate, 'attempt_no', 1),
+      drain_recovery_generation: integer(candidate, 'drain_recovery_generation', 0),
+    };
+  }
+  return {
+    cleanup_state: input.cleanup_state,
+    revision,
+    content_hash: contentHash,
+    plugin_catalog_hash: pluginCatalogHash,
+    publication,
+  };
+}
+
 export function parseWorkerDescriptorEvidence(value: unknown): WorkerDescriptorEvidence {
   const input = plain(value);
   const kind = text(input, 'kind') as WorkerDescriptorEvidence['kind'];
@@ -160,8 +212,10 @@ export function parseWorkerDescriptor(
     if (error instanceof SupervisionProtocolError) throw error;
     throw new SupervisionProtocolError('malformed_message', 'worker descriptor JSON is unsafe', { cause: error });
   }
-  const keys = input.master_control_port === undefined ? DESCRIPTOR_KEYS : DESCRIPTOR_KEYS_WITH_MASTER_CONTROL;
-  exact(input, input.lifetime_guard === undefined ? keys : [...keys, 'lifetime_guard']);
+  let keys: readonly string[] = input.master_control_port === undefined ? DESCRIPTOR_KEYS : DESCRIPTOR_KEYS_WITH_MASTER_CONTROL;
+  if (input.lifetime_guard !== undefined) keys = [...keys, 'lifetime_guard'];
+  if (input.cleanup !== undefined) keys = [...keys, 'cleanup'];
+  exact(input, keys);
   if (input.schema !== 'bungee-worker-descriptor-v1' || input.role !== 'worker') fail('schema or role is invalid');
   const masterGeneration = text(input, 'master_generation');
   const workerInstanceId = text(input, 'worker_instance_id');
@@ -192,6 +246,7 @@ export function parseWorkerDescriptor(
     worker_instance_id: workerInstanceId, worker_slot: workerSlot, boot_nonce: bootNonce, pid,
     control_port: controlPort, ...(masterControlPort === undefined ? {} : { master_control_port: masterControlPort }), phase, frozen: input.frozen, private_port: privatePort, revision,
     content_hash: contentHash, plugin_catalog_hash: pluginCatalogHash, started_at: startedAt, evidence,
+    ...(input.cleanup === undefined ? {} : { cleanup: parseCleanupEvidence(input.cleanup) }),
   };
   if (body.lifetime_guard !== undefined && body.lifetime_guard.process_instance_id !== workerInstanceId) fail('lifetime guard identity does not match');
   if (!(credential instanceof Uint8Array)) {

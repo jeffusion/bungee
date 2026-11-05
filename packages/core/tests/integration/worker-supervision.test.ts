@@ -22,7 +22,7 @@ import {
   type ControllerAuthority,
 } from '../../src/supervision';
 import { WorkerControllerClient } from '../../src/master-runtime/supervised-worker-client';
-import { aggregate, drainMessage, PROCESS_IDENTITY, startCurrentMessage } from '../helpers/config-publication-worker-runtime';
+import { aggregate, drainMessage, PROCESS_IDENTITY, startCurrentMessage, startMessage } from '../helpers/config-publication-worker-runtime';
 
 const ROOT = new Uint8Array(32).fill(4);
 const BOOT = '70000000-0000-4000-8000-000000000001';
@@ -406,6 +406,54 @@ describe('worker supervision seed and HTTP state', () => {
     expect(firstBody).toEqual(secondBody);
     expect(writes.writes).toBe(1);
     expect(firstBody.message.sequence).toBe(secondBody.message.sequence);
+  });
+
+  test('persists cleanup evidence even when it shares the ready publication reference', async () => {
+    const seed = deriveWorkerSupervisionSeed(ROOT, PROCESS_IDENTITY.master_generation, PROCESS_IDENTITY.worker_instance_id, PROCESS_IDENTITY.worker_slot);
+    const credential = deriveWorkerSupervisionCredential(seed, BOOT);
+    const directory = await mkdtemp(join(tmpdir(), 'bungee-worker-cleanup-'));
+    const path = join(directory, 'worker.json');
+    let resolveApply!: (value: unknown) => void;
+    let markApplyStarted!: () => void;
+    const applyStarted = new Promise<void>((resolve) => { markApplyStarted = resolve; });
+    const publication = { mutation_id: '94000000-0000-4000-8000-0000000000a1', attempt_no: 2, drain_recovery_generation: 3 };
+    const body = { ...startMessage(7, aggregate()), publication };
+    const runtime = {
+      apply: () => { markApplyStarted(); return new Promise((resolve) => { resolveApply = resolve; }); },
+      async failClosed() {},
+    };
+    const server = new WorkerSupervisionHttpServer({ credential, identity: PROCESS_IDENTITY, runtime: runtime as any,
+      masterControlPort: 3011, controlPort: 41001, descriptorPath: path, clock: () => 100 });
+    const post = async (route: string, value: unknown) => server.fetch(new Request(`http://127.0.0.1${route}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(value),
+    }));
+    try {
+      const challenge = await post('/__supervision/challenge', { ...AUTHORITY, request_id: randomUUID(), sequence: 1 }).then((r) => r.json()) as any;
+      await post('/__supervision/attach', signSupervisionMessage({ protocol: 'bungee-supervision-v1', kind: 'attach', direction: 'controller-to-process',
+        ...credential.identity, ...AUTHORITY, sequence: 1, request_id: randomUUID(), challenge_nonce: challenge.message.challenge_nonce }, credential));
+      await post('/__supervision/lease', signSupervisionMessage({ protocol: 'bungee-supervision-v1', kind: 'lease', direction: 'controller-to-process',
+        ...credential.identity, ...AUTHORITY, sequence: 2, request_id: randomUUID(), lease_expires_at: 1000 }, credential));
+      const message = signSupervisionMessage({ protocol: 'bungee-supervision-v1', kind: 'command', direction: 'controller-to-process',
+        ...credential.identity, ...AUTHORITY, sequence: 3, request_id: randomUUID(), method: 'POST', path: '/start', body_hash: hashSupervisionBody(body) }, credential);
+      const started = post('/__supervision/command', { message, body });
+      await applyStarted;
+      // The real runtime echoes the command publication into the ready message,
+      // so the cleanup evidence below references the same object.
+      resolveApply({ ok: true, message: { status: 'config-ready', ...PROCESS_IDENTITY, boot_nonce: BOOT, pid: process.pid,
+        revision: 7, content_hash: body.content_hash, plugin_catalog_hash: body.plugin_catalog_hash, private_port: 41234,
+        plugin_runtime_generation: 1, required_plugins: [], serving_plugins: [], publication: body.publication } });
+      expect((await started).status).toBe(200);
+
+      await server.persistCleanupEvidence({ cleanup_state: 'success', revision: 7,
+        content_hash: body.content_hash, plugin_catalog_hash: body.plugin_catalog_hash, publication: body.publication });
+
+      const persisted = await readFile(path, 'utf8');
+      const descriptor = parseWorkerDescriptor(JSON.parse(persisted), credential);
+      expect(descriptor.cleanup).toEqual({ cleanup_state: 'success', revision: 7,
+        content_hash: body.content_hash, plugin_catalog_hash: body.plugin_catalog_hash, publication });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   test('serializes descriptor writes and removes failed temporary files', async () => {

@@ -76,7 +76,7 @@ describe('explicit route WebSocket configuration', () => {
     const api = (repository: ConfigRepository) => createConfigControlApi({
       workerCount: 1, repository, parseAggregate: parseNormalizeCompileAggregate,
       managementAuth: { authenticate: async () => ({}), recheck: async () => true, identity: () => ({}), authorized: () => true, validateWrite: () => {}, selected: () => null },
-      publicationTasks: { enqueue: () => {} }, admission: { snapshot: () => [] },
+      publicationTasks: { wake: () => {} },
       clock: { now: () => 1 }, isMutationReady: () => true, resolveAuthToken: (value: unknown) => value,
     } as any);
     try {

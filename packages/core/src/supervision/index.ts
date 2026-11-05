@@ -76,6 +76,7 @@ export type {
   WorkerRuntimeSnapshotResult,
 } from './worker-runtime-snapshot';
 export type {
+  WorkerCleanupEvidence,
   WorkerDescriptor,
   WorkerDescriptorBody,
   WorkerDescriptorEvidence,

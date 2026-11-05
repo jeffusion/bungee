@@ -80,3 +80,17 @@ export class OwnedProcessCollection {
 export function cleanupConfirmed(results: readonly ProcessCleanupResult[]): boolean {
   return results.every(({ exitEvidence, waitError }) => exitEvidence !== null && waitError === undefined);
 }
+
+/**
+ * Physical exit alone is not release proof: the worker must also report successful
+ * cleanup. A drained worker proves it through its terminal drain message; a candidate
+ * cancelled before `config-ready` never has one and proves it through the signed
+ * shutdown cleanup record instead.
+ */
+export function candidateResourcesReleased(results: readonly ProcessCleanupResult[]): boolean {
+  return results.length > 0 && results.every(({ exitEvidence, waitError }) =>
+    exitEvidence !== null && waitError === undefined
+    && (exitEvidence.terminalDrain === undefined
+      ? exitEvidence.cleanup_state === 'success'
+      : exitEvidence.terminalDrain.cleanup_state === 'success'));
+}

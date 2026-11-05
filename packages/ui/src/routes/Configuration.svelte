@@ -3,7 +3,7 @@
   import { get } from 'svelte/store';
   import { _ } from '$i18n';
   import { isLoading } from 'svelte-i18n';
-  import { DEFAULT_WEBSOCKET_MAX_CONNECTIONS, DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES, MAX_WEBSOCKET_MAX_MESSAGE_BYTES, type LogicalConfiguration } from '@jeffusion/bungee-types';
+  import { DEFAULT_WEBSOCKET_MAX_CONNECTIONS, DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES, MAX_WEBSOCKET_MAX_MESSAGE_BYTES, type ConfigurationAggregate, type LogicalConfiguration } from '@jeffusion/bungee-types';
   import { ApiError } from '$api/client';
   import { getToken } from '$stores/auth';
   import { publicationRecovery } from '$stores/runtime';
@@ -13,8 +13,7 @@
   import { token as authToken } from '$stores/auth';
   import {
     getConfigSnapshot, getConfigurationOperation, validateAggregate, validateImport, commitConfiguration, importConfig,
-    ConfigurationStaleError, ConfigurationOperationConflictError, ConfigurationOperationDegradedError,
-    ConfigurationOperationTimeoutError, ConfigurationValidationError,
+    ConfigurationStaleError, ConfigurationValidationError, isDefinitiveConfigurationRejection,
     type ConfigurationSnapshot, type ConfigurationImportEnvelope, type ConfigurationImportPreview, type ConfigurationOperationState,
   } from '$api/config';
   import { PanelCard, StatusBadge, SystemAlertBar, IndustrialDialog, LoadingIndicator, IndustrialToggle } from '$components/industrial';
@@ -29,12 +28,11 @@
   import ConfigurationDiff from '$components/domain/config/ConfigurationDiff.svelte';
   import { publicationFields, publicationInputs, parsePublicationInputs, publicationServerErrors, maxPublicationSeconds,
     type PublicationInputs, type PublicationErrors, type PublicationField } from '$components/domain/config/publication-policy';
-  import { publicationMessage, historicalDrainFailure, runtimeHealthFault } from '$components/domain/config/publication-state';
-  import RuntimeFacts from '$components/domain/config/RuntimeFacts.svelte';
-  import { configurationDiff, parseImportPreview, aggregateCounts, publicationBusy, servingStatus,
-    IMPORT_LIMITS, readPendingPublication } from '$components/domain/config/workspace';
-  import { retainAccepted, forgetDispatch, submissionLocked, isTerminal, queryFailure, replacementSummary, preCommitRejection,
+  import { publicationMessage, runtimeHealthFault } from '$components/domain/config/publication-state';
+  import { configurationDiff, parseImportPreview, aggregateCounts, servingStatus, IMPORT_LIMITS } from '$components/domain/config/workspace';
+  import { submissionLocked, isTerminal, queryFailure, preCommitRejection,
     type SubmissionPhase } from '$components/domain/config/publication-state';
+  import { configurationWrite } from '$stores/configuration-write';
 
   type Draft = { -readonly [K in keyof LogicalConfiguration]: LogicalConfiguration[K] };
   let snapshot = $state<ConfigurationSnapshot | null>(null);
@@ -52,6 +50,8 @@
   const websocketInvalid = $derived(!imported && !websocketUnlimited && (websocketValue === undefined
     || !Number.isSafeInteger(websocketValue) || websocketValue < 1 || websocketValue > 2147483647));
   let publicationRaw = $state<PublicationInputs>(publicationInputs());
+  // New object only in resetSettingsInputs; ordinary draft edits must not remount the editor.
+  let loggingResetKey = $state({});
   let publicationEdited = $state(false);
   let publicationBackendErrors = $state<PublicationErrors>({});
   const parsedPublication = $derived(parsePublicationInputs(publicationRaw));
@@ -62,10 +62,9 @@
   let imported = $state<ConfigurationImportEnvelope | null>(null);
   let importPreview = $state<ConfigurationImportPreview | null>(null);
   let reviewOpen = $state(false), busy = $state(false), validating = $state(false), loading = $state(true);
-  let conflict = $state(false), detailsOpen = $state(false), storageWarning = $state('');
+  let conflict = $state(false), storageWarning = $state('');
   let phase = $state<SubmissionPhase>('idle');
   let notice = $state(''), validation = $state(''), validSignature = $state('');
-  let rejectionSummary = $state('');
   let pendingId = $state<string | null>(null), nextAuthToken = $state('');
   let tracked = $state<ConfigurationOperationState | null>(null);
   let fileInput: HTMLInputElement;
@@ -76,21 +75,27 @@
   let accepted = $state(false);
   let proofForRead = $state<string | undefined>();
   let lastDetailKey = '';
-  const t = (key: string) => $isLoading ? '' : $_(`settings.${key}`);
-  // One visible outcome per submission: the dialog carries it while open, the
-  // toast carries it everywhere else. Deduped so polling cannot spam it.
+  // The ACK advances the baseline; local edits made during the request stay in the draft.
+  let baselinePending = $state(false), rebasing = $state(false), savedRevision = $state<number | null>(null);
+  let baselineGeneration = 0;
+  const t = (key: string, values?: Record<string, string | number>) => $isLoading ? '' : $_(`settings.${key}`, values ? { values } : undefined);
+  // One visible outcome per submission: success is a single toast, problems stay
+  // in the page alert. Deduped so polling cannot spam either.
   let announced = '';
   let announcedId: number | null = null;
   function announce(key: string) {
     if (!key || key === announced) return;
-    const text = t(key);
-    if (!text) return;
+    // One outcome toast per save: saved, published and superseded are the same submission.
+    if (['saved', 'published', 'superseded'].includes(key) && ['saved', 'published', 'superseded'].includes(announced)) { announced = key; return; }
     announced = key;
     // Replace only this page's own notice, so an older phase cannot sit next to
     // the current one. Other pages' toasts are never touched.
-    if (announcedId !== null) toast.remove(announcedId);
-    const tone = key === 'published' ? 'success' : key === 'rejected' ? 'error' : key === 'submitted' ? 'info' : 'warning';
-    announcedId = toast.show(text, tone);
+    if (announcedId !== null) { toast.remove(announcedId); announcedId = null; }
+    // Warnings and errors stay in the page alert; only outcomes get a toast.
+    if (!['saved', 'published', 'superseded'].includes(key)) return;
+    const text = t(key);
+    if (!text) return;
+    announcedId = toast.show(text, ['saved', 'published'].includes(key) ? 'success' : 'info');
   }
   // Before the durable ACK the review cannot be dismissed; after it, tracking
   // continues in the background and the dialog may close.
@@ -110,6 +115,11 @@
     const value = policy === undefined ? publicationInputs()[field] : typeof policy?.[field] === 'number' ? String(policy[field] / 1000) : '';
     return [field, value];
   })) as PublicationInputs : publicationRaw);
+  function publicationSeconds(field: PublicationField) {
+    const text = publicationDisplay[field];
+    const seconds = Number(text);
+    return text.trim() !== '' && Number.isFinite(seconds) ? seconds : undefined;
+  }
   const diff = $derived(snapshot && candidate ? configurationDiff(snapshot.config, candidate, [$authToken ?? '', nextAuthToken]) : []);
   const dirty = $derived(diff.length > 0 || websocketInvalid || websocketMessageInvalid || publicationEdited && !parsedPublication.policy || imported !== null);
   const changeCount = $derived($isLoading ? '' : $_('settings.changeCount', { values: { count: diff.length } }));
@@ -117,35 +127,49 @@
   const nextAuthRequired = false;
   // Our own accepted revision is not a foreign CAS conflict while its outcome is being followed.
   const staleBaseline = $derived(!!snapshot && !!runtime && runtime.revision !== snapshot.revision);
-  const runtimeConflict = $derived(!pendingId && !busy && staleBaseline && !(phase === 'terminal' && tracked?.operation.committed_revision === runtime?.revision));
-  const locked = $derived(loading || busy || submissionLocked(phase) || publicationBusy(publication));
+  const runtimeConflict = $derived(!baselinePending && !pendingId && !busy && staleBaseline && !(phase === 'terminal' && tracked?.operation.committed_revision === runtime?.revision));
+  const editingLocked = $derived(loading || reviewOpen || !!imported || rebasing);
   const operationId = $derived(pendingId ?? (!fresh && tracked && (!publication?.operation || tracked.operation.committed_revision >= publication.operation.committed_revision)
     ? tracked.operation.mutation_id : publication?.operation?.operation_id ?? tracked?.operation.mutation_id) ?? null);
   const operationState = $derived(pendingId ? tracked?.operation.mutation_id === pendingId ? tracked.operation.state : 'unknown'
     : phase === 'terminal' && tracked?.operation.mutation_id === operationId ? tracked.operation.state
     : !fresh || !publication ? 'unknown' : publication.operation ? publication.operation.state ?? 'unknown' : 'none');
-  const detailsForced = $derived(!!pendingId || publicationBusy(publication) || runtimeHealthFault(runtime?.health, fresh));
   const authNeedsLogin = $derived(phase === 'terminal' && !!proofForRead && proofForRead.replace(/^Bearer /, '') !== $authToken);
-  const canPublish = $derived(reviewOpen && !locked && !validating && !draftInvalid && !!snapshot && !!candidate && diff.length > 0
-    && validSignature === signature && fresh && !!publication && !conflict && !staleBaseline && !authNeedsLogin
+  const canPublish = $derived(reviewOpen && !submitting && !submissionLocked(phase) && !baselinePending && !validating && !draftInvalid
+    && !!snapshot && !!candidate && diff.length > 0 && validSignature === signature
+    && !conflict && !runtimeConflict && !authNeedsLogin
     && (!nextAuthRequired || nextAuthToken.trim() !== ''));
+  const submitReason = $derived(draftInvalid ? invalidDraftMessage
+    : submitting ? t('submitting')
+    : submissionLocked(phase) ? t('unknownSubmitBlocked')
+    : baselinePending ? t('savedBaselineUnread')
+    : diff.length ? changeCount : t('clean'));
   const importCounts = $derived(imported ? aggregateCounts(imported.aggregate) : null);
-  const replacements = $derived(replacementSummary(tracked?.workers));
-  const historicalFailure = $derived(historicalDrainFailure(publication, fresh));
   const publicationStatusMessage = $derived(publicationMessage(publication, fresh));
-  const runtimeMessage = $derived($publicationRecovery.readStatus === 'paused' ? 'runtimeTracking'
-    : $publicationRecovery.readStatus === 'loading' ? 'runtimeLoading' : fresh ? 'servingNotice' : 'runtimeUnavailable');
+  // Only a real publication problem gets a page alert; routine progress stays in the status cell and toast.
+  const publicationFault = $derived(fresh && ['degraded', 'supersededFailed', 'drainFailed', 'drainUnconfirmed'].includes(publicationStatusMessage));
+  const dependencyFault = $derived(runtimeHealthFault(runtime?.health, fresh));
+  const noticeAlert = $derived((!!notice && !['saved', 'published', 'tracking', 'superseded'].includes(notice)) || conflict || runtimeConflict);
+  // Only an unresolved result needs a bar; reading status or applying a tracked save is routine.
+  const runtimeUncertain = $derived(serving !== 'confirmed' && !publicationFault && !dependencyFault && !noticeAlert && phase !== 'active'
+    && !['paused', 'loading'].includes($publicationRecovery.readStatus));
+  // One alert only: the current notice wins, then a publication problem, then a dependency problem.
+  const showFault = $derived(publicationFault && !noticeAlert);
+  const showRuntimeFault = $derived(dependencyFault && !noticeAlert && !publicationFault);
+  const runtimeMessage = $derived(fresh ? 'servingNotice' : 'runtimeUnavailable');
 
   function readHeaders() {
     if (!proofForRead) return undefined;
     return new Headers({ Authorization: proofForRead.startsWith('Bearer ') ? proofForRead : `Bearer ${proofForRead}` });
   }
   function releaseIdentity(next: 'rejected' | 'terminal') {
-    if (!forgetDispatch()) storageWarning = 'storageCleanupFailed';
+    if (!configurationWrite.clear()) storageWarning = 'storageCleanupFailed';
     inspectGeneration++; pendingId = null; phase = next;
   }
   async function loadConfig() {
     if (disposed) return;
+    baselineGeneration++;
+    baselinePending = false; savedRevision = null;
     loading = true;
     try {
       const loaded = await getConfigSnapshot(accepted ? readHeaders() : undefined);
@@ -155,15 +179,64 @@
     } catch { if (!disposed) notice = 'loadError'; }
     finally { if (!disposed) loading = false; }
   }
+  /** Advance the editing baseline to the committed revision without replacing the draft. */
+  function adoptBaseline(loaded: ConfigurationSnapshot, committedRevision: number): 'adopted' | 'lagging' | 'foreign' {
+    if (loaded.revision > committedRevision) {
+      // Another client advanced after our ACK. Never attach its revision to our older draft.
+      conflict = true; notice = 'conflict'; baselinePending = false;
+      return 'foreign';
+    }
+    if (loaded.revision < committedRevision) {
+      // Our own committed revision is not readable yet; keep the draft and block submission.
+      baselinePending = true; notice = 'savedBaselineUnread';
+      return 'lagging';
+    }
+    snapshot = loaded; baselinePending = false; conflict = false; validSignature = ''; publicationBackendErrors = {};
+    return 'adopted';
+  }
+  function keepImportedDraft(importedDraft: LogicalConfiguration | undefined) {
+    // The user confirmed this import; a conflict must not reveal the pre-import draft.
+    if (importedDraft) { draft = JSON.parse(JSON.stringify(importedDraft)); resetSettingsInputs(); }
+  }
+  async function rebaseAfterCommit(wasImport: boolean, committedRevision: number, importedDraft?: LogicalConfiguration) {
+    if (wasImport) rebasing = true;
+    const generation = ++baselineGeneration;
+    try {
+      const loaded = await getConfigSnapshot(readHeaders());
+      if (disposed || generation !== baselineGeneration) return;
+      const outcome = adoptBaseline(loaded, committedRevision);
+      if (outcome === 'foreign' || outcome === 'lagging') { if (wasImport) keepImportedDraft(importedDraft); return; }
+      if (wasImport) { draft = JSON.parse(JSON.stringify(loaded.config.logical_configuration)); resetSettingsInputs(); }
+    } catch {
+      if (!disposed && generation === baselineGeneration) {
+        baselinePending = true; notice = 'savedBaselineUnread';
+        if (wasImport) keepImportedDraft(importedDraft);
+      }
+    } finally {
+      if (wasImport && !disposed) rebasing = false;
+    }
+  }
+  async function refreshBaseline(committedRevision: number) {
+    const generation = ++baselineGeneration;
+    try {
+      const loaded = await getConfigSnapshot(readHeaders());
+      if (disposed || generation !== baselineGeneration) return;
+      if (adoptBaseline(loaded, committedRevision) !== 'adopted') return;
+      if (notice === 'savedBaselineUnread') notice = '';
+    } catch {
+      if (!disposed && generation === baselineGeneration) { baselinePending = true; notice = 'savedBaselineUnread'; }
+    }
+  }
   async function reloadConfig() {
-    if (locked || (dirty && !await confirmAction({ title: t('reload'), message: t('reloadWarning'), confirmText: t('reload'), cancelText: t('stay') }))) return;
+    if (submitting || (dirty && !await confirmAction({ title: t('reload'), message: t('reloadWarning'), confirmText: t('reload'), cancelText: t('stay') }))) return;
     if (disposed) return;
     notice = ''; await loadConfig(); if (disposed) return; await publicationRecovery.refresh(); await focusEditor();
   }
   async function discard() {
-    if (locked || !snapshot || !await confirmAction({ title: t('discard'), message: t('discardWarning'), confirmText: t('discard'), cancelText: t('stay') })) return;
+    if (submitting || !snapshot || !await confirmAction({ title: t('discard'), message: t('discardWarning'), confirmText: t('discard'), cancelText: t('stay') })) return;
     if (disposed) return;
     draft = JSON.parse(JSON.stringify(snapshot.config.logical_configuration)); imported = null;
+    baselinePending = false;
     nextAuthToken = ''; validSignature = ''; notice = ''; resetSettingsInputs();
     await focusEditor();
   }
@@ -172,27 +245,27 @@
     if (disposed) return;
     (document.querySelector<HTMLElement>('#config-log-level') ?? document.querySelector<HTMLElement>('[data-testid="settings-notice"]'))?.focus();
   }
-  function cancelImport() { if (!busy && !pendingId) { importGeneration++; imported = null; nextAuthToken = ''; validSignature = ''; publicationBackendErrors = {}; } }
+  function cancelImport() { if (!submitting) { importGeneration++; imported = null; nextAuthToken = ''; validSignature = ''; publicationBackendErrors = {}; } }
   async function selectImport(event: Event) {
     const input = event.currentTarget as HTMLInputElement, file = input.files?.[0];
     input.value = '';
-    if (!file || locked) return;
+    if (!file || editingLocked) return;
     const generation = ++importGeneration;
     imported = null; validSignature = ''; nextAuthToken = ''; reviewGeneration++; publicationBackendErrors = {};
     try {
       if (file.size > IMPORT_LIMITS.bytes) throw new Error('snapshot_limit');
       const parsed = parseImportPreview(await file.text());
-      if (disposed || generation !== importGeneration || locked) return;
+      if (disposed || generation !== importGeneration || editingLocked) return;
       const preview = await validateImport(parsed);
-      if (disposed || generation !== importGeneration || locked) return;
+      if (disposed || generation !== importGeneration || editingLocked) return;
       importPreview = preview; imported = parsed; notice = '';
     }
     catch { if (!disposed && generation === importGeneration) notice = 'invalidImport'; }
   }
   function cancelReview() { reviewOpen = false; reviewGeneration++; validSignature = ''; validation = ''; }
   async function review() {
-    if (!candidate || !diff.length || locked || draftInvalid) return;
-    rejectionSummary = ''; notice = '';
+    if (!candidate || !diff.length || submitting || baselinePending || draftInvalid || conflict || runtimeConflict) return;
+    notice = '';
     const invalid = [...document.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-testid="page-config"] input, [data-testid="page-config"] select')]
       .find(input => !input.disabled && !input.checkValidity());
     if (invalid) { invalid.reportValidity(); notice = 'invalidCandidate'; return; }
@@ -209,61 +282,77 @@
   function observe(state: ConfigurationOperationState) {
     if (disposed) return;
     if (pendingId && state.operation.mutation_id !== pendingId) throw new Error('operation identity mismatch');
+    // Only this page's confirmed operation may supply the revision a baseline retry reads.
+    savedRevision = state.operation.committed_revision;
     inspectGeneration++;
     const firstAccepted = !accepted;
-    if (firstAccepted && !retainAccepted(state.operation.mutation_id)) storageWarning = 'storageTrackingFailed';
+    if (firstAccepted && !configurationWrite.markAccepted(state.operation.mutation_id)) storageWarning = 'storageTrackingFailed';
     tracked = state; accepted = true;
-    if (isTerminal(state.operation.state)) { releaseIdentity('terminal'); detailsOpen = true; }
-    else { phase = 'active'; }
-    // The first durable ACK is a result in its own right: submitted, not converged.
-    if (firstAccepted && !isTerminal(state.operation.state)) announce('submitted');
+    if (isTerminal(state.operation.state)) {
+      releaseIdentity('terminal');
+    } else { phase = 'active'; }
     // A durable ACK proves which credential can read this publication. Resume
     // real serving reads while the operation waits for old requests to drain.
     if (firstAccepted) void publicationRecovery.resume(readHeaders());
   }
   async function publish() {
     if (!canPublish || !snapshot || !candidate) return;
+    const submitted = JSON.parse(signature) as ConfigurationAggregate;
+    const submittedImport = imported ? JSON.parse(JSON.stringify(imported)) as ConfigurationImportEnvelope : null;
     busy = true; notice = ''; storageWarning = ''; accepted = false; phase = 'idle'; announced = '';
     proofForRead = nextAuthRequired ? nextAuthToken.trim() : undefined;
-    publicationRecovery.pause();
     const options = {
+      completion: 'committed' as const,
       nextAuthorization: proofForRead,
       onDispatch: (id: string) => {
         if (disposed) return;
         inspectGeneration++; tracked = null; pendingId = id; phase = 'unknown';
+        if (!configurationWrite.markDispatched(id)) storageWarning = 'storageUnpersisted';
       },
       onOperation: observe,
     };
     try {
-      if (imported) await importConfig(snapshot, JSON.parse(JSON.stringify(imported)), options);
-      else await commitConfiguration(snapshot, JSON.parse(signature), options);
+      const acked = submittedImport
+        ? await importConfig(snapshot, submittedImport, options)
+        : await commitConfiguration(snapshot, submitted, options);
       if (disposed) return;
-      proofForRead = undefined; nextAuthToken = ''; notice = 'published'; announce('published');
-      cancelReview(); await loadConfig();
+      proofForRead = undefined; nextAuthToken = '';
+      busy = false;
+      if (submittedImport) imported = null;
+      cancelReview();
+      notice = 'saved'; announce('saved');
+      // Persistence is confirmed here. The baseline moves; the draft does not.
+      await rebaseAfterCommit(submittedImport !== null, acked.operation.committed_revision,
+        submittedImport?.aggregate.logical_configuration);
+      if (!disposed && baselinePending) { notice = 'savedBaselineUnread'; announce(notice); }
     } catch (error) {
       if (disposed) return;
       validSignature = '';
       const rejection = preCommitRejection(error, accepted);
       if (rejection) {
-        releaseIdentity('rejected'); notice = rejection.code; rejectionSummary = rejection.summary;
-      } else if (error instanceof ConfigurationStaleError || error instanceof ConfigurationOperationConflictError) {
+        releaseIdentity('rejected'); notice = rejection.code;
+      } else if (error instanceof ConfigurationStaleError) {
         releaseIdentity('rejected'); conflict = true; notice = 'conflict'; proofForRead = undefined;
-      } else if (error instanceof ConfigurationOperationDegradedError) {
-        notice = 'degraded'; cancelReview(); await loadConfig();
       }
-      else if (error instanceof ConfigurationOperationTimeoutError) notice = 'timeout';
-      else if (!accepted && (error instanceof ConfigurationValidationError || (error instanceof ApiError && [400, 401, 403, 422].includes(error.status)))) {
-        if (error instanceof ConfigurationValidationError) publicationBackendErrors = publicationServerErrors(error.errors);
+      else if (!accepted && error instanceof ConfigurationValidationError) {
+        publicationBackendErrors = publicationServerErrors(error.errors);
         releaseIdentity('rejected'); notice = 'rejected'; proofForRead = undefined;
       }
-      else { notice = accepted ? queryFailure(error instanceof ApiError ? error.status : undefined) : 'unknownAcceptance'; }
+      else if (!accepted && isDefinitiveConfigurationRejection(error)) {
+        // A structured pre-commit rejection (for example a 422 invalid_configuration)
+        // provably saved nothing, so the identity is released and the draft stays editable.
+        releaseIdentity('rejected'); notice = 'rejected'; proofForRead = undefined;
+      }
+      else {
+        notice = accepted ? queryFailure(error instanceof ApiError ? error.status : undefined) : 'unknownAcceptance';
+        // An unconfirmed submission must not leave the review dialog stuck on a disabled action.
+        if (!accepted) cancelReview();
+      }
       announce(notice);
     } finally {
-      if (disposed) return;
       busy = false;
-      // A known accepted auth rotation can be read with the candidate without persisting it.
-      // An unacknowledged rotation stays unknown: never probe with an unproven credential or re-PUT.
-      if (!pendingId || accepted || !proofForRead) await publicationRecovery.resume(accepted ? readHeaders() : undefined);
+      // Keep the shared runtime view current, including when the page unmounts mid-request.
+      void publicationRecovery.resume(accepted ? readHeaders() : undefined);
     }
   }
   async function inspectOperation(id = operationId) {
@@ -277,15 +366,19 @@
       if (wasPending) {
         observe(state);
         if (isTerminal(state.operation.state)) {
-          if (state.operation.state === 'converged') {
-
-            proofForRead = undefined;
+          if (state.operation.state === 'converged') proofForRead = undefined;
+          notice = state.operation.state === 'converged' ? 'published'
+            : state.operation.state === 'superseded' ? 'superseded'
+            : 'degraded';
+          // The draft belongs to the user; only the baseline advances to the committed revision.
+          if (baselinePending || state.operation.committed_revision > (snapshot?.revision ?? 0)) {
+            await refreshBaseline(state.operation.committed_revision);
+            if (conflict) notice = 'conflict';
           }
-          notice = state.operation.state === 'converged' ? 'published' : 'degraded';
           announce(notice);
-          // Terminal outcome: never leave the dialog on a disabled button.
-          cancelReview();
-          await loadConfig(); if (!disposed) await publicationRecovery.resume(readHeaders());
+          // Close only a dialog that has nothing left to review; a newer draft keeps it open.
+          if (!dirty) cancelReview();
+          if (!disposed) await publicationRecovery.resume(readHeaders());
         } else {
           notice = 'tracking';
           await publicationRecovery.resume(readHeaders());
@@ -293,28 +386,15 @@
       } else tracked = state;
     } catch (error) {
       if (!current()) return;
-      if (pending === id && !accepted && error instanceof ApiError && error.status === 404) {
-        if (proofForRead) { notice = 'authAcceptanceUnknown'; return; }
-        // A missing durable record is not cancellation. Future writes still use snapshot CAS.
-        try {
-          const loaded = await getConfigSnapshot();
-          if (!current() || accepted) return;
-          await publicationRecovery.resume();
-          if (!current() || accepted) return;
-          const recovery = get(publicationRecovery);
-          if (!recovery.fresh || recovery.readStatus !== 'fresh' || !recovery.runtime) {
-            notice = 'snapshotReadRuntimeUnknown'; return;
-          }
-          snapshot = loaded; draft = JSON.parse(JSON.stringify(loaded.config.logical_configuration));
-          imported = null; conflict = false; nextAuthToken = ''; proofForRead = undefined; resetSettingsInputs();
-          tracked = null; cancelReview(); releaseIdentity('rejected'); notice = 'notSubmittedReloaded';
-          await focusEditor();
-        } catch { if (current()) notice = 'loadError'; }
-      } else notice = queryFailure(error instanceof ApiError ? error.status : undefined);
+      // A missing record never proves the write was not committed, even when the
+      // snapshot and runtime are readable. Keep the identity and report it as unknown.
+      const status = error instanceof ApiError ? error.status : undefined;
+      notice = status === 404 && accepted ? 'queryNotFoundAccepted' : queryFailure(status);
     }
   }
+
   async function exportSnapshot() {
-    if (busy || !await confirmAction({ title: t('export'), message: t('snapshotWarning'), confirmText: t('export'), cancelText: t('stay') })) return;
+    if (submitting || !await confirmAction({ title: t('export'), message: t('snapshotWarning'), confirmText: t('export'), cancelText: t('stay') })) return;
     if (disposed) return;
     try {
       const response = await fetch('/api/config/export', { credentials: 'same-origin', headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {} });
@@ -349,19 +429,29 @@
     validSignature = '';
   }
   function websocketMessageField(value: string) {
+    if (value === websocketMessageValue) return;
     websocketMessageValue = value; validSignature = '';
     const bytes = Number(value) * 1024 * 1024;
     if (draft && value.trim() && Number.isSafeInteger(bytes) && bytes >= 1 && bytes <= MAX_WEBSOCKET_MAX_MESSAGE_BYTES)
       draft = { ...draft, websocket_max_message_bytes: bytes };
+  }
+  function websocketMessageMiB() {
+    const text = websocketMessageDisplay.trim();
+    const mib = Number(text);
+    return text !== '' && Number.isFinite(mib) ? mib : undefined;
+  }
+  function websocketMessageChanged(mib: number | undefined) {
+    websocketMessageField(mib === undefined ? '' : String(mib));
   }
   function resetSettingsInputs() {
     websocketValue = draft?.websocket_max_connections ?? DEFAULT_WEBSOCKET_MAX_CONNECTIONS;
     websocketMessageValue = String((draft?.websocket_max_message_bytes ?? DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES) / 1024 / 1024);
     publicationRaw = publicationInputs(draft?.publication);
     publicationEdited = false; publicationBackendErrors = {};
+    loggingResetKey = {};
   }
   function publicationField(field: PublicationField, value: string) {
-    if (!draft) return;
+    if (!draft || publicationRaw[field] === value) return;
     publicationRaw = { ...publicationRaw, [field]: value };
     publicationEdited = true; publicationBackendErrors = {}; validSignature = '';
     const parsed = parsePublicationInputs(publicationRaw);
@@ -378,8 +468,12 @@
   onMount(() => {
     void (async () => {
       try {
-        const saved = readPendingPublication(); pendingId = saved?.mutationId ?? null; accepted = saved?.accepted ?? false;
-        phase = pendingId ? accepted ? 'active' : 'unknown' : 'idle';
+        const write = get(configurationWrite);
+        if (write.corrupt) { phase = 'unknown'; notice = 'storageError'; }
+        else {
+          pendingId = write.pending?.mutationId ?? null; accepted = write.pending?.accepted ?? false;
+          phase = pendingId ? accepted ? 'active' : 'unknown' : 'idle';
+        }
       }
       catch { phase = 'unknown'; notice = 'storageError'; }
       if (pendingId) await inspectOperation(pendingId);
@@ -412,7 +506,7 @@
           </DropdownMenu.Trigger>
           <DropdownMenu.Content align="end" class="w-44">
             <DropdownMenu.Item class="settings-menu-item gap-2" onclick={exportSnapshot}><Download class="h-4 w-4" aria-hidden="true" />{t('export')}</DropdownMenu.Item>
-            <DropdownMenu.Item disabled={!snapshot || locked} class="settings-menu-item gap-2" onclick={() => fileInput.click()}><Upload class="h-4 w-4" aria-hidden="true" />{t('import')}</DropdownMenu.Item>
+            <DropdownMenu.Item disabled={!snapshot || editingLocked} class="settings-menu-item gap-2" onclick={() => fileInput.click()}><Upload class="h-4 w-4" aria-hidden="true" />{t('import')}</DropdownMenu.Item>
           </DropdownMenu.Content>
         </DropdownMenu.Root>
       {/if}
@@ -420,60 +514,50 @@
     </div>
   </header>
 
-  <section class="grid gap-3 border-y border-carbon-600 py-3 sm:grid-cols-3" aria-label={t('threeFacts')}>
+  <section class="grid gap-3 border-y border-carbon-600 py-3 sm:grid-cols-2" aria-label={t('threeFacts')}>
     <div data-testid="settings-draft-state">
       <p class="nx-field-label">{t('localEdits')}</p>
-      <p class="mt-1 text-sm text-zinc-200">{t('baseline')} <strong class="nx-display">{snapshot ? `r${snapshot.revision}` : '—'}</strong> · {draftInvalid ? invalidDraftMessage : diff.length ? changeCount : t('clean')}</p>
-    </div>
-    <div data-testid="settings-publication-state">
-      <p class="nx-field-label">{t('lastPublication')}</p>
-      <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5">
-        <p class="text-sm text-zinc-200">{publication?.operation && fresh ? $_(`configurationSave.${publicationStatusMessage}`) : t(`state.${operationState}`)}</p>
-        {#if historicalFailure}<p class="font-mono text-xs text-zinc-400" data-testid="publication-history-time">{typeof publication?.operation?.updated_at === 'number' ? new Date(publication.operation.updated_at).toLocaleString() : t('runtimeFacts.unavailable')}</p>{/if}
-        {#if operationId}<button type="button" class="settings-text-action inline-flex items-center gap-1 border-0 bg-transparent px-0.5 text-left text-sm text-zinc-400 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-500" aria-expanded={detailsOpen || detailsForced} aria-controls="settings-publication-details" onclick={() => { if (detailsForced) document.getElementById('settings-publication-details')?.scrollIntoView(); else detailsOpen = !detailsOpen; }}>{t('details')}<ChevronDown class="h-3.5 w-3.5" aria-hidden="true" /></button>{/if}
-      </div>
+      <p class="mt-1 text-sm text-zinc-200">{draftInvalid ? invalidDraftMessage : diff.length ? changeCount : t('clean')}</p>
     </div>
     <div data-testid="settings-serving-state">
       <p class="nx-field-label">{t('currentServing')}</p>
       <div class="mt-1 flex flex-wrap items-center gap-2">
         <StatusBadge variant={serving === 'confirmed' ? 'active' : serving === 'unconfirmed' ? 'standby' : 'muted'}>
-          {t(`serving.${serving}`)}{serving === 'confirmed' ? ` · r${publication?.serving_revision}` : ''}
+          {t(`serving.${serving}`)}
         </StatusBadge>
-        <button type="button" class="settings-text-action inline-flex items-center gap-1 border-0 bg-transparent px-0.5 text-left text-sm text-zinc-400 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-500 disabled:cursor-not-allowed disabled:opacity-50" onclick={() => publicationRecovery.refresh()} disabled={busy || !!pendingId}><RefreshCw class="h-3.5 w-3.5" aria-hidden="true" />{t('refresh')}</button>
+        <button type="button" class="settings-text-action inline-flex items-center gap-1 border-0 bg-transparent px-0.5 text-left text-sm text-zinc-400 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-500 disabled:cursor-not-allowed disabled:opacity-50" onclick={() => publicationRecovery.refresh()} disabled={submitting}><RefreshCw class="h-3.5 w-3.5" aria-hidden="true" />{t('refresh')}</button>
       </div>
     </div>
   </section>
-  {#if serving !== 'confirmed'}<SystemAlertBar tone={['paused', 'loading'].includes($publicationRecovery.readStatus) ? 'info' : 'warn'}><p class="text-sm text-zinc-300" data-testid="runtime-uncertain">{t(runtimeMessage)}</p></SystemAlertBar>{/if}
+  {#if runtimeUncertain}<SystemAlertBar tone="warn"><p class="text-sm text-zinc-300" data-testid="runtime-uncertain">{t(runtimeMessage)}</p></SystemAlertBar>{/if}
   {#if storageWarning}<SystemAlertBar tone="warn"><p class="text-sm" role="status">{t(storageWarning)}</p></SystemAlertBar>{/if}
   {#if authNeedsLogin}<SystemAlertBar tone="warn"><p class="text-sm">{t('authRelogin')}</p><Button variant="outline" href="/#/login">{$_('login.submit')}</Button></SystemAlertBar>{/if}
-  {#if notice || conflict || runtimeConflict}
-    <SystemAlertBar tone={notice === 'published' ? 'success' : 'warn'}>
+  {#if noticeAlert}
+    <SystemAlertBar tone="warn">
       <p class="text-sm text-zinc-200" role="status" tabindex="-1" data-testid="settings-notice">{!conflict && !runtimeConflict && notice === 'degraded' && fresh && publication?.operation?.error_code === 'old_worker_drain_failed'
-        ? $_(`configurationSave.${publicationStatusMessage}`) : t(conflict || runtimeConflict ? 'conflict' : notice)}{#if rejectionSummary && notice.startsWith('control_')}{` ${rejectionSummary}`}{/if}</p>
-      {#if conflict || runtimeConflict}<Button variant="outline" onclick={reloadConfig} disabled={locked}>{t('reload')}</Button>{/if}
+        ? $_(`configurationSave.${publicationStatusMessage}`) : t(conflict || runtimeConflict ? 'conflict' : notice)}</p>
+      {#if conflict || runtimeConflict}<Button variant="outline" onclick={reloadConfig} disabled={submitting}>{t('reload')}</Button>
+      {:else if operationId && (publicationFault || notice === 'degraded' || ['unknownAcceptance', 'queryNotFound', 'queryUnauthorized', 'queryNetwork', 'queryNotFoundAccepted'].includes(notice))}
+        <Button variant="outline" onclick={() => inspectOperation()} disabled={submitting}>{t('checkOperation')}</Button>{/if}
+      {#if notice === 'queryUnauthorized'}<Button variant="outline" href="/#/login">{$_('login.submit')}</Button>{/if}
+      {#if publicationFault || notice === 'degraded'}<Button href="/#/" variant="ghost">{t('dashboardRecovery')}<ArrowUpRight class="h-4 w-4" aria-hidden="true" /></Button>{/if}
+      {#if baselinePending}<Button variant="outline" onclick={() => { if (savedRevision !== null) void refreshBaseline(savedRevision); }} disabled={submitting}>{t('retryBaseline')}</Button>{/if}
     </SystemAlertBar>
   {/if}
-  {#if detailsOpen || detailsForced}
-    <PanelCard title={t('publicationDetails')} tag="PUBLICATION">
-      <div id="settings-publication-details" class="space-y-3 break-words" data-testid="publication-details">
-        <p class="break-all font-mono text-xs text-zinc-400">{operationId ?? t('unknown')}</p>
-        <p class="text-sm text-zinc-200" aria-live="polite">{t(`state.${operationState}`)}</p>
-        {#if publication?.operation && fresh}<p class="text-sm text-zinc-200">{$_(`configurationSave.${publicationStatusMessage}`)}</p>{/if}
-        <p class="text-sm text-zinc-400">{t('operationStages')}</p>
-        {#if tracked?.operation.mutation_id === operationId}
-          <p class="text-sm text-zinc-300">{t('committedRevision')}: r{tracked.operation.committed_revision ?? '—'} · {t('resultStatus')}: {tracked.operation.result_status ?? '—'}</p>
-          <h3 class="nx-field-label">{t('replacementResults')}</h3>
-          <ul class="space-y-1 text-sm text-zinc-300">{#each replacements as worker}<li>{t('slot')} {worker.slot ?? '—'} · {t('attempt')} {worker.attempt ?? '—'} · r{worker.revision ?? '—'} · {t(`workerState.${worker.state}`)}</li>{/each}</ul>
-        {:else}<p class="text-sm text-zinc-400">{t('unknown')}</p>{/if}
-        <RuntimeFacts {publication} health={runtime?.health} {fresh} />
-        {#if fresh && runtime}<p class="text-sm text-zinc-400">{t('workerReports')}: {(runtime.workers ?? []).map(w => `${w.slot}: r${w.revision ?? '—'}`).join(' · ') || t('unknown')}</p>{/if}
-        {#if publication?.recovery}<p class="text-sm text-zinc-400">{t('recovery')}: {publication.recovery.state} · {publication.recovery.attempt_count}/{publication.recovery.max_attempts}</p>{/if}
-        <div class="flex flex-wrap gap-3">
-          <Button variant="outline" onclick={() => inspectOperation()} disabled={busy || !operationId}>{t('checkOperation')}</Button>
-          <Button href="/#/" variant="ghost">{t('dashboardRecovery')}<ArrowUpRight class="h-4 w-4" aria-hidden="true" /></Button>
-        </div>
+  {#if showFault}
+    <SystemAlertBar tone="warn">
+      <p class="text-sm text-zinc-200" role="status" tabindex="-1" data-testid="settings-notice">{$_(`configurationSave.${publicationStatusMessage}`)}</p>
+      <div class="flex flex-wrap gap-3">
+        {#if operationId}<Button variant="outline" onclick={() => inspectOperation()} disabled={submitting}>{t('checkOperation')}</Button>{/if}
+        <Button href="/#/" variant="ghost">{t('dashboardRecovery')}<ArrowUpRight class="h-4 w-4" aria-hidden="true" /></Button>
       </div>
-    </PanelCard>
+    </SystemAlertBar>
+  {/if}
+  {#if showRuntimeFault}
+    <SystemAlertBar tone="warn">
+      <p class="text-sm text-zinc-200" role="status" data-testid="runtime-fault">{t('runtimeHealthAttention')}</p>
+      <Button href="/#/" variant="ghost">{t('dashboardRecovery')}<ArrowUpRight class="h-4 w-4" aria-hidden="true" /></Button>
+    </SystemAlertBar>
   {/if}
 
   {#if loading}<LoadingIndicator label={t('loading')} />{:else if draft && snapshot}
@@ -486,7 +570,7 @@
           <p class="text-sm text-zinc-300">{t('importRoutes')} {importCounts.routes} · {t('importServices')} {importCounts.services} · {t('activations')} {importCounts.activations} · {t('globalBindings')} {importCounts.bindings}</p>
           <p class="text-sm text-zinc-400">{t('importImpact')}</p>
           <ConfigurationDiff changes={diff} testId="import-diff" />
-          <Button variant="outline" onclick={cancelImport} disabled={locked}>{t('cancelImport')}</Button>
+          <Button variant="outline" onclick={cancelImport} disabled={submitting}>{t('cancelImport')}</Button>
         </div>
       </PanelCard>
     {/if}
@@ -501,7 +585,7 @@
     </nav>
     <section id="settings-general" tabindex="-1" aria-label={t('general')} class="scroll-mt-20">
       <PanelCard title={t('general')} tag="GLOBAL">
-        <fieldset disabled={locked || reviewOpen || !!imported} class="space-y-5">
+        <fieldset disabled={editingLocked} class="space-y-5">
           <div class="grid gap-x-6 gap-y-1.5 md:grid-cols-2">
             <div class="row-span-3 grid min-w-0 [grid-template-rows:subgrid]" data-testid="config-log-level-select">
               <div class="flex min-h-[44px] items-center sm:min-h-[40px]">
@@ -509,7 +593,7 @@
               </div>
               {#key draft.log_level}
               <Select.Root selected={logLevels.find(option => option.value === (draft?.log_level ?? ''))}
-                disabled={locked || reviewOpen || !!imported}
+                disabled={editingLocked}
                 onSelectedChange={(selected) => { globalField('log_level', selected?.value ?? ''); void focusEditor(); }}>
                 <Select.Trigger id="config-log-level" class="focus-visible:border-nexus-500" data-value={draft.log_level ?? ''} aria-describedby="config-log-level-help">
                   <Select.Value />
@@ -537,11 +621,13 @@
               <div class="flex min-h-[44px] items-center sm:min-h-[40px]">
                 <Label for="config-websocket-max-message">{t('websocket.messageLabel')} <span class="normal-case">(MiB)</span></Label>
               </div>
-              <Input id="config-websocket-max-message" type="number" inputmode="decimal" step="any"
+              <NumberInput id="config-websocket-max-message" step="any"
                 min={1 / 1024 / 1024} max={MAX_WEBSOCKET_MAX_MESSAGE_BYTES / 1024 / 1024}
-                value={websocketMessageDisplay} aria-invalid={websocketMessageInvalid}
-                aria-describedby={`config-websocket-message-help${websocketMessageInvalid ? ' config-websocket-message-error' : ''}`}
-                oninput={(e) => websocketMessageField(e.currentTarget.value)} />
+                bind:value={() => websocketMessageMiB(), websocketMessageChanged}
+                invalid={websocketMessageInvalid}
+                increaseLabel={t('websocket.messageIncrease')} decreaseLabel={t('websocket.messageDecrease')}
+                invalidMessage={t('websocket.messageInvalid')}
+                aria-describedby={`config-websocket-message-help${websocketMessageInvalid ? ' config-websocket-message-error' : ''}`} />
               <div class="space-y-1">
                 <p id="config-websocket-message-help" class="text-sm text-zinc-400">{t('websocket.messageHelp')}</p>
                 {#if websocketMessageInvalid}<p id="config-websocket-message-error" role="alert" class="text-sm text-red-400">{t('websocket.messageInvalid')}</p>{/if}
@@ -554,14 +640,14 @@
                 <span class="inline-flex items-center gap-2">
                   <span class="font-mono text-sm text-zinc-400">{t('websocket.noLimitShort')}</span>
                   <IndustrialToggle id="config-websocket-unlimited" checked={websocketUnlimited}
-                    disabled={locked || reviewOpen || !!imported} label={t('websocket.unlimited')} onchange={websocketLimitDisabled} />
+                    disabled={editingLocked} label={t('websocket.unlimited')} onchange={websocketLimitDisabled} />
                 </span>
               </div>
-              <div class="settings-integer-control min-w-0">
+              <div class="min-w-0">
                 <NumberInput id="config-websocket-max-connections" min={1} max={2147483647}
                   required={!websocketUnlimited}
                   bind:value={() => websocketUnlimited ? undefined : websocketDisplay, websocketField}
-                  disabled={locked || reviewOpen || !!imported || websocketUnlimited}
+                  disabled={editingLocked || websocketUnlimited}
                   class={websocketUnlimited ? 'disabled:opacity-100' : undefined}
                   placeholder={websocketUnlimited ? t('websocket.noLimitShort') : undefined}
                   increaseLabel={t('websocket.increase')} decreaseLabel={t('websocket.decrease')} invalidMessage={t('websocket.invalid')}
@@ -577,17 +663,22 @@
       </PanelCard>
     </section>
     <section id="settings-publication" tabindex="-1" aria-label={t('publication.title')} class="scroll-mt-20">
-      <PanelCard title={t('publication.title')} tag="PUBLICATION">
+      <PanelCard title={t('publication.title')} tag="CONFIG">
         <div class="space-y-5">
           <p class="text-sm text-zinc-300">{t('publication.scope')}</p>
-          <fieldset disabled={locked || reviewOpen || !!imported} class="space-y-5">
+          <fieldset disabled={editingLocked} class="space-y-5">
             {#each publicationFields as field}
               <div class="space-y-1.5" data-testid={`publication-field-${field}`}>
                 <Label for={`config-${field}`}>{t(`publication.${field}.label`)}</Label>
-                <Input id={`config-${field}`} type="text" inputmode="numeric" class="max-w-sm font-display font-bold tabular-nums focus-visible:border-nexus-500"
-                  value={publicationDisplay[field]} aria-invalid={!!publicationErrors[field]}
-                  aria-describedby={`config-${field}-help${publicationErrors[field] ? ` config-${field}-error` : ''}`}
-                  oninput={(event) => publicationField(field, event.currentTarget.value)} />
+                <div class="max-w-sm">
+                  <NumberInput id={`config-${field}`} min={1} max={maxPublicationSeconds} required
+                    invalid={!!publicationErrors[field]}
+                    bind:value={() => publicationSeconds(field),
+                      (seconds) => publicationField(field, seconds === undefined ? '' : String(seconds))}
+                    increaseLabel={t('publication.increase')} decreaseLabel={t('publication.decrease')}
+                    invalidMessage={t('publication.errors.positiveInteger')}
+                    aria-describedby={`config-${field}-help${publicationErrors[field] ? ` config-${field}-error` : ''}`} />
+                </div>
                 <p id={`config-${field}-help`} class="text-sm text-zinc-400">{t(`publication.${field}.help`)}</p>
                 {#if publicationErrors[field]}<p id={`config-${field}-error`} role="alert" class="text-sm text-red-400">{$_(`settings.publication.errors.${publicationErrors[field]}`, { values: { max: maxPublicationSeconds } })}</p>{/if}
               </div>
@@ -599,15 +690,18 @@
     </section>
     <section id="settings-logging" tabindex="-1" aria-label={t('logging')} class="scroll-mt-20">
       <PanelCard title={t('logging')} tag="LOG">
-        <LoggingEditor bind:value={draft.logging} disabled={locked || reviewOpen || !!imported} />
+        {#key loggingResetKey}
+          <LoggingEditor bind:value={draft.logging} disabled={editingLocked} />
+        {/key}
       </PanelCard>
     </section>
-    {#if dirty || pendingId || busy || submissionLocked(phase) || publicationBusy(publication)}
+    {#if dirty || submitting || submissionLocked(phase)}
     <footer class="sticky bottom-0 z-20 flex flex-wrap items-center justify-between gap-3 border-2 border-carbon-500 bg-carbon-900 p-3" data-testid="settings-change-bar">
-       <p class="text-sm text-zinc-300" id="publication-review-disabled-reason">{draftInvalid ? invalidDraftMessage : diff.length ? `${changeCount} · r${snapshot.revision}` : t('clean')}</p>
+       <p class="text-sm text-zinc-300" id="publication-review-disabled-reason">{submitReason}</p>
       <div class="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto">
-        <Button variant="outline" disabled={!dirty || locked} onclick={discard}>{t('discard')}</Button>
-        <Button disabled={!diff.length || locked || draftInvalid} aria-describedby={draftInvalid ? 'publication-review-disabled-reason' : undefined} onclick={review} data-testid="config-save-button">{t('reviewPublish')}</Button>
+        <Button variant="outline" disabled={!dirty || submitting} onclick={discard}>{t('discard')}</Button>
+        <Button disabled={!diff.length || submitting || draftInvalid || submissionLocked(phase) || baselinePending || conflict || runtimeConflict}
+          aria-describedby="publication-review-disabled-reason" onclick={review} data-testid="config-save-button">{t('reviewPublish')}</Button>
       </div>
     </footer>
     {/if}
@@ -618,7 +712,7 @@
   busy={submitting} width="52rem" scrollBody={true} closeLabel={t('closeReview')} onOpenChange={(open) => { if (!open) cancelReview(); }}>
   {#snippet body()}
     <div class="space-y-4" data-testid="config-review">
-      <p class="text-sm text-zinc-300">{t('baseline')} r{snapshot?.revision} · {changeCount}</p>
+      <p class="text-sm text-zinc-300">{changeCount}</p>
       <p class="text-sm text-zinc-400">{t('redactionHelp')}</p>
        <ConfigurationDiff changes={diff} />
        {#if draftInvalid}<p role="alert" class="text-sm text-red-400">{invalidDraftMessage}</p>{/if}
@@ -626,12 +720,12 @@
       {:else if validation}<p role="alert" class="text-sm text-red-400">{t(validation)}</p>
       {:else if validSignature === signature}<p class="text-sm text-zinc-300">{t('validated')}</p>{/if}
       {#if nextAuthRequired && !nextAuthToken.trim()}<p role="alert" class="text-sm text-amber-300">{t('proofRequired')}</p>{/if}
-      {#if !fresh || conflict || runtimeConflict}<p role="alert" class="text-sm text-amber-300">{t(conflict || runtimeConflict ? 'conflict' : runtimeMessage)}</p>{/if}
+      {#if conflict || runtimeConflict}<p role="alert" class="text-sm text-amber-300">{t('conflict')}</p>{/if}
+      {#if !fresh}<p class="text-sm text-zinc-400">{t('runtimeUnverifiedHelp')}</p>{/if}
       {#if reviewOutcome || pendingId}
         <SystemAlertBar tone={reviewOutcome === '' || reviewOutcome === 'tracking' ? 'info' : 'warn'} class="bg-carbon-900">
           <div class="space-y-1">
             <p id="config-review-outcome" class="text-sm text-zinc-200" role="alert">{t(reviewOutcome || 'tracking')}</p>
-            {#if rejectionSummary && reviewOutcome.startsWith('control_')}<p class="font-mono text-xs text-amber-300">{rejectionSummary}</p>{/if}
             {#if pendingId}<p class="text-sm text-zinc-400" aria-live="polite">{t(`state.${operationState}`)}{#if fresh && publication?.operation} · {$_(`configurationSave.${publicationStatusMessage}`)}{/if}</p>{/if}
           </div>
         </SystemAlertBar>
@@ -641,7 +735,7 @@
   {#snippet footer()}
     <Button class="min-h-[44px] sm:min-h-[40px]" onclick={publish} disabled={!canPublish}
       aria-describedby={reviewOutcome || pendingId ? 'config-review-outcome' : undefined}
-      data-testid="config-confirm-publish">{t(busy ? 'tracking' : 'publish')}</Button>
+      data-testid="config-confirm-publish">{t(submitting ? 'tracking' : 'publish')}</Button>
   {/snippet}
 </IndustrialDialog>
 
@@ -653,7 +747,6 @@
     transition-property: color, background-color, border-color, box-shadow, transform;
     transition-duration: 150ms;
   }
-  .settings-workspace .settings-integer-control :global(button) { min-height: 0; }
   :global(.settings-menu-item) { min-height: 44px; }
   .settings-workspace :global(button), .settings-workspace :global(a) { white-space: normal; }
   .settings-workspace :global(button:not([role="switch"])), .settings-workspace :global(a) { gap: 0.5rem; }

@@ -11,6 +11,7 @@ import { sqliteAll, sqliteGet } from './sqlite-query';
 import {
   getOperation, readOperationWorkers, workerFromRow, WORKER_SELECT, type WorkerRow,
 } from './operation-records';
+import { assertWorkerAttemptLaunchSettled, writeWorkerLaunchReservation } from './worker-launch-store';
 export { getOperation, operationFromRow, readAllOperations, readAllWorkers } from './operation-records';
 export type { OperationRow } from './operation-records';
 
@@ -24,6 +25,24 @@ function requireOperation(db: Database, mutationId: string): ConfigurationOperat
   const operation = getOperation(db, mutationId);
   if (operation === null) throw new ConfigRepositoryError('invalid_operation', 'configuration operation was not found');
   return operation;
+}
+
+/** Stopped-instance changes are persisted without a data plane and never own publication. */
+export function finalizeOfflineOperation(
+  db: Database, mutationId: string, updatedAt: number,
+): ConfigurationOperation {
+  const operation = requireOperation(db, mutationId);
+  if (operation.state === 'converged') return operation;
+  if (operation.state !== 'pending' || operation.target_worker_count !== 0) {
+    throw new ConfigRepositoryError('invalid_operation', 'offline operation must be an unstarted target-free change');
+  }
+  requireTimestamp(updatedAt, operation);
+  db.run(`UPDATE configuration_operations
+    SET state='converged',result_status=200,error_code=NULL,error_detail=NULL,updated_at=?
+    WHERE mutation_id=? AND state='pending'`, [updatedAt, mutationId]);
+  const terminal = getOperation(db, mutationId);
+  if (terminal === null) throw new ConfigRepositoryError('repository_failure', 'offline operation finalization failed');
+  return terminal;
 }
 
 export function beginPublication(db: Database, mutationId: string, updatedAt: number): ConfigurationOperation {
@@ -40,7 +59,7 @@ export function beginWorkerAttempt(
   reason: WorkerAttemptReason, updatedAt: number,
 ): ConfigurationOperationWorker {
   const operation = requireOperation(db, mutationId);
-  if ((operation.state !== 'publishing' && operation.state !== 'draining') ||
+  if ((operation.state !== 'publishing' && operation.state !== 'draining') || operation.cancel_requested ||
       !Number.isSafeInteger(workerSlot) || workerSlot < 0 ||
       !Number.isSafeInteger(previousAttemptNo) || previousAttemptNo < 0 || previousAttemptNo >= Number.MAX_SAFE_INTEGER) {
     throw new ConfigRepositoryError('invalid_operation', 'worker begin command is invalid');
@@ -53,6 +72,7 @@ export function beginWorkerAttempt(
   }
   if (worker.attempt_no === previousAttemptNo + 1 && worker.last_begin_previous_attempt_no === previousAttemptNo &&
       worker.last_begin_reason === reason) return worker;
+  assertWorkerAttemptLaunchSettled(db, mutationId, workerSlot, previousAttemptNo);
   requireTimestamp(updatedAt, operation);
   const valid = worker.attempt_no === previousAttemptNo && (operation.state === 'publishing'
     ? (worker.state === 'pending' && previousAttemptNo === 0 && reason === 'initial') ||
@@ -63,6 +83,7 @@ export function beginWorkerAttempt(
   db.run(`UPDATE configuration_operation_workers SET attempt_no=?,last_begin_previous_attempt_no=?,last_begin_reason=?,
     state='pending',applied_revision=NULL,last_error=NULL,updated_at=? WHERE mutation_id=? AND worker_slot=?`,
   [attemptNo, previousAttemptNo, reason, updatedAt, mutationId, workerSlot]);
+  writeWorkerLaunchReservation(db, mutationId, workerSlot, attemptNo, updatedAt);
   db.run('UPDATE configuration_operations SET updated_at=? WHERE mutation_id=?', [updatedAt, mutationId]);
   const updated = sqliteGet<WorkerRow, [string, number]>(db, `${WORKER_SELECT} WHERE mutation_id=? AND worker_slot=?`, mutationId, workerSlot);
   if (updated === null) throw new ConfigRepositoryError('repository_failure', 'worker begin update failed');
@@ -157,6 +178,9 @@ export function finalizePublication(
     if (duplicate) return operation;
     throw new ConfigRepositoryError('invalid_operation', 'terminal finalization conflicts with durable result');
   }
+  if (operation.cancel_requested) {
+    throw new ConfigRepositoryError('invalid_operation', 'cancelled candidate must be superseded after exit proof');
+  }
   requireTimestamp(updatedAt, operation);
   if (controlReadinessFailure) {
     if (outcome.error_detail.length > 512 || outcome.error_detail.trim().length === 0) {
@@ -208,7 +232,9 @@ export function markDraining(db: Database, mutationId: string, updatedAt: number
   const operation = requireOperation(db, mutationId);
   if (operation.state === 'draining') return operation;
   requireTimestamp(updatedAt, operation);
-  if (operation.state !== 'publishing') throw new ConfigRepositoryError('invalid_operation', 'operation is not publishing');
+  if (operation.state !== 'publishing' || operation.cancel_requested) {
+    throw new ConfigRepositoryError('invalid_operation', 'operation is not a running candidate');
+  }
   const workers = readOperationWorkers(db, mutationId);
   if (workers.some(({ state, attempt_no }) => state !== 'converged' || attempt_no === 0)) {
     throw new ConfigRepositoryError('invalid_operation', 'all frozen targets must converge before draining');
@@ -228,7 +254,7 @@ export function beginDrainingRecovery(
       previousGeneration >= Number.MAX_SAFE_INTEGER || !Number.isSafeInteger(updatedAt) || updatedAt < 0) {
     throw new ConfigRepositoryError('invalid_operation', 'draining recovery command is invalid');
   }
-  if (operation.state !== 'draining') {
+  if (operation.state !== 'draining' || operation.cancel_requested) {
     throw new ConfigRepositoryError('invalid_operation', 'operation is not draining');
   }
   if (operation.drain_recovery_generation === previousGeneration + 1 &&
@@ -244,12 +270,14 @@ export function beginDrainingRecovery(
   }
   const nextGeneration = previousGeneration + 1;
   for (const worker of workers) {
+    assertWorkerAttemptLaunchSettled(db, mutationId, worker.worker_slot, worker.attempt_no);
     db.run(`UPDATE configuration_operation_workers SET attempt_no=?,last_begin_previous_attempt_no=?,
       last_begin_reason='master_recovery',drain_recovery_generation=?,state='pending',
       applied_revision=NULL,last_error=NULL,updated_at=?
       WHERE mutation_id=? AND worker_slot=?`, [
       worker.attempt_no + 1, worker.attempt_no, nextGeneration, updatedAt, mutationId, worker.worker_slot,
     ]);
+    writeWorkerLaunchReservation(db, mutationId, worker.worker_slot, worker.attempt_no + 1, updatedAt);
   }
   db.run(`UPDATE configuration_operations SET drain_recovery_generation=?,
     last_drain_recovery_previous_generation=?,updated_at=? WHERE mutation_id=?`,

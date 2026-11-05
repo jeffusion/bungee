@@ -112,7 +112,10 @@ export function freezePublicationRetirement(db: Database, mutationId: string, ge
     return prior;
   }
   const operation = sqliteGet<{ state: string; drain_recovery_generation: number }, [string]>(db, 'SELECT state,drain_recovery_generation FROM configuration_operations WHERE mutation_id=?', mutationId);
-  if (operation === null || operation.state === 'converged' || operation.state === 'degraded' || operation.drain_recovery_generation !== generation) invalid('retirement must match the active publication generation');
+  if (operation === null || operation.state === 'converged' || operation.state === 'degraded' ||
+      operation.state === 'superseded' || operation.drain_recovery_generation !== generation) {
+    invalid('retirement must match the active publication generation');
+  }
   db.run('INSERT INTO configuration_retirements(mutation_id,generation,members_json,state,updated_at) VALUES(?,?,?,\'pending\',?)',
     [mutationId, generation, canonicalJson(members), now]);
   for (const member of members) db.run(`INSERT INTO configuration_retirement_evidence(mutation_id,member_id,exit_state,cleanup_state,updated_at)
@@ -194,7 +197,8 @@ export function readRetirementDescriptorCleanupState(db: Database, workerInstanc
   const rows = sqliteAll<{ state: string }, [string]>(db, `SELECT o.state FROM configuration_retirement_evidence e
     JOIN configuration_operations o USING(mutation_id) WHERE e.member_id=?`, workerInstanceId);
   if (!rows.length) return 'absent';
-  return rows.every(row => row.state === 'converged' || row.state === 'degraded') ? 'terminal' : 'pending';
+  return rows.every(row => row.state === 'converged' || row.state === 'degraded' || row.state === 'superseded')
+    ? 'terminal' : 'pending';
 }
 
 export type PublicationServingMember = Omit<PublicationRetirementMember, 'drain_id' | 'deadline_boot_id' | 'start_deadline_ns'> & { readonly kernel_boot_id: string };
@@ -269,7 +273,8 @@ export function freezePublicationServingSet(db: Database, mutationId: string, ge
   }
   const operation = sqliteGet<{ state: string; committed_revision: number; target_worker_count: number; drain_recovery_generation: number }, [string]>(db,
     'SELECT state,committed_revision,target_worker_count,drain_recovery_generation FROM configuration_operations WHERE mutation_id=?', mutationId);
-  if (!operation || operation.state === 'converged' || operation.state === 'degraded' || operation.drain_recovery_generation !== generation
+  if (!operation || operation.state === 'converged' || operation.state === 'degraded' ||
+    operation.state === 'superseded' || operation.drain_recovery_generation !== generation
     || workers.length !== operation.target_worker_count || workers.some(worker => worker.revision !== operation.committed_revision
       || worker.publication?.mutation_id !== mutationId || worker.publication.drain_recovery_generation !== generation)) invalid('publication serving authority does not match the current attempt');
   const attemptKey = currentServingAttemptKey(db, mutationId);

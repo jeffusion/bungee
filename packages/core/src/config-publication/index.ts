@@ -33,6 +33,7 @@ export {
   type ConfigPublicationRepository,
   type ConfigPublicationWorkerFactory,
   type ConfigPublicationWorkerProcess,
+  type CreationPermit,
   type MasterPublicationOutcome,
   type PendingConfigWorker,
   type PublicationClock,

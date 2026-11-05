@@ -7,6 +7,8 @@ import type {
   ConfigurationOperationWorker,
   ConfigurationRecoveryDisposition,
   FinalizePublicationOutcome,
+  PublicationCandidateExitEvidence,
+  PublicationPrepareDecision,
   RepositorySnapshot,
   WorkerAttemptReason,
   WorkerPublicationResult,
@@ -17,6 +19,7 @@ export type WorkerExitEvidence = {
   readonly exited: true;
   readonly pid: number;
   readonly terminalDrain?: WorkerDrainedMessage | WorkerDrainFailedMessage;
+  readonly cleanup_state?: 'success' | 'failed';
 };
 
 export type WorkerHandoffStatus = Readonly<{
@@ -46,10 +49,19 @@ export interface ConfigPublicationWorkerProcess {
   verifyExactExit?(): Promise<WorkerExitEvidence | null>;
 }
 
+/** A durable, freshly-read decision made immediately before any worker is created. */
+export type CreationPermit =
+  | { readonly allowed: true }
+  | { readonly allowed: false; readonly error: unknown };
+
 export interface ConfigPublicationWorkerFactory {
   confirmActivePublicationExited?(active: ActiveConfigurationPublication): Promise<boolean>;
-  spawn(identity: ConfigProcessIdentity): ConfigPublicationWorkerProcess;
-  markCommitted(processes: readonly ConfigPublicationWorkerProcess[]): void;
+  spawn(identity: ConfigProcessIdentity, allocation?: {
+    readonly mutation_id: string;
+    readonly committed_revision: number;
+    readonly attempt_no: number;
+  }): ConfigPublicationWorkerProcess | Promise<ConfigPublicationWorkerProcess>;
+  markCommitted(processes: readonly ConfigPublicationWorkerProcess[]): void | Promise<void>;
   disconnectProcesses(processes: readonly ConfigPublicationWorkerProcess[]): void;
   discardConfirmedUncommitted(target: import('../ingress/admission-set').AdmissionSet): Promise<void>;
 }
@@ -92,6 +104,33 @@ export interface ConfigPublicationRepository {
 
   getSnapshot(): RepositorySnapshot;
   getActivePublication(): Promise<ActiveConfigurationPublication | null>;
+  claimPublicationTarget?(
+    pluginCatalogHash: Sha256Digest,
+    updatedAt: number,
+  ): Promise<ActiveConfigurationPublication | null>;
+  requestPublicationCancellation?(
+    mutationId: string,
+    committedRevision: number,
+    updatedAt: number,
+  ): Promise<ConfigurationOperation>;
+  enterPublicationPrepare?(
+    mutationId: string,
+    committedRevision: number,
+    updatedAt: number,
+  ): Promise<PublicationPrepareDecision>;
+  confirmPublicationCandidateExited?(
+    mutationId: string,
+    committedRevision: number,
+    updatedAt: number,
+  ): Promise<ConfigurationOperation>;
+  recordPublicationCandidateExit?(
+    mutationId: string,
+    committedRevision: number,
+    workerSlot: number,
+    attemptNo: number,
+    evidence: PublicationCandidateExitEvidence,
+    updatedAt: number,
+  ): Promise<void>;
   beginPublication(mutationId: string, updatedAt: number): Promise<ConfigurationOperation>;
   beginWorkerAttempt(
     mutationId: string,
@@ -149,6 +188,8 @@ export type StartupPublicationOutcome =
       readonly pending: readonly PendingConfigWorker[] };
 
 export type MasterPublicationOutcome =
+  | { readonly kind: 'superseded'; readonly operation: ConfigurationOperation;
+      readonly serving: readonly ServingConfigWorker[] }
   | { readonly kind: 'converged'; readonly http_status: 200; readonly operation: ConfigurationOperation;
       readonly serving: readonly ServingConfigWorker[] }
   | { readonly kind: 'degraded'; readonly http_status: 202;
@@ -160,7 +201,7 @@ export type MasterPublicationOutcome =
       readonly code: 'admission_outcome_unknown' | 'repository_failure' | 'worker_exit_unconfirmed'; readonly error: unknown;
       readonly serving: readonly ServingConfigWorker[]; readonly pending: readonly PendingConfigWorker[] }
   | { readonly kind: 'outcome_unknown'; readonly fatal: false;
-      readonly code: 'recovery_replacements_failed' | 'control_recovering'; readonly error: unknown;
+      readonly code: 'recovery_replacements_failed' | 'control_recovering' | 'worker_exit_unconfirmed'; readonly error: unknown;
       readonly serving: readonly ServingConfigWorker[]; readonly pending: readonly PendingConfigWorker[] };
 
 export type MasterCoordinatorErrorCode =

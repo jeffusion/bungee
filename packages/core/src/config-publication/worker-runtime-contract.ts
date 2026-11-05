@@ -11,7 +11,11 @@ import type {
 } from './types';
 
 export interface ConfigWorkerLifecycle<ServingHandle> {
-  start(config: AppConfig, command: StartWorkerCommand): Promise<{
+  /**
+   * `signal` aborts when the runtime shuts down. Initialization that observes it
+   * settles early; the caller still awaits the real settle, never a race.
+   */
+  start(config: AppConfig, command: StartWorkerCommand, signal?: AbortSignal): Promise<{
     readonly handle: ServingHandle;
     readonly private_port: number;
     readonly plugin_runtime_generation: number;
@@ -27,6 +31,18 @@ export class ConfigWorkerLifecycleReadinessError extends Error {
   constructor(readonly failedPlugins: readonly string[]) {
     super('required plugins are not serving');
     this.name = 'ConfigWorkerLifecycleReadinessError';
+  }
+}
+
+/**
+ * Startup failed AND the owned cleanup that follows it did not complete. The
+ * runtime must propagate this instead of translating it into an apply failure,
+ * otherwise a fulfilled apply would hide an unreleased worker.
+ */
+export class ConfigWorkerLifecycleCleanupError extends Error {
+  constructor(readonly stage: 'start' | 'stop', cause: unknown) {
+    super('config worker startup cleanup failed', { cause });
+    this.name = 'ConfigWorkerLifecycleCleanupError';
   }
 }
 

@@ -35,7 +35,7 @@ function fixture(options: Partial<ConfigControlApiOptions> = {}) {
     managementAuth: credential.managementAuth,
     repository, admission: { snapshot: () => [] }, workerCount: 1, clock: { now: () => 2 },
     resolveAuthToken: (value) => value, parseAggregate: () => ({ ok: true, value: {} as never }),
-    publicationTasks: { enqueue: () => undefined }, isMutationReady: () => false,
+    publicationTasks: { wake: () => undefined }, isMutationReady: () => false,
     isRecoveryReady: () => ready,
     requestManualRecovery: async (id, source, revision) => {
       if (manualError !== null) throw manualError;

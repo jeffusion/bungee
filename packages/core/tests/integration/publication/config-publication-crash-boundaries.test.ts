@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { ConfigRepository, ConfigRepositoryError } from '../../../src/config-storage';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../../helpers/test-budgets';
+import { settleWorkerLaunch } from '../../helpers/worker-launch';
 
 setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
@@ -42,6 +43,7 @@ function commit(repository: ConfigRepository, mutationId: string, slots: readonl
     mutation_id: mutationId, expected_revision: 1, aggregate: AGGREGATE, kind: 'config',
     created_at: CREATED_AT, target_worker_slots: slots,
   }).kind).toBe('committed');
+  repository.claimPublicationTarget(`sha256:${'c'.repeat(64)}`, CREATED_AT + 1);
 }
 
 function expectInvalid(action: () => unknown): void {
@@ -108,6 +110,7 @@ function seedCommit(repository: ConfigRepository, mutationId: string, slots: rea
   if (result.kind !== 'committed') {
     throw new Error(`canonical template commit was not committed: ${mutationId}: ${result.kind}`);
   }
+  repository.claimPublicationTarget(`sha256:${'c'.repeat(64)}`, CREATED_AT + 1);
 }
 
 /** Builds one expensive legal precondition through the real repository; the closed
@@ -169,6 +172,7 @@ const { committedTemplate, drainingTemplate, drainingRecoveryTemplate } = (() =>
       repository.recordWorkerResult('drain-ledger-corrupt', 0, {
         kind: 'converged', attempt_no: 1, applied_revision: 2,
       }, CREATED_AT + 3);
+      settleWorkerLaunch(repository, 'drain-ledger-corrupt', 0, 1, CREATED_AT + 4);
       repository.markDraining('drain-ledger-corrupt', CREATED_AT + 4);
     });
     const drainingRecoveryTemplate = buildCanonicalTemplate('draining-recovery', (repository) => {
@@ -178,6 +182,7 @@ const { committedTemplate, drainingTemplate, drainingRecoveryTemplate } = (() =>
       repository.recordWorkerResult('generation-invalid', 0, {
         kind: 'converged', attempt_no: 1, applied_revision: 2,
       }, CREATED_AT + 3);
+      settleWorkerLaunch(repository, 'generation-invalid', 0, 1, CREATED_AT + 4);
       repository.markDraining('generation-invalid', CREATED_AT + 4);
       repository.beginDrainingRecovery('generation-invalid', 0, CREATED_AT + 5);
     });
@@ -220,6 +225,7 @@ describe('publication crash boundaries', () => {
     repository.recordWorkerResult('phase-reopen', 0, {
       kind: 'failed', attempt_no: 1, error: 'failed',
     }, CREATED_AT + 3);
+    settleWorkerLaunch(repository, 'phase-reopen', 0, 1, CREATED_AT + 4);
     repository = reopen(repository, dbPath);
     expect(repository.getActivePublication()?.targets[0]).toMatchObject({ state: 'failed', attempt_no: 1 });
 
@@ -287,6 +293,7 @@ describe('publication crash boundaries', () => {
     repository.recordWorkerResult('recovery-finalize', 0, {
       kind: 'converged', attempt_no: 1, applied_revision: 2,
     }, CREATED_AT + 3);
+    settleWorkerLaunch(repository, 'recovery-finalize', 0, 1, CREATED_AT + 4);
     repository.markDraining('recovery-finalize', CREATED_AT + 4);
 
     const terminal = repository.finalizePublication('recovery-finalize', {
@@ -310,11 +317,13 @@ describe('publication crash boundaries', () => {
         repository.recordWorkerResult(mutationId, 0, {
           kind: 'failed', attempt_no: 1, error: 'retry target',
         }, CREATED_AT + 3);
+        settleWorkerLaunch(repository, mutationId, 0, 1, CREATED_AT + 4);
         repository.beginWorkerAttempt(mutationId, 0, 1, 'retry', CREATED_AT + 4);
       }
       repository.recordWorkerResult(mutationId, 0, {
         kind: 'converged', attempt_no: reason === 'initial' ? 1 : 2, applied_revision: 2,
       }, CREATED_AT + 5);
+      settleWorkerLaunch(repository, mutationId, 0, reason === 'initial' ? 1 : 2, CREATED_AT + 6);
       repository.markDraining(mutationId, CREATED_AT + 6);
 
       expectInvalid(() => repository.finalizePublication(mutationId, {
@@ -334,6 +343,7 @@ describe('publication crash boundaries', () => {
       repository.recordWorkerResult('drain-recovery', slot, {
         kind: 'converged', attempt_no: 1, applied_revision: 2,
       }, CREATED_AT + 3);
+      settleWorkerLaunch(repository, 'drain-recovery', slot, 1, CREATED_AT + 4);
     }
     repository.markDraining('drain-recovery', CREATED_AT + 4);
     const beforeRecovery = repository.getOperation('drain-recovery');
@@ -359,6 +369,7 @@ describe('publication crash boundaries', () => {
     reopened.recordWorkerResult('drain-recovery', 0, {
       kind: 'failed', attempt_no: 2, error: 'generation one failed',
     }, CREATED_AT + 6);
+    settleWorkerLaunch(reopened, 'drain-recovery', 0, 2, CREATED_AT + 6);
     reopened.beginWorkerAttempt('drain-recovery', 0, 2, 'retry', CREATED_AT + 6);
     const afterRetry = reopened.getOperation('drain-recovery');
     if (afterRetry === null) throw new Error('drain recovery operation missing after retry');
@@ -369,9 +380,11 @@ describe('publication crash boundaries', () => {
     reopened.recordWorkerResult('drain-recovery', 0, {
       kind: 'converged', attempt_no: 3, applied_revision: 2,
     }, CREATED_AT + 6);
+    settleWorkerLaunch(reopened, 'drain-recovery', 0, 3, CREATED_AT + 6);
     reopened.recordWorkerResult('drain-recovery', 1, {
       kind: 'converged', attempt_no: 2, applied_revision: 2,
     }, CREATED_AT + 6);
+    settleWorkerLaunch(reopened, 'drain-recovery', 1, 2, CREATED_AT + 6);
     reopened = reopen(reopened, dbPath);
 
     const generationTwo = reopened.beginDrainingRecovery('drain-recovery', 1, CREATED_AT + 7);
@@ -385,9 +398,12 @@ describe('publication crash boundaries', () => {
     expectInvalid(() => reopened.recordWorkerResult('drain-recovery', 0, {
       kind: 'converged', attempt_no: 2, applied_revision: 2,
     }, CREATED_AT + 8));
-    for (const slot of [0, 1]) reopened.recordWorkerResult('drain-recovery', slot, {
-      kind: 'converged', attempt_no: slot === 0 ? 4 : 3, applied_revision: 2,
-    }, CREATED_AT + 8);
+    for (const slot of [0, 1]) {
+      reopened.recordWorkerResult('drain-recovery', slot, {
+        kind: 'converged', attempt_no: slot === 0 ? 4 : 3, applied_revision: 2,
+      }, CREATED_AT + 8);
+      settleWorkerLaunch(reopened, 'drain-recovery', slot, slot === 0 ? 4 : 3, CREATED_AT + 9);
+    }
     expectInvalid(() => reopened.finalizePublication('drain-recovery', {
       outcome: 'converged', old_workers_exited: true,
     }, CREATED_AT + 9));
@@ -414,6 +430,7 @@ describe('publication crash boundaries', () => {
     repository.recordWorkerResult('draining-attempt', 0, {
       kind: 'converged', attempt_no: 1, applied_revision: 2,
     }, CREATED_AT + 3);
+    settleWorkerLaunch(repository, 'draining-attempt', 0, 1, CREATED_AT + 4);
     repository.markDraining('draining-attempt', CREATED_AT + 4);
     repository.beginDrainingRecovery('draining-attempt', 0, CREATED_AT + 5);
     expectInvalid(() => repository.beginWorkerAttempt(
@@ -422,6 +439,7 @@ describe('publication crash boundaries', () => {
     repository.recordWorkerResult('draining-attempt', 0, {
       kind: 'failed', attempt_no: 2, error: 'failed',
     }, CREATED_AT + 6);
+    settleWorkerLaunch(repository, 'draining-attempt', 0, 2, CREATED_AT + 7);
 
     expect(repository.beginWorkerAttempt(
       'draining-attempt', 0, 2, 'retry', CREATED_AT + 7,
@@ -433,6 +451,7 @@ describe('publication crash boundaries', () => {
     expectInvalid(() => repository.beginWorkerAttempt(
       'draining-attempt', 0, 3, 'master_recovery', CREATED_AT + 8,
     ));
+    settleWorkerLaunch(repository, 'draining-attempt', 0, 3, CREATED_AT + 8);
     expect(repository.beginDrainingRecovery(
       'draining-attempt', 1, CREATED_AT + 8,
     )).toMatchObject({ drain_recovery_generation: 2 });
@@ -443,9 +462,12 @@ describe('publication crash boundaries', () => {
     commit(repository, 'drain-overflow', [0, 1]);
     repository.beginPublication('drain-overflow', CREATED_AT + 1);
     for (const slot of [0, 1]) repository.beginWorkerAttempt('drain-overflow', slot, 0, 'initial', CREATED_AT + 2);
-    for (const slot of [0, 1]) repository.recordWorkerResult('drain-overflow', slot, {
-      kind: 'converged', attempt_no: 1, applied_revision: 2,
-    }, CREATED_AT + 3);
+    for (const slot of [0, 1]) {
+      repository.recordWorkerResult('drain-overflow', slot, {
+        kind: 'converged', attempt_no: 1, applied_revision: 2,
+      }, CREATED_AT + 3);
+      settleWorkerLaunch(repository, 'drain-overflow', slot, 1, CREATED_AT + 4);
+    }
     repository.markDraining('drain-overflow', CREATED_AT + 4);
     const db = repository['db'];
     db.run('PRAGMA ignore_check_constraints=ON');

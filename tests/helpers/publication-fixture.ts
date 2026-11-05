@@ -28,6 +28,8 @@ export async function waitForFixturePublication(options: {
   let lastStatus: number | null = null;
   let publicationState: string | null = null;
   let recoveryState: string | null = null;
+  let recoveryTargetRevision: number | null = null;
+  let recoveryReason: string | null = null;
   try {
     while (!deadline.signal.aborted) {
       if (options.childExited()) throw new Error('fixture master exited before publication readiness');
@@ -42,8 +44,11 @@ export async function waitForFixturePublication(options: {
           const publication = body.publication;
           const state = publication?.operation?.state;
           publicationState = ['committed', 'publishing', 'draining', 'converged', 'degraded', 'failed'].includes(state) ? state : null;
-          const recovery = publication?.recovery?.state;
-          recoveryState = ['scheduled', 'running', 'succeeded', 'stopped'].includes(recovery) ? recovery : null;
+          const recovery = publication?.recovery;
+          const recoveryStateValue = recovery?.state;
+          recoveryState = ['scheduled', 'running', 'succeeded', 'stopped'].includes(recoveryStateValue) ? recoveryStateValue : null;
+          recoveryTargetRevision = Number.isSafeInteger(recovery?.target_revision) ? recovery.target_revision : null;
+          recoveryReason = typeof recovery?.final_reason_code === 'string' ? recovery.final_reason_code : null;
           ready = publication?.serving_complete === true && publication.serving_revision === options.revision;
         } else {
           // Consume responses so polling does not leave connections outstanding.
@@ -53,8 +58,9 @@ export async function waitForFixturePublication(options: {
       if (deadline.signal.aborted) break;
       if (options.childExited()) throw new Error('fixture master exited before publication readiness');
       if (ready) return;
-      if (publicationState === 'failed' || recoveryState === 'stopped') {
-        throw new Error(`fixture publication stopped (publication=${publicationState} recovery=${recoveryState})`);
+      if (publicationState === 'failed' || (recoveryState === 'stopped'
+        && (recoveryTargetRevision === options.revision || recoveryReason === 'safety_outcome_unknown'))) {
+        throw new Error(`fixture publication stopped (publication=${publicationState} recovery=${recoveryState} targetRevision=${recoveryTargetRevision} reason=${recoveryReason})`);
       }
       await sleep(100, undefined, { signal: deadline.signal }).catch(() => undefined);
     }

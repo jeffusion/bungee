@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { ConfigurationAggregate, Sha256Digest } from '@jeffusion/bungee-types';
-import type { ActiveConfigurationPublication, CommitConfigurationResult, ConfigurationOperationState,
+import type { CommitConfigurationResult, ConfigurationOperationState,
   ConfigurationResult, RepositorySnapshot } from '../config-storage';
 import { ConfigRepositoryError } from '../config-storage';
 import { validateMutationId } from '../config-storage/repository-validation';
@@ -30,7 +30,7 @@ const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/;
 export interface ConfigControlRepository {
   getSnapshot(): RepositorySnapshot;
   refreshControlProjection?(): Promise<import('../config-storage').ControlProjection>;
-  getActivePublication(): Promise<ActiveConfigurationPublication | null>;
+  getActivePublication?(): Promise<import('../config-storage').ActiveConfigurationPublication | null>;
   getCurrentRecovery?(): Promise<import('../config-storage').ConfigurationRecovery | null>;
   getRecovery?(recoveryId: string): Promise<import('../config-storage').ConfigurationRecovery | null>;
   getCurrentOperationState?(): Promise<ConfigurationOperationState | null>;
@@ -61,10 +61,11 @@ export type ConfigControlApiOptions = {
   readonly clock: { now(): number };
   readonly resolveAuthToken: (tokenExpression: string) => unknown;
   readonly parseAggregate: (value: unknown) => ConfigurationResult<ConfigurationAggregate>;
-  readonly publicationTasks: Pick<PublicationTaskLifecycle, 'enqueue'>;
+  readonly publicationTasks: Pick<PublicationTaskLifecycle, 'wake'>;
   readonly pluginControlApi?: { handle(request: Request, subject?: ManagementSubject): Promise<Response | null> };
   readonly pluginControlPreflight?: {
     readonly controlNames: ReadonlySet<string>;
+    readonly managementNames: ReadonlySet<string>;
     readonly status?: (name: string) => string;
     activate(name: string): Promise<unknown>;
     deactivate(name: string): Promise<void>;
@@ -288,7 +289,9 @@ function freezeJson(value: unknown): void {
 }
 
 function operationResponse(state: ConfigurationOperationState): Response {
-  return json(state, state.operation.state === 'converged' ? 200 : 202);
+  const status = state.operation.state === 'converged' ? 200
+    : state.operation.state === 'superseded' ? 409 : 202;
+  return json(state, status);
 }
 
 function recoveryResponse(recovery: import('../config-storage').ConfigurationRecovery): Response {
@@ -340,11 +343,7 @@ async function acceptCommitted(
 ): Promise<Response> {
   const state = await repositoryCall(() => options.repository.getOperationState(mutationId));
   if (state === null) return json({ error: 'operation_not_found' }, 500);
-  const active = await repositoryCall(() => options.repository.getActivePublication());
-  if (active !== null && active.operation.mutation_id === mutationId) {
-    const oldWorkers = options.admission.snapshot();
-    options.publicationTasks.enqueue(active, oldWorkers);
-  }
+  options.publicationTasks.wake();
   return json({ operation_id: mutationId, revision, ...state }, 202);
 }
 
@@ -361,17 +360,9 @@ async function mapCommit(
           revision: result.operation.committed_revision, ...state }, 202);
     }
     case 'stale_revision':
-      return json({ error: 'stale_revision', expected_revision: result.expected_revision,
-        active: snapshotBody(snapshot) }, 409);
+      return json({ error: 'stale_revision', active: snapshotBody(snapshot) }, 409);
     case 'idempotency_key_reused':
       return json({ error: 'idempotency_key_reused', mutation_id: result.mutation_id }, 409);
-    case 'operation_in_progress': {
-      return json({ error: 'operation_in_progress', operation_id: result.mutation_id,
-        revision: result.committed_revision, state: result.state }, 409);
-    }
-    case 'recovery_in_progress':
-      return json({ error: 'recovery_in_progress', recovery_id: result.recovery_id,
-        target_revision: result.target_revision, state: result.state }, 409);
     default: {
       const unhandled: never = result;
       return json({ error: 'unhandled_commit_result', unhandled }, 500);
@@ -624,7 +615,7 @@ async function preflightControlActivations(
   const activated: string[] = [];
   try {
     for (const { plugin_name: name } of mutation.next.plugin_activations) {
-      if (active.has(name) || !preflight.controlNames.has(name)) continue;
+      if (active.has(name) || !preflight.controlNames.has(name) || !preflight.managementNames.has(name)) continue;
       const statusBefore = preflight.status?.(name);
       await preflight.activate(name);
       if (statusBefore !== 'ready' && statusBefore !== 'starting') activated.push(name);
@@ -789,11 +780,6 @@ function isMutationRequest(
 }
 
 async function mutationReadinessResponse(options: ConfigControlApiOptions): Promise<Response | null> {
-  const recovery = await repositoryCall(() => options.repository.getCurrentRecovery?.());
-  if (recovery !== null && recovery !== undefined && (recovery.state === 'scheduled' || recovery.state === 'running')) {
-    return json({ error: 'recovery_in_progress', recovery_id: recovery.recovery_id,
-      target_revision: recovery.target_revision, state: recovery.state }, 409);
-  }
   let readiness: ReturnType<ConfigControlApiOptions['isMutationReady']> = true;
   try {
     readiness = options.isMutationReady();
@@ -944,14 +930,14 @@ async function reconcilePendingCommit(options: ConfigControlApiOptions): Promise
 }
 
 async function unchangedMutationResponse(options: ConfigControlApiOptions, revision: number): Promise<Response> {
-  const publication = await repositoryCall(() => options.repository.getActivePublication());
-  if (publication?.snapshot.revision === revision) {
-    const state = await repositoryCall(() => options.repository.getOperationState(publication.operation.mutation_id));
-    if (state === null) return json({ error: 'operation_not_found' }, 500);
+  const current = await repositoryCall(() => options.repository.getCurrentOperationState?.() ?? null);
+  if (current !== null && current !== undefined && current.operation.committed_revision === revision
+    && (current.operation.state === 'pending' || current.operation.state === 'committed'
+      || current.operation.state === 'publishing' || current.operation.state === 'draining')) {
     return json({
-      operation_id: publication.operation.mutation_id,
+      operation_id: current.operation.mutation_id,
       revision,
-      ...state,
+      ...current,
     }, 202);
   }
   return json({ revision, unchanged: true }, 200);
@@ -1200,6 +1186,7 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
         }
         if (path === '/api/config/runtime' && request.method === 'GET') {
           const currentOperation = await repositoryCall(() => serializedOptions.repository.getCurrentOperationState?.() ?? null);
+          const owner = await repositoryCall(() => serializedOptions.repository.getActivePublication?.() ?? null);
           const currentRecovery = await repositoryCall(() => serializedOptions.repository.getCurrentRecovery?.() ?? null);
           const retirement = currentOperation === null ? null : await repositoryCall(() =>
             serializedOptions.repository.getPublicationRetirement?.(currentOperation.operation.mutation_id) ?? null);
@@ -1211,6 +1198,7 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
             health,
             publication: {
               operation: runtimeOperation(currentOperation),
+              owner: owner === null ? null : runtimeOperation({ operation: owner.operation, workers: owner.targets }),
               cleanup: publicationCleanup(retirement, serializedOptions.retirementDeadline),
               recovery: runtimeRecovery(currentRecovery),
               retryable: (currentOperation?.operation.state==='draining' && retirement?.state==='stopped') || (currentOperation?.operation.state === 'degraded'

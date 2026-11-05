@@ -4,13 +4,14 @@ import { kernelMonotonicNowNs, readKernelDeadlineClockId } from './kernel-monoto
 import type { ChildProcess } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import type { Sha256Digest } from '@jeffusion/bungee-types';
-import type { ConfigMasterMessage, ConfigProcessIdentity, StartWorkerCommand, WorkerDrainedMessage, WorkerDrainFailedMessage, WorkerDrainStartedMessage, WorkerExitDeadlineEvidence } from '../config-publication/types';
+import type { ConfigMasterMessage, ConfigProcessIdentity, ConfigPublicationIdentity, StartWorkerCommand, WorkerDrainedMessage, WorkerDrainFailedMessage, WorkerDrainStartedMessage, WorkerExitDeadlineEvidence } from '../config-publication/types';
 import { parseConfigMasterMessage } from '../config-publication/master-messages';
 import type { ConfigWorkerRuntimeMessage } from '../config-publication/worker-runtime-contract';
 import type { ConfigPublicationWorkerProcess, WorkerExitEvidence } from '../config-publication/coordinator-types';
 import {
   deriveWorkerSupervisionCredential,
   parseWorkerDescriptor,
+  type WorkerCleanupEvidence,
   type WorkerSupervisionSeed,
   type SupervisionProcessCredential,
 } from '../supervision';
@@ -29,6 +30,11 @@ import { recordShutdownFailure, shutdownElapsedMs } from './shutdown-diagnostics
 import { recordWorkerInitializationFailure, type WorkerInitializationPhase } from './worker-initialization-diagnostics';
 
 export type WorkerUnavailableEvidence = { readonly kind: 'unavailable'; readonly pid: number };
+
+type WorkerExitRecord = {
+  readonly terminalDrain?: WorkerDrainedMessage | WorkerDrainFailedMessage;
+  readonly cleanup_state?: 'success' | 'failed';
+};
 
 /**
  * Host-private, immutable first configuration target observed for one physical worker
@@ -102,6 +108,7 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
   private client: WorkerControllerClient | null = null;
   private lastStatus: WorkerStatusPayload | null = null;
   private configurationTargetFact: SupervisedWorkerConfigurationTarget | null = null;
+  private configurationPublication: ConfigPublicationIdentity | null = null;
   bootNonce: string | null = null;
   private clientStateUnsubscribe: (() => void) | null = null;
   private exitEvidence: WorkerExitEvidence | null = null;
@@ -208,12 +215,12 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
         lastError = error;
         if (this.origin === 'adopted' && error instanceof ProcessIdentityMissingError) {
           try {
-            const terminal = await this.readTerminalDrainEvidence();
+            const record = await this.readExitRecord();
             const probe = this.identityControl.probeInstance === undefined
               ? await probeProcessInstance(this.pid, this.identity.worker_instance_id)
               : await this.identityControl.probeInstance(this.pid, this.identity.worker_instance_id);
-            if (terminal !== null && (probe === 'dead' || probe === 'mismatch')) {
-              this.publishExitEvidence(terminal);
+            if (record !== null && (probe === 'dead' || probe === 'mismatch')) {
+              this.publishExitEvidence(record);
               return;
             }
           } catch { /* no matching signed terminal and exact dead-process proof: keep discovery unknown */ }
@@ -248,10 +255,14 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
     this.heldGuard = ack.guard;
   }
 
-  private publishExitEvidence(terminalDrain?: WorkerDrainedMessage | WorkerDrainFailedMessage): WorkerExitEvidence {
+  private publishExitEvidence(record: WorkerExitRecord | null = null): WorkerExitEvidence {
     this.stopped = true;
     this.client?.disconnect(false);
-    const evidence: WorkerExitEvidence = { exited: true, pid: this.pid, ...(terminalDrain === undefined ? {} : { terminalDrain }) };
+    const evidence: WorkerExitEvidence = {
+      exited: true, pid: this.pid,
+      ...(record?.terminalDrain === undefined ? {} : { terminalDrain: record.terminalDrain }),
+      ...(record?.cleanup_state === undefined ? {} : { cleanup_state: record.cleanup_state }),
+    };
     this.exitEvidence = evidence;
     for (const listener of [...this.exitListeners]) listener(evidence);
     return evidence;
@@ -259,13 +270,20 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
 
   private emitExit(): void {
     if (this.exitEvidence !== null || this.origin !== 'spawned') return;
-    this.exitPublication ??= this.readTerminalDrainEvidence().then(
-      (terminal) => this.publishExitEvidence(terminal ?? undefined),
+    this.exitPublication ??= this.readExitRecord().then(
+      (record) => this.publishExitEvidence(record),
       () => this.publishExitEvidence(),
     );
   }
 
-  private async readTerminalDrainEvidence(): Promise<WorkerDrainedMessage | WorkerDrainFailedMessage | null> {
+  /**
+   * Reads one signed descriptor snapshot. Only evidence matching this exact boot,
+   * OS identity and (once a start was dispatched) target/internal publication is
+   * returned; anything unreadable or foreign stays unknown. A candidate that never
+   * reached `config-ready` has no drain message, so its release proof is the
+   * signed terminal cleanup record, never the `/shutdown` acknowledgement.
+   */
+  private async readExitRecord(): Promise<WorkerExitRecord | null> {
     const raw = this.options.readDescriptor === undefined
       ? JSON.parse(await readFile(this.options.descriptorPath, 'utf8')) as unknown
       : await this.options.readDescriptor();
@@ -274,20 +292,46 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
       || hint.worker_instance_id !== this.identity.worker_instance_id || hint.worker_slot !== this.slot) return null;
     const credential = deriveWorkerSupervisionCredential(this.options.supervisionSeed, hint.boot_nonce);
     const descriptor = parseWorkerDescriptor(raw, credential);
+    if (descriptor.pid !== this.pid || descriptor.boot_nonce !== this.bootNonce) return null;
+    const record: { terminalDrain?: WorkerDrainedMessage | WorkerDrainFailedMessage; cleanup_state?: 'success' | 'failed' } = {};
     const message = descriptor.evidence.message;
-    if ((message?.status !== 'worker-drained' && message?.status !== 'worker-drain-failed')
-      || descriptor.evidence.kind !== (message.status === 'worker-drained' ? 'drained' : 'drain-failed')
-      || descriptor.pid !== this.pid || descriptor.boot_nonce !== this.bootNonce
-      || message.pid !== this.pid || message.master_generation !== this.identity.master_generation
-      || message.worker_instance_id !== this.identity.worker_instance_id || message.worker_slot !== this.slot
-      || message.boot_nonce !== descriptor.boot_nonce || message.boot_id !== this.kernelBootId) return null;
-    const task = this.drainCommand;
-    if (task !== null && (message.drain_id !== task.drain_id
-      || JSON.stringify(message.policy) !== JSON.stringify(task.policy)
-      || message.revision !== task.revision || message.content_hash !== task.content_hash
-      || message.plugin_catalog_hash !== task.plugin_catalog_hash
-      || JSON.stringify(message.publication) !== JSON.stringify(task.publication))) return null;
-    return message;
+    if ((message?.status === 'worker-drained' || message?.status === 'worker-drain-failed')
+      && descriptor.evidence.kind === (message.status === 'worker-drained' ? 'drained' : 'drain-failed')
+      && message.pid === this.pid && message.master_generation === this.identity.master_generation
+      && message.worker_instance_id === this.identity.worker_instance_id && message.worker_slot === this.slot
+      && message.boot_nonce === descriptor.boot_nonce && message.boot_id === this.kernelBootId) {
+      const task = this.drainCommand;
+      if (task === null || (message.drain_id === task.drain_id
+        && JSON.stringify(message.policy) === JSON.stringify(task.policy)
+        && message.revision === task.revision && message.content_hash === task.content_hash
+        && message.plugin_catalog_hash === task.plugin_catalog_hash
+        && JSON.stringify(message.publication) === JSON.stringify(task.publication))) {
+        record.terminalDrain = message;
+      }
+    }
+    const cleanup = descriptor.cleanup;
+    if (cleanup !== undefined && descriptor.phase === 'stopped' && this.cleanupMatches(cleanup, descriptor)) {
+      record.cleanup_state = cleanup.cleanup_state;
+    }
+    return record.terminalDrain === undefined && record.cleanup_state === undefined ? null : record;
+  }
+
+  /** The signed cleanup must belong to this boot attempt's exact target and publication. */
+  private cleanupMatches(cleanup: WorkerCleanupEvidence, descriptor: ReturnType<typeof parseWorkerDescriptor>): boolean {
+    const target = this.configurationTargetFact;
+    // Negative proof: this exact boot never began processing a start. It requires
+    // the whole descriptor to say so (no ready/apply/drain evidence, no serving
+    // port, no target and no publication), not just null cleanup fields.
+    const noAppliedStart = cleanup.revision === null && cleanup.content_hash === null
+      && cleanup.plugin_catalog_hash === null && cleanup.publication === null
+      && descriptor.revision === null && descriptor.content_hash === null
+      && descriptor.plugin_catalog_hash === null && descriptor.private_port === null
+      && descriptor.evidence.kind === 'candidate' && descriptor.evidence.message === undefined;
+    if (noAppliedStart) return true;
+    if (target === null) return false;
+    return cleanup.revision === target.revision && cleanup.content_hash === target.content_hash
+      && cleanup.plugin_catalog_hash === target.plugin_catalog_hash
+      && canonicalJson(cleanup.publication) === canonicalJson(this.configurationPublication);
   }
 
   /** Exact OS identity captured during initialization; null until capture succeeds. */
@@ -303,11 +347,12 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
     if (this.exitEvidence !== null) {
       // Physical exit is permanent, but its first descriptor read may precede
       // the final signed cleanup snapshot. Retry only incomplete evidence.
-      if (this.exitEvidence.terminalDrain?.cleanup_state === undefined
-        || this.exitEvidence.terminalDrain.cleanup_state === 'pending') {
+      const terminalIncomplete = this.exitEvidence.terminalDrain?.cleanup_state === undefined
+        || this.exitEvidence.terminalDrain.cleanup_state === 'pending';
+      if (terminalIncomplete && this.exitEvidence.cleanup_state === undefined) {
         try {
-          const terminal = await this.readTerminalDrainEvidence();
-          if (terminal !== null) this.exitEvidence = { ...this.exitEvidence, terminalDrain: terminal };
+          const record = await this.readExitRecord();
+          if (record !== null) this.exitEvidence = { exited: true, pid: this.pid, ...record };
         } catch { /* retain OS exit proof; unreadable cleanup remains unknown */ }
       }
       return this.exitEvidence;
@@ -319,9 +364,9 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
       if (proof.kind === 'live') return null;
       if (proof.kind === 'unknown') throw new Error(`worker lifetime guard exit proof is unknown (${proof.reason})`);
       this.retirementFence = proof.fence;
-      let terminal: WorkerDrainedMessage | WorkerDrainFailedMessage | null = null;
-      try { terminal = await this.readTerminalDrainEvidence(); } catch { /* cleanup remains independent and unknown */ }
-      return this.publishExitEvidence(terminal ?? undefined);
+      let record: WorkerExitRecord | null = null;
+      try { record = await this.readExitRecord(); } catch { /* cleanup remains independent and unknown */ }
+      return this.publishExitEvidence(record);
     }
     if (process.platform !== 'win32' && this.options.processIdentity === undefined) {
       throw new Error('worker lifetime guard was not verified; exit remains unknown');
@@ -330,8 +375,8 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
     const captured = this.capturedIdentity;
     if (captured === null) {
       recordShutdownFailure('worker_exit_probe', { pid: this.pid, origin: this.origin, capturedIdentity: false, lastProbe: 'not_run', probeAttempts: 0 });
-      let terminal: WorkerDrainedMessage | WorkerDrainFailedMessage | null = null;
-      try { terminal = await this.readTerminalDrainEvidence(); } catch { /* invalid terminal evidence is not an exit proof */ }
+      let record: WorkerExitRecord | null = null;
+      try { record = await this.readExitRecord(); } catch { /* invalid terminal evidence is not an exit proof */ }
       let probe: ProcessIdentityProbe;
       try {
         probe = this.identityControl.probeInstance === undefined
@@ -344,7 +389,7 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
       }
       if (probe === 'exact') return null;
       if (probe === 'unknown') throw new Error('worker exit state could not be verified against the operating system');
-      return this.publishExitEvidence(terminal ?? undefined);
+      return this.publishExitEvidence(record);
     }
     let probe: ProcessIdentityProbe;
     try { probe = await this.identityControl.probe(captured); }
@@ -353,12 +398,12 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
       throw error;
     }
     if (probe === 'dead' || probe === 'mismatch') {
-      let terminal: WorkerDrainedMessage | WorkerDrainFailedMessage | null = null;
-      try { terminal = await this.readTerminalDrainEvidence(); }
+      let record: WorkerExitRecord | null = null;
+      try { record = await this.readExitRecord(); }
       catch (error) {
         recordShutdownFailure('worker_exit_probe', { pid: this.pid, origin: this.origin, lastProbe: 'unknown' }, error);
       }
-      return this.publishExitEvidence(terminal ?? undefined);
+      return this.publishExitEvidence(record);
     }
     recordShutdownFailure('worker_exit_probe', { pid: this.pid, origin: this.origin, capturedIdentity: true, lastProbe: probe, probeAttempts: 1, elapsedMs: shutdownElapsedMs(startedAt) });
     if (probe === 'exact') return null;
@@ -412,7 +457,11 @@ export class SupervisedConfigWorkerProcessAdapter implements ConfigPublicationWo
       plugin_catalog_hash: message.plugin_catalog_hash,
     });
     const pinned = this.configurationTargetFact;
-    if (pinned === null) { this.configurationTargetFact = target; return; }
+    if (pinned === null) {
+      this.configurationTargetFact = target;
+      this.configurationPublication = message.publication;
+      return;
+    }
     if (!sameConfigurationTarget(pinned, target)) {
       throw new Error('supervised worker physical instance already has a different configuration target');
     }

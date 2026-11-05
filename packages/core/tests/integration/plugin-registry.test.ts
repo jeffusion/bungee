@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { PluginRegistry } from '../../src/plugin-registry';
-import { initializePluginContextManager, getPluginContextManager } from '../../src/plugin-context-manager';
+import { initializePluginContextManager, getPluginContextManager, PluginContextManager } from '../../src/plugin-context-manager';
 import type { PluginConfig } from '@jeffusion/bungee-types';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -218,12 +218,15 @@ describe('PluginRegistry', () => {
   });
 
   describe('unloadAll', () => {
-    test('should call onDestroy for all plugins', async () => {
+    test('should unload metadata without constructing or destroying plugin instances', async () => {
       const destroyTrackerCode = `
         export default class DestroyTracker {
           static name = 'destroy-tracker';
           static version = '1.0.0';
-          static destroyed = false;
+
+          constructor() {
+            global.pluginConstructed = true;
+          }
 
           async onDestroy() {
             global.pluginDestroyed = true;
@@ -237,11 +240,49 @@ describe('PluginRegistry', () => {
 
       await registry.loadPlugin({ name: 'destroy-tracker', path: 'destroy-tracker.plugin.ts' });
 
+      (global as any).pluginConstructed = false;
       (global as any).pluginDestroyed = false;
       await registry.unloadAll();
 
-      expect((global as any).pluginDestroyed).toBe(true);
+      expect(registry.getAllPluginsMetadata()).toHaveLength(0);
+      expect((global as any).pluginConstructed).toBe(false);
+      expect((global as any).pluginDestroyed).toBe(false);
+      delete (global as any).pluginConstructed;
       delete (global as any).pluginDestroyed;
+    });
+
+    test('should propagate context cleanup failures while cleaning remaining contexts', async () => {
+      const revoked: string[] = [];
+      const fakeFactory = {
+        create: (name: string) => ({
+          name,
+          flush: async () => {
+            if (name === 'simple-test-plugin') throw new Error('flush failed');
+          },
+          get: async () => null,
+          set: async () => {},
+          delete: async () => {},
+          keys: async () => [],
+        }),
+        revoke: (storage: { name: string }) => { revoked.push(storage.name); },
+      };
+      (PluginContextManager as any).instance = null;
+      initializePluginContextManager(fakeFactory as any);
+
+      await registry.loadPlugins([
+        { name: 'simple', path: 'simple.plugin.ts' },
+        { name: 'interceptor', path: 'interceptor.plugin.ts' },
+      ]);
+      const manager = getPluginContextManager();
+      manager.getOrCreateContext('simple-test-plugin', path.join(TEST_PLUGINS_DIR, 'simple.plugin.ts'), {});
+      manager.getOrCreateContext('interceptor-test-plugin', path.join(TEST_PLUGINS_DIR, 'interceptor.plugin.ts'), {});
+
+      await expect(registry.unloadAll()).rejects.toThrow('plugin registry unload failed');
+
+      expect(registry.getAllPluginsMetadata()).toHaveLength(0);
+      expect(manager.getContext('simple-test-plugin')).toBeUndefined();
+      expect(manager.getContext('interceptor-test-plugin')).toBeUndefined();
+      expect(revoked.sort()).toEqual(['interceptor-test-plugin', 'simple-test-plugin']);
     });
 
     test('should clear all plugins', async () => {

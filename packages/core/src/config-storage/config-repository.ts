@@ -9,13 +9,23 @@ import { Database } from 'bun:sqlite';
 import type { Sha256Digest } from '@jeffusion/bungee-types';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { readActivePublication } from './active-publication';
+import {
+  claimPublicationTarget as claimOperationTarget,
+  confirmPublicationCandidateExited as confirmOperationCandidateExited,
+  enterPublicationPrepare as enterOperationPrepare,
+  readActivePublication,
+  readOutstandingPublicationCandidates,
+  readPublicationOwner,
+  recordPublicationCandidateExit as recordOperationCandidateExit,
+  requestPublicationCancellation as requestOperationCancellation,
+} from './active-publication';
 import { commitTransaction } from './commit-transaction';
 import { migrateConfigurationDatabase } from './migrations';
 import {
   beginPublication as beginOperationPublication,
   beginDrainingRecovery as beginOperationDrainingRecovery,
   beginWorkerAttempt as beginOperationWorkerAttempt,
+  finalizeOfflineOperation,
   finalizePublication as finalizeOperationPublication,
   getOperation as readOperation,
   markDraining as markOperationDraining,
@@ -32,6 +42,7 @@ import {
   createManualRecovery,
   readLatestRecovery,
   readCurrentRecovery,
+  readPublicationRecoveryBarrier,
   readRecovery,
   requeueRecovery,
   scheduleRecoveryRetry,
@@ -51,6 +62,9 @@ import type {
   ConfigurationRecoveryReasonCode,
   ConfigRepositoryOptions,
   FinalizePublicationOutcome,
+  PublicationCandidateAllocation,
+  PublicationCandidateExitEvidence,
+  PublicationPrepareDecision,
   RepositorySnapshot,
   ServingSnapshotKey,
   WorkerPublicationResult,
@@ -68,8 +82,26 @@ import { isSqliteBusyError, repositoryFailure } from './sqlite-errors';
 import { freezeSnapshot } from './immutable-snapshot';
 import type { PreparedCommitCommand } from './prepared-command';
 import { readActiveRevision } from './current-revision';
-import { validateOperationRelations, validateActiveOperationIdentity } from './operation-relations';
+import { validateOperationRelations } from './operation-relations';
 import { readSchemaObjectFingerprint } from './schema-fingerprint';
+import {
+  assertPublicationLaunchDebtSettled,
+  readWorkerLaunchInventory,
+  readUnsettledWorkerLaunches,
+  readWorkerLaunch,
+  readWorkerLaunchAllocationFacts,
+  recordWorkerLaunchAdmitted,
+  recordWorkerLaunchExit,
+  registerWorkerLaunch,
+  fenceWorkerLaunchNotStarted,
+  type UnsettledWorkerLaunch,
+  type WorkerLaunch,
+  type WorkerLaunchAllocation,
+  type WorkerLaunchAllocationFacts,
+  type WorkerLaunchExitEvidence,
+  type WorkerLaunchIdentity,
+} from './worker-launch-store';
+import type { ProcessLifetimeGuardFacts } from '../supervision/process-lifetime-guard';
 function configureConnection(db: Database): void {
   const encoding = sqliteGet<{ readonly encoding: string }, []>(db, 'PRAGMA encoding')?.encoding;
   if (encoding !== 'UTF-8') {
@@ -203,9 +235,7 @@ export class ConfigRepository {
       const result = commitTransaction(this.db, command, this.options, snapshot, true);
       if (result.kind !== 'committed') throw new ConfigRepositoryError('invalid_operation',
         `plugin catalog reconciliation cannot proceed (${result.kind})`);
-      beginOperationPublication(this.db, operationId, now);
-      markOperationDraining(this.db, operationId, now);
-      finalizeOperationPublication(this.db, operationId, { outcome: 'converged', old_workers_exited: true }, now);
+      finalizeOfflineOperation(this.db, operationId, now);
     }));
     this.snapshot = freezeSnapshot(readRepositorySnapshot(this.db));
   }
@@ -247,12 +277,9 @@ export class ConfigRepository {
       };
       const result = commitTransaction(this.db, offlinePrepared, this.options, snapshot, true);
       if (result.kind !== 'committed') {
-        throw new ConfigRepositoryError(result.kind === 'recovery_in_progress' ? 'recovery_in_progress' : 'invalid_operation',
-          `offline management change cannot proceed (${result.kind})`);
+        throw new ConfigRepositoryError('invalid_operation', `offline management change cannot proceed (${result.kind})`);
       }
-      beginOperationPublication(this.db, operationId, now);
-      markOperationDraining(this.db, operationId, now);
-      finalizeOperationPublication(this.db, operationId, { outcome: 'converged', old_workers_exited: true }, now);
+      finalizeOfflineOperation(this.db, operationId, now);
     }));
     return this.getControlProjection();
   }
@@ -294,7 +321,47 @@ export class ConfigRepository {
   }
 
   getActivePublication(): ActiveConfigurationPublication | null {
-    return runRepositoryAction(() => withConsistentRead(this.db, () => readActivePublication(this.db, this.snapshot)));
+    return runRepositoryAction(() => withConsistentRead(this.db, () => readActivePublication(this.db)));
+  }
+
+  /** Claims the newest persisted target when the publication owner is free. */
+  claimPublicationTarget(pluginCatalogHash: Sha256Digest, updatedAt: number): ActiveConfigurationPublication | null {
+    return runRepositoryAction(() => this.publicationTransaction(null, () =>
+      claimOperationTarget(this.db, this.snapshot, pluginCatalogHash, updatedAt)));
+  }
+
+  requestPublicationCancellation(
+    mutationId: string, committedRevision: number, updatedAt: number,
+  ): ConfigurationOperation {
+    return runRepositoryAction(() => this.publicationTransaction(mutationId, () =>
+      requestOperationCancellation(this.db, mutationId, committedRevision, updatedAt)));
+  }
+
+  enterPublicationPrepare(
+    mutationId: string, committedRevision: number, updatedAt: number,
+  ): PublicationPrepareDecision {
+    return runRepositoryAction(() => this.publicationTransaction(mutationId, () =>
+      enterOperationPrepare(this.db, mutationId, committedRevision, updatedAt)));
+  }
+
+  recordPublicationCandidateExit(
+    mutationId: string, committedRevision: number, workerSlot: number, attemptNo: number,
+    evidence: PublicationCandidateExitEvidence, updatedAt: number,
+  ): void {
+    return runRepositoryAction(() => this.mutationTransaction(() =>
+      recordOperationCandidateExit(this.db, mutationId, committedRevision, workerSlot, attemptNo, evidence, updatedAt)));
+  }
+
+  confirmPublicationCandidateExited(
+    mutationId: string, committedRevision: number, updatedAt: number,
+  ): ConfigurationOperation {
+    return runRepositoryAction(() => this.mutationTransaction(() =>
+      confirmOperationCandidateExited(this.db, mutationId, committedRevision, updatedAt)));
+  }
+
+  getOutstandingPublicationCandidates(): readonly PublicationCandidateAllocation[] {
+    return runRepositoryAction(() => withConsistentRead(this.db, () =>
+      readOutstandingPublicationCandidates(this.db)));
   }
 
   commit(command: CommitConfigurationCommandV1): CommitConfigurationResult {
@@ -345,10 +412,12 @@ export class ConfigRepository {
   }
 
   getCurrentRecovery(): ConfigurationRecovery | null {
-    return runRepositoryAction(() => withConsistentRead(this.db, () => {
-      const revision = readActiveRevision(this.db);
-      return readCurrentRecovery(this.db, revision);
-    }));
+    return runRepositoryAction(() => withConsistentRead(this.db, () => readCurrentRecovery(this.db)));
+  }
+
+  getPublicationRecoveryBarrier(excludeRecoveryId: string | null = null): ConfigurationRecovery | null {
+    return runRepositoryAction(() => withConsistentRead(this.db, () =>
+      readPublicationRecoveryBarrier(this.db, excludeRecoveryId)));
   }
 
   getLatestRecovery(targetRevision: number): ConfigurationRecovery | null {
@@ -462,6 +531,53 @@ export class ConfigRepository {
     }));
   }
 
+  registerWorkerLaunch(
+    identity: WorkerLaunchIdentity, guard: ProcessLifetimeGuardFacts,
+    allocation: WorkerLaunchAllocation | null, updatedAt: number,
+  ): WorkerLaunch {
+    return runRepositoryAction(() => this.mutationTransaction(() =>
+      registerWorkerLaunch(this.db, identity, guard, allocation, updatedAt)));
+  }
+
+  fenceWorkerLaunchNotStarted(
+    mutationId: string, workerSlot: number, attemptNo: number, updatedAt: number,
+  ): void {
+    return runRepositoryAction(() => this.mutationTransaction(() =>
+      fenceWorkerLaunchNotStarted(this.db, mutationId, workerSlot, attemptNo, updatedAt)));
+  }
+
+  recordWorkerLaunchAdmitted(workerInstanceId: string, updatedAt: number): WorkerLaunch {
+    return runRepositoryAction(() => this.mutationTransaction(() =>
+      recordWorkerLaunchAdmitted(this.db, workerInstanceId, updatedAt)));
+  }
+
+  recordWorkerLaunchExit(
+    workerInstanceId: string, evidence: WorkerLaunchExitEvidence, updatedAt: number,
+  ): WorkerLaunch {
+    return runRepositoryAction(() => this.mutationTransaction(() =>
+      recordWorkerLaunchExit(this.db, workerInstanceId, evidence, updatedAt)));
+  }
+
+  getWorkerLaunch(workerInstanceId: string): WorkerLaunch | null {
+    return runRepositoryAction(() => withConsistentRead(this.db, () =>
+      readWorkerLaunch(this.db, workerInstanceId)));
+  }
+
+  getWorkerLaunchAllocationFacts(allocation: WorkerLaunchAllocation): WorkerLaunchAllocationFacts | null {
+    return runRepositoryAction(() => withConsistentRead(this.db, () =>
+      readWorkerLaunchAllocationFacts(this.db, allocation)));
+  }
+
+  getUnsettledWorkerLaunches(): readonly UnsettledWorkerLaunch[] {
+    return runRepositoryAction(() => withConsistentRead(this.db, () =>
+      readUnsettledWorkerLaunches(this.db)));
+  }
+
+  getWorkerLaunchInventory(): readonly UnsettledWorkerLaunch[] {
+    return runRepositoryAction(() => withConsistentRead(this.db, () =>
+      readWorkerLaunchInventory(this.db)));
+  }
+
   recordWorkerResult(
     mutationId: string,
     workerSlot: number,
@@ -479,11 +595,16 @@ export class ConfigRepository {
     outcome: FinalizePublicationOutcome,
     updatedAt: number,
   ): ConfigurationOperation {
-    return runRepositoryAction(() => this.publicationTransaction(mutationId, () => {
+    return runRepositoryAction(() => this.mutationTransaction(() => {
       const before = readOperation(this.db, mutationId);
       if (before === null) throw new ConfigRepositoryError('invalid_operation', 'configuration operation was not found');
+      // A terminal operation still answers a repeated finalization by identity.
+      if (before.state !== 'converged' && before.state !== 'degraded' && before.state !== 'superseded') {
+        this.requirePublicationOwner(mutationId);
+        if (outcome.outcome === 'degraded') assertPublicationLaunchDebtSettled(this.db, mutationId);
+      }
       const operation = finalizeOperationPublication(this.db, mutationId, outcome, updatedAt);
-      if (before.state !== 'converged' && before.state !== 'degraded' &&
+      if (before.state !== 'converged' && before.state !== 'degraded' && before.state !== 'superseded' &&
           outcome.outcome === 'degraded' &&
           (outcome.error_code === 'replacement_convergence_failed' || outcome.error_code === 'control_readiness_failed')) {
         switch (outcome.recovery_disposition) {
@@ -601,12 +722,20 @@ export class ConfigRepository {
     return runRepositoryAction(() => this.mutationTransaction(() => this.supervision.claim(controllerId, updatedAt)));
   }
 
-  private publicationTransaction<Result>(mutationId: string, action: () => Result): Result {
+  private publicationTransaction<Result>(mutationId: string | null, action: () => Result): Result {
     return this.mutationTransaction(() => {
-      const revision = readActiveRevision(this.db);
-      this.requireActiveOperation(mutationId, revision);
+      if (mutationId !== null) this.requirePublicationOwner(mutationId);
       const result = action();
-      this.requireActiveOperation(mutationId, revision);
+      if (mutationId !== null) {
+        const operation = readOperation(this.db, mutationId);
+        if (operation === null) throw new ConfigRepositoryError('repository_failure', 'publication operation disappeared');
+        // Releasing ownership is a legal result of terminal finalization.
+        if (operation.state === 'committed' || operation.state === 'publishing' || operation.state === 'draining') {
+          readActivePublication(this.db);
+        }
+      } else if (readPublicationOwner(this.db) !== null) {
+        readActivePublication(this.db);
+      }
       return result;
     });
   }
@@ -620,12 +749,12 @@ export class ConfigRepository {
     }).immediate();
   }
 
-  private requireActiveOperation(mutationId: string, activeRevision: number): void {
-    const operation = readOperation(this.db, mutationId);
-    if (operation === null || operation.committed_revision !== activeRevision) {
-      throw new ConfigRepositoryError('invalid_operation', 'only the active revision operation may publish');
+  private requirePublicationOwner(mutationId: string): void {
+    const owner = readPublicationOwner(this.db);
+    if (owner === null || owner.operation.mutation_id !== mutationId) {
+      throw new ConfigRepositoryError('invalid_operation', 'only the current publication owner may publish');
     }
-    validateActiveOperationIdentity(this.db, operation, readOperationWorkers(this.db, mutationId), this.snapshot);
+    readActivePublication(this.db);
   }
 
 }

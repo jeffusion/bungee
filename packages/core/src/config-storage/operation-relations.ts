@@ -5,8 +5,8 @@ import { ConfigRepositoryError } from './repository-types';
 import { hashConfigurationRequest } from './content-hash';
 import { sqliteGet } from './sqlite-query';
 
-/** Current revision identity is checked against the startup/confirmed-commit projection. */
-export function validateActiveOperationIdentity(
+/** The operation identity is checked against its own frozen snapshot, never the latest revision. */
+export function validateOperationIdentity(
   db: Database, operation: ConfigurationOperation, workers: readonly ConfigurationOperationWorker[], snapshot: RepositorySnapshot,
 ): void {
   validateOperationRelations(operation, workers);
@@ -19,11 +19,11 @@ export function validateActiveOperationIdentity(
         kind: operation.kind, expected_revision: operation.expected_revision, aggregate: snapshot.aggregate,
         target_worker_slots: workers.map(worker => worker.worker_slot).sort((left, right) => left - right),
       })) {
-    throw new ConfigRepositoryError('schema_corrupt', 'active operation identity is incoherent');
+    throw new ConfigRepositoryError('schema_corrupt', 'operation identity is incoherent');
   }
 }
 
-/** Validates only the operation and its frozen targets, without touching history. */
+/** Validates only the operation and its frozen targets, without touching history or snapshots. */
 export function validateOperationRelations(operation: ConfigurationOperation, workers: readonly ConfigurationOperationWorker[]): void {
   if (workers.some(worker => worker.mutation_id !== operation.mutation_id || worker.target_revision !== operation.committed_revision
     || worker.updated_at < operation.created_at || worker.updated_at > operation.updated_at)) {
@@ -36,9 +36,9 @@ export function validateOperationRelations(operation: ConfigurationOperation, wo
     drain_recovery_generation !== operation.drain_recovery_generation)) {
     throw new ConfigRepositoryError('schema_corrupt', 'operation recovery generation is incoherent');
   }
-  if (operation.state === 'committed' && workers.some(({ state: workerState, attempt_no }) =>
-    workerState !== 'pending' || attempt_no !== 0)) {
-    throw new ConfigRepositoryError('schema_corrupt', 'committed operation has terminal worker state');
+  if ((operation.state === 'pending' || operation.state === 'committed') &&
+      workers.some(({ state: workerState, attempt_no }) => workerState !== 'pending' || attempt_no !== 0)) {
+    throw new ConfigRepositoryError('schema_corrupt', 'unstarted operation has terminal worker state');
   }
   if (operation.state === 'draining' &&
       workers.some(({ state: workerState, attempt_no }) => workerState !== 'converged' || attempt_no === 0)) {

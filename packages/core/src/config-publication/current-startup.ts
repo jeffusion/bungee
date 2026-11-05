@@ -11,6 +11,7 @@ import {
   type ServingConfigWorker,
   type StartupPublicationOutcome,
   type WorkerAdmissionController,
+  type CreationPermit,
 } from './coordinator-types';
 import { cleanupConfirmed, OwnedProcessCollection } from './process-cleanup';
 import { waitForAdmissionHandoff } from './admission-handoff';
@@ -34,6 +35,8 @@ type CurrentStartupOptions = {
   readonly admission: WorkerAdmissionController;
   readonly retireWorkers: readonly ServingConfigWorker[];
   readonly signal?: PublicationCancellationSignal;
+  /** Shared creation gate; called immediately before any missing slot is forked. */
+  readonly ensureCreationPermitted: () => Promise<CreationPermit>;
 };
 
 function processError(error: unknown, slot: number): PublicationFailure {
@@ -74,6 +77,14 @@ export async function runCurrentStartup(
   const missingSlots = Array.from({ length: options.workerCount }, (_, slot) => slot)
     .filter((slot) => !existingBySlot.has(slot));
   const allocated = options.identities.allocate(missingSlots);
+  if (allocated.length > 0) {
+    const permit = await options.ensureCreationPermitted();
+    if (!permit.allowed) {
+      return { kind: 'startup_degraded', http_status: 202, error_code: 'admission_outcome_unknown',
+        recovery_disposition: 'retryable', failures: [processError(permit.error, -1)],
+        serving: existingWorkers };
+    }
+  }
   const owned = new OwnedProcessCollection();
   const spawned: PendingConfigWorker[] = [];
   let startupError: unknown;
@@ -86,7 +97,7 @@ export async function runCurrentStartup(
       throwIfPublicationCancelled(options.signal);
       for (const identity of allocated) {
         throwIfPublicationCancelled(options.signal);
-        const process = options.workerFactory.spawn(identity);
+        const process = await options.workerFactory.spawn(identity);
         if (existingWorkers.some(({ process: current }) => current === process)
           || spawned.some(({ process: current }) => current === process)) {
           throw new MasterConfigPublicationError('invalid_options', 'spawned worker reuses an existing process object');
@@ -167,13 +178,13 @@ export async function runCurrentStartup(
         admissionCommitMayHaveBeenSent = true;
         await prepared!.commit();
         admissionState = 'committed';
-        options.workerFactory.markCommitted(serving.map(({ process }) => process));
+        await options.workerFactory.markCommitted(serving.map(({ process }) => process));
         throwIfPublicationCancelled(options.signal, true);
       } catch (error) {
         if (isPublicationCancelled(error)) throw error;
         admissionState = isOutcomeUnknown(error) || !isDefinitelyNotCommitted(error) ? 'outcome_unknown' : 'not_committed';
         if (admissionState === 'outcome_unknown') {
-          options.workerFactory.markCommitted(serving.map(({ process }) => process));
+          await options.workerFactory.markCommitted(serving.map(({ process }) => process));
           return { kind: 'startup_degraded', http_status: 202, error_code: 'admission_outcome_unknown',
             recovery_disposition: 'fatal', failures: [processError(error, -1)], serving };
         }

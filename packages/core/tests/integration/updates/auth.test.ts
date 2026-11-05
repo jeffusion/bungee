@@ -19,7 +19,7 @@ test('update routes preserve management authentication, capabilities and explici
   try{
     const api=createConfigControlApi({managementAuth:credential.managementAuth,repository:configurationRepositoryFixture(repository),
       admission:new WorkerAdmissionRegistry(),workerCount:1,clock:{now:()=>Date.now()},resolveAuthToken:value=>value,
-      parseAggregate:parseNormalizeCompileAggregate,publicationTasks:{enqueue(){ }},isMutationReady:()=>true,updates:controller});
+      parseAggregate:parseNormalizeCompileAggregate,publicationTasks:{wake(){ }},isMutationReady:()=>true,updates:controller});
     expect((await api.handle(new Request('http://management.test/api/system/updates')))!.status).toBe(401);
     expect((await api.handle(new Request('http://management.test/api/system/updates/confirm',{method:'POST',body:'{}'})))!.status).toBe(401);
     const headers={authorization:`Bearer ${credential.current.token}`};

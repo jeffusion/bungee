@@ -11,6 +11,8 @@ import {
   commitConfiguration,
   duplicateConfigurationRoute,
   getConfigSnapshot,
+  getConfigurationOperation,
+  waitForConfigurationOperation,
   updateConfig,
 } from '../../../src/api/config';
 
@@ -179,6 +181,70 @@ describe('configuration v2 bridge', () => {
     expect(error).toMatchObject({ mutationId: JSON.parse(String(requests[1]?.init?.body)).mutation_id });
     expect(requests.filter(request => request.init?.method === 'PUT')).toHaveLength(1);
   });
+  test('an explicit result_unknown keeps the original identity and never resubmits', async () => {
+    const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
+    setResponses(requests, [snapshot(), Response.json({ error: 'result_unknown' }, { status: 503 }),
+      Response.json({ error: 'operation_not_found' }, { status: 404 })]);
+    const loaded = await getConfigSnapshot();
+    const error = await rejection(commitConfiguration(loaded, aggregate, { completion: 'committed' }));
+    const id = JSON.parse(String(requests[1]?.init?.body)).mutation_id;
+    expect(error).toBeInstanceOf(ConfigurationSubmissionUnknownError);
+    expect(error).toMatchObject({ mutationId: id });
+    expect(requests.filter(request => request.init?.method === 'PUT')).toHaveLength(1);
+    expect(requests[2]?.url).toBe(`/api/config/operations/${id}`);
+  });
+
+  test('never adopts a foreign ACK identity; only the original ID is queried', async () => {
+    const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
+    setResponses(requests, [snapshot(), Response.json({ operation_id: 'another-id', revision: 8,
+      operation: { ...operation('committed'), mutation_id: 'another-id' }, workers: [] }, { status: 202 }),
+      Response.json({ error: 'operation_not_found' }, { status: 404 })]);
+    const loaded = await getConfigSnapshot();
+    const error = await rejection(commitConfiguration(loaded, aggregate, { completion: 'committed' }));
+    const id = JSON.parse(String(requests[1]?.init?.body)).mutation_id;
+    expect(error).toBeInstanceOf(ConfigurationSubmissionUnknownError);
+    expect(error).toMatchObject({ mutationId: id });
+    expect(requests[2]?.url).toBe(`/api/config/operations/${id}`);
+    expect(requests.filter(request => request.init?.method === 'PUT')).toHaveLength(1);
+  });
+
+  test('an ACK without the operation or with a mismatched revision stays unknown', async () => {
+    const variants = [
+      (id: string) => ({ operation_id: id, revision: 8 }),
+      (id: string) => ({ operation_id: id, revision: 9, operation: { ...operation('committed'), mutation_id: id }, workers: [] }),
+      (id: string) => ({ operation_id: id, revision: 7, operation: { ...operation('committed'), mutation_id: id, expected_revision: 6, committed_revision: 7 }, workers: [] }),
+      (id: string) => ({ operation_id: id, revision: 8, operation: { ...operation('committed'), mutation_id: id, result_status: 200 }, workers: [] }),
+      // 0 -> 1 is not a valid revision pair: active revisions are positive.
+      (id: string) => ({ operation_id: id, revision: 1, operation: { ...operation('committed'), mutation_id: id, expected_revision: 0, committed_revision: 1 }, workers: [] }),
+    ];
+    for (const variant of variants) {
+      const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
+      setResponses(requests, [snapshot(),
+        (_input, init) => Response.json(variant(JSON.parse(String(init?.body)).mutation_id), { status: 202 }),
+        Response.json({ error: 'operation_not_found' }, { status: 404 })]);
+      const loaded = await getConfigSnapshot();
+      const error = await rejection(commitConfiguration(loaded, aggregate, { completion: 'committed' }));
+      expect(error).toBeInstanceOf(ConfigurationSubmissionUnknownError);
+      expect(requests.filter(request => request.init?.method === 'PUT')).toHaveLength(1);
+      expect(requests[2]?.url).toBe(`/api/config/operations/${JSON.parse(String(requests[1]?.init?.body)).mutation_id}`);
+    }
+  });
+
+  test('a storage rejection is reconciled by the original identity, never resubmitted', async () => {
+    for (const code of ['repository_unavailable', 'configuration_commit_failed']) {
+      const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
+      setResponses(requests, [snapshot(), Response.json({ error: code }, { status: 500 }),
+        Response.json({ error: 'operation_not_found' }, { status: 404 })]);
+      const loaded = await getConfigSnapshot();
+      const error = await rejection(commitConfiguration(loaded, aggregate, { completion: 'committed' }));
+      const id = JSON.parse(String(requests[1]?.init?.body)).mutation_id;
+      expect(error).toBeInstanceOf(ConfigurationSubmissionUnknownError);
+      expect(error).toMatchObject({ mutationId: id });
+      expect(requests[2]?.url).toBe(`/api/config/operations/${id}`);
+      expect(requests.filter(request => request.init?.method === 'PUT')).toHaveLength(1);
+    }
+  });
+
   test('denied tracking storage never blocks the single write; dispatch is memory-only', async () => {
     const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
     setResponses(requests, [snapshot(), accepted('converged')]);
@@ -275,6 +341,28 @@ describe('configuration v2 bridge', () => {
 
     // Then
     expect(error).toBeInstanceOf(ConfigurationOperationTimeoutError);
+  });
+
+  test('reads a superseded operation reported as HTTP 409 by its original identity', async () => {
+    const id = '10000000-0000-4000-8000-000000000077';
+    const operation = { mutation_id: id, state: 'superseded', result_status: 409,
+      error_code: 'revision_superseded', error_detail: 'revision was superseded before publication was claimed' };
+    setResponses([], [Response.json({ operation, workers: [] }, { status: 409 })]);
+    const state = await getConfigurationOperation(id);
+    expect(state.operation.state).toBe('superseded');
+    expect(state.operation.mutation_id).toBe(id);
+
+    setResponses([], [Response.json({ operation, workers: [] }, { status: 409 })]);
+    const terminal = await waitForConfigurationOperation(id, { pollIntervalMs: 0 });
+    expect(terminal.operation.state).toBe('superseded');
+  });
+
+  test('does not accept a 409 superseded body for another operation', async () => {
+    const id = '10000000-0000-4000-8000-000000000077';
+    setResponses([], [Response.json({ operation: { mutation_id: '10000000-0000-4000-8000-000000000099',
+      state: 'superseded', result_status: 409, error_code: 'revision_superseded', error_detail: 'x' }, workers: [] },
+    { status: 409 })]);
+    await expect(getConfigurationOperation(id)).rejects.toBeInstanceOf(ApiError);
   });
 
 });

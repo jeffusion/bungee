@@ -46,11 +46,11 @@ export function managementLoginFixture(publicOrigin = 'https://dashboard.example
         if (!repositoryReady) throw new Error('secret database location');
         return {aggregate,revision:1,content_hash:'sha256:'+'0'.repeat(64)} as RepositorySnapshot;
       },
-      getActivePublication:async () => null,getOperationState:async () => null,
+      getOperationState:async () => null,
       commit:async () => {throw new Error('unexpected commit');},
     },
     admission:{snapshot:() => []},workerCount:1,clock:{now:Date.now},resolveAuthToken:() => null,
-    parseAggregate:value => ({ok:true,value:value as ConfigurationAggregate}),publicationTasks:{enqueue() {}},
+    parseAggregate:value => ({ok:true,value:value as ConfigurationAggregate}),publicationTasks:{wake() {}},
     isMutationReady:() => true,managementAuth:auth,
   });
   return {api,auth,provider,calls,

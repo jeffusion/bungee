@@ -18,8 +18,8 @@ The npm package is `@jeffusion/bungee`; its executable is named `bungee`. Use `n
 | `bungee status` | Show daemon status and health |
 | `bungee logs` | Show daemon logs |
 | `bungee ui` | Open dashboard in browser |
-| `bungee export` | Export a sealed configuration snapshot |
-| `bungee import` | Import a sealed snapshot and wait for publication |
+| `bungee export` | Export configuration to a JSON file |
+| `bungee import` | Save configuration from a JSON file |
 | `bungee upgrade` | Install the latest stable release and restart a running instance |
 
 ---
@@ -96,7 +96,9 @@ Updating interrupts service. Back up the databases and matching encryption key b
 
 ### `bungee import`
 
-- `-f, --file <path>`: snapshot file (required)
+Reports `Config saved from <file>` once the configuration has been saved. Use the management UI to check whether the changes are active. If the import result cannot be confirmed, check the saved configuration before trying again; do not repeatedly import the same file without checking the result.
+
+- `-f, --file <path>`: configuration file (required)
 - `-p, --port <port>`: management port (default `8089`)
 - `-H, --host <host>`: management host (default `localhost`)
 - `-t, --token <token>`: optional Bearer administrator session

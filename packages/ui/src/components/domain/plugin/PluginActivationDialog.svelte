@@ -9,6 +9,7 @@
   import { hasManagementLoginComponent } from '$components/native-widgets';
   import { registerStaticPluginTranslations } from '$i18n/plugin-translations';
   import { accountError, originMatches } from './activation-state';
+  import { configurationWrite } from '$stores/configuration-write';
   const t = (key: string, values: Record<string, string> = {}) => $isLoading ? '' : $_(`pluginActivation.${key}`, { values });
   const errorText = (key: string) => $isLoading ? '' : $_(key);
 
@@ -30,6 +31,8 @@
   const localDisable = $derived(!!plugin.management && !enabled);
   const setupRequired = $derived(!!plugin.management && enabled && initialized === false);
   const setupUnchecked = $derived(!!plugin.management && enabled && initialized === null);
+  const writeBlocked = $derived(!busy && !accepted && !complete && ($configurationWrite.corrupt
+    || ($configurationWrite.pending !== null && !$configurationWrite.pending.accepted)));
   const title = $derived(plugin.management ? enabled ? t('enableManagementTitle') : t('disableManagementTitle') : t('enablePluginTitle'));
 
   async function checkOrigin(readSetup = true) {
@@ -69,7 +72,7 @@
     await oncomplete();
   }
   async function submit(event: SubmitEvent) {
-    event.preventDefault(); if (busy || checking || mismatch || loginUnavailable || localDisable || setupUnchecked || accepted || complete) return;
+    event.preventDefault(); if (busy || checking || mismatch || loginUnavailable || localDisable || setupUnchecked || accepted || complete || writeBlocked) return;
     if (setupRequired) {
       if (password !== passwordConfirmation) { failure(new Error('password_confirmation')); return; }
       if ([...password].length < 5 || [...password].length > 32) { failure(new Error('invalid_password')); return; }
@@ -126,6 +129,8 @@
   {busy} scrollBody closeLabel={t('close')} onOpenChange={(value) => { if (!value) onclose(); }}>
   {#snippet body()}
     <form id="plugin-activation" class="space-y-4" onsubmit={submit} aria-busy={busy}>
+      {#if writeBlocked}<p role="status" class="text-sm text-amber-300">{$_('pluginActivation.unknownWrite')}
+        <a href="/#/config" class="text-nexus-300 underline">{$_('editor.reconcile')}</a></p>{/if}
       {#if loginUnavailable}<p role="alert" class="text-sm text-amber-400">{errorText('management.loginComponentUnavailable')}</p>{/if}
       {#if dependencies.length}<p class="text-sm text-zinc-300">{t('dependencies', { names: dependencies.join(t('listSeparator')) })}</p>{/if}
       {#if plugin.management}
@@ -153,7 +158,7 @@
     {#if !complete && !accepted}<button class="nx-btn-ghost" disabled={busy} onclick={() => { open = false; onclose(); }}>{t('cancel')}</button>{/if}
     {#if complete}<button class="nx-btn-primary" onclick={() => { open = false; onclose(); }}>{t('done')}</button>
     {:else if accepted}<button class="nx-btn-primary" disabled={busy || checking || mismatch} onclick={recover}>{busy ? t('recovering') : t('retry')}</button>
-    {:else if !setupUnchecked}<button form="plugin-activation" class="nx-btn-primary" disabled={busy || checking || mismatch || loginUnavailable || localDisable}>{busy ? t('processing') : !enabled ? t('disable') : plugin.management ? setupRequired ? t('initializeEnable') : t('verifyEnable') : t('enable')}</button>{/if}
+    {:else if !setupUnchecked}<button form="plugin-activation" class="nx-btn-primary" disabled={busy || checking || mismatch || loginUnavailable || localDisable || writeBlocked}>{busy ? t('processing') : !enabled ? t('disable') : plugin.management ? setupRequired ? t('initializeEnable') : t('verifyEnable') : t('enable')}</button>{/if}
     {#if !accepted && !complete && (setupUnchecked || mismatch || message)}<button class="nx-btn-ghost" disabled={busy || checking} onclick={() => checkOrigin()}>{t('checkStatus')}</button>{/if}
   {/snippet}
 </IndustrialDialog>

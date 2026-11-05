@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { DEFAULT_PUBLICATION_POLICY, type ConfigurationAggregate, type Sha256Digest } from '@jeffusion/bungee-types';
 import { ConfigRepository } from '../../../src/config-storage';
 import {
@@ -46,6 +46,39 @@ const SETUP_AGGREGATE: ConfigurationAggregate = {
 };
 const roots: string[] = [];
 const repositories: ConfigRepository[] = [];
+/** The live synchronous repository backing this file's factory fakes. */
+let launchLedger: ConfigRepository | null = null;
+
+function launchGuardFacts(identity: ConfigProcessIdentity) {
+  return {
+    schema: 'bungee-process-lifetime-guard-v1' as const,
+    identity: identity.worker_instance_id,
+    process_instance_id: identity.worker_instance_id,
+    path: resolve(`/tmp/bungee-test-guard-${identity.worker_instance_id}`),
+    device: '2049',
+    inode: '42',
+    host_boot_id: KERNEL_BOOT_ID,
+    domain: 'bungee-local-flock' as const,
+  };
+}
+
+function recordLaunchIntent(
+  worker: FakeWorker, mutationId: string, attemptNo: number, admitted = false,
+): void {
+  if (launchLedger === null) return;
+  launchLedger.registerWorkerLaunch(worker.identity, launchGuardFacts(worker.identity), {
+    mutation_id: mutationId, worker_slot: worker.slot, attempt_no: attemptNo,
+  }, Date.now());
+  if (admitted) launchLedger.recordWorkerLaunchAdmitted(worker.identity.worker_instance_id, Date.now());
+}
+
+let nextFixturePid = 900;
+/** A prior attempt that really ran and later exited with signed cleanup proof. */
+function settleLaunch(mutationId: string, slot: number, attemptNo: number): void {
+  const worker = new FakeWorker(slot, nextFixturePid++, []);
+  recordLaunchIntent(worker, mutationId, attemptNo, true);
+  worker.exit();
+}
 
 type MessageListener = (message: unknown) => void;
 type ExitListener = (evidence: WorkerExitEvidence) => void;
@@ -165,9 +198,21 @@ class FakeWorker implements ConfigPublicationWorkerProcess {
   exit(): void {
     if (this.exitEvidence !== null) return;
     const evidence = { exited: true as const, pid: this.pid,
-      ...(this.terminalDrain === null ? {} : { terminalDrain: { ...this.terminalDrain,
-        exit_remaining_ms: Math.max(1, this.terminalDrain.policy.worker_exit_timeout_ms - 1), cleanup_state: 'success' as const } }) };
+      ...(this.terminalDrain === null
+        ? { cleanup_state: 'success' as const }
+        : { terminalDrain: { ...this.terminalDrain,
+          exit_remaining_ms: Math.max(1, this.terminalDrain.policy.worker_exit_timeout_ms - 1), cleanup_state: 'success' as const } }) };
     this.exitEvidence = evidence;
+    const ledger = launchLedger;
+    if (ledger !== null) {
+      try {
+        if (ledger.getWorkerLaunch(this.identity.worker_instance_id) !== null) {
+          ledger.recordWorkerLaunchExit(this.identity.worker_instance_id, {
+            kind: 'exited', cleanup: 'released',
+          }, Date.now());
+        }
+      } catch { /* exit evidence is still reported; a ledger mismatch is a fixture bug */ }
+    }
     for (const listener of this.exitListeners) listener(evidence);
   }
 
@@ -214,6 +259,7 @@ class SynchronousScheduler implements PublicationScheduler {
 
 class FakeFactory implements ConfigPublicationWorkerFactory {
   readonly workers: FakeWorker[] = [];
+  readonly allocations: (undefined | { readonly mutation_id: string; readonly committed_revision: number; readonly attempt_no: number })[] = [];
   private nextPid = 100;
 
   failAtSpawn: number | null = null;
@@ -222,15 +268,39 @@ class FakeFactory implements ConfigPublicationWorkerFactory {
 
   constructor(private readonly events: string[]) {}
 
-  spawn(identity: ConfigProcessIdentity): FakeWorker {
-    if (this.failAtSpawn === this.workers.length + 1) throw new Error('injected spawn failure');
+  spawn(identity: ConfigProcessIdentity, allocation?: { readonly mutation_id: string; readonly committed_revision: number; readonly attempt_no: number }): FakeWorker {
+    this.allocations.push(allocation);
+    if (this.failAtSpawn === this.workers.length + 1) {
+      // A post-reservation spawn failure is fenced as "no child was created".
+      if (allocation !== undefined && launchLedger !== null) {
+        launchLedger.fenceWorkerLaunchNotStarted(allocation.mutation_id, identity.worker_slot, allocation.attempt_no, Date.now());
+      }
+      throw new Error('injected spawn failure');
+    }
+    if (allocation !== undefined && launchLedger !== null) {
+      launchLedger.registerWorkerLaunch(identity, launchGuardFacts(identity), {
+        mutation_id: allocation.mutation_id,
+        worker_slot: identity.worker_slot,
+        attempt_no: allocation.attempt_no,
+      }, Date.now());
+    }
     const worker = new FakeWorker(identity.worker_slot, this.nextPid, this.events, true, identity);
     this.nextPid += 1;
     this.workers.push(worker);
     return worker;
   }
 
-  markCommitted(): void {}
+  markCommitted(processes: readonly ConfigPublicationWorkerProcess[] = []): void {
+    if (launchLedger === null) return;
+    for (const process of processes) {
+      const worker = process as FakeWorker;
+      let instance: string;
+      try { instance = worker.identity.worker_instance_id; } catch { continue; }
+      if (launchLedger.getWorkerLaunch(instance) !== null) {
+        launchLedger.recordWorkerLaunchAdmitted(instance, Date.now());
+      }
+    }
+  }
   disconnectProcesses(): void {}
   async discardConfirmedUncommitted(): Promise<void> {}
 }
@@ -276,6 +346,17 @@ class FaultRepository implements ConfigPublicationRepository {
     if (this.finalizeError !== null) throw this.finalizeError;
     return this.repository.finalizePublication(...parameters);
   }
+  async confirmPublicationCandidateExited(...parameters: Parameters<ConfigRepository['confirmPublicationCandidateExited']>): Promise<ReturnType<ConfigRepository['confirmPublicationCandidateExited']>> {
+    return this.repository.confirmPublicationCandidateExited(...parameters);
+  }
+  async getOutstandingPublicationCandidates(): Promise<ReturnType<ConfigRepository['getOutstandingPublicationCandidates']>> {
+    return this.repository.getOutstandingPublicationCandidates();
+  }
+  async recordPublicationCandidateExit(
+    ...parameters: Parameters<ConfigRepository['recordPublicationCandidateExit']>
+  ): Promise<ReturnType<ConfigRepository['recordPublicationCandidateExit']>> {
+    return this.repository.recordPublicationCandidateExit(...parameters);
+  }
 
   get beginDrainingRecoveryCalls(): number { return this.drainingRecoveryCalls; }
 }
@@ -314,6 +395,7 @@ function openRepository(): { readonly repository: ConfigRepository; readonly dbP
   roots.push(root);
   const repository = ConfigRepository.open(join(root, 'config.db'));
   repositories.push(repository);
+  launchLedger = repository;
   return { repository, dbPath: join(root, 'config.db') };
 }
 
@@ -322,6 +404,7 @@ function reopen(repository: ConfigRepository, dbPath: string): ConfigRepository 
   repositories.splice(repositories.indexOf(repository), 1);
   const reopened = ConfigRepository.open(dbPath);
   repositories.push(reopened);
+  launchLedger = reopened;
   return reopened;
 }
 
@@ -334,6 +417,8 @@ function commit(repository: ConfigRepository, mutationId: string, slots: readonl
     created_at: CREATED_AT,
     target_worker_slots: slots,
   }).kind).toBe('committed');
+  expect(repository.claimPublicationTarget(PLUGIN_CATALOG_HASH, CREATED_AT + 1)?.operation.mutation_id)
+    .toBe(mutationId);
 }
 
 function publicationReady(worker: FakeWorker, publication: ConfigPublicationIdentity, revision: number, hash: Sha256Digest): void {
@@ -354,11 +439,13 @@ const PROCESS_OPTIONS = {
 };
 
 class MasterConfigPublicationCoordinator extends BaseMasterConfigPublicationCoordinator {
-  constructor(options: Omit<MasterConfigPublicationCoordinatorOptions, 'pluginCatalogHash' | 'admission' | 'repository'> & {
+  constructor(options: Omit<MasterConfigPublicationCoordinatorOptions, 'pluginCatalogHash' | 'admission' | 'repository' | 'ensureCreationPermitted'> & {
     readonly repository: ConfigRepository | ConfigPublicationRepository;
     readonly admission?: WorkerAdmissionController;
+    readonly ensureCreationPermitted?: MasterConfigPublicationCoordinatorOptions['ensureCreationPermitted'];
   }) {
     super({ admission: options.admission ?? new FakeAdmissionController(), ...PROCESS_OPTIONS, ...options,
+      ensureCreationPermitted: options.ensureCreationPermitted ?? (async () => ({ allowed: true as const })),
       repository: options.repository instanceof ConfigRepository ? new FaultRepository(options.repository) : options.repository });
   }
 }
@@ -370,7 +457,7 @@ function serving(worker: FakeWorker, revision: number, contentHash: Sha256Digest
 }
 
 async function flushMicrotasks(): Promise<void> {
-  for (let step = 0; step < 8; step += 1) await Promise.resolve();
+  for (let step = 0; step < 40; step += 1) await Promise.resolve();
 }
 
 async function waitForDrainTerminalSubscription(worker: FakeWorker): Promise<void> {
@@ -403,6 +490,7 @@ describe('MasterConfigPublicationCoordinator', () => {
       const oldTargets = [new FakeWorker(0, 80, []), new FakeWorker(1, 81, [])];
       for (const worker of oldTargets) {
         opened.repository.beginWorkerAttempt(mutation, worker.slot, 0, 'initial', CREATED_AT + 2);
+        recordLaunchIntent(worker, mutation, 1);
       }
       for (const worker of oldTargets) {
         opened.repository.recordWorkerResult(mutation, worker.slot, { kind: 'converged', attempt_no: 1, applied_revision: 2 }, CREATED_AT + 3);
@@ -479,6 +567,7 @@ describe('MasterConfigPublicationCoordinator', () => {
 
     // When
     const pending = coordinator.startCurrent(snapshot);
+    await flushMicrotasks();
     const worker = factory.workers[0];
     if (worker === undefined) throw new Error('current worker missing');
     worker.emit({
@@ -491,6 +580,7 @@ describe('MasterConfigPublicationCoordinator', () => {
 
     // Then
     expect(outcome.kind).toBe('startup_ready');
+    expect(factory.allocations).toEqual([undefined]);
     expect(snapshot).toMatchObject({ revision: 2 });
     expect(worker.sent[0]).toEqual({
       command: 'start-current-config-worker',
@@ -502,6 +592,39 @@ describe('MasterConfigPublicationCoordinator', () => {
       activated_plugin_names: [],
       publication: null,
     });
+  });
+
+  test('recovery does not fork replacements when the shared creation permit is denied', async () => {
+    const { repository } = openRepository();
+    commit(repository, 'creation-permit-recovery', [0]);
+    const factory = new FakeFactory([]);
+    const coordinator = new MasterConfigPublicationCoordinator({
+      repository, workerFactory: factory, workerCount: 1,
+      clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
+      ensureCreationPermitted: async () => ({ allowed: false, error: new Error('historical launch debt') }),
+    });
+    const outcome = await coordinator.recoverAndPublish();
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false, code: 'control_recovering' });
+    expect(factory.workers).toHaveLength(0);
+    expect(factory.allocations).toHaveLength(0);
+  });
+
+  test('startCurrent does not fork missing slots when the shared creation permit is denied', async () => {
+    const { repository } = openRepository();
+    repository.commit({
+      mutation_id: 'creation-permit-start', expected_revision: 1, aggregate: SETUP_AGGREGATE,
+      kind: 'config', created_at: CREATED_AT, target_worker_slots: [0],
+    });
+    const factory = new FakeFactory([]);
+    const coordinator = new MasterConfigPublicationCoordinator({
+      repository, workerFactory: factory, workerCount: 1,
+      clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
+      ensureCreationPermitted: async () => ({ allowed: false, error: new Error('2N budget is occupied') }),
+    });
+    const outcome = await coordinator.startCurrent(repository.getSnapshot());
+    expect(outcome).toMatchObject({ kind: 'startup_degraded', error_code: 'admission_outcome_unknown',
+      recovery_disposition: 'retryable' });
+    expect(factory.workers).toHaveLength(0);
   });
 
   test('starts current revision without creating a durable operation', async () => {
@@ -517,6 +640,7 @@ describe('MasterConfigPublicationCoordinator', () => {
 
     // When
     const pending = coordinator.startCurrent(repository.getSnapshot());
+    await flushMicrotasks();
     for (const worker of factory.workers) {
       const snapshot = repository.getSnapshot();
       worker.emit({
@@ -559,6 +683,7 @@ describe('MasterConfigPublicationCoordinator', () => {
 
     // When
     const pending = coordinator.startCurrent(repository.getSnapshot());
+    await flushMicrotasks();
     const worker = factory.workers[0];
     if (worker === undefined) throw new Error('current worker missing');
     worker.events.push(`ready:${worker.pid}`);
@@ -910,6 +1035,7 @@ describe('MasterConfigPublicationCoordinator', () => {
       masterGeneration: MASTER_GENERATION, createWorkerInstanceId: () => duplicate,
     });
     const startup = coordinator.startCurrent(repository.getSnapshot());
+    await flushMicrotasks();
     const current = factory.workers[0];
     if (current === undefined) throw new Error('current worker missing');
     current.emit({ status: 'config-ready', pid: current.pid, revision: 1,
@@ -1200,7 +1326,7 @@ describe('MasterConfigPublicationCoordinator', () => {
     const outcome = await pending;
 
     // Then
-    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true, code: 'worker_exit_unconfirmed' });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false, code: 'worker_exit_unconfirmed' });
     expect(repository.getActivePublication()?.operation.state).toBe('publishing');
     expect(admission.registry.select()?.process).toBe(old);
     expect(outcome.kind === 'outcome_unknown' && outcome.serving.map(({ process }) => process.pid))
@@ -1648,6 +1774,16 @@ describe('MasterConfigPublicationCoordinator', () => {
     const active = repository.getActivePublication();
     if (active === null) throw new Error('active publication missing');
     const factory = new FakeFactory([]);
+    // Pre-ready attempt allocations must be proven exited before a new attempt begins.
+    factory.confirmActivePublicationExited = async () => {
+      for (const target of active.targets) {
+        if (target.attempt_no > 0) {
+          repository.recordPublicationCandidateExit('publishing-recovery', active.operation.committed_revision,
+            target.worker_slot, target.attempt_no, { kind: 'not_started' }, CREATED_AT + 99);
+        }
+      }
+      return true;
+    };
     const coordinator = new MasterConfigPublicationCoordinator({
       repository, workerFactory: factory, workerCount: 2,
       clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
@@ -1676,6 +1812,24 @@ describe('MasterConfigPublicationCoordinator', () => {
     expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false,
       code: 'control_recovering' });
     expect(repository.getActivePublication()).not.toBeNull();
+  });
+
+  test('settles a requested cancellation during recovery without beginning a new attempt', async () => {
+    const { repository } = openRepository();
+    commit(repository, 'cancel-recovery', [0]);
+    repository.requestPublicationCancellation('cancel-recovery', 2, CREATED_AT + 2);
+    const factory = new FakeFactory([]);
+    factory.confirmActivePublicationExited = async () => true;
+    const coordinator = new MasterConfigPublicationCoordinator({
+      repository, workerFactory: factory, workerCount: 1,
+      clock: { now: () => CREATED_AT + 100 }, startupApplyTimeoutMs: 100, drainTimeoutMs: 100,
+    });
+
+    const outcome = await coordinator.recoverAndPublish();
+
+    expect(outcome).toMatchObject({ kind: 'superseded' });
+    expect(repository.getOperation('cancel-recovery')?.state).toBe('superseded');
+    expect(factory.workers).toEqual([]);
   });
 
   test('reopens committed publication and begins master recovery attempts', async () => {
@@ -1717,6 +1871,7 @@ describe('MasterConfigPublicationCoordinator', () => {
     const snapshot = repository.getSnapshot();
     const events: string[] = [];
     const worker = new FakeWorker(0, 42, events);
+    recordLaunchIntent(worker, 'adopt-current-target', 1, true);
     const activeServing = { ...serving(worker, 2, snapshot.content_hash),
       boot_nonce: '40000000-0000-4000-8000-000000000042',
       publication: { mutation_id: 'adopt-current-target', attempt_no: 1, drain_recovery_generation: 0 } };
@@ -1774,6 +1929,7 @@ describe('MasterConfigPublicationCoordinator', () => {
         repository.beginWorkerAttempt(mutationId, 0, 0, 'initial', CREATED_AT + 2);
         repository.recordWorkerResult(mutationId, 0, { kind: 'converged', attempt_no: 1, applied_revision: 2 }, CREATED_AT + 3);
         repository.markDraining(mutationId, CREATED_AT + 4);
+        settleLaunch(mutationId, 0, 1);
       }
       const factory = new FakeFactory([]);
       factory.priorAttemptExited = phase === 'draining';
@@ -1816,6 +1972,7 @@ describe('MasterConfigPublicationCoordinator', () => {
       kind: 'converged', attempt_no: 1, applied_revision: 2,
     }, CREATED_AT + 3);
     opened.repository.markDraining('draining-recovery', CREATED_AT + 4);
+    settleLaunch('draining-recovery', 0, 1);
     const repository = reopen(opened.repository, opened.dbPath);
     const active = repository.getActivePublication();
     if (active === null) throw new Error('active publication missing');
@@ -1869,6 +2026,7 @@ describe('MasterConfigPublicationCoordinator', () => {
       kind: 'converged', attempt_no: 1, applied_revision: 2,
     }, CREATED_AT + 3);
     repository.markDraining('draining-replacement-failure', CREATED_AT + 4);
+    settleLaunch('draining-replacement-failure', 0, 1);
     const factory = new FakeFactory([]);
     factory.priorAttemptExited = true;
     const coordinator = new MasterConfigPublicationCoordinator({
@@ -1967,7 +2125,9 @@ describe('MasterConfigPublicationCoordinator', () => {
       kind: 'converged', attempt_no: 1, applied_revision: 2,
     }, CREATED_AT + 3);
     repository.markDraining('second-recovery-crash', CREATED_AT + 4);
+    settleLaunch('second-recovery-crash', 0, 1);
     repository.beginDrainingRecovery('second-recovery-crash', 0, CREATED_AT + 5);
+    settleLaunch('second-recovery-crash', 0, 2);
     const factory = new FakeFactory([]);
     factory.priorAttemptExited = true;
     const coordinator = new MasterConfigPublicationCoordinator({
@@ -2105,7 +2265,7 @@ describe('MasterConfigPublicationCoordinator', () => {
     const outcome = await pending;
 
     // Then
-    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true, code: 'worker_exit_unconfirmed' });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false, code: 'worker_exit_unconfirmed' });
     expect(repository.getActivePublication()?.operation.state).toBe('publishing');
     expect(outcome.serving.map(({ process }) => process.pid)).toEqual([10, readyWorker.pid]);
     expect(readyWorker.exitListeners.size).toBe(0);
@@ -2532,6 +2692,7 @@ describe('MasterConfigPublicationCoordinator', () => {
     // When
     const outcome = await coordinator.startCurrent(repository.getSnapshot());
     const second = coordinator.startCurrent(repository.getSnapshot());
+    await flushMicrotasks();
     const secondWorker = factory.workers[1];
     if (secondWorker === undefined) throw new Error('lease was not reacquired');
     secondWorker.emit({ status: 'config-ready', worker_slot: 0, pid: secondWorker.pid, revision: 1,
@@ -2595,7 +2756,7 @@ describe('MasterConfigPublicationCoordinator', () => {
     const outcome = await pending;
 
     // Then
-    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true, code: 'worker_exit_unconfirmed' });
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false, code: 'worker_exit_unconfirmed' });
     expect(repository.getActivePublication()?.operation.state).toBe('publishing');
     if (outcome.kind !== 'outcome_unknown') throw new Error('expected outcome_unknown');
     expect(outcome.serving.map(({ process }) => process.pid)).toEqual([10]);
@@ -2787,6 +2948,7 @@ describe('MasterConfigPublicationCoordinator', () => {
 
     // When
     const pending = coordinator.startCurrent(repository.getSnapshot());
+    await flushMicrotasks();
     const worker = factory.workers[0];
     if (worker === undefined) throw new Error('startup worker missing');
     worker.emit({ status: 'config-ready', worker_slot: 0, pid: worker.pid, revision: 1,

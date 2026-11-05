@@ -20,12 +20,13 @@ export interface MasterRuntimeRepository {
 }
 
 export interface MasterRuntimeCoordinator {
-  recoverAndPublish(): Promise<MasterPublicationOutcome | null>;
+  recoverAndPublish(signal?: PublicationCancellationSignal): Promise<MasterPublicationOutcome | null>;
   startCurrent(
     snapshot: RepositorySnapshot,
     existingWorkers?: readonly ServingConfigWorker[],
     retireWorkers?: readonly ServingConfigWorker[],
     signal?: PublicationCancellationSignal,
+    recoveryId?: string,
   ): Promise<StartupPublicationOutcome>;
 }
 

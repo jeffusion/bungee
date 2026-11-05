@@ -7,8 +7,12 @@ export const STORAGE_METHODS = [
   'getPublicationRetirementRetry','requestPublicationRetirementRetry',
   'freezePublicationRetirementDrainStart',
   'getControlProjection', 'setManagementProviderOffline', 'commitPrepared', 'appendServingSnapshot', 'getServingSnapshot', 'claimController',
-  'getActivePublication', 'getOperation', 'getOperationState', 'getCurrentOperationState',
-  'getRecovery', 'getCurrentRecovery', 'getLatestRecovery', 'createManualRecovery',
+  'getActivePublication', 'claimPublicationTarget', 'requestPublicationCancellation', 'enterPublicationPrepare',
+  'recordPublicationCandidateExit', 'confirmPublicationCandidateExited', 'getOutstandingPublicationCandidates',
+  'registerWorkerLaunch', 'fenceWorkerLaunchNotStarted', 'recordWorkerLaunchAdmitted', 'recordWorkerLaunchExit',
+  'getWorkerLaunch', 'getWorkerLaunchAllocationFacts', 'getUnsettledWorkerLaunches', 'getWorkerLaunchInventory',
+  'getOperation', 'getOperationState', 'getCurrentOperationState',
+  'getRecovery', 'getCurrentRecovery', 'getPublicationRecoveryBarrier', 'getLatestRecovery', 'createManualRecovery',
   'claimRecoveryAttempt', 'scheduleRecoveryRetry', 'succeedRecovery', 'stopRecovery', 'requeueRecovery',
   'beginPublication', 'beginWorkerAttempt', 'beginDrainingRecovery', 'recordWorkerResult',
   'finalizePublication', 'markDraining', 'verify', 'getPublicationServingSet', 'freezePublicationServingSet', 'confirmPublicationServingMemberExit',
@@ -20,8 +24,10 @@ export type StorageParameters<M extends StorageMethod> = Parameters<ConfigReposi
 export type StorageResult<M extends StorageMethod> = ReturnType<ConfigRepository[M]>;
 export const READ_METHODS: ReadonlySet<StorageMethod> = new Set([
   'getControlProjection', 'getMenuLayout', 'getPublicationRetirementRetry',
-  'getPublicationServingSet', 'getServingSnapshot', 'getActivePublication', 'getOperation', 'getOperationState',
-  'getCurrentOperationState', 'getRecovery', 'getCurrentRecovery', 'getLatestRecovery', 'verify',
+  'getPublicationServingSet', 'getServingSnapshot', 'getActivePublication',
+  'getOutstandingPublicationCandidates', 'getWorkerLaunch', 'getWorkerLaunchAllocationFacts', 'getUnsettledWorkerLaunches', 'getWorkerLaunchInventory',
+  'getOperation', 'getOperationState',
+  'getCurrentOperationState', 'getRecovery', 'getCurrentRecovery', 'getPublicationRecoveryBarrier', 'getLatestRecovery', 'verify',
   'getRetirementDescriptorCleanupState', 'getRetiredWorkerInstanceIds', 'getPublicationRetirement', 'getRuntimeRecoveryBudget', 'getRuntimeRecoveryStartupGate',
 ]);
 

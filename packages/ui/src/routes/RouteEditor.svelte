@@ -3,7 +3,7 @@
   import { pop, querystring } from 'svelte-spa-router';
   import { sortBy } from 'lodash-es';
   import { RoutesAPI, RouteStaleError } from '$api/routes';
-  import { ConfigurationStaleError, ConfigurationOperationTimeoutError } from '$api/config';
+  import { ConfigurationStaleError } from '$api/config';
   import { consumeRouteSourceHandoff, prepareRouteSourceHandoff, RouteSourceHandoffError, type RouteSourceHandoffErrorCode } from '$api/source-handoff';
   import type { ConfigurationRoute } from '@jeffusion/bungee-types';
   import type { Route, Service } from '$api/routes';
@@ -22,13 +22,15 @@
   import RetrySection from '$components/domain/route/sections/RetrySection.svelte';
   import DirectResponseSection from '$components/domain/route/sections/DirectResponseSection.svelte';
   import { toast } from '$stores/toast';
+  import { editorDirty } from '$stores/navigation-guard';
+  import { configurationWrite } from '$stores/configuration-write';
   import { _ } from '$i18n';
   import { isLoading } from 'svelte-i18n';
   import { getPluginText } from '$utils/plugin-i18n';
   import { v4 as uuidv4 } from 'uuid';
   import { isEditorShortcutBlocked, isModifierPressed } from '$utils/platform';
   import { DEFAULT_REQUEST_MS } from '$utils/route-timeouts';
-  import { BSwitch, LoadingIndicator, PanelCard, StatusBadge, StatusDot } from '$components/industrial';
+  import { BSwitch, LoadingIndicator, PanelCard, StatusBadge, StatusDot, SystemAlertBar } from '$components/industrial';
 
   let { params = {} }: { params?: { path?: string } } = $props();
   const handoffText = (key: string) => $isLoading ? '' : getPluginText(key, 'chatgpt-oauth', $_);
@@ -56,6 +58,10 @@
   let originalPath = $state('');
   let loading = $state(true);
   let saving = $state(false);
+  let savedSignature = $state('');
+  let baselineReady = $state(false);
+  const unresolvedWrite = $derived(!saving && !!$configurationWrite.pending && !$configurationWrite.pending.accepted);
+  const saveBlocked = $derived(unresolvedWrite || $configurationWrite.corrupt);
   let showTemplates = $state(false);
   let breadcrumbHeight = $state(0);
   let actionsHeight = $state(0);
@@ -84,6 +90,11 @@
     plugins: [],
   }));
   let pendingRestore = $state.raw<{ draft: Route; initialRoute: string } | null>(null);
+  const dirty = $derived(baselineReady && JSON.stringify(route) !== savedSignature);
+  $effect(() => {
+    if (!loading && !baselineReady) { savedSignature = JSON.stringify(route); baselineReady = true; }
+  });
+  $effect(() => { editorDirty.set(dirty); });
 
   $effect(() => {
     const pending = pendingRestore;
@@ -192,10 +203,12 @@
   });
 
   async function handleSave() {
-    if (!isValid || saving || loading || reloading || conflictMessage || !currentEditor()) {
-      toast.show($_('routeEditor.saveFailed', { values: { error: $_('common.error') } }), 'error');
+    if (!isValid || saving || loading || reloading || conflictMessage || saveBlocked || !currentEditor()) {
+      if (!saveBlocked) toast.show($_('routeEditor.saveFailed', { values: { error: $_('common.error') } }), 'error');
       return;
     }
+    // What the user saw when they submitted; later edits stay unsaved and dirty.
+    const beforeSave = JSON.stringify(route);
     try {
       saving = true;
       // Debounced form validation may not have run for the latest keystroke.
@@ -215,34 +228,46 @@
       if (!sortedRoute.endpoints) delete sortedRoute.endpoints;
 
       if (isEditMode) {
-        if (!baseline) throw new Error(handoffText('ui.routeStale'));
-        await RoutesAPI.update(originalPath, sortedRoute, baseline);
-        toast.show($_('routeEditor.routeUpdated'), 'success');
+        if (!baseline) throw new Error($_('routeEditor.routeStale'));
+        baseline = await RoutesAPI.update(originalPath, sortedRoute, baseline);
+        originalPath = sortedRoute.path;
       } else {
-        await RoutesAPI.create(sortedRoute);
-        toast.show($_('routeEditor.routeSaved'), 'success');
+        baseline = await RoutesAPI.create(sortedRoute);
+        originalPath = sortedRoute.path;
+        isEditMode = true;
         localStorage.removeItem('bungee-route-draft');
       }
-      if (currentEditor()) pop();
+      // Keep reloads on the persisted path, including after a rename.
+      if (currentEditor()) replaceEditorPath(sortedRoute.path);
+      savedSignature = beforeSave;
+      toast.show($_('editor.saved'), 'success');
     } catch (e: any) {
       if (e instanceof RouteStaleError || e instanceof ConfigurationStaleError) {
         if (isEditMode) {
-          conflictMessage = handoffText('ui.routeStale');
+          conflictMessage = $_('routeEditor.routeStale');
           toast.show(conflictMessage, 'error');
         } else {
           // Create has no persisted route to reload. Keep the draft and let the
           // next explicit save read a fresh configuration snapshot.
-          toast.show(handoffText('ui.routeSaveError'), 'error');
+          toast.show($_('routeEditor.saveConflict'), 'error');
         }
         return;
       }
-      toast.show(e instanceof ConfigurationOperationTimeoutError ? $_('configurationSave.waitingStopped') : handoffDraft ? handoffText('ui.routeSaveError') : $_('routeEditor.saveFailed', { values: { error: e.message } }), e instanceof ConfigurationOperationTimeoutError ? 'warning' : 'error');
+      toast.show(handoffDraft ? handoffText('ui.routeSaveError') : $_('routeEditor.saveFailed', { values: { error: e.message } }), 'error');
     } finally {
       saving = false;
     }
   }
 
+  function replaceEditorPath(path: string) {
+    const target = `/routes/edit/${encodeURIComponent(path)}`;
+    if (window.location.hash.slice(1).split('?')[0] === target) return;
+    window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}#${target}`);
+    editorPath = target;
+  }
+
   function handleCancel() {
+    if (!dirty) { if (currentEditor()) pop(); return; }
     showConfirm($_('confirmDialog.cancelTitle'), $_('confirmDialog.cancelMessage'), () => pop());
   }
 
@@ -262,19 +287,20 @@
 
   async function loadExistingRoute() {
     const loaded = await RoutesAPI.getForEdit(originalPath, baseline?.id);
-    if (!loaded) throw new Error(handoffText('ui.routeStale'));
+    if (!loaded) throw new Error($_('routeEditor.routeStale'));
     if (!currentEditor()) return;
     baseline = loaded.baseline;
     originalPath = loaded.route.path;
     route = normalizeRoute(loaded.route);
+    savedSignature = JSON.stringify(route); baselineReady = true;
     conflictMessage = ''; handoffMessage = '';
   }
 
   function requestReload() {
-    showConfirm(handoffText('ui.routeReloadTitle'), handoffText('ui.routeReloadConfirm'), async () => {
+    showConfirm($_('routeEditor.reloadTitle'), $_('routeEditor.reloadConfirm'), async () => {
       reloading = true;
       try { await loadExistingRoute(); }
-      catch { if (currentEditor()) conflictMessage = handoffText('ui.routeStale'); }
+      catch { if (currentEditor()) conflictMessage = $_('routeEditor.routeStale'); }
       finally { reloading = false; }
     });
   }
@@ -331,9 +357,11 @@
           pendingRestore = { draft: parsedDraft, initialRoute: JSON.stringify(route) };
         }
       } catch (e) {
-        toast.show(e instanceof Error ? e.message : '无法加载路由草稿。', 'error');
+        toast.show(e instanceof Error ? e.message : '无法加载路由配置。', 'error');
       }
     }
+    // A new-route handoff draft is unsaved: baseline the empty initial draft before applying it.
+    if (!isEditMode && !baselineReady) { savedSignature = JSON.stringify(route); baselineReady = true; }
     let focusIndex = -1;
     if (consumed.handoff && (!isEditMode || baseline) && currentEditor()) {
       const before = JSON.stringify(route);
@@ -369,6 +397,7 @@
   onDestroy(() => {
     lifetime.abort();
     pendingRestore = null;
+    editorDirty.set(false);
     window.removeEventListener('keydown', handleKeydown);
     window.removeEventListener('hashchange', cancelPendingRestoreOnNavigation);
     if (autoSaveInterval) clearInterval(autoSaveInterval);
@@ -487,7 +516,7 @@
       <section class="flex-1 min-w-0 space-y-4">
         {#if handoffMessage}<div role="status" class="border-l-2 border-nexus-500 bg-carbon-800 px-3 py-2 text-sm text-zinc-200" data-testid="route-handoff-notice">{handoffMessage}</div>{/if}
         {#if handoffError && !$isLoading}<div role="alert" class="border-l-2 border-amber-500 bg-carbon-800 px-3 py-2 text-sm text-amber-300" data-testid="route-handoff-error">{handoffErrorText(handoffError)}</div>{/if}
-        {#if conflictMessage}<div role="alert" class="flex flex-wrap items-center gap-3 border-l-2 border-amber-500 bg-carbon-800 px-3 py-2 text-sm text-amber-300" data-testid="route-stale-warning"><span class="flex-1">{conflictMessage}</span><button type="button" class="nx-btn-ghost nx-btn-sm" disabled={reloading} onclick={requestReload}>{handoffText('ui.routeReload')}</button></div>{/if}
+        {#if conflictMessage}<div role="alert" class="flex flex-wrap items-center gap-3 border-l-2 border-amber-500 bg-carbon-800 px-3 py-2 text-sm text-amber-300" data-testid="route-stale-warning"><span class="flex-1">{conflictMessage}</span><button type="button" class="nx-btn-ghost nx-btn-sm" disabled={reloading} onclick={requestReload}>{$_('routeEditor.reload')}</button></div>{/if}
         {#if activeSection === 'match'}
           <PanelCard title={$_('routeEditor.builder.match')} tag="MA-01">
             <div data-testid="section-match" class="space-y-5">
@@ -700,6 +729,12 @@
   <!-- ===== Bottom action bar ==================================== -->
   <div class="fixed bottom-0 left-0 right-0 bg-carbon-950 border-t border-carbon-600 shadow-industrial-lg z-40" bind:offsetHeight={actionsHeight}>
     <div class="nx-page py-3">
+      {#if saveBlocked}
+        <SystemAlertBar tone="warn" class="mb-3">
+          <p class="text-sm text-zinc-300" role="status">{$_(unresolvedWrite ? 'editor.unknownPending' : 'settings.storageError')}
+            <a href="/#/config" class="text-nexus-300 underline">{$_('editor.reconcile')}</a></p>
+        </SystemAlertBar>
+      {/if}
       <div class="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
         <div class="flex items-center gap-4 min-w-0">
           {#if allErrors.length > 0}
@@ -728,10 +763,10 @@
         </div>
 
         <div class="flex items-center justify-end gap-2">
-          <button class="nx-btn-ghost" onclick={handleCancel} disabled={saving}>
-            {$_('common.cancel')}
+          <button class="nx-btn-ghost" onclick={handleCancel} disabled={saving} data-testid="route-editor-back">
+            {dirty ? $_('common.cancel') : $_('common.backToList')}
           </button>
-          <button class="nx-btn-primary" disabled={!isValid || saving || loading || reloading || !!conflictMessage} onclick={handleSave} data-testid="route-save-button">
+          <button class="nx-btn-primary" disabled={!isValid || saving || loading || reloading || !!conflictMessage || saveBlocked} onclick={handleSave} data-testid="route-save-button">
             {#if saving}
               <LoadingIndicator label="" size="xs" centered={false} />
             {:else}

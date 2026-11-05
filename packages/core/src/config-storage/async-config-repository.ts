@@ -225,6 +225,49 @@ export class AsyncConfigRepository {
     const result = await this.rpc('getActivePublication', ...args);
     return result === null ? null : freezeProjection(result);
   }
+  async claimPublicationTarget(...args: Parameters<ConfigRepository['claimPublicationTarget']>): Promise<ReturnType<ConfigRepository['claimPublicationTarget']>> {
+    const result = await this.rpc('claimPublicationTarget', ...args);
+    return result === null ? null : freezeProjection(result);
+  }
+  requestPublicationCancellation(...args: Parameters<ConfigRepository['requestPublicationCancellation']>): Promise<ReturnType<ConfigRepository['requestPublicationCancellation']>> {
+    return this.rpc('requestPublicationCancellation', ...args);
+  }
+  enterPublicationPrepare(...args: Parameters<ConfigRepository['enterPublicationPrepare']>): Promise<ReturnType<ConfigRepository['enterPublicationPrepare']>> {
+    return this.rpc('enterPublicationPrepare', ...args);
+  }
+  recordPublicationCandidateExit(...args: Parameters<ConfigRepository['recordPublicationCandidateExit']>): Promise<ReturnType<ConfigRepository['recordPublicationCandidateExit']>> {
+    return this.rpc('recordPublicationCandidateExit', ...args);
+  }
+  confirmPublicationCandidateExited(...args: Parameters<ConfigRepository['confirmPublicationCandidateExited']>): Promise<ReturnType<ConfigRepository['confirmPublicationCandidateExited']>> {
+    return this.rpc('confirmPublicationCandidateExited', ...args);
+  }
+  getOutstandingPublicationCandidates(...args: Parameters<ConfigRepository['getOutstandingPublicationCandidates']>): Promise<ReturnType<ConfigRepository['getOutstandingPublicationCandidates']>> {
+    return this.rpc('getOutstandingPublicationCandidates', ...args);
+  }
+  registerWorkerLaunch(...args: Parameters<ConfigRepository['registerWorkerLaunch']>): Promise<ReturnType<ConfigRepository['registerWorkerLaunch']>> {
+    return this.rpc('registerWorkerLaunch', ...args);
+  }
+  fenceWorkerLaunchNotStarted(...args: Parameters<ConfigRepository['fenceWorkerLaunchNotStarted']>): Promise<ReturnType<ConfigRepository['fenceWorkerLaunchNotStarted']>> {
+    return this.rpc('fenceWorkerLaunchNotStarted', ...args);
+  }
+  recordWorkerLaunchAdmitted(...args: Parameters<ConfigRepository['recordWorkerLaunchAdmitted']>): Promise<ReturnType<ConfigRepository['recordWorkerLaunchAdmitted']>> {
+    return this.rpc('recordWorkerLaunchAdmitted', ...args);
+  }
+  recordWorkerLaunchExit(...args: Parameters<ConfigRepository['recordWorkerLaunchExit']>): Promise<ReturnType<ConfigRepository['recordWorkerLaunchExit']>> {
+    return this.rpc('recordWorkerLaunchExit', ...args);
+  }
+  getWorkerLaunch(...args: Parameters<ConfigRepository['getWorkerLaunch']>): Promise<ReturnType<ConfigRepository['getWorkerLaunch']>> {
+    return this.rpc('getWorkerLaunch', ...args);
+  }
+  getWorkerLaunchAllocationFacts(...args: Parameters<ConfigRepository['getWorkerLaunchAllocationFacts']>): Promise<ReturnType<ConfigRepository['getWorkerLaunchAllocationFacts']>> {
+    return this.rpc('getWorkerLaunchAllocationFacts', ...args);
+  }
+  getUnsettledWorkerLaunches(...args: Parameters<ConfigRepository['getUnsettledWorkerLaunches']>): Promise<ReturnType<ConfigRepository['getUnsettledWorkerLaunches']>> {
+    return this.rpc('getUnsettledWorkerLaunches', ...args);
+  }
+  getWorkerLaunchInventory(...args: Parameters<ConfigRepository['getWorkerLaunchInventory']>): Promise<ReturnType<ConfigRepository['getWorkerLaunchInventory']>> {
+    return this.rpc('getWorkerLaunchInventory', ...args);
+  }
   getOperation(...args: Parameters<ConfigRepository['getOperation']>): Promise<ReturnType<ConfigRepository['getOperation']>> {
     return this.rpc('getOperation', ...args);
   }
@@ -239,6 +282,9 @@ export class AsyncConfigRepository {
   }
   getCurrentRecovery(...args: Parameters<ConfigRepository['getCurrentRecovery']>): Promise<ReturnType<ConfigRepository['getCurrentRecovery']>> {
     return this.rpc('getCurrentRecovery', ...args);
+  }
+  getPublicationRecoveryBarrier(...args: Parameters<ConfigRepository['getPublicationRecoveryBarrier']>): Promise<ReturnType<ConfigRepository['getPublicationRecoveryBarrier']>> {
+    return this.rpc('getPublicationRecoveryBarrier', ...args);
   }
   getLatestRecovery(...args: Parameters<ConfigRepository['getLatestRecovery']>): Promise<ReturnType<ConfigRepository['getLatestRecovery']>> {
     return this.rpc('getLatestRecovery', ...args);

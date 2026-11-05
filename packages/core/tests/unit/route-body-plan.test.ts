@@ -24,9 +24,9 @@ test('route-plan management API authenticates and is read only',async()=>{
   const auth = createManagementAuthFixture(()=>value,{provider:true});
   let commits = 0;
   const api = createConfigControlApi({managementAuth:auth.managementAuth,
-    repository:{getSnapshot(){return {revision:2,content_hash:hashConfigurationContent(value),aggregate:value};},async getActivePublication(){return null;},async getOperationState(){return null;},commit(){commits++;throw new Error('not writable');}},
+    repository:{getSnapshot(){return {revision:2,content_hash:hashConfigurationContent(value),aggregate:value};},async getOperationState(){return null;},commit(){commits++;throw new Error('not writable');}},
     admission:{snapshot(){return []; }},workerCount:1,clock:{now:Date.now},resolveAuthToken:x=>x,parseAggregate:parseNormalizeCompileAggregate,
-    publicationTasks:{enqueue(){}},isMutationReady:()=>true});
+    publicationTasks:{wake(){}},isMutationReady:()=>true});
   try {
     expect((await api.handle(new Request('http://control/api/runtime/routes')))!.status).toBe(401);
     const headers = {authorization:`Bearer ${auth.current.token}`};

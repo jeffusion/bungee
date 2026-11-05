@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
-import { ConfigRepository, hashConfigurationContent, parseNormalizeCompileAggregate } from '../../src/config-storage';
+import { ConfigRepository, ConfigRepositoryError, hashConfigurationContent, parseNormalizeCompileAggregate } from '../../src/config-storage';
 import { createConfigControlApi, type ConfigControlApiOptions } from '../../src/master-runtime/control-api';
 import { PublicationTaskManager } from '../../src/master-runtime/publication-task-manager';
 import { createManagementListener } from '../../src/management-listener';
@@ -67,7 +67,15 @@ function fixture(
     return value;
   };
   const publicationTasks = new PublicationTaskManager({
-    async publish(active) {
+    async publish() {
+      let active: ReturnType<ConfigRepository['getActivePublication']>;
+      try {
+        active = repository.claimPublicationTarget(hashConfigurationContent(aggregate()), monotonicNow());
+      } catch (error) {
+        if (error instanceof ConfigRepositoryError && error.code === 'recovery_in_progress') return null;
+        throw error;
+      }
+      if (active === null) return null;
       publishCalls.push(active.operation.mutation_id);
       if (publicationMode === 'deferred') return { kind: 'outcome_unknown', fatal: false,
         code: 'recovery_replacements_failed', error: new Error('deferred by test'), serving: [], pending: [] };
@@ -75,6 +83,8 @@ function fixture(
       repository.beginPublication(mutationId, monotonicNow());
       for (const target of active.targets) {
         repository.beginWorkerAttempt(mutationId, target.worker_slot, 0, 'initial', monotonicNow());
+        // This control fixture simulates the publisher without forking a process.
+        repository.fenceWorkerLaunchNotStarted(mutationId, target.worker_slot, 1, monotonicNow());
         if (publicationMode === 'converged') {
           repository.recordWorkerResult(mutationId, target.worker_slot,
             { kind: 'converged', attempt_no: 1, applied_revision: active.snapshot.revision }, monotonicNow());
@@ -203,7 +213,7 @@ describe('configuration control with an explicit management provider', () => {
         plugins: [{ ...plugin, id: copy.endpoints![0]!.plugins[0]!.id }],
         managedBy: { ...source.endpoints[0]!.managedBy, bindingId: copy.endpoints![0]!.plugins[0]!.id } }],
     });
-    expect(after.aggregate.logical_configuration.routes.slice(0, -1)).toEqual(before.aggregate.logical_configuration.routes);
+    expect([...after.aggregate.logical_configuration.routes].slice(0, -1)).toEqual([...before.aggregate.logical_configuration.routes]);
     expect(after.aggregate.logical_configuration.services).toEqual(before.aggregate.logical_configuration.services);
     expect(after.aggregate.plugin_activations).toEqual(before.aggregate.plugin_activations);
     expect(parseNormalizeCompileAggregate(after.aggregate).ok).toBe(true);
@@ -335,7 +345,7 @@ describe('configuration control with an explicit management provider', () => {
     expect(repository.getSnapshot().revision).toBe(1);
   });
 
-  test('returns recovery_in_progress with the durable recovery identity', async () => {
+  test('persists a new target instead of blocking on a scheduled recovery', async () => {
     const { api, repository, publicationTasks } = fixture(1, 'degraded');
     const recoveryAggregate = (logLevel: 'debug' | 'info'): ConfigurationAggregate => ({
       logical_configuration: { log_level: logLevel, auth: { enabled: false, tokens: [] }, services: [], routes: [], plugins: [] },
@@ -353,9 +363,9 @@ describe('configuration control with an explicit management provider', () => {
     const body = await json(second as Response);
     await publicationTasks.stop();
     expect(first?.status).toBe(202);
-    expect(second?.status).toBe(409);
-    expect(body).toMatchObject({ error: 'recovery_in_progress', target_revision: 2, state: 'scheduled' });
-    expect(typeof body.recovery_id).toBe('string');
+    expect(second?.status).toBe(202);
+    expect(body).toMatchObject({ operation_id: 'recovery-api-second', revision: 3 });
+    expect(repository.getOperation('recovery-api-second')?.committed_revision).toBe(3);
   });
 
   test('rejects anonymous writes and candidate-only proof while administrator session commits config', async () => {
@@ -604,7 +614,7 @@ describe('configuration control with an explicit management provider', () => {
   test('rejects a stale import before preflight, publication, or plugin activation', async () => {
     const controlCalls: string[] = [];
     const { api, repository, publishCalls } = fixture(1, 'converged', undefined, undefined, {
-      controlNames: new Set(['fake-control']),
+      controlNames: new Set(['fake-control']), managementNames: new Set(['fake-control']),
       async activate(name) { controlCalls.push(`activate:${name}`); },
       async deactivate(name) { controlCalls.push(`deactivate:${name}`); },
     });
@@ -626,7 +636,7 @@ describe('configuration control with an explicit management provider', () => {
     }));
 
     expect(stale?.status).toBe(409);
-    expect(await json(stale as Response)).toMatchObject({ error: 'stale_revision', expected_revision: 1 });
+    expect(await json(stale as Response)).toMatchObject({ error: 'stale_revision', active: { revision: 2 } });
     expect(repository.getSnapshot().revision).toBe(2);
     expect(controlCalls).toEqual([]);
     expect(publishCalls).toEqual(['advance-before-import']);
@@ -660,7 +670,7 @@ describe('configuration control with an explicit management provider', () => {
   test('replays an import after administrator session revocation with the new credential without repeating side effects', async () => {
     const controlCalls: string[] = [];
     const { api, credential, repository, publicationTasks, publishCalls } = fixture(1, 'converged', undefined, undefined, {
-      controlNames: new Set(['fake-control']),
+      controlNames: new Set(['fake-control']), managementNames: new Set(['fake-control']),
       async activate(name) { controlCalls.push(`activate:${name}`); },
       async deactivate(name) { controlCalls.push(`deactivate:${name}`); },
     });
@@ -748,12 +758,9 @@ describe('configuration control with an explicit management provider', () => {
     expect(await json(changed as Response)).toMatchObject({ error: 'idempotency_key_reused' });
     expect(stale?.status).toBe(409);
     expect(await json(stale as Response)).toMatchObject({ error: 'stale_revision', active: { revision: 2 } });
-    expect(concurrent.map((item) => item?.status)).toEqual([409, 409]);
-    expect(await json(concurrent[0] as Response)).toEqual({
-      error: 'operation_in_progress',
-      operation_id: 'replay-key',
-      revision: 2,
-      state: 'committed',
+    expect(concurrent.map((item) => item?.status)).toEqual([202, 409]);
+    expect(await json(concurrent[1] as Response)).toMatchObject({
+      error: 'stale_revision', active: { revision: 3 },
     });
   });
 
@@ -807,6 +814,7 @@ describe('configuration control with an explicit management provider', () => {
       }],
       publication: {
         operation: null,
+        owner: null,
         cleanup: null,
         recovery: null,
         retryable: false,
@@ -815,6 +823,61 @@ describe('configuration control with an explicit management provider', () => {
         target_revision: snapshot.revision,
       },
     });
+  });
+
+  test('separates latest desired, publication owner, and serving evidence', async () => {
+    const { api, repository, publicationTasks } = fixture(1, 'deferred');
+    const save = (expectedRevision: number, mutationId: string) => api.handle(authorized('/api/config', {
+      method: 'PUT', body: JSON.stringify({ expected_revision: expectedRevision,
+        aggregate: aggregate(), mutation_id: mutationId }),
+    }));
+    expect((await save(1, 'owner-b'))?.status).toBe(202);
+    for (let turn = 0; turn < 20 && repository.getActivePublication() === null; turn += 1) {
+      await Promise.resolve();
+    }
+    expect(repository.getActivePublication()?.operation.mutation_id).toBe('owner-b');
+    expect((await save(2, 'desired-d'))?.status).toBe(202);
+
+    const response = await api.handle(authorized('/api/config/runtime'));
+    const body = await json(response as Response);
+    await publicationTasks.stop();
+
+    expect(body).toMatchObject({
+      revision: 3,
+      publication: {
+        operation: { operation_id: 'desired-d', committed_revision: 3, state: 'pending' },
+        owner: { operation_id: 'owner-b', committed_revision: 2, state: 'committed' },
+        serving_complete: false,
+        serving_revision: null,
+        target_revision: 3,
+      },
+    });
+  });
+
+  test('returns a superseded operation as an honest 409 terminal record', async () => {
+    const { api, repository, publicationTasks } = fixture(1, 'deferred');
+    const saved = await api.handle(authorized('/api/config', {
+      method: 'PUT', body: JSON.stringify({ expected_revision: 1, aggregate: aggregate(), mutation_id: 'superseded-get' }),
+    }));
+    expect(saved?.status).toBe(202);
+    for (let turn = 0; turn < 20 && repository.getActivePublication() === null; turn += 1) {
+      await Promise.resolve();
+    }
+    const owner = repository.getActivePublication();
+    if (owner === null) throw new Error('owner missing');
+    const now = owner.operation.updated_at + 1;
+    repository.requestPublicationCancellation('superseded-get', 2, now);
+    repository.confirmPublicationCandidateExited('superseded-get', 2, now + 1);
+
+    const response = await api.handle(authorized('/api/config/operations/superseded-get'));
+    const body = await json(response as Response);
+    await publicationTasks.stop();
+
+    expect(response?.status).toBe(409);
+    expect(body).toMatchObject({ operation: {
+      mutation_id: 'superseded-get', state: 'superseded',
+      result_status: 409, error_code: 'revision_superseded',
+    } });
   });
 
   test('requires a valid administrator session and exposes exact terminal publication states', async () => {
@@ -1153,7 +1216,9 @@ describe('configuration control with an explicit management provider', () => {
     const enabledOperation = await json(enable as Response);
     const repeated = await api.handle(authorized('/api/plugins/llm-protocol-adapter/enable', { method: 'POST' }));
     expect(repeated?.status).toBe(202);
-    expect(await json(repeated as Response)).toEqual(enabledOperation);
+    expect(await json(repeated as Response)).toMatchObject({
+      operation_id: enabledOperation.operation_id, revision: enabledOperation.revision,
+    });
     await publicationTasks.stop();
   });
 
@@ -1290,7 +1355,9 @@ describe('configuration control with an explicit management provider', () => {
       method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }),
     }));
     expect(repeated?.status).toBe(202);
-    expect(await json(repeated as Response)).toEqual(disabledOperation);
+    expect(await json(repeated as Response)).toMatchObject({
+      operation_id: disabledOperation.operation_id, revision: disabledOperation.revision,
+    });
     await publicationTasks.stop();
   });
 

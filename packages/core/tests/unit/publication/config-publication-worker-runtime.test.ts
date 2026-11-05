@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { DEFAULT_PUBLICATION_POLICY } from '@jeffusion/bungee-types';
 import { createConfigWorkerRuntimeController as createRuntimeController, type ConfigWorkerLifecycle } from '../../../src/config-publication';
+import { ConfigWorkerLifecycleCleanupError } from '../../../src/config-publication/worker-runtime-contract';
 import { parseConfigWorkerMessage } from '../../../src/config-publication/messages';
 import { compileRuntimeConfigSnapshot } from '../../../src/config-storage';
 import { IDS, PLUGIN_CATALOG_HASH, PRIVATE_PORT, PROCESS_IDENTITY, aggregate, drainMessage, expectMessage, fakeLifecycle, type Handle, startCurrentMessage, startMessage, statusReport } from '../../helpers/config-publication-worker-runtime';
@@ -711,6 +712,44 @@ describe('config publication worker runtime', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     expect(fake.calls).toContain('stop:1');
+  });
+
+  test('startup cleanup failure rejects the apply instead of becoming an apply result', async () => {
+    const lifecycle: ConfigWorkerLifecycle<Handle> = {
+      async start() { throw new ConfigWorkerLifecycleCleanupError('start', new Error('teardown failed')); },
+      async stop() {}, async stopAccepting() {}, async drain() {},
+    };
+    const controller = createConfigWorkerRuntimeController({ pid: 4321, identity: PROCESS_IDENTITY, lifecycle });
+
+    await expect(controller.apply(startMessage())).rejects.toBeInstanceOf(ConfigWorkerLifecycleCleanupError);
+    await expect(controller.failClosed()).rejects.toBeInstanceOf(AggregateError);
+  });
+
+  test('shutdown aborts in-flight initialization synchronously but waits for its real settle', async () => {
+    const settle = Promise.withResolvers<void>();
+    let startSignal: AbortSignal | undefined;
+    const lifecycle: ConfigWorkerLifecycle<Handle> = {
+      async start(_config, _command, signal) {
+        startSignal = signal;
+        await settle.promise;
+        throw new Error('initialization cancelled');
+      },
+      async stop() {}, async stopAccepting() {}, async drain() {},
+    };
+    const controller = createConfigWorkerRuntimeController({ pid: 4321, identity: PROCESS_IDENTITY, lifecycle });
+    const applying = controller.apply(startMessage()).catch(() => undefined);
+    while (startSignal === undefined) await Bun.sleep(1);
+
+    let closed = false;
+    const closing = controller.failClosed().then(() => { closed = true; });
+    expect(startSignal.aborted).toBe(true);
+    await Bun.sleep(5);
+    expect(closed).toBe(false);
+
+    settle.resolve();
+    await applying;
+    await closing;
+    expect(closed).toBe(true);
   });
 
   test('rejects malformed values and accessors without invoking them', async () => {

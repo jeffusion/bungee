@@ -1,17 +1,10 @@
 import type {
-  ActiveConfigurationPublication,
-} from '../config-storage';
-import type {
   MasterPublicationOutcome,
-  ServingConfigWorker,
 } from '../config-publication';
 
 type PublicationTaskManagerOptions = {
-  readonly publish: (
-    active: ActiveConfigurationPublication,
-    oldWorkers: readonly ServingConfigWorker[],
-    signal: AbortSignal,
-  ) => Promise<MasterPublicationOutcome>;
+  readonly publish: (signal: AbortSignal) => Promise<MasterPublicationOutcome | null>;
+  readonly onWake?: () => void;
   readonly schedule?: (callback: () => void) => void;
 };
 
@@ -21,10 +14,8 @@ export type RecoveryTaskResult =
   | { readonly kind: 'fatal'; readonly error: Error };
 
 export interface PublicationTaskLifecycle {
-  enqueue(
-    active: ActiveConfigurationPublication,
-    oldWorkers: readonly ServingConfigWorker[],
-  ): void;
+  /** Requests one publication run; repeated requests during a run coalesce into one follow-up. */
+  wake(): void;
   setFatalHandler(handler: (error: Error) => void): void;
   stop(): Promise<void>;
   enqueueRecovery(task: () => Promise<RecoveryTaskResult>): Promise<RecoveryTaskResult>;
@@ -38,6 +29,9 @@ export class PublicationTaskManager implements PublicationTaskLifecycle {
   private accepting = true;
   private fatalHandler: ((error: Error) => void) | null = null;
   private tail = Promise.resolve();
+  private pending = false;
+  private scheduled = false;
+  private running: Promise<void> | null = null;
   private readonly stopController = new AbortController();
   private readonly schedule: (callback: () => void) => void;
 
@@ -50,32 +44,33 @@ export class PublicationTaskManager implements PublicationTaskLifecycle {
     this.fatalHandler = handler;
   }
 
-  enqueue(
-    active: ActiveConfigurationPublication,
-    oldWorkers: readonly ServingConfigWorker[],
-  ): void {
-    if (!this.accepting) throw new PublicationTaskError('publication task manager is stopped');
-    if (this.fatalHandler === null) throw new PublicationTaskError('fatal handler is not configured');
+  wake(): void {
+    if (!this.accepting) return;
+    this.options.onWake?.();
+    this.pending = true;
+    if (this.scheduled || this.running !== null) return;
+    this.scheduled = true;
     const scheduled = new Promise<void>((resolve, reject) => {
-      try { this.schedule(resolve); } catch (error) { reject(error); }
+      try {
+        this.schedule(() => { this.scheduled = false; resolve(); });
+      } catch (error) {
+        this.scheduled = false;
+        reject(error);
+      }
     });
-    const publication = this.tail.then(() => scheduled)
-      .then(() => this.stopController.signal.aborted
-        ? null : this.options.publish(active, oldWorkers, this.stopController.signal));
-    this.tail = publication.then(
-      (outcome) => {
-        if (outcome?.kind === 'outcome_unknown' && outcome.fatal) {
-          this.report(new PublicationTaskError(`fatal publication outcome: ${outcome.code}`, { cause: outcome.error }));
-        }
-      },
-      (error: unknown) => {
-        this.report(error instanceof Error ? error : new PublicationTaskError('publication task failed', { cause: error }));
-      },
-    );
+    const running = this.tail.then(() => scheduled).then(() => this.drain());
+    this.running = running;
+    this.tail = running.catch((error: unknown) => {
+      this.report(error instanceof Error ? error : new PublicationTaskError('publication task failed', { cause: error }));
+    }).then(() => {
+      if (this.running === running) this.running = null;
+      if (this.pending && this.accepting) this.wake();
+    });
   }
 
   stop(): Promise<void> {
     this.accepting = false;
+    this.pending = false;
     this.stopController.abort('publication tasks stopping');
     return this.tail;
   }
@@ -87,6 +82,26 @@ export class PublicationTaskManager implements PublicationTaskLifecycle {
     }));
     this.tail = recovery.then(() => undefined, () => undefined);
     return recovery;
+  }
+
+  private async drain(): Promise<void> {
+    while (this.accepting && this.pending) {
+      this.pending = false;
+      let outcome: MasterPublicationOutcome | null = null;
+      try {
+        outcome = await this.options.publish(this.stopController.signal);
+      } catch (error) {
+        this.report(error instanceof Error ? error : new PublicationTaskError('publication task failed', { cause: error }));
+        return;
+      }
+      if (outcome?.kind === 'outcome_unknown') {
+        if (outcome.fatal) {
+          this.report(new PublicationTaskError(`fatal publication outcome: ${outcome.code}`, { cause: outcome.error }));
+        }
+        // Do not start another publication before the unknown outcome is reconciled.
+        return;
+      }
+    }
   }
 
   private report(error: Error): void {

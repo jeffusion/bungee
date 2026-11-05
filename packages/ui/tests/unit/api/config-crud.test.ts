@@ -4,7 +4,9 @@ import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { RouteStaleError, RoutesAPI } from '../../../src/api/routes';
 import { ServicesAPI, ServiceStaleError } from '../../../src/api/services';
 import { ManagedBindingError, toEditorRoute, toEditorService } from '../../../src/api/config-adapters';
-import { ConfigurationStaleError } from '../../../src/api/config';
+import { ConfigurationStaleError, ConfigurationSubmissionUnknownError, ConfigurationValidationError } from '../../../src/api/config';
+import { get } from 'svelte/store';
+import { configurationWrite } from '../../../src/stores/configuration-write';
 
 const aggregate: ConfigurationAggregate = {
   logical_configuration: {
@@ -47,13 +49,19 @@ const aggregate: ConfigurationAggregate = {
 
 const originalFetch = globalThis.fetch;
 
-function mockControlApi(requests: Request[], current = aggregate): void {
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function mockControlApi(requests: Request[], current = aggregate, gate?: Promise<void>): void {
   const responses = [
     Response.json({ config: current, revision: 4, content_hash: 'sha256:before' }),
     Response.json({
       operation_id: 'operation-id',
       revision: 5,
-      operation: { state: 'committed', result_status: null, error_code: null },
+      operation: { expected_revision: 4, committed_revision: 5, state: 'committed', result_status: null, error_code: null },
       workers: [],
     }, { status: 202 }),
     Response.json({
@@ -66,13 +74,14 @@ function mockControlApi(requests: Request[], current = aggregate): void {
     value: async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const request = new Request(new URL(String(input), 'http://ui.test'), init);
       requests.push(request);
+      if (gate !== undefined && request.method === 'GET') await gate;
       const response = responses.shift();
       if (response === undefined) throw new Error('Unexpected HTTP request');
       if (request.method === 'PUT') {
         const mutationId = (await request.clone().json()).mutation_id;
         const body = await response.json();
         return Response.json({ ...body, operation_id: mutationId,
-          operation: { ...body.operation, mutation_id: mutationId } }, { status: response.status });
+          operation: { ...body.operation, mutation_id: mutationId, committed_revision: body.revision } }, { status: response.status });
       }
       return response;
     },
@@ -95,11 +104,15 @@ describe('v2 route and service CRUD adapters', () => {
     expect(loaded.baseline).toEqual(aggregate.logical_configuration.services[0]!);
   });
 
-  test.each(['name', 'endpoint', 'plugin', 'managedBy'] as const)('rejects a stale form after a persisted %s change without writing or mutating the draft', async (field) => {
-    const baseline = aggregate.logical_configuration.services[0]!;
+  test.each(['name', 'endpoint', 'plugin', 'managedBy', 'header'] as const)('rejects a stale form after a persisted %s change without writing or mutating the draft', async (field) => {
+    const service = aggregate.logical_configuration.services[0]!;
+    const baseline = field === 'header'
+      ? { ...service, endpoints: [{ ...service.endpoints[0]!, request: { headers: { add: { 'x-test': 'before' } } } }] }
+      : service;
     const changed = structuredClone(baseline);
     const replacement = field === 'name' ? { ...changed, name: 'renamed-elsewhere' }
       : field === 'plugin' ? { ...changed, plugins: [{ ...changed.plugins[0]!, options: { sample: 1 } }] }
+      : field === 'header' ? { ...changed, endpoints: [{ ...changed.endpoints[0]!, request: { headers: { add: { 'x-test': 'after' } } } }] }
       : { ...changed, endpoints: [{ ...changed.endpoints[0]!, ...(field === 'endpoint'
         ? { target: 'https://other.example.com' }
         : { managedBy: { plugin: changed.endpoints[0]!.plugins[0]!.name, contributionId: 'upstream', bindingId: changed.endpoints[0]!.plugins[0]!.id } }) }] };
@@ -218,7 +231,7 @@ describe('v2 route and service CRUD adapters', () => {
         if (request.method === 'GET') return Response.json({ config: aggregate, revision: 4, content_hash: 'sha256:before' });
         mutationId = (await request.json()).mutation_id;
         return Response.json({ operation_id: mutationId, revision: 5,
-          operation: { mutation_id: mutationId, committed_revision: 5, state: 'draining' }, workers: [] }, { status: 202 });
+          operation: { mutation_id: mutationId, expected_revision: 4, committed_revision: 5, state: 'draining', result_status: null }, workers: [] }, { status: 202 });
       },
     });
     const baseline = aggregate.logical_configuration.routes[0]!;
@@ -227,31 +240,108 @@ describe('v2 route and service CRUD adapters', () => {
     expect(requests.map(request => request.method)).toEqual(['GET', 'PUT']);
   });
 
-  test('a consecutive edit waits for the prior publication and keeps the original CAS revision', async () => {
+  test('a consecutive edit commits once without waiting for the prior publication', async () => {
     const requests: Request[] = [];
-    const previousId = '10000000-0000-4000-8000-000000000001';
-    let writes = 0;
     Object.defineProperty(globalThis, 'fetch', {
       configurable: true,
       value: async (input: RequestInfo | URL, init?: RequestInit) => {
         const request = new Request(new URL(String(input), 'http://ui.test'), init);
         requests.push(request);
-        if (request.url.endsWith('/operations/' + previousId)) {
-          return Response.json({ operation: { mutation_id: previousId, state: 'converged' }, workers: [] });
-        }
         if (request.method === 'GET') return Response.json({ config: aggregate, revision: 4, content_hash: 'sha256:before' });
         const body = await request.clone().json();
         expect(body.expected_revision).toBe(4);
-        if (++writes === 1) return Response.json({ error: 'operation_in_progress', operation_id: previousId,
-          revision: 4, state: 'draining' }, { status: 409 });
         return Response.json({ operation_id: body.mutation_id, revision: 5,
-          operation: { mutation_id: body.mutation_id, committed_revision: 5, state: 'committed' }, workers: [] }, { status: 202 });
+          operation: { mutation_id: body.mutation_id, expected_revision: 4, committed_revision: 5, state: 'committed', result_status: null }, workers: [] }, { status: 202 });
       },
     });
     const baseline = aggregate.logical_configuration.routes[0]!;
-    await RoutesAPI.update('/alpha', { ...toEditorRoute(baseline, aggregate.logical_configuration.services), path: '/renamed' }, baseline);
-    expect(requests.map(request => request.method)).toEqual(['GET', 'PUT', 'GET', 'PUT']);
-    expect(await requests[1]!.clone().json()).toMatchObject({ aggregate: (await requests[3]!.clone().json()).aggregate });
+    const acked = await RoutesAPI.update('/alpha', { ...toEditorRoute(baseline, aggregate.logical_configuration.services), path: '/renamed' }, baseline);
+    expect(acked.id).toBe(baseline.id);
+    // One baseline read and one write; no publication polling and no second write.
+    expect(requests.map(request => request.method)).toEqual(['GET', 'PUT']);
+    expect(requests[1]!.url).not.toContain('/operations/');
+  });
+
+  test('an unconfirmed entity save keeps the original identity and never writes twice', async () => {
+    const requests: Request[] = [];
+    let mutationId = '';
+    Object.defineProperty(globalThis, 'fetch', {
+      configurable: true,
+      value: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(new URL(String(input), 'http://ui.test'), init);
+        requests.push(request);
+        const path = new URL(request.url).pathname;
+        if (request.method === 'GET' && path === '/api/config') return Response.json({ config: aggregate, revision: 4, content_hash: 'sha256:before' });
+        if (request.method === 'PUT') {
+          mutationId = (await request.clone().json()).mutation_id;
+          return Response.json({ error: 'result_unknown' }, { status: 503 });
+        }
+        if (request.method === 'GET' && path === `/api/config/operations/${mutationId}`) {
+          return Response.json({ error: 'operation_not_found' }, { status: 404 });
+        }
+        return Response.json({ error: 'unavailable' }, { status: 503 });
+      },
+    });
+    try {
+      const baseline = aggregate.logical_configuration.routes[0]!;
+      await expect(RoutesAPI.update('/alpha', { ...toEditorRoute(baseline, aggregate.logical_configuration.services), path: '/renamed' }, baseline))
+        .rejects.toBeInstanceOf(ConfigurationSubmissionUnknownError);
+      expect(requests.filter(request => request.method === 'PUT')).toHaveLength(1);
+      expect(get(configurationWrite).pending).toEqual({ mutationId, accepted: false });
+    } finally {
+      configurationWrite.clear();
+    }
+  });
+
+  test('a foreign ACK and a foreign lookup both keep the original identity', async () => {
+    const requests: Request[] = [];
+    let mutationId = '';
+    const foreign = (id: string) => ({ mutation_id: id, expected_revision: 4, committed_revision: 5,
+      state: 'committed', result_status: null, error_code: null, error_detail: null });
+    Object.defineProperty(globalThis, 'fetch', {
+      configurable: true,
+      value: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(new URL(String(input), 'http://ui.test'), init);
+        requests.push(request);
+        const path = new URL(request.url).pathname;
+        if (request.method === 'GET' && path === '/api/config') return Response.json({ config: aggregate, revision: 4, content_hash: 'sha256:before' });
+        if (request.method === 'PUT') {
+          mutationId = (await request.clone().json()).mutation_id;
+          return Response.json({ operation_id: 'foreign', revision: 5, operation: foreign('foreign'), workers: [] }, { status: 202 });
+        }
+        if (request.method === 'GET' && path === `/api/config/operations/${mutationId}`) {
+          return Response.json({ operation: foreign('foreign'), workers: [] });
+        }
+        return Response.json({ error: 'unavailable' }, { status: 503 });
+      },
+    });
+    try {
+      const baseline = aggregate.logical_configuration.routes[0]!;
+      await expect(RoutesAPI.update('/alpha', { ...toEditorRoute(baseline, aggregate.logical_configuration.services), path: '/renamed' }, baseline))
+        .rejects.toBeInstanceOf(ConfigurationSubmissionUnknownError);
+      expect(requests.filter(request => request.method === 'PUT')).toHaveLength(1);
+      expect(get(configurationWrite).pending).toEqual({ mutationId, accepted: false });
+    } finally {
+      configurationWrite.clear();
+    }
+  });
+
+  test('a definitive rejection releases the identity', async () => {
+    Object.defineProperty(globalThis, 'fetch', {
+      configurable: true,
+      value: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(new URL(String(input), 'http://ui.test'), init);
+        if (request.method === 'GET' && new URL(request.url).pathname === '/api/config') {
+          return Response.json({ config: aggregate, revision: 4, content_hash: 'sha256:before' });
+        }
+        if (request.method === 'PUT') return Response.json({ error: 'stale_revision' }, { status: 409 });
+        return Response.json({ error: 'unavailable' }, { status: 503 });
+      },
+    });
+    const baseline = aggregate.logical_configuration.routes[0]!;
+    await expect(RoutesAPI.update('/alpha', { ...toEditorRoute(baseline, aggregate.logical_configuration.services), path: '/renamed' }, baseline))
+      .rejects.toBeInstanceOf(ConfigurationStaleError);
+    expect(get(configurationWrite).pending).toBeNull();
   });
 
   test('leaves a save-time CAS conflict to the editor without an automatic overwrite or retry', async () => {
@@ -305,15 +395,31 @@ describe('v2 route and service CRUD adapters', () => {
   });
 
   test('detects changes to the same route across revisions but does not reject an unrelated route change', async () => {
-    const baseline = aggregate.logical_configuration.routes[0]!;
-    const changedRoute = { ...baseline, plugins: [{ ...baseline.plugins[0]!, options: { tag: 'remote' } }] };
-    const changed = { ...aggregate, logical_configuration: { ...aggregate.logical_configuration,
-      routes: [changedRoute, { ...baseline, id: 'other-route', path: '/other', position: 1 }],
-    } };
-    const staleRequests: Request[] = [];
-    mockControlApi(staleRequests, changed);
-    await expect(RoutesAPI.update('/alpha', { ...toEditorRoute(baseline, aggregate.logical_configuration.services), path: '/draft' }, baseline)).rejects.toMatchObject({ reason: 'changed' });
-    expect(staleRequests.map(request => request.method)).toEqual(['GET']);
+    const baseline = {
+      ...aggregate.logical_configuration.routes[0]!,
+      endpoints: [{
+        id: 'route-endpoint',
+        position: 0,
+        target: 'https://alpha.example.com',
+        weight: 100,
+        priority: 1,
+        is_disabled: false,
+        plugins: [],
+        request: { headers: { add: { 'x-test': 'before' } } },
+      }],
+    };
+    const changedRoutes = [
+      { ...baseline, plugins: [{ ...baseline.plugins[0]!, options: { tag: 'remote' } }] },
+      { ...baseline, endpoints: [{ ...baseline.endpoints[0]!, request: { headers: { add: { 'x-test': 'after' } } } }] },
+    ];
+    for (const changedRoute of changedRoutes) {
+      const staleRequests: Request[] = [];
+      mockControlApi(staleRequests, { ...aggregate, logical_configuration: { ...aggregate.logical_configuration,
+        routes: [changedRoute, { ...baseline, id: 'other-route', path: '/other', position: 1 }],
+      } });
+      await expect(RoutesAPI.update('/alpha', { ...toEditorRoute(baseline, aggregate.logical_configuration.services), path: '/draft' }, baseline)).rejects.toMatchObject({ reason: 'changed' });
+      expect(staleRequests.map(request => request.method)).toEqual(['GET']);
+    }
 
     const unrelatedRequests: Request[] = [];
     mockControlApi(unrelatedRequests, { ...aggregate, logical_configuration: { ...aggregate.logical_configuration,
@@ -339,7 +445,7 @@ describe('v2 route and service CRUD adapters', () => {
         submitted = true;
         const mutationId = (await request.clone().json()).mutation_id;
         return Response.json({ operation_id: mutationId, revision: 5,
-          operation: { state: 'committed', result_status: null, error_code: null, mutation_id: mutationId }, workers: [],
+          operation: { state: 'committed', result_status: null, error_code: null, mutation_id: mutationId, expected_revision: 4, committed_revision: 5 }, workers: [],
         }, { status: 202 });
       }
       return submitted
@@ -454,6 +560,152 @@ describe('v2 route and service CRUD adapters', () => {
       target: 'https://changed.example.com',
     });
     expect(endpoint.plugins[0]).toMatchObject({ id: 'endpoint-plugin-id', position: 3 });
+  });
+
+  test('route create snapshots a nested proxy draft and returns a baseline that can be updated', async () => {
+    const pluginOptions = { tag: 'original' };
+    const loadBalancing = { policy: 'round_robin' as 'round_robin' | 'least_requests' };
+    const draft = {
+      path: '/proxy-route',
+      load_balancing: new Proxy(loadBalancing, {}),
+      endpoints: [{
+        target: 'https://proxy.example.com',
+        request: { headers: { add: undefined, remove: undefined, replace: undefined, default: undefined } },
+      }],
+      plugins: [{ name: 'proxy-plugin', options: new Proxy(pluginOptions, {}) }],
+    };
+    const gate = deferred();
+    const requests: Request[] = [];
+    mockControlApi(requests, aggregate, gate.promise);
+    const pending = RoutesAPI.create(draft);
+    loadBalancing.policy = 'least_requests';
+    pluginOptions.tag = 'mutated';
+    gate.resolve();
+    const created = await pending;
+    const body = await requests[1]!.json();
+    expect(body.aggregate.logical_configuration.routes.at(-1)).toMatchObject({
+      path: '/proxy-route',
+      load_balancing: { policy: 'round_robin' },
+      plugins: [{ name: 'proxy-plugin', options: { tag: 'original' } }],
+    });
+    expect(created.load_balancing).toEqual({ policy: 'round_robin' });
+
+    mockControlApi(requests, { ...aggregate, logical_configuration: {
+      ...aggregate.logical_configuration, routes: [...aggregate.logical_configuration.routes, created],
+    } });
+    const updated = await RoutesAPI.update('/proxy-route', { path: '/proxy-route-renamed' }, created);
+    expect(updated.id).toBe(created.id);
+    expect((await requests[3]!.json()).aggregate.logical_configuration.routes.at(-1)).toMatchObject({
+      id: created.id, path: '/proxy-route-renamed',
+    });
+  });
+
+  test('route create keeps non-finite endpoint numbers as null and propagates validation rejection', async () => {
+    const requests: Request[] = [];
+    Object.defineProperty(globalThis, 'fetch', {
+      configurable: true,
+      value: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(new URL(String(input), 'http://ui.test'), init);
+        requests.push(request);
+        if (request.method === 'GET') return Response.json({ config: aggregate, revision: 4, content_hash: 'sha256:before' });
+        return Response.json({ error: 'invalid_configuration', errors: [{ path: 'routes', message: 'invalid number' }] }, { status: 422 });
+      },
+    });
+    const draft = {
+      path: '/non-finite',
+      endpoints: [{ target: 'https://non-finite.example.test', weight: Number.NaN, priority: Number.POSITIVE_INFINITY }],
+    };
+    await expect(RoutesAPI.create(draft)).rejects.toBeInstanceOf(ConfigurationValidationError);
+    expect(requests.map(request => request.method)).toEqual(['GET', 'PUT']);
+    const wire = await requests[1]!.clone().json();
+    expect(wire.aggregate.logical_configuration.routes.at(-1).endpoints[0]).toMatchObject({ weight: null, priority: null });
+  });
+
+  test('service create snapshots a nested proxy draft and returns a baseline that can be updated', async () => {
+    const endpointPluginOptions = { mode: 'strict' };
+    const servicePluginOptions = { sample: 0.5 };
+    const draft = {
+      name: 'proxy-service',
+      endpoints: [{
+        target: 'https://proxy.example.test', weight: 100, priority: 1,
+        plugins: [{ name: 'endpoint-plugin', options: new Proxy(endpointPluginOptions, {}) }],
+        request: new Proxy({ headers: { add: { 'x-test': 'yes' }, remove: undefined, replace: undefined, default: undefined } }, {}),
+      }],
+      plugins: [{ name: 'service-plugin', options: new Proxy(servicePluginOptions, {}) }],
+    };
+    const gate = deferred();
+    const requests: Request[] = [];
+    mockControlApi(requests, aggregate, gate.promise);
+    const pending = ServicesAPI.create(draft);
+    endpointPluginOptions.mode = 'mutated';
+    servicePluginOptions.sample = 0.9;
+    gate.resolve();
+    const created = await pending;
+    const body = await requests[1]!.json();
+    expect(body.aggregate.logical_configuration.services.at(-1)).toMatchObject({
+      name: 'proxy-service',
+      endpoints: [{
+        request: { headers: { add: { 'x-test': 'yes' } } },
+        plugins: [{ name: 'endpoint-plugin', options: { mode: 'strict' } }],
+      }],
+      plugins: [{ name: 'service-plugin', options: { sample: 0.5 } }],
+    });
+    expect(created.plugins![0]).toMatchObject({ options: { sample: 0.5 } });
+
+    mockControlApi(requests, { ...aggregate, logical_configuration: {
+      ...aggregate.logical_configuration, services: [...aggregate.logical_configuration.services, created],
+    } });
+    const updated = await ServicesAPI.update('proxy-service', { name: 'proxy-service-renamed', endpoints: [] }, created);
+    expect(updated.id).toBe(created.id);
+    expect((await requests[3]!.json()).aggregate.logical_configuration.services.at(-1)).toMatchObject({
+      id: created.id, name: 'proxy-service-renamed',
+    });
+  });
+
+  test('route update snapshots nested draft and proxy baseline while the snapshot read is pending', async () => {
+    const base = { ...aggregate.logical_configuration.routes[0]!, path_rewrite: { '/old': '/new' } };
+    const current = { ...aggregate, logical_configuration: { ...aggregate.logical_configuration, routes: [base] } };
+    const baseline = structuredClone(base);
+    baseline.path_rewrite = new Proxy(structuredClone(base.path_rewrite), {});
+    const draft = toEditorRoute(base, current.logical_configuration.services);
+    draft.path_rewrite = new Proxy({ '/old': '/new' }, {});
+    const gate = deferred();
+    const requests: Request[] = [];
+    mockControlApi(requests, current, gate.promise);
+    const pending = RoutesAPI.update('/alpha', draft, baseline);
+    draft.path_rewrite!['/old'] = '/draft-mutated';
+    baseline.path_rewrite!['/old'] = '/baseline-mutated';
+    gate.resolve();
+    const saved = await pending;
+    const body = await requests[1]!.json();
+    expect(body.aggregate.logical_configuration.routes[0].path_rewrite).toEqual({ '/old': '/new' });
+    expect(saved.path_rewrite).toEqual({ '/old': '/new' });
+    draft.path_rewrite!['/old'] = '/after-ack';
+    expect(saved.path_rewrite).toEqual({ '/old': '/new' });
+  });
+
+  test('service update snapshots nested draft and proxy baseline while the snapshot read is pending', async () => {
+    const base = structuredClone(aggregate.logical_configuration.services[0]!);
+    base.endpoints[0]!.request = { headers: { add: { 'x-test': 'yes' } } };
+    const current = { ...aggregate, logical_configuration: { ...aggregate.logical_configuration, services: [base] } };
+    const baseline = structuredClone(base);
+    baseline.endpoints[0]!.request = new Proxy(structuredClone(base.endpoints[0]!.request!), {});
+    const draft = toEditorService(base);
+    draft.endpoints[0]!.request = new Proxy({ headers: { add: { 'x-test': 'yes' } } }, {});
+    const gate = deferred();
+    const requests: Request[] = [];
+    mockControlApi(requests, current, gate.promise);
+    const pending = ServicesAPI.update('alpha', draft, baseline);
+    draft.endpoints[0]!.request!.headers!.add!['x-test'] = 'draft-mutated';
+    baseline.endpoints[0]!.request!.headers!.add!['x-test'] = 'baseline-mutated';
+    gate.resolve();
+    const saved = await pending;
+    const body = await requests[1]!.json();
+    expect(body.aggregate.logical_configuration.services[0].endpoints[0].request)
+      .toEqual({ headers: { add: { 'x-test': 'yes' } } });
+    expect(saved.endpoints[0]!.request).toEqual({ headers: { add: { 'x-test': 'yes' } } });
+    draft.endpoints[0]!.request!.headers!.add!['x-test'] = 'after-ack';
+    expect(saved.endpoints[0]!.request).toEqual({ headers: { add: { 'x-test': 'yes' } } });
   });
 });
 

@@ -1,7 +1,12 @@
 import type { PluginConfigConstraint, PluginRuntimeScope } from '@jeffusion/bungee-types';
+import { get } from 'svelte/store';
 import { api, requestPluginControl, type ApiRequestOptions } from './client';
-import type { ConfigurationOperationState } from './config';
-import { retainAccepted } from '../components/domain/config/publication-state';
+import {
+  ConfigurationSubmissionUnknownError, getConfigurationOperation, isDefinitiveConfigurationRejection,
+  trustedConfigurationOperation, type ConfigurationOperationState,
+} from './config';
+import { configurationWrite } from '../stores/configuration-write';
+import { v4 as uuidv4 } from 'uuid';
 
 export interface UpstreamSourceContribution {
   readonly id: string;
@@ -160,14 +165,32 @@ export const PluginsAPI = {
     if (status.lastError) throw new Error('Catalog refresh failed');
   },
 
-  enable: (name: string, managementSetup?:unknown) => api.post<PluginToggleAccepted>(`/plugins/${encodeURIComponent(name)}/enable`, managementSetup?{managementSetup}:{}, {preserveSessionOnUnauthorized:true}),
-  disable: (name: string) => api.post<PluginToggleAccepted>(`/plugins/${encodeURIComponent(name)}/disable`, {}, {preserveSessionOnUnauthorized:true}),
+  enable: (name: string, managementSetup?:unknown, mutationId?:string) => api.post<PluginToggleAccepted>(`/plugins/${encodeURIComponent(name)}/enable`,
+    { ...(managementSetup?{managementSetup}:{}), ...(mutationId?{mutation_id:mutationId}:{}) }, {preserveSessionOnUnauthorized:true}),
+  disable: (name: string, mutationId?:string) => api.post<PluginToggleAccepted>(`/plugins/${encodeURIComponent(name)}/disable`,
+    { ...(mutationId?{mutation_id:mutationId}:{}) }, {preserveSessionOnUnauthorized:true}),
 };
 
 type PluginToggleAccepted = ConfigurationOperationState & {
   readonly unchanged?: boolean;
   readonly operation_id?: string;
 };
+
+/** A query by the original identity is the only acceptable proof of a lost toggle. */
+async function reconcileToggle(mutationId: string, cause: unknown): Promise<PluginToggleAccepted> {
+  try {
+    const state = await getConfigurationOperation(mutationId);
+    if (!trustedConfigurationOperation(state, mutationId)) throw new ConfigurationSubmissionUnknownError(mutationId, cause);
+    return { ...state, operation_id: mutationId };
+  } catch (error) {
+    if (error instanceof ConfigurationSubmissionUnknownError) throw error;
+    throw new ConfigurationSubmissionUnknownError(mutationId, cause);
+  }
+}
+
+function trustedToggle(accepted: PluginToggleAccepted, mutationId: string): boolean {
+  return accepted.operation_id === mutationId && trustedConfigurationOperation(accepted, mutationId);
+}
 
 /**
  * A durable configuration ACK ends the toggle. Publication continues in the
@@ -179,11 +202,43 @@ export async function setPluginEnabled(
   enabled: boolean,
   options: { managementSetup?:unknown; onAccepted?:(operation:PluginToggleAccepted)=>void|Promise<void> } = {},
 ): Promise<'unchanged' | 'committed'> {
-  const accepted = await (enabled ? PluginsAPI.enable(name,options.managementSetup) : PluginsAPI.disable(name));
-  if (accepted.unchanged !== true && (typeof accepted.operation_id !== 'string' || !accepted.operation_id)) {
-    throw new Error(`Plugin activation for ${name} was not accepted as a configuration operation`);
+  // A write with an unconfirmed result may have committed. Never dispatch a second
+  // identity before the first is reconciled.
+  const write = get(configurationWrite);
+  if (write.corrupt || (write.pending !== null && !write.pending.accepted)) {
+    throw new Error('configuration_write_unconfirmed');
   }
-  if (accepted.operation_id) retainAccepted(accepted.operation_id);
+  const mutationId = typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : uuidv4();
+  configurationWrite.markDispatched(mutationId);
+  let accepted: PluginToggleAccepted;
+  try {
+    accepted = await (enabled
+      ? PluginsAPI.enable(name, options.managementSetup, mutationId)
+      : PluginsAPI.disable(name, mutationId));
+  } catch (error) {
+    // Only a structured rejection proves nothing was committed. result_unknown, malformed
+    // responses and transport failures may have committed; reconcile by the original ID.
+    if (isDefinitiveConfigurationRejection(error)) {
+      configurationWrite.clear();
+      throw error;
+    }
+    accepted = await reconcileToggle(mutationId, error);
+  }
+  if (accepted.unchanged === true) {
+    configurationWrite.clear();
+    await options.onAccepted?.(accepted);
+    return 'unchanged';
+  }
+  // A 2xx with a foreign or malformed identity is not an ACK; keep the marker until proven.
+  if (!trustedToggle(accepted, mutationId)) {
+    accepted = await reconcileToggle(mutationId, new Error('untrusted_ack'));
+  }
+  if (accepted.operation.state === 'superseded') {
+    // Saved, then replaced before it applied. This is a known terminal, not a failure to retry blindly.
+    configurationWrite.clear();
+    throw new Error('configuration_superseded');
+  }
+  configurationWrite.markAccepted(mutationId);
   await options.onAccepted?.(accepted);
-  return accepted.unchanged === true ? 'unchanged' : 'committed';
+  return 'committed';
 }

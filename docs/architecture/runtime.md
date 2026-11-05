@@ -21,17 +21,24 @@ HTTP bodies are opaque streams by default. Worker rules, explicit plugin require
 
 ## Revision Publication
 
-1. The control API commits a complete aggregate to `data/bungee.db` using `expected_revision`.
-2. The master starts replacement workers with the exact revision, content hash, plugin catalog hash, and plugin activation names.
-3. A worker compiles the snapshot and ACKs its private port and validated hashes.
-4. The master atomically switches admission only after all replacement ACKs match.
-5. Old workers drain; exact exit evidence finalizes the operation.
+1. The control API commits a complete aggregate to `data/bungee.db` using `expected_revision` and acknowledges durable storage without waiting for publication.
+2. The single publication owner claims the latest saved target and freezes its snapshot identity independently of later saves.
+3. The master starts replacement workers with the exact revision, content hash, plugin catalog hash, and plugin activation names. Each worker compiles the snapshot and ACKs its private port and validated hashes.
+4. Before admission preparation, a newer saved target can cancel an obsolete candidate. Confirmed exit and required cleanup must precede creation of its replacement. Cancellation and permission to begin admission preparation are mutually exclusive.
+5. Once admission preparation begins, the attempt follows its original switching and recovery protocol. The master switches admission only after all replacement ACKs match.
+6. Old workers drain; exact exit evidence and retirement release complete the attempt. Only then can another candidate batch start.
+
+Saving, applying and serving are separate facts. Unclaimed targets may be superseded without application; cancelled candidates retain their operation identity and audit record. Neither durable storage nor a superseded outcome proves that a revision served traffic. Late results cannot transfer authority between attempts.
+
+Normal updates allow at most the serving batch plus one candidate or draining batch: `2N` workers for a configured count of `N`, excluding the master and ingress. There is no third prewarming batch during drain. Unconfirmed exits continue to occupy capacity, including after master recovery.
 
 Before admission changes, the configuration database freezes the complete retired membership and replacement serving authority for the exact attempt. Drain-command deadlines are frozen after ingress handoff and before the first command; recovery reuses those deadlines. A recovering master validates and adopts active admission before starting another attempt. The subset it successfully adopts cannot substitute for the complete retirement set.
 
 On Linux and macOS, process-lifetime locks bind authenticated descriptors to an inherited file identity. Confirmed exit is persisted before ingress releases retired admission. Cleanup success, failure or unknown is recorded separately from physical exit. Missing or uncertain evidence stops cleanup while committed active workers can continue serving. Explicit cleanup retry uses the same membership, attempt and deadlines; historical terminal failures remain audit facts.
 
-Replacement failure keeps the previous admitted set. If an admitted worker later exits, supervision republishes using validated survivors and spawns only missing slots.
+For a cancelled owner that has not begun admission preparation, the existing serial recovery scheduler rechecks late exit and cleanup evidence with capped backoff, including after master restart. These observations do not initialize workers or consume initialization-recovery attempts. Stopped safety-unknown barriers remain closed.
+
+Failure before the admission switch keeps the previous admitted set. After a switch may have been sent, recovery must establish the actual serving identity rather than assume rollback. Missing exit or release evidence blocks another publication, not an otherwise authorized configuration save. If an admitted worker later exits, supervision republishes using validated survivors and spawns only missing slots.
 
 ## Configuration Truth
 
