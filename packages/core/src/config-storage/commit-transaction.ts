@@ -4,10 +4,10 @@ import { replaceActiveMaterialization } from './materialize';
 import { operationFromRow, type OperationRow } from './operation-store';
 import type { PreparedCommitCommand } from './prepared-command';
 import { readActiveRevision } from './current-revision';
-import { readActiveRecovery } from './recovery-store';
 import type { CommitConfigurationResult, ConfigurationOperation, ConfigRepositoryOptions, RepositorySnapshot } from './repository-types';
-import { validateActiveOperationIdentity } from './operation-relations';
+import { readActivePublication } from './active-publication';
 import { readOperationWorkers } from './operation-records';
+import { validateOperationIdentity } from './operation-relations';
 import { ConfigRepositoryError } from './repository-types';
 import { sqliteGet } from './sqlite-query';
 
@@ -25,7 +25,8 @@ export function commitTransaction(
 ): CommitDecision {
   const existing = sqliteGet<OperationRow, [string]>(db, `SELECT mutation_id,request_hash,expected_revision,
     committed_revision,kind,target_worker_count,state,result_status,error_code,error_detail,
-    drain_recovery_generation,last_drain_recovery_previous_generation,created_at,updated_at
+    drain_recovery_generation,last_drain_recovery_previous_generation,plugin_catalog_hash,cancel_requested,
+    prepare_started,created_at,updated_at
     FROM configuration_operations WHERE mutation_id=?`, prepared.mutationId);
   if (existing !== null) {
     const operation = operationFromRow(existing);
@@ -34,30 +35,11 @@ export function commitTransaction(
     }
     return { kind: 'duplicate', operation };
   }
-  const state = { active_revision: readActiveRevision(db) };
-  if (state.active_revision !== prepared.expectedRevision) {
-    return { kind: 'stale_revision', expected_revision: prepared.expectedRevision, active_revision: state.active_revision };
+  const activeRevision = readActiveRevision(db);
+  if (activeRevision !== prepared.expectedRevision) {
+    return { kind: 'stale_revision', expected_revision: prepared.expectedRevision, active_revision: activeRevision };
   }
-  const activeRow = sqliteGet<OperationRow, [number]>(db, `SELECT mutation_id,request_hash,expected_revision,
-    committed_revision,kind,target_worker_count,state,result_status,error_code,error_detail,
-    drain_recovery_generation,last_drain_recovery_previous_generation,created_at,updated_at
-    FROM configuration_operations WHERE committed_revision=?`, state.active_revision);
-  if (activeRow !== null) {
-    const active = operationFromRow(activeRow);
-    validateActiveOperationIdentity(db, active, readOperationWorkers(db, active.mutation_id), snapshot);
-    if (active.state === 'committed' || active.state === 'publishing' || active.state === 'draining') {
-      return { kind: 'operation_in_progress', mutation_id: active.mutation_id,
-        committed_revision: active.committed_revision, state: active.state };
-    }
-  } else if (state.active_revision !== 1) {
-    throw new ConfigRepositoryError('schema_corrupt', 'active revision operation is missing');
-  }
-  const activeRecovery = readActiveRecovery(db, state.active_revision);
-  if (activeRecovery !== null && (activeRecovery.state === 'scheduled' || activeRecovery.state === 'running')) {
-    return { kind: 'recovery_in_progress', recovery_id: activeRecovery.recovery_id,
-      target_revision: activeRecovery.target_revision, state: activeRecovery.state };
-  }
-  if (state.active_revision === Number.MAX_SAFE_INTEGER) {
+  if (activeRevision === Number.MAX_SAFE_INTEGER) {
     throw new ConfigRepositoryError('repository_failure', 'configuration revision limit reached');
   }
   const protection = readManagementProtection(db);
@@ -67,15 +49,30 @@ export function commitTransaction(
   if (prepared.managementProvider !== null && !prepared.aggregate.plugin_activations.some(a => a.plugin_name === prepared.managementProvider)) {
     throw new ConfigRepositoryError('invalid_configuration', 'selected management provider activation is missing');
   }
-  const committedRevision = state.active_revision + 1;
+  // The latest and running projections must stay self-consistent; neither blocks newer expectations.
+  const latestRow = sqliteGet<OperationRow, [number]>(db, `SELECT mutation_id,request_hash,expected_revision,
+    committed_revision,kind,target_worker_count,state,result_status,error_code,error_detail,
+    drain_recovery_generation,last_drain_recovery_previous_generation,plugin_catalog_hash,cancel_requested,
+    prepare_started,created_at,updated_at
+    FROM configuration_operations WHERE committed_revision=?`, activeRevision);
+  if (latestRow !== null) {
+    if (snapshot.revision !== activeRevision) {
+      throw new ConfigRepositoryError('schema_corrupt', 'repository snapshot disagrees with the latest revision');
+    }
+    const latest = operationFromRow(latestRow);
+    validateOperationIdentity(db, latest, readOperationWorkers(db, latest.mutation_id), snapshot);
+  }
+  if (!offlineManagement) readActivePublication(db);
+  const committedRevision = activeRevision + 1;
   replaceActiveMaterialization(db, prepared.aggregate);
   options.faultInjection?.('after_materialization');
   db.run(`INSERT INTO configuration_revisions (revision,content_hash,kind,created_at) VALUES (?,?,?,?)`,
     [committedRevision, prepared.contentHash, prepared.kind, prepared.createdAt]);
   db.run(`INSERT INTO configuration_operations
     (mutation_id,request_hash,expected_revision,committed_revision,kind,state,result_status,error_code,error_detail,
-     drain_recovery_generation,last_drain_recovery_previous_generation,target_worker_count,created_at,updated_at)
-    VALUES (?,?,?,?,?,'committed',NULL,NULL,NULL,0,NULL,?,?,?)`, [
+     drain_recovery_generation,last_drain_recovery_previous_generation,plugin_catalog_hash,cancel_requested,
+     prepare_started,target_worker_count,created_at,updated_at)
+    VALUES (?,?,?,?,?,'pending',NULL,NULL,NULL,0,NULL,NULL,0,0,?,?,?)`, [
     prepared.mutationId, prepared.requestHash, prepared.expectedRevision, committedRevision,
     prepared.kind, prepared.targetSlots.length, prepared.createdAt, prepared.createdAt,
   ]);
@@ -100,7 +97,8 @@ export function commitTransaction(
     expected_revision: prepared.expectedRevision, committed_revision: committedRevision,
     kind: prepared.kind, target_worker_count: prepared.targetSlots.length,
     drain_recovery_generation: 0, last_drain_recovery_previous_generation: null,
-    state: 'committed', result_status: null, error_code: null, error_detail: null,
+    plugin_catalog_hash: null, cancel_requested: false, prepare_started: false,
+    state: 'pending', result_status: null, error_code: null, error_detail: null,
     created_at: prepared.createdAt, updated_at: prepared.createdAt,
   } };
 }

@@ -22,6 +22,7 @@ import { assertNeverConfigPublicationMessage, ConfigPublicationMessageError } fr
 import { sameProcessIdentity, samePublicationIdentity } from './message-fields';
 import { derivePluginReadiness, requiredPluginNames } from './worker-runtime-plugins';
 import {
+  ConfigWorkerLifecycleCleanupError,
   ConfigWorkerLifecycleReadinessError,
   ConfigWorkerRuntimeError,
   sameStartIdentity,
@@ -47,6 +48,12 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
   readonly bootNonce?: string;
   readonly bootId?: string;
   readonly monotonicNow?: () => bigint;
+  /**
+   * Observed synchronously for the first start command, before compilation or
+   * any wait. It associates shutdown cleanup evidence with the exact target even
+   * when initialization is cancelled before the lifecycle begins.
+   */
+  readonly observeStartCommand?: (command: StartWorkerCommand) => void;
   readonly requestShutdown?: () => void;
   readonly persistTerminalEvidence?: (message: WorkerDrainedMessage | WorkerDrainFailedMessage) => Promise<void>;
   readonly lifecycle: ConfigWorkerLifecycle<ServingHandle>;
@@ -72,6 +79,9 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
   let shutdownRequested = false;
   let shutdown: Promise<void> | null = null;
   let activeApply: Promise<ConfigWorkerRuntimeResult> | null = null;
+  let startupCleanupFailure: unknown;
+  /** Cancels in-progress plugin initialization; abort is not cleanup evidence. */
+  const shutdownSignal = new AbortController();
 
   function exitEvidence(state: ServingState<ServingHandle>): WorkerExitDeadlineEvidence | null {
     if (state.exitDeadlineNs === undefined || state.exitBootId === undefined || state.cleanupState === undefined) return null;
@@ -174,6 +184,7 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
   }
 
   async function start(command: StartWorkerCommand): Promise<ConfigWorkerRuntimeResult> {
+    if (attempt === null) options.observeStartCommand?.(command);
     if (attempt !== null) {
       if (sameStartIdentity(attempt.command, command)) return { ok: true, message: attempt.message };
       return { ok: true, message: workerFailure(command, identity, bootNonce, pid, 'worker already has a configuration target', [], serving) };
@@ -199,8 +210,16 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
     const required = requiredPluginNames(compiled.config);
     let started: Awaited<ReturnType<ConfigWorkerLifecycle<ServingHandle>['start']>>;
     try {
-      started = await lifecycle.start(compiled.config, command);
+      started = await lifecycle.start(compiled.config, command, shutdownSignal.signal);
     } catch (error) {
+      // A failed startup whose owned cleanup also failed must not become a
+      // normal apply failure: the coordinator would lose the release evidence.
+      if (error instanceof ConfigWorkerLifecycleCleanupError) {
+        // Record it before surfacing: shutdown may observe the settled apply
+        // instead of the in-flight promise and must still report failed cleanup.
+        startupCleanupFailure ??= error;
+        throw error;
+      }
       const readinessFailure = error instanceof ConfigWorkerLifecycleReadinessError;
       const message = workerFailure(
         command,
@@ -229,6 +248,7 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
         await lifecycle.stop(started.handle);
       } catch (error) {
         cleanupFailed = true;
+        startupCleanupFailure ??= error;
       }
       const message = workerFailure(
         command,
@@ -428,6 +448,9 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
     },
     failClosed(stopSupervision?: () => Promise<void>): Promise<void> {
       shutdownRequested = true;
+      // Abort synchronously so a cooperative initialization stops waiting, then
+      // still await its real settle below; never race it away.
+      shutdownSignal.abort(new Error('worker runtime is shutting down'));
       if (serving?.drainTimeout !== undefined) clearTimeout(serving.drainTimeout);
       if (shutdown !== null) return shutdown;
       const queued = queue;
@@ -438,6 +461,7 @@ export function createConfigWorkerRuntimeController<ServingHandle>(options: {
         const results = await Promise.allSettled(waits);
         const [queuedResult, stopResult, activeResult] = results;
         const errors: unknown[] = [];
+        if (startupCleanupFailure !== undefined) errors.push(startupCleanupFailure);
         if (stopResult?.status === 'rejected') errors.push(stopResult.reason);
         if (activeResult?.status === 'rejected') errors.push(activeResult.reason);
         if (queuedResult?.status === 'rejected') errors.push(queuedResult.reason);

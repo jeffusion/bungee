@@ -25,6 +25,9 @@ export type {
   RepositorySnapshot,
   ManagementProtection,
   ControlProjection,
+  PublicationCandidateAllocation,
+  PublicationCandidateExitEvidence,
+  PublicationPrepareDecision,
   ServingSnapshotKey,
   WorkerAttemptReason,
   WorkerPublicationResult,
@@ -48,6 +51,14 @@ export type {
 
 export { CONFIG_MIGRATIONS } from './migrations';
 
+export type {
+  UnsettledWorkerLaunch,
+  WorkerLaunch,
+  WorkerLaunchAllocation,
+  WorkerLaunchAllocationFacts,
+  WorkerLaunchExitEvidence,
+  WorkerLaunchIdentity,
+} from './worker-launch-store';
 export type { PublicationRetirement, PublicationRetirementMember, RetirementCleanupState, RetirementExitState, RetirementStopReason } from './retirement-store';
 export type { RuntimeRecoveryBudget, RuntimeRecoverySample, RuntimeRecoveryStartupGate } from './runtime-recovery-budget';
 

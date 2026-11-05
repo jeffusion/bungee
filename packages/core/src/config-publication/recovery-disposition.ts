@@ -108,6 +108,7 @@ export function classifyRecoveryError(error: unknown): PublicationRecoveryDispos
       case 'recovery_in_progress':
       case 'invalid_command':
       case 'invalid_configuration':
+      case 'cancellation_not_permitted':
         return 'retryable';
       default: return neverDisposition(error.code);
     }

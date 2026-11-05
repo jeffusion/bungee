@@ -1,6 +1,6 @@
 import type { ConfigRepository } from '../../src/config-storage';
 
-type FixtureMethod = 'getActivePublication' | 'getOperation' | 'getOperationState' | 'getCurrentOperationState' | 'getRecovery' | 'getCurrentRecovery' | 'getLatestRecovery' | 'commit' | 'beginPublication' | 'beginWorkerAttempt' | 'beginDrainingRecovery' | 'recordWorkerResult' | 'finalizePublication' | 'markDraining' | 'createManualRecovery' | 'claimRecoveryAttempt' | 'scheduleRecoveryRetry' | 'succeedRecovery' | 'stopRecovery' | 'requeueRecovery' | 'appendServingSnapshot' | 'getServingSnapshot' | 'getRetirementDescriptorCleanupState' | 'getRetiredWorkerInstanceIds' | 'getPublicationRetirement' | 'freezePublicationRetirement' | 'recordPublicationRetirementEvidence' | 'stopPublicationRetirement' | 'retryPublicationRetirement' | 'markPublicationRetirementReleased' | 'getRuntimeRecoveryBudget' | 'consumeRuntimeRecoveryRestartTicket' | 'getRuntimeRecoveryStartupGate' | 'observeRuntimeRecoveryHealth' | 'getPublicationServingSet' | 'freezePublicationServingSet' | 'confirmPublicationServingMemberExit' | 'close';
+type FixtureMethod = 'getActivePublication' | 'claimPublicationTarget' | 'requestPublicationCancellation' | 'enterPublicationPrepare' | 'recordPublicationCandidateExit' | 'confirmPublicationCandidateExited' | 'getOutstandingPublicationCandidates' | 'registerWorkerLaunch' | 'fenceWorkerLaunchNotStarted' | 'recordWorkerLaunchAdmitted' | 'recordWorkerLaunchExit' | 'getWorkerLaunch' | 'getWorkerLaunchAllocationFacts' | 'getUnsettledWorkerLaunches' | 'getWorkerLaunchInventory' | 'getOperation' | 'getOperationState' | 'getCurrentOperationState' | 'getRecovery' | 'getCurrentRecovery' | 'getPublicationRecoveryBarrier' | 'getLatestRecovery' | 'commit' | 'beginPublication' | 'beginWorkerAttempt' | 'beginDrainingRecovery' | 'recordWorkerResult' | 'finalizePublication' | 'markDraining' | 'createManualRecovery' | 'claimRecoveryAttempt' | 'scheduleRecoveryRetry' | 'succeedRecovery' | 'stopRecovery' | 'requeueRecovery' | 'appendServingSnapshot' | 'getServingSnapshot' | 'getRetirementDescriptorCleanupState' | 'getRetiredWorkerInstanceIds' | 'getPublicationRetirement' | 'freezePublicationRetirement' | 'recordPublicationRetirementEvidence' | 'stopPublicationRetirement' | 'retryPublicationRetirement' | 'markPublicationRetirementReleased' | 'getRuntimeRecoveryBudget' | 'consumeRuntimeRecoveryRestartTicket' | 'getRuntimeRecoveryStartupGate' | 'observeRuntimeRecoveryHealth' | 'getPublicationServingSet' | 'freezePublicationServingSet' | 'confirmPublicationServingMemberExit' | 'close';
 type ConfigurationRepositoryFixture = {
   [M in FixtureMethod]: (...args: Parameters<ConfigRepository[M]>) => Promise<ReturnType<ConfigRepository[M]>>;
 } & Pick<ConfigRepository, 'getSnapshot'>;
@@ -27,11 +27,26 @@ export function configurationRepositoryFixture(repository: ConfigRepository): Co
     observeRuntimeRecoveryHealth: async (...args: Parameters<ConfigRepository['observeRuntimeRecoveryHealth']>) => repository.observeRuntimeRecoveryHealth(...args),
 
     getActivePublication: async (...args: Parameters<ConfigRepository['getActivePublication']>) => repository.getActivePublication(...args),
+    claimPublicationTarget: async (...args: Parameters<ConfigRepository['claimPublicationTarget']>) => repository.claimPublicationTarget(...args),
+    requestPublicationCancellation: async (...args: Parameters<ConfigRepository['requestPublicationCancellation']>) => repository.requestPublicationCancellation(...args),
+    enterPublicationPrepare: async (...args: Parameters<ConfigRepository['enterPublicationPrepare']>) => repository.enterPublicationPrepare(...args),
+    recordPublicationCandidateExit: async (...args: Parameters<ConfigRepository['recordPublicationCandidateExit']>) => repository.recordPublicationCandidateExit(...args),
+    confirmPublicationCandidateExited: async (...args: Parameters<ConfigRepository['confirmPublicationCandidateExited']>) => repository.confirmPublicationCandidateExited(...args),
+    getOutstandingPublicationCandidates: async (...args: Parameters<ConfigRepository['getOutstandingPublicationCandidates']>) => repository.getOutstandingPublicationCandidates(...args),
+    registerWorkerLaunch: async (...args: Parameters<ConfigRepository['registerWorkerLaunch']>) => repository.registerWorkerLaunch(...args),
+    fenceWorkerLaunchNotStarted: async (...args: Parameters<ConfigRepository['fenceWorkerLaunchNotStarted']>) => repository.fenceWorkerLaunchNotStarted(...args),
+    recordWorkerLaunchAdmitted: async (...args: Parameters<ConfigRepository['recordWorkerLaunchAdmitted']>) => repository.recordWorkerLaunchAdmitted(...args),
+    recordWorkerLaunchExit: async (...args: Parameters<ConfigRepository['recordWorkerLaunchExit']>) => repository.recordWorkerLaunchExit(...args),
+    getWorkerLaunch: async (...args: Parameters<ConfigRepository['getWorkerLaunch']>) => repository.getWorkerLaunch(...args),
+    getWorkerLaunchAllocationFacts: async (...args: Parameters<ConfigRepository['getWorkerLaunchAllocationFacts']>) => repository.getWorkerLaunchAllocationFacts(...args),
+    getUnsettledWorkerLaunches: async (...args: Parameters<ConfigRepository['getUnsettledWorkerLaunches']>) => repository.getUnsettledWorkerLaunches(...args),
+    getWorkerLaunchInventory: async (...args: Parameters<ConfigRepository['getWorkerLaunchInventory']>) => repository.getWorkerLaunchInventory(...args),
     getOperation: async (...args: Parameters<ConfigRepository['getOperation']>) => repository.getOperation(...args),
     getOperationState: async (...args: Parameters<ConfigRepository['getOperationState']>) => repository.getOperationState(...args),
     getCurrentOperationState: async (...args: Parameters<ConfigRepository['getCurrentOperationState']>) => repository.getCurrentOperationState(...args),
     getRecovery: async (...args: Parameters<ConfigRepository['getRecovery']>) => repository.getRecovery(...args),
     getCurrentRecovery: async (...args: Parameters<ConfigRepository['getCurrentRecovery']>) => repository.getCurrentRecovery(...args),
+    getPublicationRecoveryBarrier: async (...args: Parameters<ConfigRepository['getPublicationRecoveryBarrier']>) => repository.getPublicationRecoveryBarrier(...args),
     getLatestRecovery: async (...args: Parameters<ConfigRepository['getLatestRecovery']>) => repository.getLatestRecovery(...args),
     commit: async (...args: Parameters<ConfigRepository['commit']>) => repository.commit(...args),
     beginPublication: async (...args: Parameters<ConfigRepository['beginPublication']>) => repository.beginPublication(...args),

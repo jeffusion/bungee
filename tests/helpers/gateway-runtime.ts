@@ -5,8 +5,10 @@ import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { DaemonManager } from '../../packages/cli/src/daemon/manager';
+import { captureProcessTree } from '../../packages/cli/src/daemon/process-tree';
 import { initializePluginSecretsKey } from '../../packages/cli/src/config/plugin-secrets-key';
 import { captureProcessIdentity, probeProcessIdentity, type CapturedProcessIdentity } from '../../packages/core/src/master-runtime/process-identity';
+import { discoverIngressIdentity } from '../../packages/core/src/ingress/supervision-http';
 import { makeCanonicalTempDir } from './canonical-temp';
 import {
   claimTestPortBlock,
@@ -35,10 +37,13 @@ export type OwnedMaster = {
   readonly child: ChildProcess;
   readonly output: string[];
   readonly workers: Map<string, OwnedWorker>;
+  ingress?: OwnedWorker;
   readonly shutdown?: () => Promise<void>;
   readonly diagnostics?: () => Promise<string>;
   workerInventoryComplete: boolean;
 };
+
+const ingressByFixture = new WeakMap<GatewayFixture, OwnedWorker>();
 export type StopOwnedMasterOptions = Readonly<{ graceTimeoutMs?: number; forceTimeoutMs?: number }>;
 export type GatewayMasterStartupState = { attempted: boolean; master?: OwnedMaster; errors: unknown[] };
 
@@ -182,6 +187,7 @@ export async function spawnMaster(
       child: owned.child,
       output,
       workers: new Map(),
+      ingress: ingressByFixture.get(fixture),
       workerInventoryComplete: false,
       shutdown: () => manager.stop(),
       diagnostics: async () => {
@@ -242,6 +248,9 @@ export async function waitForHealth(master: OwnedMaster, port: number, fixture: 
       return response.status === 200 && health.live === true && health.management === true;
     } catch { return false; }
     }, 'management health did not become ready', SETUP_TIMEOUT_MS);
+    // Capture the exact ingress owner before worker inventory: a later worker failure
+    // must not leave a recoverable ingress process untracked.
+    master.ingress = await captureOwnedIngress(master, port, fixture);
     await waitUntil(async () => {
     if (master.child.exitCode !== null || master.child.signalCode !== null) {
       throw new Error('master exited before its worker inventory was captured');
@@ -283,6 +292,44 @@ export async function recordOwnedWorkers(
   master.workerInventoryComplete = true;
 }
 
+async function captureOwnedIngress(
+  master: OwnedMaster,
+  managementPort: number,
+  fixture: GatewayFixture,
+): Promise<OwnedWorker> {
+  // Port block layout: management, public, ingress supervision, master control.
+  const identity = await discoverIngressIdentity(`http://127.0.0.1:${managementPort + 2}`, fetch, 5_000);
+  const existing = master.ingress;
+  if (existing !== undefined) {
+    if (existing.identity === undefined) throw new Error('owned ingress identity is unavailable');
+    const probe = await probeProcessIdentity(existing.identity);
+    if (probe === 'unknown') throw new Error('owned ingress identity could not be inspected');
+    if (existing.workerInstanceId === identity.process_instance_id && probe === 'exact') {
+      ingressByFixture.set(fixture, existing);
+      return existing;
+    }
+    if (probe === 'exact') {
+      throw new Error('fixture has multiple exact-owned ingress processes; refusing ambiguous cleanup');
+    }
+  }
+  const masterPid = master.child.pid;
+  if (masterPid === undefined) throw new Error('master PID is unavailable for ingress ownership capture');
+  const tree = await captureProcessTree(masterPid);
+  const matches = tree.filter((item) => item.processIdentity === identity.process_instance_id);
+  const snapshot = matches[0];
+  if (matches.length !== 1 || snapshot === undefined) {
+    throw new Error('expected exactly one owned ingress process in the master process tree');
+  }
+  const captured = await captureProcessIdentity(snapshot.pid, identity.process_instance_id);
+  const owned: OwnedWorker = {
+    pid: captured.pid,
+    workerInstanceId: identity.process_instance_id,
+    identity: captured,
+  };
+  ingressByFixture.set(fixture, owned);
+  return owned;
+}
+
 export async function waitUntil(
   predicate: () => boolean | Promise<boolean>, message: string, timeoutMs = SETUP_TIMEOUT_MS,
 ): Promise<void> {
@@ -300,6 +347,35 @@ export async function waitUntil(
 }
 
 export async function stopOwnedMaster(master: OwnedMaster, options: StopOwnedMasterOptions = {}): Promise<void> {
+  let masterFailure: unknown;
+  try {
+    await stopOwnedMasterProcess(master, options);
+  } catch (error) {
+    masterFailure = error;
+  }
+  let ingressFailure: unknown;
+  try {
+    await stopOwnedIngress(master, options);
+  } catch (error) {
+    ingressFailure = error;
+  }
+  if (masterFailure === undefined) {
+    if (ingressFailure !== undefined) {
+      throw new OwnedMasterShutdownError(`owned ingress cleanup failed: ${errorMessage(ingressFailure)}`, false, { cause: ingressFailure });
+    }
+    return;
+  }
+  if (ingressFailure !== undefined) {
+    throw new OwnedMasterShutdownError(
+      `${errorMessage(masterFailure)}; owned ingress cleanup also failed: ${errorMessage(ingressFailure)}`,
+      false,
+      { cause: masterFailure },
+    );
+  }
+  throw masterFailure;
+}
+
+async function stopOwnedMasterProcess(master: OwnedMaster, options: StopOwnedMasterOptions = {}): Promise<void> {
   const child = master.child;
   const graceTimeoutMs = options.graceTimeoutMs ?? 15_000;
   const forceTimeoutMs = options.forceTimeoutMs ?? 5_000;
@@ -356,6 +432,37 @@ async function inspectWorkerIdentity(worker: OwnedWorker): Promise<WorkerProcess
   return result === 'dead' ? 'gone' : result === 'mismatch' ? 'different' : result === 'exact' ? 'same' : 'unknown';
 }
 
+async function stopOwnedIngress(master: OwnedMaster, options: StopOwnedMasterOptions): Promise<void> {
+  const ingress = master.ingress;
+  if (ingress === undefined) return;
+  const initial = await inspectWorkerIdentity(ingress);
+  if (initial === 'gone' || initial === 'different') return;
+  if (initial === 'unknown') {
+    throw new OwnedMasterShutdownError('owned ingress identity could not be inspected; temporary evidence must be retained', false);
+  }
+  try {
+    process.kill(ingress.pid, 'SIGTERM');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
+    throw new OwnedMasterShutdownError(`owned ingress SIGTERM failed: ${errorMessage(error)}`, false, { cause: error });
+  }
+  const deadline = Date.now() + (options.graceTimeoutMs ?? 15_000);
+  for (;;) {
+    const state = await inspectWorkerIdentity(ingress);
+    if (state === 'gone' || state === 'different') return;
+    if (state === 'unknown') {
+      throw new OwnedMasterShutdownError('owned ingress identity could not be inspected after SIGTERM', false);
+    }
+    if (Date.now() >= deadline) {
+      throw new OwnedMasterShutdownError(
+        `owned ingress process identity still matches after SIGTERM: ${ingress.pid}/${ingress.workerInstanceId}`,
+        false,
+      );
+    }
+    await Bun.sleep(50);
+  }
+}
+
 async function waitForOwnedWorkersExited(master: OwnedMaster, timeoutMs: number): Promise<void> {
   if (!master.workerInventoryComplete || master.workers.size < 2) {
     throw new Error('worker inventory was never authoritatively captured');
@@ -400,7 +507,7 @@ export function scrub(value: string, fixture: GatewayFixture): string {
 }
 
 export function safeGatewayError(error: unknown, fixture: GatewayFixture, maxLength = 8_192): string {
-  return scrub(errorMessage(error), fixture).slice(-maxLength);
+  return scrub(errorMessage(error), fixture).slice(0, maxLength);
 }
 
 export async function requestJson(url: string, init: RequestInit, fixture: GatewayFixture): Promise<{

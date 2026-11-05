@@ -26,9 +26,9 @@ async function fixture() {
  let guard:ManagementProtection={required:false,selectedProvider:null,generation:0};
  const auth=new ManagementAuthentication(host,()=>aggregate,new Set(['user-auth']),undefined,()=>guard);
  const snapshot=()=>({aggregate,revision:1,content_hash:'sha256:'+'0'.repeat(64)}) as any;
- const api=createConfigControlApi({repository:{getSnapshot:snapshot,getActivePublication:async()=>null,getOperationState:async()=>null,commit:()=>{throw Error('unexpected');}},
+ const api=createConfigControlApi({repository:{getSnapshot:snapshot,getOperationState:async()=>null,commit:()=>{throw Error('unexpected');}},
   admission:{snapshot:()=>[]},workerCount:1,clock:{now:Date.now},resolveAuthToken:()=>null,
-  parseAggregate:value=>({ok:true,value:value as ConfigurationAggregate}),publicationTasks:{enqueue(){}},isMutationReady:()=>true,
+  parseAggregate:value=>({ok:true,value:value as ConfigurationAggregate}),publicationTasks:{wake(){}},isMutationReady:()=>true,
   managementAuth:auth,managementProviderMetadata:name=>({name,loginComponent:'Login',setupComponent:'Setup'}),
   validateManagementTransition:(req,active,next)=>validateManagementTransition(req,active,next,auth,host),
   pluginControlApi:host.api,pluginCapability:()=> 'self.password',

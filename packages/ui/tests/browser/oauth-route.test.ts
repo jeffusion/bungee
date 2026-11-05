@@ -72,7 +72,7 @@ async function runRouteScenario(scenario:string){
         return respond({ error: 'revision_changed' }, 409);
       }
       config = body.aggregate; revision++;
-      return respond({ operation_id: body.mutation_id, revision, operation: { state: 'converged', result_status: 200, error_code: null }, workers: [] }, 202);
+      return respond({ operation_id: body.mutation_id, revision, operation: { state: 'converged', result_status: 200, error_code: null, mutation_id: body.mutation_id, expected_revision: revision - 1, committed_revision: revision }, workers: [] }, 202);
     }
     if (url.pathname === '/api/plugins') return respond([{ name: 'chatgpt-oauth', enabled: true, metadata: { contributes: manifest.contributes } }]);
     if (url.pathname === '/api/plugins/schemas') return respond({ 'chatgpt-oauth': { name: manifest.name, version: manifest.version, configSchema: manifest.configSchema } });

@@ -28,6 +28,7 @@ test('a removed authentication plugin does not prevent dashboard and proxy start
           }] },
         } });
       expect(result.kind).toBe('committed');
+      repository.claimPublicationTarget(`sha256:${'a'.repeat(64)}`, Date.now());
       repository.beginPublication('before-upgrade', Date.now());
       repository.markDraining('before-upgrade', Date.now());
       repository.finalizePublication('before-upgrade', { outcome: 'converged', old_workers_exited: true }, Date.now());

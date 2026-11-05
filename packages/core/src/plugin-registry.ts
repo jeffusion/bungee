@@ -838,34 +838,30 @@ export class PluginRegistry {
 
   /**
    * 卸载所有 plugins（清理 context）
+   *
+   * 真实实例由 ScopedPluginRegistry 持有，这里不能再构造临时实例调用 onDestroy：
+   * 那既没有所有权，也会对未初始化的实例重复清理。只清理真正的全局 context，
+   * 尝试全部 context 后再传播失败。
    */
   async unloadAll(): Promise<void> {
     // 安全地获取 contextManager（如果未初始化则为 null）
     const contextManager = isPluginContextManagerInitialized() ? getPluginContextManager() : null;
+    const cleanupErrors: unknown[] = [];
 
-    for (const [name, factoryInfo] of this.pluginFactories.entries()) {
-      // 创建临时实例并调用 onDestroy（用于清理全局资源）
+    for (const name of [...this.pluginFactories.keys()]) {
+      if (contextManager === null) continue;
       try {
-        const tempInstance = new factoryInfo.PluginClass(factoryInfo.config.options || {});
-        if (tempInstance.onDestroy) {
-          await tempInstance.onDestroy();
-          logger.debug({ pluginName: name }, 'Plugin cleanup completed');
-        }
+        await contextManager.destroyContext(name);
       } catch (error) {
-        logger.error({ error, pluginName: name }, 'Error during plugin cleanup');
-      }
-
-      // 清理插件的全局 context（如果 contextManager 已初始化）
-      if (contextManager) {
-        try {
-          await contextManager.destroyContext(name);
-        } catch (error) {
-          logger.error({ error, pluginName: name }, 'Error destroying plugin context');
-        }
+        logger.error({ error, pluginName: name }, 'Error destroying plugin context');
+        cleanupErrors.push(error);
       }
     }
 
     this.pluginFactories.clear();
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(cleanupErrors, 'plugin registry unload failed');
+    }
     logger.info('All plugins unloaded');
   }
 

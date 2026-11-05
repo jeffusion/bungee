@@ -43,6 +43,8 @@ function finalize(repository: ConfigRepository, active: ReturnType<ConfigReposit
   const id = active.operation.mutation_id;
   repository.beginPublication(id, 2);
   repository.beginWorkerAttempt(id, 0, 0, 'initial', 3);
+  // This control fixture simulates the publisher without forking a process.
+  repository.fenceWorkerLaunchNotStarted(id, 0, 1, 3);
   repository.recordWorkerResult(id, 0, { kind: 'converged', attempt_no: 1,
     applied_revision: active.snapshot.revision }, 4);
   repository.markDraining(id, 5);
@@ -60,7 +62,9 @@ function fixture(
   const repository = ConfigRepository.open(join(root, 'config.db'));
   repositories.push(repository);
   const publishedOperationIds: string[] = [];
-  const enqueue = (active: NonNullable<ReturnType<ConfigRepository['getActivePublication']>>) => {
+  const wake = () => {
+    const active = repository.claimPublicationTarget(hashConfigurationContent(repository.getSnapshot().aggregate), 2);
+    if (active === null) return;
     publishedOperationIds.push(active.operation.mutation_id);
     finalize(repository, active);
   };
@@ -69,7 +73,7 @@ function fixture(
   const apiOptions = { managementAuth: credential.managementAuth, repository: configurationRepositoryFixture(repository), admission: new WorkerAdmissionRegistry(), workerCount: 1,
     clock: { now: () => 1 }, resolveAuthToken: (value: string) => value,
     parseAggregate: parseNormalizeCompileAggregate,
-    publicationTasks: { enqueue }, pluginControlPreflight: preflight, isMutationReady, isRecoveryReady,
+    publicationTasks: { wake }, pluginControlPreflight: preflight, isMutationReady, isRecoveryReady,
   };
   const api = createConfigControlApi(apiOptions);
   return { api, repository, publishedOperationIds, credential };
@@ -96,7 +100,7 @@ describe('asynchronous configuration control with an explicit management provide
     let checks = 0;
     const controlCalls: string[] = [];
     const preflight: ConfigControlApiOptions['pluginControlPreflight'] = {
-      controlNames: new Set(['fake-control']),
+      controlNames: new Set(['fake-control']), managementNames: new Set(['fake-control']),
       async activate(name) { controlCalls.push(`activate:${name}`); },
       async deactivate(name) { controlCalls.push(`deactivate:${name}`); },
     };
@@ -118,7 +122,7 @@ describe('asynchronous configuration control with an explicit management provide
   test('preflight failure leaves revision, operation, and publication queue unchanged at every commit entry', async () => {
     const activated: string[] = [];
     const preflight: ConfigControlApiOptions['pluginControlPreflight'] = {
-      controlNames: new Set(['fake-control']),
+      controlNames: new Set(['fake-control']), managementNames: new Set(['fake-control']),
       async activate(name) { activated.push(name); throw new Error('control unavailable'); },
       async deactivate() { throw new Error('must not rollback a failed activation'); },
     };
@@ -149,7 +153,7 @@ describe('asynchronous configuration control with an explicit management provide
   test('rolls back only control activations created by a rejected commit', async () => {
     const calls: string[] = [];
     const { api, repository, publishedOperationIds } = fixture({
-      controlNames: new Set(['fake-control']),
+      controlNames: new Set(['fake-control']), managementNames: new Set(['fake-control']),
       async activate(name) { calls.push(`activate:${name}`); },
       async deactivate(name) { calls.push(`deactivate:${name}`); },
     });
@@ -168,7 +172,7 @@ describe('asynchronous configuration control with an explicit management provide
     const preflightStartedPromise = new Promise<void>((resolve) => { signalPreflightStarted = resolve; });
     let releasePreflight!: () => void;
     const { api, repository, credential } = fixture({
-      controlNames: new Set(['fake-control']),
+      controlNames: new Set(['fake-control']), managementNames: new Set(['fake-control']),
       async activate() {
         preflightStarted = true;
         signalPreflightStarted();
@@ -208,7 +212,7 @@ describe('asynchronous configuration control with an explicit management provide
     const preflightStarted = new Promise<void>((resolve) => { signalPreflightStarted = resolve; });
     let releasePreflight!: () => void;
     const { api, repository, publishedOperationIds } = fixture({
-      controlNames: new Set([controlA, controlB]),
+      controlNames: new Set([controlA, controlB]), managementNames: new Set([controlA, controlB]),
       async activate(name) {
         preflightCalls.push(name);
         if (name === controlA) {
@@ -253,7 +257,7 @@ describe('asynchronous configuration control with an explicit management provide
     const secondResponse = await second;
     expect(secondResponse?.status).toBe(409);
     expect(await secondResponse?.json()).toMatchObject({
-      error: 'stale_revision', expected_revision: revision,
+      error: 'stale_revision',
       active: { revision: revision + 1, config: aggregateA },
     });
 
@@ -302,16 +306,13 @@ describe('asynchronous configuration control with an explicit management provide
     const operation = repository.getOperation(mutationId);
     expect(operation).toMatchObject({
       mutation_id: mutationId, expected_revision: 1, committed_revision: 2,
-      kind: 'config', state: 'committed', target_worker_count: 1,
+      kind: 'config', state: 'pending', target_worker_count: 1,
       request_hash: hashConfigurationRequest({ kind: 'config', expected_revision: 1,
         aggregate: next, target_worker_slots: [0] }),
     });
     if (operation === null) throw new Error('committed operation missing after recovered read');
     expect(repository.getOperationState(mutationId)?.operation).toEqual(operation);
-    expect(repository.getActivePublication()).toMatchObject({
-      operation: { mutation_id: mutationId, committed_revision: 2 },
-      snapshot: { revision: 2, aggregate: next, content_hash: hashConfigurationContent(next) },
-    });
+    expect(repository.getActivePublication()).toBeNull();
     expect(publishedOperationIds).toEqual([]);
     expect(commitCalls).toBe(1);
   });
@@ -324,7 +325,7 @@ describe('asynchronous configuration control with an explicit management provide
     let signalPreflightStarted!: () => void;
     const preflightStarted = new Promise<void>((resolve) => { signalPreflightStarted = resolve; });
     const { api, repository, credential } = fixture({
-      controlNames: new Set(['rotation-control', 'queued-control']),
+      controlNames: new Set(['rotation-control', 'queued-control']), managementNames: new Set(['rotation-control', 'queued-control']),
       async activate(name) {
         calls.push(`activate:${name}`);
         if (name === 'rotation-control') {
@@ -367,7 +368,7 @@ describe('asynchronous configuration control with an explicit management provide
     let signalPreflightStarted!: () => void;
     const preflightStarted = new Promise<void>((resolve) => { signalPreflightStarted = resolve; });
     const { api, repository, credential } = fixture({
-      controlNames: new Set(['rotation-control']),
+      controlNames: new Set(['rotation-control']), managementNames: new Set(['rotation-control']),
       async activate(name) {
         calls.push(`activate:${name}`);
         signalPreflightStarted();
@@ -563,7 +564,7 @@ describe('asynchronous configuration control with an explicit management provide
     let mutationReadinessCalls = 0;
     let recoveryReadinessCalls = 0;
     const { api } = fixture({
-      controlNames: new Set(['control']),
+      controlNames: new Set(['control']), managementNames: new Set(['control']),
       async activate(name) { calls.push(`activate:${name}`); },
       async deactivate(name) { calls.push(`deactivate:${name}`); },
     }, () => { mutationReadinessCalls += 1; return true; }, () => {
@@ -657,7 +658,7 @@ describe('asynchronous configuration control with an explicit management provide
       repository: { getSnapshot() { throw new ConfigRepositoryError('repository_failure', 'closed'); } },
       admission: new WorkerAdmissionRegistry(), workerCount: 1, clock: { now: () => 1 },
       resolveAuthToken: (value: string) => value, parseAggregate: parseNormalizeCompileAggregate,
-      publicationTasks: { enqueue() {} }, isMutationReady: () => true,
+      publicationTasks: { wake() {} }, isMutationReady: () => true,
     } as unknown as Parameters<typeof createConfigControlApi>[0]);
     const response = await broken.handle(new Request('http://control.test/api/config', { headers: { authorization: `Bearer ${OLD}` } }));
     expect(response?.status).toBe(503);

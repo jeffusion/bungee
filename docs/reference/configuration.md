@@ -32,11 +32,15 @@ Keys, administrator sessions and plugin ledgers are durable runtime state outsid
 | Import snapshot | `POST /api/config/import` |
 | Runtime workers | `GET /api/config/runtime` |
 
-Writes use optimistic concurrency with `expected_revision` and return `202` plus an operation ID. Poll until the operation is `converged` or `degraded`.
+Writes use optimistic concurrency with `expected_revision` and return `202` plus an operation ID after the configuration is durably saved. Saving does not wait for an earlier publication or old-worker drain. A stale revision returns a conflict; re-read and review the changes rather than resubmitting an old aggregate against a newer revision.
 
-Route and service editors finish saving when the master confirms the database commit. A shared banner tracks publication across page navigation, including worker startup, traffic switching, and old requests draining; a slow publication does not mean the configuration was not saved. If a previous publication is still running, the next edit waits before submitting with its original `expected_revision`, so concurrent changes still produce a revision conflict.
+The configuration workspace, imports, entity editors and plugin activation finish saving when the master confirms the database commit. Editing and further saves remain available while the data plane applies the configuration. A shared banner tracks application across page navigation; slow startup or old requests draining does not mean the configuration was not saved. Publication updates do not replace unsaved editor changes.
 
-If a save response is lost, the editor queries its original operation ID rather than repeating the write. Unconfirmed results retain that ID for inspection in the configuration workspace.
+The master applies one target at a time and selects the latest saved target when it becomes available. Intermediate targets need not receive traffic. When a target is claimed, earlier unclaimed targets are marked superseded without starting workers. A starting candidate can be cancelled before admission preparation, but its exit and required cleanup must be confirmed before a replacement starts. A superseded operation remains a saved configuration record, not proof that it served traffic. Once admission preparation begins, the attempt must complete or recover through its original safety protocol.
+
+Operation states distinguish `pending` (saved, waiting to be claimed), `committed` (claimed publication target), `publishing`, `draining`, and the terminal states `converged`, `degraded`, and `superseded`. In particular, `pending` is already durable; it is not an unsent editor draft. A superseded operation is not a failed save and must not be blindly submitted again. Inspect the latest target and actual serving identity separately.
+
+If a save response is lost, the editor queries its original operation ID rather than repeating the write. Unconfirmed results retain that ID for application-wide tracking. Further input is allowed, but another submission must not replace the unresolved operation with a new mutation ID.
 
 For a retry, send exactly `{"request_id":"<lowercase UUID>","expected_revision":<positive safe integer>}`. The response is a durable recovery record; active recoveries return `202`, terminal records return `200`, and retrying the same request ID with the same operation and revision is idempotent.
 
@@ -172,12 +176,12 @@ The `aggregate` field is the complete object shown above. Management protection 
 - 校验不要求三个字段之间存在固定比例或先后关系。
 - 三个期限分别约束不同阶段，不能相加当作“整轮发布总超时”。
 - 修改从本次发布开始生效：新一轮发布使用目标 snapshot 的 `publication`；恢复不会重置同一排空任务的 `drain_timeout_ms`。
-- `drain_timeout_ms` 越长，旧代进程及其连接占用资源越久；本轮发布未到达终态时不能提交下一轮发布。
+- `drain_timeout_ms` 越长，旧代进程及其连接占用资源越久。期间可以保存新配置，但下一批候选必须等待旧代退出且 retirement 安全释放；不在排空期间启动第三批 Worker。
 - `worker_exit_timeout_ms`（E）在 worker 自然排空到达终态或决定强制结束时创建一次。其后的状态查询、强制停止、资源清理、关闭与 OS 退出取证共用同一段剩余 E，不会重新授予一段完整 E；清理的签名终态与精确退出分别取证，即使进程已经退出，清理失败也不能判为成功。
 - 这些期限是发布策略，不是单次 API / LLM 请求超时或 idle timeout，也不存在按模式切换的开关。控制台按秒显示与编辑；查看页面不会把默认值写入配置。
 - `publication` 与代理请求预算相互独立，不是代理的 `request_ms` / first-byte / idle budget，也不覆盖前置插件处理阶段。代理现有 `request_ms` 默认 30 秒与可选 first-byte 预算，据此不能声称整条请求链已被一个统一 deadline 接管。
 
-**派生交接前置阶段（H）。** 除三个用户期限外，实现中还有一个派生的前置阶段 H，其时长等于本次目标 `drain_timeout_ms`，它不是第四个用户设置。Ingress 提交后立即把新请求切到新代；此前已按旧 admission / worker 身份选定旧进程的私有请求，要等到取得响应头或失败才算释放，这段等待就是 H。H 从 Ingress commit 起单调计时，同一 boot 内重连或重试不会重新授予。H 是额外的前置阶段，不消耗、也不重启 worker 真正开始排空后的 D；若 H 逾期仍未完成，只是非致命的 unknown：保留新代接流、旧代与双方租约，操作保持非终态并禁止下一轮发布，之后只查询同一屏障。因此换代 / 退场的总时长不能写成 C + D + E。
+**派生交接前置阶段（H）。** 除三个用户期限外，实现中还有一个派生的前置阶段 H，其时长等于本次目标 `drain_timeout_ms`，它不是第四个用户设置。Ingress 提交后立即把新请求切到新代；此前已按旧 admission / worker 身份选定旧进程的私有请求，要等到取得响应头或失败才算释放，这段等待就是 H。H 从 Ingress commit 起单调计时，同一 boot 内重连或重试不会重新授予。H 是额外的前置阶段，不消耗、也不重启 worker 真正开始排空后的 D；若 H 逾期仍未完成，只是非致命的 unknown：保留新代接流、旧代与双方租约，操作保持非终态并禁止启动下一次发布，之后只查询同一屏障。保存新的期望配置不会解除这个屏障。因此换代 / 退场的总时长不能写成 C + D + E。
 
 API 场景的较短排空起始建议（5 / 30 / 10 秒）：
 

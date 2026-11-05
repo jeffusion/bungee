@@ -3,7 +3,7 @@ import { Database } from 'bun:sqlite';
 import { copyFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate, Sha256Digest } from '@jeffusion/bungee-types';
 import {
   ConfigRepository,
   ConfigRepositoryError,
@@ -11,6 +11,7 @@ import {
   hashConfigurationRequest,
 } from '../../src/config-storage';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
+import { settleWorkerLaunch } from '../helpers/worker-launch';
 
 setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
@@ -62,7 +63,18 @@ function nextCommand(mutationId: string, targets: readonly number[] = [1]) {
 }
 
 function beginTargets(repository: ConfigRepository, mutationId: string, slots: readonly number[]): void {
-  for (const slot of slots) repository.beginWorkerAttempt(mutationId, slot, 0, 'initial', CREATED_AT + 2);
+  for (const slot of slots) {
+    repository.beginWorkerAttempt(mutationId, slot, 0, 'initial', CREATED_AT + 2);
+    settleWorkerLaunch(repository, mutationId, slot, 1, CREATED_AT + 2);
+  }
+}
+
+const CATALOG: Sha256Digest = `sha256:${'a'.repeat(64)}`;
+
+function claim(repository: ConfigRepository) {
+  const active = repository.claimPublicationTarget(CATALOG, CREATED_AT);
+  if (active === null) throw new Error('expected a claimed publication target');
+  return active;
 }
 
 afterEach(() => {
@@ -103,28 +115,32 @@ const emptyDatabaseTemplate = (() => {
 afterAll(() => rmSync(emptyDatabaseTemplate.root, { recursive: true, force: true }));
 
 describe('ConfigRepository operation lifecycle', () => {
-  test('blocks a new revision while the active operation is committed or publishing without reserving mutation IDs', () => {
+  test('persists newer revisions while an older target is claimed and publishing', () => {
     // Given
     const { repository, dbPath } = open();
     repository.commit(command('active-r2', [0]));
+    claim(repository);
 
     // When / Then
-    expect(repository.commit(nextCommand('blocked-committed'))).toEqual({
-      kind: 'operation_in_progress', mutation_id: 'active-r2', committed_revision: 2, state: 'committed',
-    });
-    expect(counts(dbPath)).toEqual({ revisions: 2, operations: 1, workers: 1 });
-    expect(repository.getOperation('blocked-committed')).toBeNull();
+    const r3 = repository.commit(nextCommand('newer-r3'));
+    expect(r3.kind).toBe('committed');
+    expect(counts(dbPath)).toEqual({ revisions: 3, operations: 2, workers: 2 });
     repository.beginPublication('active-r2', CREATED_AT + 1);
-    expect(repository.commit(nextCommand('blocked-publishing'))).toEqual({
-      kind: 'operation_in_progress', mutation_id: 'active-r2', committed_revision: 2, state: 'publishing',
+    const r4 = repository.commit({ ...nextCommand('newer-r4'), expected_revision: 3, created_at: CREATED_AT + 20 });
+    expect(r4.kind).toBe('committed');
+    expect(repository.getSnapshot().revision).toBe(4);
+    expect(repository.getActivePublication()?.operation).toMatchObject({
+      mutation_id: 'active-r2', committed_revision: 2, state: 'publishing',
     });
-    expect(repository.getOperation('blocked-publishing')).toBeNull();
+    expect(repository.getOperation('newer-r3')).toMatchObject({ state: 'pending', committed_revision: 3 });
+    expect(repository.getOperation('newer-r4')).toMatchObject({ state: 'pending', committed_revision: 4 });
   });
 
-  test('permits the next revision only after the active operation is terminal and preserves duplicate precedence', () => {
+  test('preserves duplicate precedence for terminal historical revisions', () => {
     // Given
     const { repository } = open();
     repository.commit(command('r2-terminal', [0]));
+    claim(repository);
     repository.beginPublication('r2-terminal', CREATED_AT + 1);
     beginTargets(repository, 'r2-terminal', [0]);
     repository.recordWorkerResult('r2-terminal', 0, { kind: 'converged', attempt_no: 1, applied_revision: 2 }, CREATED_AT + 3);
@@ -149,38 +165,34 @@ describe('ConfigRepository operation lifecycle', () => {
     repository.commit(command('empty-r2', []));
 
     // When / Then
-    expect(repository.commit(nextCommand('empty-blocked'))).toMatchObject({ kind: 'operation_in_progress' });
+    claim(repository);
     repository.beginPublication('empty-r2', CREATED_AT + 1);
     expect(repository.markDraining('empty-r2', CREATED_AT + 2).state).toBe('draining');
-    expect(repository.commit(nextCommand('empty-r3')).kind).toBe('operation_in_progress');
+    expect(repository.commit(nextCommand('empty-r3')).kind).toBe('committed');
   });
 
-  test('rejects publication actions for a non-active nonterminal operation before any write', () => {
+  test('rejects publication actions for an unclaimed target before any write', () => {
     // Given
     const { repository } = open();
     repository.commit(command('old-r2', [0]));
+    claim(repository);
     repository.beginPublication('old-r2', CREATED_AT + 1);
     beginTargets(repository, 'old-r2', [0]);
     repository.recordWorkerResult('old-r2', 0, { kind: 'failed', attempt_no: 1, error: 'failed' }, CREATED_AT + 3);
     repository.finalizePublication('old-r2', {
       outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'failed', recovery_disposition: 'retryable',
     }, CREATED_AT + 4);
-    repository.commit(nextCommand('active-r3', [1]));
-    const db = repository['db'];
-    db.run('DROP TRIGGER configuration_operations_terminal_immutable_update');
-    db.run('PRAGMA ignore_check_constraints=ON');
-    db.run("UPDATE configuration_operations SET state='publishing',result_status=NULL,error_code=NULL WHERE mutation_id='old-r2'");
-    db.run("UPDATE configuration_operation_workers SET state='pending',applied_revision=NULL,last_error=NULL WHERE mutation_id='old-r2'");
-    db.run('PRAGMA ignore_check_constraints=OFF');
+    repository.commit(nextCommand('pending-r3', [1]));
 
     // When / Then
     for (const action of [
-      () => repository.beginPublication('old-r2', CREATED_AT + 20),
-      () => repository.recordWorkerResult('old-r2', 0, { kind: 'failed', attempt_no: 1, error: 'late' }, CREATED_AT + 20),
-      () => repository.finalizePublication('old-r2', {
+      () => repository.beginPublication('pending-r3', CREATED_AT + 20),
+      () => repository.recordWorkerResult('pending-r3', 1, { kind: 'failed', attempt_no: 1, error: 'late' }, CREATED_AT + 20),
+      () => repository.finalizePublication('pending-r3', {
         outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'late', recovery_disposition: 'retryable',
       }, CREATED_AT + 20),
     ]) expect(action).toThrow(ConfigRepositoryError);
+    expect(repository.getOperation('pending-r3')).toMatchObject({ state: 'pending', result_status: null });
   });
 
   test('canonicalizes target slots into request identity and atomically freezes pending targets', () => {
@@ -204,7 +216,7 @@ describe('ConfigRepository operation lifecycle', () => {
     expect(result.kind).toBe('committed');
     if (result.kind !== 'committed') return;
     expect(result.operation).toMatchObject({
-      state: 'committed', target_worker_count: 2, result_status: null, error_code: null,
+      state: 'pending', target_worker_count: 2, result_status: null, error_code: null,
     });
     expect(result.operation.request_hash).toBe(hashConfigurationRequest({
       kind: 'config', expected_revision: 1, aggregate: value, target_worker_slots: [1, 3],
@@ -231,6 +243,7 @@ describe('ConfigRepository operation lifecycle', () => {
     }
     const empty = repository.commit(command('empty-targets', []));
     expect(empty.kind).toBe('committed');
+    claim(repository);
     repository.beginPublication('empty-targets', CREATED_AT + 1);
     expect(repository.markDraining('empty-targets', CREATED_AT + 2).state).toBe('draining');
   });
@@ -241,6 +254,7 @@ describe('ConfigRepository operation lifecycle', () => {
     repository.commit(command('converge', [0, 2]));
 
     // When / Then
+    claim(repository);
     expect(repository.beginPublication('converge', CREATED_AT + 1).state).toBe('publishing');
     beginTargets(repository, 'converge', [0, 2]);
     expect(() => repository.markDraining('converge', CREATED_AT + 3)).toThrow(ConfigRepositoryError);
@@ -266,6 +280,7 @@ describe('ConfigRepository operation lifecycle', () => {
     // Given
     const { repository } = open();
     repository.commit(command('degrade', [4]));
+    claim(repository);
     repository.beginPublication('degrade', CREATED_AT + 1);
     beginTargets(repository, 'degrade', [4]);
 
@@ -293,8 +308,10 @@ describe('ConfigRepository operation lifecycle', () => {
     expect(() => repository.recordWorkerResult('illegal', 0, {
       kind: 'failed', attempt_no: 1, error: 'failed',
     }, CREATED_AT + 1)).toThrow(ConfigRepositoryError);
+    claim(repository);
     repository.beginPublication('illegal', CREATED_AT + 2);
     repository.beginWorkerAttempt('illegal', 0, 0, 'initial', CREATED_AT + 2);
+    settleWorkerLaunch(repository, 'illegal', 0, 1, CREATED_AT + 2);
     expect(() => repository.recordWorkerResult('illegal', 9, {
       kind: 'failed', attempt_no: 1, error: 'failed',
     }, CREATED_AT + 3)).toThrow(ConfigRepositoryError);
@@ -334,6 +351,7 @@ describe('ConfigRepository operation lifecycle', () => {
     // Given
     const { repository, dbPath } = open();
     repository.commit(command('truthful-terminal', [0]));
+    claim(repository);
     repository.beginPublication('truthful-terminal', CREATED_AT + 1);
     beginTargets(repository, 'truthful-terminal', [0]);
     repository.recordWorkerResult('truthful-terminal', 0, {

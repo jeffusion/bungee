@@ -3,9 +3,11 @@ import { runGatewayWebSocket } from '../gateway/runtime';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import type { Server } from 'bun';
 import {
+  ConfigWorkerLifecycleCleanupError,
   ConfigWorkerLifecycleReadinessError,
   type ConfigWorkerLifecycle,
 } from '../config-publication/worker-runtime-contract';
+import { PluginRuntimeInitializationCleanupError } from '../plugin-runtime-orchestrator';
 import { derivePluginReadiness, requiredPluginNames } from '../config-publication/worker-runtime-plugins';
 import type { StartWorkerCommand } from '../config-publication/types';
 import type { PluginRuntimeOrchestratorStatusReport } from '../plugin-runtime-orchestrator';
@@ -44,7 +46,7 @@ export type ProductionResources = {
   readonly requestLogging?: RequestLoggerDependencies;
   initializePluginContext(): void;
   cleanupPluginContexts(): Promise<void>;
-  initializePluginRuntime(config: AppConfig, activatedPluginNames: readonly string[], services?: PluginServiceHost, beforeBootstrap?: (signal: AbortSignal) => Promise<void>): Promise<{
+  initializePluginRuntime(config: AppConfig, activatedPluginNames: readonly string[], services?: PluginServiceHost, beforeBootstrap?: (signal: AbortSignal) => Promise<void>, signal?: AbortSignal): Promise<{
     generation: number;
     status: PluginRuntimeOrchestratorStatusReport;
   }>;
@@ -111,7 +113,8 @@ export function createConfigWorkerLifecycle(
   const transportSecret = parseWorkerTransportSecret(options.transportSecret);
   const loadResources = options.loadResources ?? loadProductionResources;
   return {
-    async start(config: AppConfig, command: StartWorkerCommand) {
+    async start(config: AppConfig, command: StartWorkerCommand, signal?: AbortSignal) {
+      const shutdownSignal = signal ?? new AbortController().signal;
       const resources = await loadResources();
       let cleanupPromise: Promise<void> | null = null;
       const cleanup = () => cleanupPromise ??= cleanupAll(resources);
@@ -119,20 +122,27 @@ export function createConfigWorkerLifecycle(
       const websocket = createWebSocketBridge(webSocketMessageLimits(config.websocket_max_message_bytes));
       const sessions = new Set<Promise<void>>();
       try {
+        shutdownSignal.throwIfAborted();
         resources.configureBodyStorage(config);
         resources.initializeRuntimeState(config);
         resources.initializePluginContext();
         options.onStartTarget?.(command);
         // Real gate, bounded and cancelable: the authenticated peer transport
-        // must be attached before any plugin can consume a remote service.
+        // must be attached before any plugin can consume a remote service. The
+        // shutdown signal is combined so a cancelled start stops waiting here.
         if (options.awaitPeerReady !== undefined) {
           const startup = new AbortController();
-          try { await options.awaitPeerReady(startup.signal); }
+          const gateSignal = AbortSignal.any([startup.signal, shutdownSignal]);
+          try { await options.awaitPeerReady(gateSignal); }
           finally { startup.abort('config worker plugin initialization finished'); }
         }
+        shutdownSignal.throwIfAborted();
+        const beforeBootstrap = options.beforeBootstrap === undefined ? undefined
+          : (gateSignal: AbortSignal) => options.beforeBootstrap!(AbortSignal.any([gateSignal, shutdownSignal]));
         const pluginRuntime = await resources.initializePluginRuntime(
-          config, command.activated_plugin_names, options.services, options.beforeBootstrap,
+          config, command.activated_plugin_names, options.services, beforeBootstrap, shutdownSignal,
         );
+        shutdownSignal.throwIfAborted();
         const readiness = derivePluginReadiness(
           requiredPluginNames(config),
           pluginRuntime.generation,
@@ -155,6 +165,7 @@ export function createConfigWorkerLifecycle(
             logging: resources.requestLogging,
           });
         };
+        shutdownSignal.throwIfAborted();
         server = resources.serveWebSocket
           ? resources.serveWebSocket(fetchHandler,websocket.websocket)
           : resources.serve(request=>fetchHandler(request) as Promise<Response>);
@@ -179,15 +190,21 @@ export function createConfigWorkerLifecycle(
           plugin_status: pluginRuntime.status,
         };
       } catch (error) {
+        let cleanupFailed = error instanceof PluginRuntimeInitializationCleanupError;
         const failures: unknown[] = [error];
         if (server !== null) {
-          try { await server.stop(true); } catch (stopError) { failures.push(stopError); }
+          try { await server.stop(true); } catch (stopError) { failures.push(stopError); cleanupFailed = true; }
         }
         try {
           await cleanup();
         } catch (cleanupError) {
+          cleanupFailed = true;
           if (cleanupError instanceof AggregateError) failures.push(...cleanupError.errors);
           else failures.push(cleanupError);
+        }
+        if (cleanupFailed) {
+          throw new ConfigWorkerLifecycleCleanupError('start',
+            failures.length === 1 ? error : new AggregateError(failures, 'config worker start failed'));
         }
         if (failures.length > 1) throw new AggregateError(failures, 'config worker start failed');
         throw error;
@@ -287,12 +304,13 @@ export async function loadProductionResources(): Promise<ProductionResources> {
         await pluginContexts.getPluginContextManager().destroyAll();
       }
     },
-    async initializePluginRuntime(config, activatedPluginNames, services, beforeBootstrap) {
+    async initializePluginRuntime(config, activatedPluginNames, services, beforeBootstrap, signal) {
       const result = await pluginRuntime.initializePluginRuntime(config, {
         basePath: process.cwd(),
         activatedPluginNames,
         ...(services === undefined ? {} : { services }),
         ...(beforeBootstrap === undefined ? {} : { beforeBootstrap }),
+        ...(signal === undefined ? {} : { signal }),
       });
       return { generation: result.generation, status: result.status };
     },

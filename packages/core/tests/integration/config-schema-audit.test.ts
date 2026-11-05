@@ -12,6 +12,7 @@ setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
 const roots: string[] = [];
 const repositories: ConfigRepository[] = [];
+const CATALOG = `sha256:${'c'.repeat(64)}` as const;
 const VALUE: ConfigurationAggregate = {
   logical_configuration: {
     auth: { enabled: true, tokens: ['literal'] }, services: [], routes: [], plugins: [],
@@ -132,6 +133,7 @@ describe('ConfigRepository initialized schema fingerprint', () => {
         created_at: 1_700_000_000_000, target_worker_slots: [0],
       });
       if (action === 'record' || action === 'finalize') {
+        repository.claimPublicationTarget(CATALOG, 1_700_000_000_000);
         repository.beginPublication('trigger-r2', 1_700_000_000_001);
         repository.beginWorkerAttempt('trigger-r2', 0, 0, 'initial', 1_700_000_000_001);
       }

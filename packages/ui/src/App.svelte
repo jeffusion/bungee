@@ -1,17 +1,19 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { get } from 'svelte/store';
-  import { guardedLocation as location, settingsDirty, dashboardDirty, menuDirty } from '$stores/navigation-guard';
+  import { guardedLocation as location, settingsDirty, dashboardDirty, menuDirty, editorDirty } from '$stores/navigation-guard';
   import { confirmAction } from '$stores/confirmation';
   import { toast } from '$stores/toast';
   import ConfirmationHost from '$components/shell/ConfirmationHost.svelte';
-  import ConfigurationPublicationBanner from '$components/shell/ConfigurationPublicationBanner.svelte';
   import AppHeader from '$components/shell/AppHeader.svelte';
   import LazyPage from '$components/shell/LazyPage.svelte';
   import { isLoading } from 'svelte-i18n';
   import { _ } from '$i18n';
   import { loadPluginTranslations } from '$i18n/plugin-translations';
   import { isAuthenticated, authMode, subject, getAuthStateRevision, isAuthenticationStateCurrent } from '$stores/auth';
+  import { publicationRecovery } from '$stores/runtime';
+  import { configurationWrite } from '$stores/configuration-write';
+  import { isTerminal } from '$components/domain/config/publication-state';
   import { restoreManagementSession, endSession } from '$api/auth';
   import { PluginsAPI } from '$api/plugins';
   import { pluginList } from '$stores/plugins';
@@ -55,6 +57,20 @@
   $effect(() => {
     if (!$isAuthenticated) protectedInitialized = false;
     if ($authMode?.mode === 'plugin' && !$isAuthenticated) loginPageActive = true;
+  });
+  // Once the tracked write is terminal, no page needs its pending identity anymore.
+  $effect(() => {
+    if (!applicationReady || !$isAuthenticated) return;
+    const settle = () => {
+      const pending = get(configurationWrite).pending;
+      const recovery = get(publicationRecovery);
+      const operation = recovery.publication?.operation;
+      if (!pending || !recovery.fresh || !operation) return;
+      if (operation.operation_id === pending.mutationId && isTerminal(operation.state)) configurationWrite.clear();
+    };
+    const stopPublication = publicationRecovery.subscribe(settle);
+    const stopWrite = configurationWrite.subscribe(settle);
+    return () => { stopPublication(); stopWrite(); };
   });
 
   async function protectedInitialize(currentGuard: () => boolean = () => true): Promise<boolean> {
@@ -146,6 +162,7 @@
       if ($settingsDirty) warnings.push($_('settings.leaveWarning'));
       if ($dashboardDirty) warnings.push($_('dashboardLayout.discardMessage'));
       if ($menuDirty) warnings.push($_('menus.leaveWarning'));
+      if ($editorDirty) warnings.push($_('editor.leaveWarning'));
       const accepted = await confirmAction({
         opener,
         title: $_('login.logout'), message: warnings.join(' '),
@@ -157,6 +174,7 @@
         settingsDirty.set(false);
         dashboardDirty.set(false);
         menuDirty.set(false);
+        editorDirty.set(false);
         resetMenus();
         pluginList.set([]);
         loginPageActive = true;
@@ -216,7 +234,6 @@
 
     <!-- ===== Routed content ============================================ -->
     <main class="flex-1 flex flex-col">
-      <ConfigurationPublicationBanner />
       {#if $menus.error}<div role="status" class="border-b border-amber-500/40 bg-carbon-900 px-4 py-2 text-sm text-amber-400">{$_('menus.loadFailed')}</div>{/if}
       {#if $location === '/' || ($location === '/login' && $authMode?.mode === 'anonymous')}
         <Dashboard />

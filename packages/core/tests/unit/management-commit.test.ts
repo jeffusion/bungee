@@ -22,20 +22,22 @@ function fixture() {
  const operation={mutation_id:mutationId,committed_revision:2,state:'committed'} as any;
  let commit:(command:typeof commands[number])=>Promise<CommitConfigurationResult>=async()=>({kind:'committed',operation,snapshot:durable});
  let refreshFails=false;
+ let wakes=0,admissionSnapshots=0;
  const options:ConfigControlApiOptions={repository:{getSnapshot:()=>current,
   refreshControlProjection:async()=>{if(refreshFails)throw Error('storage unavailable');current=durable;guard=durableGuard;return{snapshot:current,managementProtection:guard};},
-  getOperationState:async()=>({operation,workers:[]}) as any,getActivePublication:async()=>null,
+  getOperationState:async()=>({operation,workers:[]}) as any,
   commit:async command=>{commands.push(command);return commit(command);}},
   onConfigurationCommitted:async snapshot=>{committedRevisions.push(snapshot.revision);},
-  managementAuth:auth,admission:{snapshot:()=>[]},workerCount:1,clock:{now:()=>100},resolveAuthToken:()=>null,
-  parseAggregate:value=>({ok:true,value:value as ConfigurationAggregate}),publicationTasks:{enqueue(){}},isMutationReady:()=>true,
+  managementAuth:auth,admission:{snapshot:()=>{admissionSnapshots++;return[];}},workerCount:1,clock:{now:()=>100},resolveAuthToken:()=>null,
+  parseAggregate:value=>({ok:true,value:value as ConfigurationAggregate}),publicationTasks:{wake(){wakes++;}},isMutationReady:()=>true,
   validateManagementTransition:(request,active,next)=>validateManagementTransition(request,active,next,auth,host),
-  pluginControlPreflight:{controlNames:new Set(['user-auth']),status:()=>ready?'ready':'stopped',activate:async()=>{ready=true;},deactivate:async()=>{ready=false;deactivations++;}},
+  pluginControlPreflight:{controlNames: new Set(['user-auth']), managementNames: new Set(['user-auth']),status:()=>ready?'ready':'stopped',activate:async()=>{ready=true;},deactivate:async()=>{ready=false;deactivations++;}},
  };
  const api=createConfigControlApi(options);
  return {api,auth,commands,provider,options,committedRevisions,
   advance:()=>{durable={...durable,revision:3};},
   commit:(handler:typeof commit)=>{commit=handler;},deactivations:()=>deactivations,current:()=>current,
+  wakes:()=>wakes,admissionSnapshots:()=>admissionSnapshots,
   persist:()=>{durable={aggregate:protectedAggregate,revision:2,content_hash:hashConfigurationContent(protectedAggregate)};durableGuard={required:true,selectedProvider:'user-auth',generation:1};return durable;},
   ready:()=>{ready=true;},refreshFails:(value:boolean)=>{refreshFails=value;},
  };
@@ -92,8 +94,18 @@ test('confirmed rejection rolls back preflight and releases the latch without en
  expect(f.deactivations()).toBe(1);expect(f.auth.available()).toBe(true);expect(f.auth.selected()).toBeNull();
 });
 
+test('does not preflight ordinary control plugins that are only pending application',async()=>{
+ const f=fixture();
+ const calls:string[]=[];
+ const api=createConfigControlApi({...f.options,pluginControlPreflight:{controlNames:new Set(['ordinary-control']),managementNames:new Set(),
+  activate:async(name)=>{calls.push(name);},deactivate:async()=>{}}});
+ const response=await api.handle(req('/api/config',{aggregate:{...initial,plugin_activations:[{plugin_name:'ordinary-control'}]},expected_revision:1,mutation_id:mutationId},'PUT'));
+ expect(response!.status).toBe(202);
+ expect(calls).toEqual([]);
+});
+
 test('preflight failure does not reach storage or leave an anonymous transition latch',async()=>{
- const f=fixture();const api=createConfigControlApi({...f.options,pluginControlPreflight:{controlNames:new Set(['user-auth']),activate:async()=>{throw Error('not prepared');},deactivate:async()=>{}}});
+ const f=fixture();const api=createConfigControlApi({...f.options,pluginControlPreflight:{controlNames: new Set(['user-auth']), managementNames: new Set(['user-auth']),activate:async()=>{throw Error('not prepared');},deactivate:async()=>{}}});
  expect((await api.handle(put()))!.status).toBe(503);expect(f.commands).toHaveLength(0);expect(f.auth.available()).toBe(true);
 });
 
@@ -105,6 +117,14 @@ test('duplicate reconciliation uses the current pair and never publishes a histo
  expect((await f.api.handle(put()))!.status).toBe(503);
  expect((await f.api.handle(req('/api/auth/setup')))!.status).toBe(200);
  expect(f.current().revision).toBe(3);expect(f.committedRevisions).toEqual([3]);expect(f.auth.selected()).toBe('user-auth');
+});
+
+test('a committed save only wakes the background publisher without reading admission',async()=>{
+ const f=fixture();
+ const response=await f.api.handle(put());
+ expect(response!.status).toBe(202);
+ expect(f.wakes()).toBe(1);
+ expect(f.admissionSnapshots()).toBe(0);
 });
 
 test('a management read already awaiting a plugin cannot return its response after the transition invalidates its identity',async()=>{
@@ -151,7 +171,7 @@ test('production async client keeps the Host closed when its ACK projection refr
  const host={get:()=>ready?{status:'ready',admission:true,control:{management:f.provider}}:null} as unknown as PluginControlHost;
  const auth=new ManagementAuthentication(host,()=>client.getSnapshot().aggregate,new Set(['user-auth']),undefined,()=>client.getManagementProtection());
  const api=createConfigControlApi({...f.options,managementAuth:auth,repository:{...f.options.repository,getSnapshot:()=>client.getSnapshot(),commit:command=>client.commit(command),refreshControlProjection:()=>client.refreshControlProjection()},
-  pluginControlPreflight:{controlNames:new Set(['user-auth']),activate:async()=>{ready=true;},deactivate:async()=>{ready=false;}}});
+  pluginControlPreflight:{controlNames: new Set(['user-auth']), managementNames: new Set(['user-auth']),activate:async()=>{ready=true;},deactivate:async()=>{ready=false;}}});
  try {
   expect((await api.handle(put()))!.status).toBe(503);expect(persisted).toBe(true);
   expect(client.getSnapshot().revision).toBe(1);expect(auth.available()).toBe(false);

@@ -20,8 +20,8 @@ const aggregate = (): ConfigurationAggregate => ({ logical_configuration: { log_
 const digest = `sha256:${'a'.repeat(64)}` as const;
 const envelope = (value: ConfigurationAggregate) => ({format:'bungee-config-snapshot',format_version:1,schema_version:1,
   exported_at:1,source_revision:42,content_hash:digest,envelope_hash:digest,aggregate:value});
-function operation(id: string, state: 'converged' | 'committed' | 'draining' | 'degraded' = 'converged'): ConfigurationOperationState {
-  return { operation: { mutation_id:id, request_hash:digest, expected_revision:42, committed_revision:43, kind:'config',
+function operation(id: string, state: 'converged' | 'committed' | 'draining' | 'degraded' = 'converged', expectedRevision = 42): ConfigurationOperationState {
+  return { operation: { mutation_id:id, request_hash:digest, expected_revision:expectedRevision, committed_revision:expectedRevision + 1, kind:'config',
     target_worker_count:2,drain_recovery_generation:0,last_drain_recovery_previous_generation:null,created_at:1,updated_at:1,
     state, result_status:state === 'converged' ? 200 : null,error_code:null,error_detail:null } as ConfigurationOperationState['operation'], workers:[] };
 }
@@ -53,7 +53,11 @@ async function withSettings(run: (page: Page, model: ReturnType<typeof createMod
     if(path === '/api/config/runtime') return model.runtimeUnavailable ? json({error:'runtime_unavailable'},503) : json({
       ...configurationRuntimeFixture(model.publication ?? publicationFixture({operation:null,recovery:null,retryable:false,serving_complete:true,
         serving_revision:model.revision,target_revision:model.revision})),config:model.saved});
-    if(path === '/api/config' && method === 'GET') return json({revision:model.revision,content_hash:digest,config:model.saved});
+    if(path === '/api/config' && method === 'GET') {
+      const gate=model.configGate;
+      if(gate){model.configGate=null;model.configGateEntered?.();await gate;}
+      return json({revision:model.revision,content_hash:digest,config:model.saved});
+    }
     if(path === '/api/logs') return json({data:[],total:0,totalPages:0,page:1,limit:50});
     if(path === '/api/logs/cleanup/config') return model.cleanupRefreshFailure && model.cleanupWrites ? json({error:'offline'},503) : json({enabled:true,retentionDays:1,scheduleIntervalHours:1,isActive:true});
     if(path === '/api/logs/cleanup' && method === 'POST') {model.cleanupWrites++;return model.cleanupStatus ? json({error:'rejected'},model.cleanupStatus) : json({success:true});}
@@ -67,10 +71,10 @@ async function withSettings(run: (page: Page, model: ReturnType<typeof createMod
       if(model.rejection) return json({error:model.rejection,reason:'lease_margin',message:'PRIVATE-ERROR',aggregate:{secret:'PRIVATE-ERROR'}},model.status);
       if(model.networkFailure) {evidence.expectFailure(request,'net::ERR_CONNECTION_RESET');return route.abort('connectionreset');}
       if(model.nonJson) {evidence.expectStatus(route,503);return route.fulfill({status:503,contentType:'text/plain',body:'PRIVATE-ERROR'});}
-      model.saved=body.aggregate ?? body.envelope.aggregate;model.revision=43;
-      return json({...operation(model.id,model.active?'committed':'converged'),operation_id:model.id,revision:43},202);
+      model.saved=body.aggregate ?? body.envelope.aggregate;model.expected=body.expected_revision;model.revision=body.expected_revision+1;
+      return json({...operation(model.id,model.active?'committed':'converged',body.expected_revision),operation_id:model.id,revision:model.revision},202);
     }
-    if(path === `/api/config/operations/${model.id}` && method === 'GET') {model.queries++;const gate=model.operationGate;if(gate){model.operationGate=null;await gate;}return model.queryStatus ? json({error:'unavailable'},model.queryStatus) : json(operation(model.id,model.queryState));}
+    if(path === `/api/config/operations/${model.id}` && method === 'GET') {model.queries++;const gate=model.operationGate;if(gate){model.operationGate=null;await gate;}return model.queryStatus ? json({error:'unavailable'},model.queryStatus) : json(operation(model.id,model.queryState,model.expected));}
     errors.push(`Unexpected API ${method} ${path}`);return json({error:'unexpected_request'},500);
   });
     await page.goto(`${runtime.origin}/#/${route}`);
@@ -85,10 +89,11 @@ async function withSettings(run: (page: Page, model: ReturnType<typeof createMod
   } finally { await context.close(); }
 }
 function createModel() {
-  return {saved:aggregate(),revision:42,id:'',writes:[] as Array<{method:string;path:string;body:any}>,validations:[] as any[],exports:0,
+  return {saved:aggregate(),revision:42,expected:42,id:'',writes:[] as Array<{method:string;path:string;body:any}>,validations:[] as any[],exports:0,
     active:false,queryState:'converged' as 'converged'|'draining'|'degraded',publication:null as ConfigurationPublication|null,
     cleanupWrites:0,cleanupStatus:0,cleanupRefreshFailure:false,queries:0,rejection:'',status:503,networkFailure:false,nonJson:false,queryStatus:0,runtimeUnavailable:false,
     operationGate:null as Promise<void>|null,
+    configGate:null as Promise<void>|null,configGateEntered:null as (()=>void)|null,
 };
 }
 async function review(page:Page) {
@@ -96,8 +101,13 @@ async function review(page:Page) {
   await expect(page.getByTestId('config-confirm-publish')).toBeEnabled();
 }
 async function closeReview(page:Page) {
-  await page.getByRole('dialog').getByRole('button',{name:/Close review|关闭审阅/,exact:true}).click();
-  await expect(page.getByTestId('config-review')).toHaveCount(0);
+  const review=page.getByTestId('config-review');
+  // An unconfirmed submission closes the review itself; known rejections stay open for correction.
+  if (await review.count() === 0) return;
+  await review.waitFor({state:'detached',timeout:1500}).catch(()=>{});
+  if (await review.count() === 0) return;
+  await page.getByRole('dialog').getByRole('button',{name:/Close review|关闭检查/,exact:true}).click();
+  await expect(review).toHaveCount(0);
 }
 async function upload(page:Page,value:unknown) {
   await page.getByTestId('config-import-input').setInputFiles({name:'snapshot.json',mimeType:'application/json',buffer:Buffer.from(typeof value==='string'?value:JSON.stringify(value))});
@@ -124,11 +134,11 @@ test('review, cancellation, publication and export preserve the current draft an
     await expect(page.getByTestId('config-review')).toHaveCount(0);
     expect(model.writes).toHaveLength(1);expect(model.writes[0]!.body.expected_revision).toBe(42);
     expect(model.writes[0]!.body.aggregate.logical_configuration.logging.body.max_size).toBe(53248);
-    await page.getByRole('button',{name:'Snapshot actions',exact:true}).click();
-    await page.getByRole('menuitem',{name:'Export snapshot',exact:true}).click();
+    await page.getByRole('button',{name:'Configuration actions',exact:true}).click();
+    await page.getByRole('menuitem',{name:'Export configuration',exact:true}).click();
     await page.getByTestId('confirmation-cancel').click();expect(model.exports).toBe(0);
-    await page.getByRole('button',{name:'Snapshot actions',exact:true}).click();
-    await page.getByRole('menuitem',{name:'Export snapshot',exact:true}).click();
+    await page.getByRole('button',{name:'Configuration actions',exact:true}).click();
+    await page.getByRole('menuitem',{name:'Export configuration',exact:true}).click();
     const downloaded=page.waitForEvent('download');await page.getByTestId('confirmation-accept').click();await downloaded;expect(model.exports).toBe(1);
   });
 },60_000);
@@ -136,16 +146,80 @@ test('review, cancellation, publication and export preserve the current draft an
 test('a config loaded without logging stays without logging when publishing an unrelated edit',async()=>{
   await withSettings(async(page,model)=>{
     await page.locator('#config-websocket-max-connections').focus();
+    // Blurring an untouched numeric field must not materialize its displayed default.
+    for (const field of ['drain_start_timeout_ms','drain_timeout_ms','worker_exit_timeout_ms']) await page.locator(`#config-${field}`).focus();
     await page.getByRole('combobox',{name:/^(Log Level|日志级别)$/}).click();
     await page.getByRole('option',{name:'Debug',exact:true}).click();
-    await review(page);await page.getByTestId('config-confirm-publish').click();
+    await review(page);
+    expect(Object.hasOwn(model.validations.at(-1).aggregate.logical_configuration,'publication')).toBe(false);
+    await page.getByTestId('config-confirm-publish').click();
     await expect(page.getByTestId('config-review')).toHaveCount(0);
     expect(model.writes).toHaveLength(1);
     const saved=model.writes[0]!.body.aggregate.logical_configuration;
     expect(saved.log_level).toBe('debug');
     expect(Object.hasOwn(saved,'logging')).toBe(false);
     expect(Object.hasOwn(saved,'websocket_max_connections')).toBe(false);
+    expect(Object.hasOwn(saved,'publication')).toBe(false);
   },1440,'en','config',model=>{ delete (model.saved.logical_configuration as { logging?: unknown }).logging; });
+},60_000);
+
+test('fractional body sizes and whole-second update timeouts convert before publishing',async()=>{
+  await withSettings(async(page,model)=>{
+    const size=page.getByTestId('logging-max-size'),retention=page.getByTestId('logging-retention-days');
+    await size.fill('1.5');await retention.fill('7');
+    const timeouts={drain_start_timeout_ms:'7',drain_timeout_ms:'301',worker_exit_timeout_ms:'11'} as const;
+    for(const [field,seconds] of Object.entries(timeouts)) await page.locator(`#config-${field}`).fill(seconds);
+    // An in-range decimal that cannot become whole bytes must not submit, even after blur.
+    await size.fill('1.1');await size.press('Tab');
+    await expect(size).toHaveValue('1.1');
+    const save=page.getByTestId('config-save-button');
+    if(await save.isEnabled()) {
+      await save.click();
+      await expect(page.getByTestId('settings-notice')).toBeVisible();
+      await expect(page.getByTestId('config-review')).toHaveCount(0);
+    }
+    expect(model.validations).toHaveLength(0);expect(model.writes).toHaveLength(0);
+    // Integer fields filter the decimal point instead of accepting it.
+    await retention.fill('1.5');await expect(retention).toHaveValue('7');
+    await size.fill('1.5');await review(page);
+    const validated=model.validations.at(-1).aggregate.logical_configuration;
+    expect(validated.logging.body.max_size).toBe(1536);
+    expect(validated.logging.body.retention_days).toBe(7);
+    expect(validated.publication).toEqual({drain_start_timeout_ms:7000,drain_timeout_ms:301000,worker_exit_timeout_ms:11000});
+    await page.getByTestId('config-confirm-publish').click();
+    await expect(page.getByTestId('config-review')).toHaveCount(0);
+    expect(model.writes).toHaveLength(1);
+    const submitted=model.writes[0]!.body.aggregate.logical_configuration;
+    expect(submitted.logging.body.max_size).toBe(1536);
+    expect(submitted.logging.body.retention_days).toBe(7);
+    expect(submitted.publication).toEqual({drain_start_timeout_ms:7000,drain_timeout_ms:301000,worker_exit_timeout_ms:11000});
+    await waitForSettingsReads(page);
+    await expect(size).toHaveValue('1.5');await expect(retention).toHaveValue('7');
+    // An invalid size equal to the persisted one must not survive replacing the draft,
+    // via Discard or a real reload, and must not leave blocking validity behind.
+    for(const reset of ['Discard changes','Reload latest configuration'] as const) {
+      await size.fill('1.1');await size.press('Tab');
+      await expect(size).toHaveValue('1.1');
+      await page.getByRole('combobox',{name:/^(Log Level|日志级别)$/}).click();
+      await page.getByRole('option',{name:'Debug',exact:true}).click();
+      await expect(size).toHaveValue('1.1');
+      if(reset === 'Reload latest configuration') {
+        // The reload action is offered by the conflict notice; move the runtime ahead of the snapshot.
+        model.revision=44;
+        await page.getByRole('button',{name:'Refresh status',exact:true}).click();
+      }
+      await page.getByRole('button',{name:reset,exact:true}).click();
+      await page.getByTestId('confirmation-accept').click();
+      await expect(page.getByTestId('confirmation-accept')).toHaveCount(0);
+      await expect(size).toHaveValue('1.5');
+    }
+    await page.getByRole('combobox',{name:/^(Log Level|日志级别)$/}).click();
+    await page.getByRole('option',{name:'Warning',exact:true}).click();
+    await review(page);await page.getByTestId('config-confirm-publish').click();
+    await expect(page.getByTestId('config-review')).toHaveCount(0);
+    expect(model.writes).toHaveLength(2);
+    expect(model.writes[1]!.body.aggregate.logical_configuration.logging.body.max_size).toBe(1536);
+  });
 },60_000);
 
 test('import review can be cancelled and invalid snapshots are rejected',async()=>{
@@ -169,6 +243,8 @@ test('submission failures retain the draft, distinguish known rejection from unk
       model.rejection=outcome==='non-json'||outcome==='network'?'':outcome==='conflict'?'stale_revision':outcome==='invalid'?'invalid_configuration':outcome;
       model.status=outcome==='conflict'?409:outcome==='invalid'?422:503;
       model.networkFailure=outcome==='network';model.nonJson=outcome==='non-json';
+      // A lost response is reconciled by its UUID; fail that lookup too to keep the result unconfirmed.
+      model.queryStatus=outcome==='network'||outcome==='non-json'?503:outcome==='repository_unavailable'?404:0;
       if(imported) {const next=aggregate();next.logical_configuration.log_level='error';await upload(page,envelope(next));await expect(page.getByTestId('import-preview')).toBeVisible();}
       else await page.getByTestId('logging-max-size').fill('52');
       await review(page);await page.getByTestId('config-confirm-publish').click();
@@ -177,11 +253,13 @@ test('submission failures retain the draft, distinguish known rejection from unk
       // A known rejection must be readable while the review still covers the page.
       if(known) await expect(page.getByTestId('config-review').getByRole('alert').first()).toBeVisible();
       if(outcome.startsWith('control_')) {
-        await expect(page.getByTestId('config-review')).toContainText('HTTP 503 · control_');
-        await expect(page.getByTestId('toast-container')).toContainText(/control service|控制服务/i);
+        await expect(page.getByTestId('config-review')).toContainText(/configuration was not saved|配置未保存/i);
+        await expect(page.getByTestId('config-review')).not.toContainText('HTTP 503 · control_');
       }
       await closeReview(page);
       if(imported) await expect(page.getByTestId('import-preview')).toBeVisible();else await expect(page.getByTestId('logging-max-size')).toHaveValue('52');
+      // Unknown identity: a second submission (new ID) is never offered, import or direct edit.
+      if(!known) await expect(page.getByTestId('config-save-button')).toBeDisabled();
       await expect(page.getByTestId('page-config')).not.toContainText('PRIVATE-ERROR');
       expect(model.writes).toHaveLength(1);expect(model.revision).toBe(42);
     },imported?390:1440,imported?'zh-CN':'en');
@@ -190,13 +268,13 @@ test('submission failures retain the draft, distinguish known rejection from unk
 
 test('an unknown response is queried by its original operation identity and survives a page reload without a second submission',async()=>{
   await withSettings(async(page,model)=>{
-    model.rejection='repository_unavailable';await page.getByTestId('logging-max-size').fill('52');await review(page);
+    model.rejection='repository_unavailable';model.queryStatus=404;await page.getByTestId('logging-max-size').fill('52');await review(page);
     await page.getByTestId('config-confirm-publish').click();await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','unknown');
     await closeReview(page);await expect(page.getByTestId('config-save-button')).toBeDisabled();
-    model.queryStatus=503;await page.getByRole('button',{name:'Check this publication',exact:true}).click();
+    model.queryStatus=503;await page.getByRole('button',{name:'Check this save',exact:true}).click();
     await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','unknown');
     model.queryStatus=0;model.revision=43;model.saved.logical_configuration.logging!.body!.max_size=53248;
-    await page.getByRole('button',{name:'Check this publication',exact:true}).click();
+    await page.getByRole('button',{name:'Check this save',exact:true}).click();
     await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','terminal');
     expect(model.queries).toBeGreaterThan(0);expect(model.writes).toHaveLength(1);
     await reloadSettings(page);await expect(page.getByTestId('logging-max-size')).toHaveValue('52');expect(model.writes).toHaveLength(1);
@@ -226,7 +304,7 @@ test('later import selection wins over a slow earlier validation response',async
   });
 },60_000);
 
-test('accepted publication stays locked across query failure and reload, then exposes degradation without resubmitting',async()=>{
+test('an accepted publication keeps tracking and leaves the form editable',async()=>{
   await withSettings(async(page,model)=>{
     model.active=true;model.queryStatus=503;
     let releaseOperation!:()=>void;
@@ -234,20 +312,23 @@ test('accepted publication stays locked across query failure and reload, then ex
     try {
       await page.getByTestId('logging-max-size').fill('52');await review(page);await page.getByTestId('config-confirm-publish').click();
       await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','active');
-      // ACK received while the first operation read is still held: the review must close,
-      // keep tracking, and never re-enable submission.
-      await closeReview(page);await expect(page.getByTestId('config-save-button')).toBeDisabled();
+      // The ACK ends the save: the review closes, tracking continues and fields stay usable.
+      await expect(page.getByTestId('config-review')).toHaveCount(0);
+      await expect(page.getByTestId('logging-max-size')).toBeEnabled();
+      // The ACK is the save result: one success toast while it applies.
+      await expect(page.getByTestId('toast-container').getByRole('status').filter({hasText:/Saved successfully|保存成功/})).toHaveCount(1);
     } finally { releaseOperation(); }
-    await expect(page.getByTestId('settings-notice')).toBeVisible();
     await reloadSettings(page);await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','active');
-    await expect(page.getByTestId('logging-max-size')).toBeDisabled();
-    model.queryStatus=0;model.queryState='degraded';await page.getByRole('button',{name:'Check this publication',exact:true}).click();
+    await expect(page.getByTestId('logging-max-size')).toBeEnabled();
+    await expect(page.getByRole('button',{name:'Check this save',exact:true})).toBeVisible();
+    model.queryStatus=0;model.queryState='degraded';
+    await page.getByRole('button',{name:'Check this save',exact:true}).click();
     await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','terminal');expect(model.writes).toHaveLength(1);
     await expect(page.getByTestId('settings-notice')).toBeVisible();
   });
 },60_000);
 
-test('a restored plugin activation unlocks settings when background publication reaches its terminal state',async()=>{
+test('a restored application leaves settings editable until it reaches a terminal state',async()=>{
   for(const terminal of ['converged','degraded'] as const) await withSettings(async(page,model)=>{
     model.id='10000000-0000-4000-8000-000000000009';model.revision=43;model.queryState='draining';
     model.publication=publicationFixture({operation:{operation_id:model.id,committed_revision:43,state:'draining',
@@ -255,7 +336,7 @@ test('a restored plugin activation unlocks settings when background publication 
     await page.evaluate(id=>sessionStorage.setItem('bungee:settings-publication',JSON.stringify({version:1,mutationId:id,accepted:true})),model.id);
     await reloadSettings(page);
     await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','active');
-    await expect(page.getByTestId('logging-max-size')).toBeDisabled();
+    await expect(page.getByTestId('logging-max-size')).toBeEnabled();
     expect(model.queries).toBeGreaterThan(0);
     model.queryState=terminal;
     model.publication={...model.publication,operation:{...model.publication.operation!,state:terminal,
@@ -272,7 +353,8 @@ test('local tracking storage failures report a warning and corrupted metadata re
     if(action === 'corrupt') {
       await page.evaluate(()=>sessionStorage.setItem('bungee:settings-publication','{broken'));
       await reloadSettings(page);await expect(page.getByTestId('settings-notice')).toBeVisible();
-      await expect(page.getByTestId('logging-max-size')).toBeDisabled();expect(model.writes).toHaveLength(0);return;
+      await expect(page.getByTestId('logging-max-size')).toBeEnabled();
+      await expect(page.getByTestId('config-save-button')).toBeDisabled();expect(model.writes).toHaveLength(0);return;
     }
     await page.evaluate(action=>{
       const original=Storage.prototype[action];
@@ -283,7 +365,7 @@ test('local tracking storage failures report a warning and corrupted metadata re
     },action);
     await page.getByTestId('logging-max-size').fill('52');await review(page);await page.getByTestId('config-confirm-publish').click();
     await expect(page.getByTestId('config-review')).toHaveCount(0);
-    await expect(page.getByTestId('page-config').getByRole('status').filter({hasText:/tracking identity|local|storage/i})).toBeVisible();
+    await expect(page.getByTestId('page-config').getByRole('status').filter({hasText:/browser|record|storage/i})).toBeVisible();
     expect(model.writes).toHaveLength(1);
   });
 },60_000);
@@ -322,46 +404,190 @@ test('log cleanup requires confirmation and distinguishes execution, status refr
   },1440,'en','logs');
 },60_000);
 
-test('a missing unacknowledged operation reloads only after both snapshot and serving reads succeed',async()=>{
-  await withSettings(async(page,model)=>{
-    model.rejection='repository_unavailable';model.queryStatus=404;
-    await page.getByTestId('logging-max-size').fill('52');await review(page);await page.getByTestId('config-confirm-publish').click();
-    await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','unknown');await closeReview(page);
-    const firstId=model.id;model.runtimeUnavailable=true;
-    await holdResponseJson(page,'missing-operation-runtime',{method:'GET',path:'/api/config/runtime'});
-    await page.getByRole('button',{name:'Check this publication',exact:true}).click();
-    const failedRuntime=await waitForResponseReceipt(page,'missing-operation-runtime');
-    await releaseResponseJson(page,failedRuntime);
-    await waitForResponseDelivery(page,failedRuntime);
-    await expect(page.getByTestId('runtime-uncertain')).toBeVisible();
-    await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','unknown');
-    await expect(page.getByTestId('logging-max-size')).toHaveValue('52');await expect(page.getByTestId('logging-max-size')).toBeDisabled();
-    expect(model.writes).toHaveLength(1);expect(model.id).toBe(firstId);
-    model.runtimeUnavailable=false;await page.getByRole('button',{name:'Check this publication',exact:true}).click();
-    await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','rejected');
-    await expect(page.getByTestId('logging-max-size')).toHaveValue('50');await expect(page.getByTestId('logging-max-size')).toBeEnabled();
-    expect(await page.evaluate(()=>sessionStorage.getItem('bungee:settings-publication'))).toBeNull();expect(model.writes).toHaveLength(1);
-    model.rejection='';model.queryStatus=0;
-    await page.getByTestId('logging-max-size').fill('52');await review(page);await page.getByTestId('config-confirm-publish').click();
-    await expect(page.getByTestId('config-review')).toHaveCount(0);
-    expect(model.writes).toHaveLength(2);expect(model.id).not.toBe(firstId);expect(model.writes[1]!.body.expected_revision).toBe(42);
-  });
-},60_000);
+test('a baseline read newer than the ACK cannot be adopted by the older draft', async () => {
+  for (const imported of [false, true]) await withSettings(async(page, model) => {
+    const next = aggregate();
+    next.logical_configuration.logging!.body!.max_size = 53248;
+    if (imported) { await upload(page, envelope(next)); await expect(page.getByTestId('import-preview')).toBeVisible(); }
+    else await page.getByTestId('logging-max-size').fill('52');
+    await review(page);
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    model.configGate = gate; model.configGateEntered = entered;
+    await page.getByTestId('config-confirm-publish').click();
+    await started; // the ACK's baseline read is in flight
+    const other = aggregate();
+    other.logical_configuration.log_level = 'debug';
+    model.saved = other; model.revision = 44;
+    release();
+    await expect(page.getByTestId('settings-notice')).toContainText(/configuration was changed/i);
+    await expect(page.getByTestId('logging-max-size')).toHaveValue('52');
+    await expect(page.getByTestId('config-save-button')).toBeDisabled();
+    expect(model.writes).toHaveLength(1);
+    expect(model.writes[0]!.body.expected_revision).toBe(42);
+  }, 1440, 'en');
+}, 60_000);
 
-test('a missing accepted operation remains locked across reload and never authorizes a second submission',async()=>{
+test('a lagging baseline retry reads the confirmed revision and still refuses a foreign snapshot', async () => {
+  for (const retry of ['own-revision', 'foreign'] as const) await withSettings(async (page, model) => {
+    await page.getByTestId('logging-max-size').fill('52');
+    await review(page);
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    model.configGate = gate; model.configGateEntered = entered;
+    await page.getByTestId('config-confirm-publish').click();
+    await started; // the ACK's baseline read is in flight
+    // The baseline read lags behind the committed revision, so the retry stays offered.
+    model.revision = 42; model.saved = aggregate();
+    release();
+    const retryButton = page.getByRole('button', { name: 'Refresh configuration', exact: true });
+    await expect(retryButton).toBeVisible();
+    await expect(page.getByTestId('logging-max-size')).toHaveValue('52');
+    if (retry === 'foreign') {
+      const other = aggregate();
+      other.logical_configuration.log_level = 'debug';
+      model.saved = other; model.revision = 44;
+    } else {
+      // The committed revision becomes readable again; the retry adopts it, not a foreign one.
+      model.saved = model.writes[0]!.body.aggregate; model.revision = 43;
+      await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
+      await page.getByTestId('logging-max-size').fill('1.1');
+      await page.getByTestId('logging-max-size').press('Tab');
+    }
+    await retryButton.click();
+    if (retry === 'foreign') {
+      await expect(page.getByTestId('settings-notice')).toContainText(/configuration was changed/i);
+      await expect(page.getByTestId('logging-max-size')).toHaveValue('52');
+      await expect(page.getByTestId('config-save-button')).toBeDisabled();
+    } else {
+      await expect(page.getByTestId('logging-max-size')).toHaveValue('1.1');
+      await expect(retryButton).toHaveCount(0);
+    }
+    expect(model.writes).toHaveLength(1);
+  }, 1440, 'en');
+}, 120_000);
+
+test('a missing unacknowledged operation stays unknown on active query and reload until the same ID is confirmed', async () => {
+  await withSettings(async(page, model) => {
+    model.rejection = 'repository_unavailable'; model.queryStatus = 404;
+    await page.getByTestId('logging-max-size').fill('52');
+    await review(page); await page.getByTestId('config-confirm-publish').click();
+    await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase', 'unknown');
+    await closeReview(page);
+    const id = model.id;
+    const marker = () => page.evaluate(() => {
+      const raw = sessionStorage.getItem('bungee:settings-publication');
+      return raw && raw.startsWith('{') ? JSON.parse(raw) : raw ? { version: 1, mutationId: raw, accepted: false } : null;
+    });
+    expect(id).toBeTruthy();
+    expect(await marker()).toEqual({ version: 1, mutationId: id, accepted: false });
+    expect(model.writes).toHaveLength(1);
+
+    // A readable snapshot and runtime do not prove the original write was not committed.
+    await page.getByRole('button', { name: 'Check this save', exact: true }).click();
+    await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase', 'unknown');
+    await expect(page.getByTestId('config-save-button')).toBeDisabled();
+    await expect(page.getByTestId('logging-max-size')).toBeEnabled();
+    expect(await marker()).toEqual({ version: 1, mutationId: id, accepted: false });
+    expect(model.writes).toHaveLength(1);
+
+    // Reload restores the same identity; it must not turn into a new submission.
+    model.runtimeUnavailable = false;
+    await reloadSettings(page);
+    await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase', 'unknown');
+    await expect(page.getByTestId('config-save-button')).toBeDisabled();
+    await expect(page.getByTestId('logging-max-size')).toBeEnabled();
+    expect(await marker()).toEqual({ version: 1, mutationId: id, accepted: false });
+    expect(model.writes).toHaveLength(1);
+
+    // Only a trusted operation with this identity settles the result.
+    model.queryStatus = 0; model.queryState = 'converged'; model.revision = 43;
+    model.saved.logical_configuration.logging!.body!.max_size = 53248;
+    await page.getByRole('button', { name: 'Check this save', exact: true }).click();
+    await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase', 'terminal');
+
+    // A later, legitimate edit may now submit again.
+    await page.getByTestId('logging-max-size').fill('54'); await review(page);
+    await page.getByTestId('config-confirm-publish').click();
+    await expect(page.getByTestId('config-review')).toHaveCount(0);
+    expect(model.writes).toHaveLength(2);
+    expect(model.writes[1]!.body.expected_revision).toBe(43);
+  });
+}, 60_000);
+
+test('a same-ID unknown reconciliation does not adopt a newer snapshot either', async () => {
+  await withSettings(async(page, model) => {
+    model.rejection = 'repository_unavailable'; model.queryStatus = 404;
+    await page.getByTestId('logging-max-size').fill('52');
+    await review(page); await page.getByTestId('config-confirm-publish').click();
+    await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase', 'unknown');
+    await closeReview(page);
+    const other = aggregate();
+    other.logical_configuration.log_level = 'debug';
+    model.queryStatus = 0; model.queryState = 'converged'; model.saved = other; model.revision = 44;
+    await page.getByRole('button', { name: 'Check this save', exact: true }).click();
+    await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase', 'terminal');
+    await expect(page.getByTestId('settings-notice')).toContainText(/configuration was changed/i);
+    await expect(page.getByTestId('logging-max-size')).toHaveValue('52');
+    await expect(page.getByTestId('config-save-button')).toBeDisabled();
+    expect(model.writes).toHaveLength(1);
+  }, 1440, 'en');
+}, 60_000);
+
+test('a missing accepted operation keeps the marker and leaves the form editable',async()=>{
   await withSettings(async(page,model)=>{
     model.active=true;model.queryStatus=404;
     await page.getByTestId('logging-max-size').fill('52');await review(page);await page.getByTestId('config-confirm-publish').click();
-    await expect(page.getByTestId('settings-notice')).toBeVisible();await closeReview(page);
+    await expect(page.getByTestId('toast-container')).toContainText(/Saved successfully|保存成功/);
+    await expect(page.getByTestId('config-review')).toHaveCount(0);
     await reloadSettings(page);await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','active');
-    await expect(page.getByTestId('logging-max-size')).toBeDisabled();
+    await expect(page.getByTestId('logging-max-size')).toBeEnabled();
     expect(await page.evaluate(()=>JSON.parse(sessionStorage.getItem('bungee:settings-publication')!))).toEqual({version:1,mutationId:model.id,accepted:true});
     expect(model.writes).toHaveLength(1);
-    model.queryStatus=0;model.queryState='degraded';await page.getByRole('button',{name:'Check this publication',exact:true}).click();
+    await expect(page.getByRole('button',{name:'Check this save',exact:true})).toBeVisible();
+    model.queryStatus=0;model.queryState='degraded';
+    await page.getByRole('button',{name:'Check this save',exact:true}).click();
     await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','terminal');expect(model.writes).toHaveLength(1);
   });
 },60_000);
 
+
+test('edits typed after the ACK survive the baseline refresh',async()=>{
+  await withSettings(async(page,model)=>{
+    await page.getByTestId('logging-max-size').fill('52');await review(page);
+    await holdResponseJson(page,'settings-rebase',{method:'GET',path:'/api/config'});
+    await page.getByTestId('config-confirm-publish').click();
+    const rebase=await waitForResponseReceipt(page,'settings-rebase');
+    // The ACK closed the review and the baseline read is still held: keep editing.
+    await expect(page.getByTestId('config-review')).toHaveCount(0);
+    await expect(page.getByTestId('logging-max-size')).toBeEnabled();
+    await page.getByTestId('logging-max-size').fill('54');
+    await releaseResponseJson(page,rebase);await waitForResponseDelivery(page,rebase);
+    await expect(page.getByTestId('logging-max-size')).toHaveValue('54');
+    await expect(page.getByTestId('settings-change-bar')).toContainText(/1 change|1 项更改/);
+    expect(model.writes).toHaveLength(1);
+  });
+},60_000);
+
+test('a second save is submitted while the previous application is still running',async()=>{
+  await withSettings(async(page,model)=>{
+    model.active=true;
+    await page.getByTestId('logging-max-size').fill('52');await review(page);
+    await page.getByTestId('config-confirm-publish').click();
+    await expect(page.getByTestId('config-review')).toHaveCount(0);
+    await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase','active');
+    await expect(page.getByTestId('logging-max-size')).toBeEnabled();
+    // The ACK advances the editing baseline even while application is still running.
+    await page.getByTestId('logging-max-size').fill('54');await review(page);
+    await page.getByTestId('config-confirm-publish').click();
+    await expect(page.getByTestId('config-review')).toHaveCount(0);
+    expect(model.writes).toHaveLength(2);
+    expect(model.writes[1]!.body.expected_revision).toBe(43);
+    expect(model.writes[1]!.body.aggregate.logical_configuration.logging.body.max_size).toBe(55296);
+  });
+},60_000);
 
 test('WebSocket connection limits publish an integer or explicit null through review and snapshot CAS',async()=>{
   for (const limit of [128,null]) await withSettings(async(page,model)=>{
@@ -438,14 +664,22 @@ test('imported WebSocket limits are read-only and publish the import while cance
 },60_000);
 
 
-test('message size validates the visible draft and publishes larger sizes through review and snapshot CAS', async () => {
+test('message size validates the visible draft and publishes fractional or larger sizes through review and snapshot CAS', async () => {
   await withSettings(async (page, model) => {
     const input = page.locator('#config-websocket-max-message');
-    for (const invalid of ['', '0', '-1', '2048']) {
+    // The numeric filter drops the sign; no negative MiB value reaches the draft.
+    await input.fill('-1');
+    expect(await input.inputValue()).not.toContain('-');
+    expect(model.validations).toHaveLength(0);
+    // 1.1 MiB is in range but not a whole number of bytes.
+    for (const invalid of ['', '0', '2048', '1.1']) {
       await input.fill(invalid);
       await expect(page.getByTestId('config-save-button')).toBeDisabled();
       expect(model.validations).toHaveLength(0); expect(model.writes).toHaveLength(0);
     }
+    await input.fill('1.5'); await review(page);
+    expect(model.validations.at(-1).aggregate.logical_configuration.websocket_max_message_bytes).toBe(1.5 * 1024 * 1024);
+    await closeReview(page); expect(model.writes).toHaveLength(0);
     await input.fill('64'); await review(page);
     expect(model.validations.at(-1).aggregate.logical_configuration.websocket_max_message_bytes).toBe(64 * 1024 * 1024);
     await closeReview(page); expect(model.writes).toHaveLength(0);

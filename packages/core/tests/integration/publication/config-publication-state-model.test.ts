@@ -6,10 +6,12 @@ import { join } from 'node:path';
 import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
 import { ConfigRepository, ConfigRepositoryError } from '../../../src/config-storage';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../../helpers/test-budgets';
+import { settleWorkerLaunch } from '../../helpers/worker-launch';
 
 setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
 const CREATED_AT = 1_700_000_000_000;
+const PLUGIN_CATALOG_HASH = `sha256:${'c'.repeat(64)}` as const;
 const AGGREGATE: ConfigurationAggregate = {
   logical_configuration: {
     auth: { enabled: true, tokens: ['literal'] }, services: [], routes: [], plugins: [],
@@ -45,6 +47,8 @@ function commit(repository: ConfigRepository, mutationId: string, slots: readonl
     created_at: CREATED_AT,
     target_worker_slots: slots,
   }).kind).toBe('committed');
+  expect(repository.claimPublicationTarget(PLUGIN_CATALOG_HASH, CREATED_AT + 1)?.operation.mutation_id)
+    .toBe(mutationId);
 }
 
 function expectInvalid(action: () => unknown): void {
@@ -82,6 +86,7 @@ describe('durable worker publication attempts', () => {
     expect(repository.recordWorkerResult('retry', 0, {
       kind: 'failed', attempt_no: 1, error: 'startup failed', applied_revision: 1,
     }, CREATED_AT + 3)).toMatchObject({ state: 'failed', attempt_no: 1 });
+    settleWorkerLaunch(repository, 'retry', 0, 1, CREATED_AT + 4);
     expect(repository.beginWorkerAttempt('retry', 0, 1, 'retry', CREATED_AT + 4)).toMatchObject({
       state: 'pending', attempt_no: 2, applied_revision: null, last_error: null,
     });
@@ -123,6 +128,7 @@ describe('durable worker publication attempts', () => {
           kind: 'converged', attempt_no: 1, applied_revision: 2,
         }, CREATED_AT + 3);
       }
+      settleWorkerLaunch(repository, mutationId, 0, 1, CREATED_AT + 4);
       const recovered = repository.beginWorkerAttempt(mutationId, 0, 1, 'master_recovery', CREATED_AT + 4);
       expect(recovered).toMatchObject({ state: 'pending', attempt_no: 2, applied_revision: null, last_error: null });
       const reopened = reopen(repository, dbPath);
@@ -207,12 +213,14 @@ describe('draining and exact terminal outcomes', () => {
     repository.recordWorkerResult('replacement-failed', 0, {
       kind: 'failed', attempt_no: 1, error: 'startup failed',
     }, CREATED_AT + 3);
+    settleWorkerLaunch(repository, 'replacement-failed', 0, 1, CREATED_AT + 4);
     expectInvalid(() => repository.finalizePublication('replacement-failed', {
       outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'one replacement failed', recovery_disposition: 'retryable',
     }, CREATED_AT + 4));
     repository.recordWorkerResult('replacement-failed', 1, {
       kind: 'converged', attempt_no: 1, applied_revision: 2,
     }, CREATED_AT + 4);
+    settleWorkerLaunch(repository, 'replacement-failed', 1, 1, CREATED_AT + 5);
     expect(repository.finalizePublication('replacement-failed', {
       outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'one replacement failed', recovery_disposition: 'retryable',
     }, CREATED_AT + 5)).toMatchObject({
@@ -232,6 +240,7 @@ describe('draining and exact terminal outcomes', () => {
       repository.recordWorkerResult(mutationId, 0, {
         kind: 'converged', attempt_no: 1, applied_revision: 2,
       }, CREATED_AT + 3);
+      settleWorkerLaunch(repository, mutationId, 0, 1, CREATED_AT + 4);
       repository.markDraining(mutationId, CREATED_AT + 4);
       const unproved = outcome === 'converged'
         ? { outcome: 'converged', old_workers_exited: false }

@@ -80,6 +80,21 @@ function fixture(
     getServingSnapshot: async () => null,
     appendServingSnapshot: async () => undefined,
     getActivePublication: async () => null,
+    claimPublicationTarget: async () => null,
+    requestPublicationCancellation: async () => { throw new Error('no publication owner'); },
+    enterPublicationPrepare: async () => ({ kind: 'granted' as const, operation: { mutation_id: 'mutation-1' } as never }),
+    confirmPublicationCandidateExited: unused,
+    recordPublicationCandidateExit: unused,
+    getOutstandingPublicationCandidates: async () => [],
+    registerWorkerLaunch: unused,
+    fenceWorkerLaunchNotStarted: unused,
+    recordWorkerLaunchAdmitted: unused,
+    recordWorkerLaunchExit: unused,
+    getWorkerLaunch: async () => null,
+    getWorkerLaunchAllocationFacts: async () => null,
+    getWorkerLaunchInventory: async () => [],
+    getPublicationRecoveryBarrier: async () => null,
+    getUnsettledWorkerLaunches: async () => [],
     getOperationState: unused,
     getCurrentOperationState: async () => null,
     getCurrentRecovery: async () => null,
@@ -266,6 +281,7 @@ function fixture(
         fail('ingress');
         return {
           controlPort: 3010,
+          hasTrustedActiveAdmission: () => false,
           authenticatedRateLimitSession: () => authenticatedIngressSession ? ({ supervisionPort: 3010, expectedIngress: {
             process_instance_id: '70000000-0000-4000-8000-000000000001',
             boot_nonce: '70000000-0000-4000-8000-000000000002',
@@ -824,7 +840,7 @@ describe('master process composition', () => {
     expect(managementOptions()!.daemonControl).toBeUndefined();
   });
 
-  test('anonymous management reports unavailable ingress readiness', async () => {
+  test('attempts a save without requiring ingress readiness', async () => {
     const { dependencies, managementOptions } = fixture(undefined, true, false, true, undefined, true);
     const processHandle = await startMasterComposition(dependencies);
     try {
@@ -836,8 +852,9 @@ describe('master process composition', () => {
           aggregate: { logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [] },
           mutation_id: 'composition-readiness' }),
       }));
+      // The storage call is reached even though ingress readiness is unavailable.
       expect(response?.status).toBe(503);
-      expect(await response?.json()).toMatchObject({ error: 'control_recovering' });
+      expect(await response?.json()).toMatchObject({ error: 'repository_unavailable' });
     } finally {
       processHandle.removeSignalHandlers();
     }
@@ -1068,6 +1085,28 @@ function recoveryDependencies(input: {
     refreshControlProjection: async (): Promise<ControlProjection> => ({snapshot:repository.getSnapshot(),managementProtection:ANONYMOUS_MANAGEMENT_PROTECTION}),
     getSnapshot: () => input.getSnapshot?.() ?? snapshot,
     getActivePublication: async () => input.getActivePublication?.() ?? null,
+    claimPublicationTarget: async () => input.getActivePublication?.() ?? null,
+    requestPublicationCancellation: async () => { throw new Error('unused fake method'); },
+    enterPublicationPrepare: async () => ({ kind: 'granted' as const, operation: {} as never }),
+    recordPublicationCandidateExit: async () => undefined,
+    confirmPublicationCandidateExited: async () => { throw new Error('unused fake method'); },
+    getOutstandingPublicationCandidates: async () => [],
+    registerWorkerLaunch: async () => { throw new Error('unused fake method'); },
+    fenceWorkerLaunchNotStarted: async () => { throw new Error('unused fake method'); },
+    recordWorkerLaunchAdmitted: async () => { throw new Error('unused fake method'); },
+    recordWorkerLaunchExit: async () => { throw new Error('unused fake method'); },
+    getWorkerLaunch: async () => null,
+    getWorkerLaunchAllocationFacts: async () => null,
+    getWorkerLaunchInventory: async () => [],
+    getPublicationRecoveryBarrier: async (excludeRecoveryId: string | null = null) => {
+      const current = input.getCurrentRecovery?.() as
+        { readonly recovery_id?: string; readonly state?: string; readonly final_reason_code?: string | null } | null | undefined;
+      if (current === null || current === undefined || current.recovery_id === excludeRecoveryId) return null;
+      return current.state === 'scheduled' || current.state === 'running'
+        || (current.state === 'stopped' && current.final_reason_code === 'safety_outcome_unknown')
+        ? current : null;
+    },
+    getUnsettledWorkerLaunches: async () => [],
     getServingSnapshot: async () => null,
     appendServingSnapshot: async () => { events.push('append'); },
     getOperationState: async () => null,
@@ -1235,6 +1274,220 @@ function recoveryDependencies(input: {
   };
 }
 
+test('creation permit refuses while a durable launch reservation is unsettled', async () => {
+  const harness = recoveryDependencies({ withIngress: true });
+  (harness.repository as unknown as { getWorkerLaunchInventory: () => Promise<readonly unknown[]> })
+    .getWorkerLaunchInventory = async () => [{
+      kind: 'reservation', allocation: { mutation_id: 'mutation-1', worker_slot: 0, attempt_no: 1 },
+    }];
+  let permit: (() => Promise<{ readonly allowed: boolean }>) | undefined;
+  const dependencies = {
+    ...harness.dependencies,
+    createCoordinator: (options: { ensureCreationPermitted: () => Promise<{ readonly allowed: boolean }> }) => {
+      permit = options.ensureCreationPermitted;
+      return { recoverAndPublish: async () => null,
+        startCurrent: async () => ({ kind: 'startup_ready' as const, serving: [] }),
+        publish: async () => ({ kind: 'converged' as const, http_status: 200 as const, operation: {} as never, serving: [] }) };
+    },
+  } as unknown as typeof harness.dependencies;
+  const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+  process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 1).toString('base64');
+  let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
+  try {
+    handle = await startMasterComposition(dependencies);
+    expect(permit).toBeDefined();
+    expect(await permit!()).toMatchObject({ allowed: false });
+    expect(harness.events).not.toContain('worker-spawn');
+  } finally {
+    await handle?.shutdown().catch(() => undefined);
+    if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+    else process.env.BUNGEE_PLUGIN_SECRETS_KEY = previousSecret;
+  }
+});
+
+test('creation permit blocks an admitted candidate outside the fresh serving set', async () => {
+  const harness = recoveryDependencies({ withIngress: true });
+  const repository = harness.repository as unknown as {
+    getWorkerLaunchInventory: () => Promise<readonly unknown[]>;
+  };
+  repository.getWorkerLaunchInventory = async () => [{
+    kind: 'launch',
+    launch: { identity: {
+      master_generation: '10000000-0000-4000-8000-000000000001',
+      worker_instance_id: '20000000-0000-4000-8000-000000000099',
+      worker_slot: 0,
+    } },
+  }];
+  let permit: (() => Promise<{ readonly allowed: boolean }>) | undefined;
+  const dependencies = {
+    ...harness.dependencies,
+    createCoordinator: (options: { ensureCreationPermitted: () => Promise<{ readonly allowed: boolean }> }) => {
+      permit = options.ensureCreationPermitted;
+      return { recoverAndPublish: async () => null,
+        startCurrent: async () => ({ kind: 'startup_ready' as const, serving: [] }),
+        publish: async () => ({ kind: 'converged' as const, http_status: 200 as const, operation: {} as never, serving: [] }) };
+    },
+  } as unknown as typeof harness.dependencies;
+  const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+  process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 1).toString('base64');
+  let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
+  try {
+    handle = await startMasterComposition(dependencies);
+    expect(permit).toBeDefined();
+    expect(await permit!()).toMatchObject({ allowed: false });
+    expect(harness.events).not.toContain('worker-spawn');
+  } finally {
+    await handle?.shutdown().catch(() => undefined);
+    if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+    else process.env.BUNGEE_PLUGIN_SECRETS_KEY = previousSecret;
+  }
+});
+
+test('creation permit refuses a new cohort when a partial retired generation remains', async () => {
+  const harness = recoveryDependencies({ withIngress: true });
+  const workerOf = (slot: number, id: string): { master_generation: string; worker_instance_id: string; worker_slot: number } => ({
+    master_generation: '10000000-0000-4000-8000-000000000001',
+    worker_instance_id: id, worker_slot: slot,
+  });
+  const baseIngress = harness.dependencies.createIngressController!;
+  let permit: (() => Promise<{ readonly allowed: boolean }>) | undefined;
+  const dependencies = {
+    ...harness.dependencies,
+    readOptions: () => ({ ...harness.dependencies.readOptions(), workerCount: 2 }),
+    createIngressController: (options: Parameters<typeof baseIngress>[0]) => {
+      const ingress = baseIngress(options) as { status: () => Promise<unknown> };
+      ingress.status = async () => ({ registry: {
+        active: { revision: 1, content_hash: 'sha256:' + 'a'.repeat(64), workers: [
+          workerOf(0, '20000000-0000-4000-8000-000000000011'), workerOf(1, '20000000-0000-4000-8000-000000000012')] },
+        prepared: null,
+        retired: [{ revision: 1, content_hash: 'sha256:' + 'a'.repeat(64),
+          workers: [workerOf(0, '20000000-0000-4000-8000-000000000013')] }],
+      } });
+      return ingress;
+    },
+    createCoordinator: (options: { ensureCreationPermitted: () => Promise<{ readonly allowed: boolean }> }) => {
+      permit = options.ensureCreationPermitted;
+      return { recoverAndPublish: async () => null,
+        startCurrent: async () => ({ kind: 'startup_ready' as const, serving: [] }),
+        publish: async () => ({ kind: 'converged' as const, http_status: 200 as const, operation: {} as never, serving: [] }) };
+    },
+  } as unknown as typeof harness.dependencies;
+  const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+  process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 1).toString('base64');
+  let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
+  try {
+    handle = await startMasterComposition(dependencies);
+    expect(permit).toBeDefined();
+    expect(await permit!()).toMatchObject({ allowed: false });
+  } finally {
+    await handle?.shutdown().catch(() => undefined);
+    if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+    else process.env.BUNGEE_PLUGIN_SECRETS_KEY = previousSecret;
+  }
+});
+
+test('creation permit does not exempt in-memory admission when ingress status is unavailable', async () => {
+  const harness = recoveryDependencies({ withIngress: true });
+  const baseIngress = harness.dependencies.createIngressController!;
+  let permit: (() => Promise<{ readonly allowed: boolean }>) | undefined;
+  const dependencies = {
+    ...harness.dependencies,
+    createIngressController: (options: Parameters<typeof baseIngress>[0]) => {
+      const ingress = baseIngress(options) as { status: () => Promise<unknown> };
+      ingress.status = async () => { throw new Error('ingress status is unavailable'); };
+      return ingress;
+    },
+    createCoordinator: (options: { ensureCreationPermitted: () => Promise<{ readonly allowed: boolean }> }) => {
+      permit = options.ensureCreationPermitted;
+      return { recoverAndPublish: async () => null,
+        startCurrent: async () => ({ kind: 'startup_ready' as const, serving: [] }),
+        publish: async () => ({ kind: 'converged' as const, http_status: 200 as const, operation: {} as never, serving: [] }) };
+    },
+  } as unknown as typeof harness.dependencies;
+  const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+  process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 1).toString('base64');
+  let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
+  try {
+    handle = await startMasterComposition(dependencies);
+    expect(permit).toBeDefined();
+    expect(await permit!()).toMatchObject({ allowed: false });
+  } finally {
+    await handle?.shutdown().catch(() => undefined);
+    if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+    else process.env.BUNGEE_PLUGIN_SECRETS_KEY = previousSecret;
+  }
+});
+
+test('creation permit re-checks trusted authority after debt settlement', async () => {
+  const harness = recoveryDependencies({ withIngress: true });
+  (harness.repository as unknown as { getWorkerLaunchInventory: () => Promise<readonly unknown[]> })
+    .getWorkerLaunchInventory = async () => [{
+      kind: 'reservation', allocation: { mutation_id: 'mutation-1', worker_slot: 0, attempt_no: 1 },
+    }];
+  const baseIngress = harness.dependencies.createIngressController!;
+  let permit: (() => Promise<{ readonly allowed: boolean }>) | undefined;
+  let reads = 0;
+  const dependencies = {
+    ...harness.dependencies,
+    createIngressController: (options: Parameters<typeof baseIngress>[0]) => {
+      const ingress = baseIngress(options) as { status: () => Promise<unknown> };
+      ingress.status = async () => {
+        reads += 1;
+        if (reads === 1) return { registry: { active: null, prepared: null, retired: [] } };
+        throw new Error('ingress status was lost after debt settlement');
+      };
+      return ingress;
+    },
+    createWorkerFactory: (options: Parameters<typeof harness.dependencies.createWorkerFactory>[0]) => ({
+      ...harness.dependencies.createWorkerFactory(options),
+      settleWorkerLaunchDebt: async () => {
+        (harness.repository as unknown as { getWorkerLaunchInventory: () => Promise<readonly unknown[]> })
+          .getWorkerLaunchInventory = async () => [];
+        return { released: [], fenced: [], unknown: [] };
+      },
+    }),
+    createCoordinator: (options: { ensureCreationPermitted: () => Promise<{ readonly allowed: boolean }> }) => {
+      permit = options.ensureCreationPermitted;
+      return { recoverAndPublish: async () => null,
+        startCurrent: async () => ({ kind: 'startup_ready' as const, serving: [] }),
+        publish: async () => ({ kind: 'converged' as const, http_status: 200 as const, operation: {} as never, serving: [] }) };
+    },
+  } as unknown as typeof harness.dependencies;
+  const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+  process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 1).toString('base64');
+  let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
+  try {
+    handle = await startMasterComposition(dependencies);
+    expect(permit).toBeDefined();
+    expect(await permit!()).toMatchObject({ allowed: false });
+  } finally {
+    await handle?.shutdown().catch(() => undefined);
+    if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+    else process.env.BUNGEE_PLUGIN_SECRETS_KEY = previousSecret;
+  }
+});
+
+test('creation permit refuses without a trusted ingress registry even with empty inventory', async () => {
+  const harness = recoveryDependencies({ withIngress: false });
+  let permit: (() => Promise<{ readonly allowed: boolean }>) | undefined;
+  const dependencies = {
+    ...harness.dependencies,
+    createCoordinator: (options: { ensureCreationPermitted: () => Promise<{ readonly allowed: boolean }> }) => {
+      permit = options.ensureCreationPermitted;
+      return { recoverAndPublish: async () => null,
+        startCurrent: async () => ({ kind: 'startup_ready' as const, serving: [] }),
+        publish: async () => ({ kind: 'converged' as const, http_status: 200 as const, operation: {} as never, serving: [] }) };
+    },
+  } as unknown as typeof harness.dependencies;
+  const handle = await startMasterComposition(dependencies);
+  try {
+    expect(permit).toBeDefined();
+    expect(await permit!()).toMatchObject({ allowed: false });
+  } finally {
+    await handle.shutdown().catch(() => undefined);
+  }
+});
+
 test('does not recover before the active snapshot is durably remembered after a transient pre-read failure', async () => {
   const active = { snapshot: recoverySnapshot(), operation: { mutation_id: 'mutation-1' } };
   let reads = 0;
@@ -1248,7 +1501,7 @@ test('does not recover before the active snapshot is durably remembered after a 
     },
     recoverAndPublish: async (options) => {
       harness.events.push('base-recover');
-      harness.workerFactory.spawn(harness.serving.process.identity);
+      await harness.workerFactory.spawn(harness.serving.process.identity);
       const prepared = await options.admission.prepare([harness.serving]);
       await prepared.commit();
       return { kind: 'converged', http_status: 200, operation: {} as never, serving: [harness.serving] };
@@ -1266,7 +1519,9 @@ test('does not recover before the active snapshot is durably remembered after a 
     expect(harness.events.indexOf('append')).toBeLessThan(harness.events.indexOf('base-recover'));
     expect(harness.events.indexOf('append')).toBeLessThan(harness.events.indexOf('worker-spawn'));
     expect(harness.events.indexOf('append')).toBeLessThan(harness.events.indexOf('ingress-prepare'));
-    expect(reads).toBe(2);
+    // The owner snapshot is also read for control reconciliation, so only the
+    // pre-append retry count is fixed.
+    expect(reads).toBeGreaterThanOrEqual(2);
   } finally {
     await handle?.shutdown().catch(() => undefined);
     if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
@@ -1293,11 +1548,13 @@ test('does not revive non-durable ingress recovery work', async () => {
   let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
   try {
     handle = await startMasterComposition(harness.dependencies);
+    const readsBeforeRecovered = reads;
     await harness.ingressOptions()!.onRecovered!({ kind: 'same_boot' }).catch((error) => { throw error; });
     await handle.shutdown().catch(() => undefined);
     expect(harness.counts().reports).toBe(0);
     expect(harness.counts().fatalCount).toBe(0);
-    expect(reads).toBeLessThanOrEqual(1);
+    // A same-boot notification must not start new recovery work (which would re-read the owner).
+    expect(reads).toBe(readsBeforeRecovered);
     expect(unhandled).toHaveLength(0);
   } finally {
     await handle?.shutdown().catch(() => undefined);
@@ -2032,7 +2289,7 @@ function changedSnapshot(revision: number) {
   return { ...initial, revision };
 }
 
-const stoppedSnapshotRecovery = { state: 'stopped', final_reason_code: 'fatal_source_failure' };
+const stoppedSnapshotRecovery = { state: 'stopped', final_reason_code: 'safety_outcome_unknown' };
 
 test.each(['failed', 'throw', 'cancel'] as const)(
   'bounds cached revisions after repeated %s publications and recovery, retaining the old admission', async mode => {

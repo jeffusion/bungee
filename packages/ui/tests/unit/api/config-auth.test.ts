@@ -44,7 +44,11 @@ test('management initialize, verify and disable use exact envelopes',async()=>{
   const setup={operation:'initialize',username:'owner',password:'long-new-password',passwordConfirmation:'long-new-password'};
   await setPluginEnabled('user-auth',true,{managementSetup:setup});const verification={operation:'verify',username:'owner',password:'long-new-password'};
   await setPluginEnabled('user-auth',true,{managementSetup:verification});await setPluginEnabled('user-auth',false,{});
-  expect(JSON.parse(String(requests[0]!.init!.body))).toEqual({managementSetup:setup});expect(JSON.parse(String(requests[1]!.init!.body))).toEqual({managementSetup:verification});expect(JSON.parse(String(requests[2]!.init!.body))).toEqual({});expect(new Headers(requests[2]!.init!.headers).get('x-bungee-next-authorization')).toBeNull();
+  // Each submission carries its own idempotency identity; the setup envelope stays exact.
+  const bodies=requests.map(request=>JSON.parse(String(request.init!.body)));
+  expect(bodies.map(body=>{const {mutation_id, ...rest}=body;expect(mutation_id).toMatch(/^[a-f0-9-]{36}$/);return rest;}))
+    .toEqual([{managementSetup:setup},{managementSetup:verification},{}]);
+  expect(new Headers(requests[2]!.init!.headers).get('x-bungee-next-authorization')).toBeNull();
 });
 test('unauthorized clears credentials and CSRF',async()=>{
   login('key');restoreSession({success:true,csrfToken:'csrf'});

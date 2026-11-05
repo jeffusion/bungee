@@ -152,8 +152,8 @@ test.each(['enable', 'put', 'import'] as const)('$entry activation persists the 
     const api = createConfigControlApi({ repository:configurationRepositoryFixture(repository), managementAuth:credentials.managementAuth, pluginDependencies: graph, admission: { snapshot: () => [] },
       workerCount: 1, clock: { now: () => ++time }, resolveAuthToken: value => value,
       parseAggregate: value => parseNormalizeCompileAggregate(value, compile),
-      publicationTasks: { enqueue() {} }, isMutationReady: () => true,
-      pluginControlPreflight: { controlNames: new Set(['consumer', 'intermediate', 'provider']),
+      publicationTasks: { wake() {} }, isMutationReady: () => true,
+      pluginControlPreflight: { controlNames: new Set(['consumer', 'intermediate', 'provider']), managementNames: new Set(),
         async activate(name) { startedControls.push(name); }, async deactivate() {} },
     });
     const request = (path: string, method = 'POST', body?: unknown) => new Request(`http://test${path}`, {
@@ -173,7 +173,7 @@ test.each(['enable', 'put', 'import'] as const)('$entry activation persists the 
     expect(repository.getSnapshot().aggregate.plugin_activations).toEqual([
       { plugin_name: 'consumer' }, { plugin_name: 'intermediate' }, { plugin_name: 'provider' },
     ]);
-    expect(startedControls.sort()).toEqual(['consumer', 'intermediate', 'provider']);
+    expect(startedControls.sort()).toEqual([]);
     settle();
     const blocked = await api.handle(request('/api/plugins/provider/disable'));
     expect(blocked?.status).toBe(422);

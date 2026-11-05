@@ -33,6 +33,7 @@ import {
 import {
   removeWorkerDescriptor,
   writeWorkerDescriptor,
+  type WorkerCleanupEvidence,
   type WorkerDescriptorBody,
   type WorkerDescriptorFs,
   type WorkerDescriptorPhase,
@@ -227,6 +228,7 @@ export class WorkerSupervisionHttpServer {
   private contentHash: string | null = null;
   private pluginCatalogHash: string | null = null;
   private evidence: WorkerStatusEvidence = { kind: 'candidate' };
+  private cleanupEvidence: WorkerCleanupEvidence | undefined;
   private publishedAuthority: ControllerAuthority | null = null;
   private terminating = false;
 
@@ -342,6 +344,21 @@ export class WorkerSupervisionHttpServer {
     await this.updateDescriptor({ kind, message });
   }
 
+  /**
+   * Persists the signed terminal cleanup record. The caller must only pass
+   * `success` after every owned shutdown cleanup step settled; this record never
+   * derives from the pre-cleanup `/shutdown` acknowledgement or the exit code.
+   */
+  persistCleanupEvidence(evidence: WorkerCleanupEvidence): Promise<void> {
+    // The descriptor snapshot rejects aliased objects (the same publication also
+    // appears in a ready/drain message), so store an independent identity copy.
+    this.cleanupEvidence = {
+      ...evidence,
+      publication: evidence.publication === null ? null : { ...evidence.publication },
+    };
+    return this.updateDescriptor();
+  }
+
   async fetch(request: Request): Promise<Response> {
     try {
       const url = new URL(request.url);
@@ -383,7 +400,8 @@ export class WorkerSupervisionHttpServer {
     const facts = this.facts();
     const { schema: _schema, role: _role, ...descriptorFacts } = facts;
     const body: WorkerDescriptorBody = { schema: 'bungee-worker-descriptor-v1', role: 'worker', ...descriptorFacts, evidence,
-      ...(this.lifetimeGuard === undefined ? {} : { lifetime_guard: this.lifetimeGuard }) };
+      ...(this.lifetimeGuard === undefined ? {} : { lifetime_guard: this.lifetimeGuard }),
+      ...(this.cleanupEvidence === undefined ? {} : { cleanup: this.cleanupEvidence }) };
     await writeWorkerDescriptor(this.descriptorPath, body, this.credential.process_key, this.descriptorWriteOptions);
   }
 

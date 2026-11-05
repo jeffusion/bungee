@@ -7,7 +7,8 @@ import { confirmAction } from './confirmation';
 export const settingsDirty = writable(false);
 export const dashboardDirty = writable(false);
 export const menuDirty = writable(false);
-const hasUnsavedChanges = () => get(settingsDirty) || get(dashboardDirty) || get(menuDirty);
+export const editorDirty = writable(false);
+const hasUnsavedChanges = () => get(settingsDirty) || get(dashboardDirty) || get(menuDirty) || get(editorDirty);
 
 /** Gate the existing router store, not a second router. Keep the editor mounted until a decision. */
 export const guardedLocation = readable(get(location), set => {
@@ -50,10 +51,11 @@ export const guardedLocation = readable(get(location), set => {
     void confirmAction(get(dashboardDirty)
       ? { title: t('dashboardLayout.discardTitle'), message: t('dashboardLayout.discardMessage'), confirmText: t('dashboardLayout.discard'), cancelText: t('dashboardLayout.keepEditing') }
       : get(menuDirty) ? { title: t('menus.leaveTitle'), message: t('menus.leaveWarning'), confirmText: t('menus.discard'), cancelText: t('menus.keepEditing') }
+      : get(editorDirty) ? { title: t('editor.leaveTitle'), message: t('editor.leaveWarning'), confirmText: t('editor.leaveDiscard'), cancelText: t('editor.stay') }
       : { title: t('settings.leaveTitle'), message: t('settings.leaveWarning'), confirmText: t('settings.leaveDiscard'), cancelText: t('settings.stay') }).then(leave => {
       asking = false;
       if (leave) {
-        settingsDirty.set(false); dashboardDirty.set(false); menuDirty.set(false);
+        settingsDirty.set(false); dashboardDirty.set(false); menuDirty.set(false); editorDirty.set(false);
         show(target);
       } else show(current);
     });

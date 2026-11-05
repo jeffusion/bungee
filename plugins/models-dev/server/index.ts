@@ -30,7 +30,13 @@ export const ModelsDevPlugin = definePlugin(
         if (reconcileCatalogView(current, this.view) === 'failed') this.logger.warn('models-dev catalog snapshot is unavailable');
       };
       const unsubscribe = snapshot.onApplied(apply);
-      await snapshot.sync();
+      // Retain the subscription cleanup before awaiting so a cancelled or failed
+      // initialization can release it through onDestroy.
+      this.cleanup = () => { unsubscribe(); };
+      await snapshot.sync(context.signal === undefined ? {} : { signal: context.signal });
+      // The subscription stays installed until onDestroy/onDispose so the sync
+      // result is not lost; after a cancelled wait nothing new may be published.
+      context.signal?.throwIfAborted();
       if (this.view.status().version === null) apply(snapshot.current());
       const local = catalogServiceOf(this.view);
       services.publish(MODELS_DEV_CAPABILITIES_SERVICE_ID, MODELS_DEV_CAPABILITIES_CONTRACT_VERSION, capabilitiesServiceOf(this.view));

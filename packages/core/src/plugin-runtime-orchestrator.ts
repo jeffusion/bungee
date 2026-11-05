@@ -20,6 +20,18 @@ import {
 export type { PluginRuntimeOrchestratorDiff } from './plugin-runtime-diff';
 export type { PluginRuntimeOrchestratorStatusEntry, PluginRuntimeOrchestratorStatusReport } from './plugin-runtime-status';
 
+/**
+ * Initialization failed and its owned teardown did not complete. Callers that
+ * own a worker process must propagate this instead of reporting a plain apply
+ * failure, so cleanup evidence stays honest.
+ */
+export class PluginRuntimeInitializationCleanupError extends Error {
+  constructor(readonly cause: unknown, readonly cleanupError: unknown) {
+    super('plugin runtime initialization cleanup failed', { cause });
+    this.name = 'PluginRuntimeInitializationCleanupError';
+  }
+}
+
 export interface PluginRuntimeOrchestratorApplyResult {
   generation: number;
   diff: PluginRuntimeOrchestratorDiff;
@@ -108,7 +120,8 @@ export class PluginRuntimeOrchestrator {
     };
   }
 
-  async applyConfig(config: AppConfig): Promise<PluginRuntimeOrchestratorApplyResult> {
+  async applyConfig(config: AppConfig, signal?: AbortSignal): Promise<PluginRuntimeOrchestratorApplyResult> {
+    signal?.throwIfAborted();
     const previousStatus = this.getStatusReport();
 
     const previousPluginRegistry = this.pluginRegistry;
@@ -120,17 +133,24 @@ export class PluginRuntimeOrchestrator {
     try {
       logger.info('🔍 Orchestrator scanning plugin directories...');
       await nextPluginRegistry.scanAndLoadAllPlugins();
+      signal?.throwIfAborted();
 
       if (declaredPlugins.length > 0) {
         logger.info({ declaredPlugins: declaredPlugins.length }, '🔄 Orchestrator reconciling declared plugin metadata');
         await nextPluginRegistry.loadPlugins(declaredPlugins);
       }
+      signal?.throwIfAborted();
 
       const runtimeConfig = createRuntimeEligibleConfig(config, nextPluginRegistry, this.activatedPluginNames);
 
       nextScopedRegistry = new ScopedPluginRegistry(this.configBasePath, this.services);
       if (this.beforeBootstrap !== undefined) nextScopedRegistry.setBeforeBootstrapHook(this.beforeBootstrap);
-      const runtimeResult = await nextScopedRegistry.initializeFromConfig(runtimeConfig, new PluginDependencyGraph(nextPluginRegistry.getAllPluginManifests().values()));
+      const runtimeResult = await nextScopedRegistry.initializeFromConfig(
+        runtimeConfig,
+        new PluginDependencyGraph(nextPluginRegistry.getAllPluginManifests().values()),
+        signal,
+      );
+      signal?.throwIfAborted();
       const globalNames = [...nextPluginRegistry.getAllPluginManifests().values()]
         .filter((manifest) => (manifest.runtimeScope === 'global' || manifest.runtimeScope === 'global-and-scoped') && this.activatedPluginNames.has(manifest.name))
         .map((manifest) => manifest.name);
@@ -179,10 +199,15 @@ export class PluginRuntimeOrchestrator {
         status: this.getStatusReport(),
       };
     } catch (error) {
+      const cleanupFailures: unknown[] = [];
       if (nextScopedRegistry) {
-        await nextScopedRegistry.destroy();
+        try { await nextScopedRegistry.destroy(); } catch (cleanupError) { cleanupFailures.push(cleanupError); }
       }
-      await nextPluginRegistry.unloadAll();
+      try { await nextPluginRegistry.unloadAll(); } catch (cleanupError) { cleanupFailures.push(cleanupError); }
+      if (cleanupFailures.length > 0) {
+        throw new PluginRuntimeInitializationCleanupError(error,
+          cleanupFailures.length === 1 ? cleanupFailures[0] : new AggregateError(cleanupFailures, 'plugin runtime teardown failed'));
+      }
       throw error;
     }
   }

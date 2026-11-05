@@ -44,6 +44,14 @@ interface Plugin {
 
 `definePlugin` 约束构造器静态 `name`、`version`；构造器接收 binding options。`init` 在实例注册前取得作用域和已声明的能力。不得把 init 理解成“整个部署只执行一次”；global 的含义是每个声明进程的全局实例。临时状态通过 reset 清理，资源通过 onDestroy 释放，销毁需要等待在途租约。
 
+worker 初始化的 `PluginInitContext.signal?` 传递宿主关闭／候选取消信号。异步初始化应将它传给支持取消的 I/O，并在等待结束后、发布服务或启动定时任务前检查取消。该信号不表示初始化已结束；宿主仍等待实际初始化和清理完成。不响应取消的初始化可能阻止后续配置应用，宿主不会把进程退出当作资源已释放，也不保证回滚外部副作用。
+
+宿主适配普通插件类时，`init` 拒绝后仍等待该实例的 `onDestroy`；已创建但尚未注册的 handler 也必须收尾。自定义静态 `createHandler` 应在失败返回前清理其内部已创建的资源。`services.onDispose` 只支持同步清理；异步清理应由 `onDestroy` 或初始化自身的 `catch/finally` 等待完成。
+
+实例清理由其所属作用域负责；插件工厂元数据卸载不会构造临时实例调用 `onDestroy`。全局 context 清理仍等待存储刷新并撤销授权；失败会向宿主传播，不记为清理成功。
+
+清理异常会向宿主传播，不能通过重试初始化或再次调用 registry 的 `destroy()` 洗成成功。候选资源的清理结果未知或失败时，发布保留占用，不启动替代批次。
+
 缺少 `bodyRequirements` 或返回无效需求会使初始化／执行失败，不从 Hook 名称推断需求。该方法同步、无副作用，根据当前 method、URL、scope 和实际启用功能返回内容需求。
 
 | `PluginBodyRequirementContext` 字段 | 含义 |
@@ -146,6 +154,8 @@ hooks.onStreamChunk.tap('example', envelope => {
 控制面取得命名空间 `durableState`，所有操作异步。`get/list` 返回不可变版本记录，`transact` 用 expectedVersion 做同库原子 CAS；普通更新不生成历史命令。幂等业务操作经声明的 RPC command journal，未知结果先查询或 reconciliation，禁止换 ID 自动重执行。
 
 普通 KV、秘密存储、可靠事件与命令日志位于 plugin-state.db；观察数据位于 access.db。状态、结果及 outbox 的原子契约、纯 planner 读集、队列与关闭 ACK 见[存储说明](../architecture/storage.md)。插件不能取得配置库裸连接。
+
+worker 的远程 KV 无本地缓存；`flush()` 等待调用前本能力已受理的写，不发送空刷新 RPC。写失败会在原调用和后续 `flush()` 中保持拒绝；能力撤销后禁止调用。`flush()` 不重试写入，也不替代插件对写 Promise 的等待和错误处理。
 
 观察插件在 control entry 导出 `createObservationAdapter(observation)`，返回已注册的方法表；SQL 仅在观察 Worker 的 `observation.withDatabase` 回调内执行。Worker 和 control 实例通过可选的 `context.storage.invokeObservation<T>(operation, args)` 调用自身命名空间的方法，使用前必须检查能力是否已授予，缺失时报错。Host 校验激活状态、命名空间、已注册方法及撤销／关闭状态，不向插件调用方传递数据库连接。
 

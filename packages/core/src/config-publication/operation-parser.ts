@@ -12,7 +12,8 @@ import {
 const OPERATION_FIELDS = new Set([
   'mutation_id', 'request_hash', 'expected_revision', 'committed_revision', 'kind',
   'target_worker_count', 'drain_recovery_generation',
-  'last_drain_recovery_previous_generation', 'created_at', 'updated_at', 'state',
+  'last_drain_recovery_previous_generation', 'plugin_catalog_hash', 'cancel_requested',
+  'prepare_started', 'created_at', 'updated_at', 'state',
   'result_status', 'error_code', 'error_detail',
 ]);
 
@@ -51,6 +52,9 @@ export function parseOperation(value: PluginConfigValue | undefined, path: strin
   else if (object.kind === 'admin_state') kind = 'admin_state';
   else invalid(`${path}.kind`);
   const recovery = recoveryMetadata(object, path);
+  if (typeof object.cancel_requested !== 'boolean' || typeof object.prepare_started !== 'boolean') {
+    invalid(`${path}.state`);
+  }
   const base = {
     mutation_id: identifier(object.mutation_id, `${path}.mutation_id`),
     request_hash: digest(object.request_hash, `${path}.request_hash`),
@@ -60,16 +64,29 @@ export function parseOperation(value: PluginConfigValue | undefined, path: strin
     target_worker_count: nonnegativeInteger(object.target_worker_count, `${path}.target_worker_count`),
     drain_recovery_generation: recovery.generation,
     last_drain_recovery_previous_generation: recovery.previous,
+    plugin_catalog_hash: object.plugin_catalog_hash === null ? null
+      : digest(object.plugin_catalog_hash, `${path}.plugin_catalog_hash`),
+    cancel_requested: object.cancel_requested,
+    prepare_started: object.prepare_started,
     created_at: createdAt,
     updated_at: updatedAt,
   };
   switch (object.state) {
+    case 'pending':
+      if (object.result_status !== null || object.error_code !== null || object.error_detail !== null
+          || base.plugin_catalog_hash !== null || base.cancel_requested || base.prepare_started) invalid(`${path}.state`);
+      return { ...base, state: 'pending', result_status: null, error_code: null, error_detail: null };
     case 'committed':
     case 'publishing':
     case 'draining':
       if (object.result_status !== null || object.error_code !== null || object.error_detail !== null
+          || base.plugin_catalog_hash === null
           || (recovery.generation > 0 && object.state !== 'draining')) invalid(`${path}.state`);
       return { ...base, state: object.state, result_status: null, error_code: null, error_detail: null };
+    case 'superseded':
+      if (object.result_status !== 409 || object.error_code !== 'revision_superseded') invalid(`${path}.state`);
+      return { ...base, state: 'superseded', result_status: 409, error_code: 'revision_superseded',
+        error_detail: errorDetail(object.error_detail, `${path}.error_detail`) };
     case 'converged':
       if (object.result_status !== 200 || object.error_code !== null || object.error_detail !== null
           || recovery.generation !== 0) invalid(`${path}.state`);

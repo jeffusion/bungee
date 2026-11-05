@@ -7,8 +7,11 @@ import { buildPluginManifestCatalog } from '../../src/plugin-manifest-catalog';
 import { cleanupCatalogRoots, manifest, tempRoot, writePlugin } from '../helpers/plugin-manifest-catalog';
 import { PROCESS_IDENTITY } from '../helpers/config-publication-worker-runtime';
 import { AsyncConfigRepository } from '../../src/config-storage/async-config-repository';
+import { fenceWorkerLaunch, settleWorkerLaunch } from '../helpers/worker-launch';
 
 afterEach(cleanupCatalogRoots);
+
+const TEST_CATALOG_HASH = `sha256:${'0'.repeat(64)}` as const;
 
 async function fixture(existingManagementProvider = false, removedPlugin?: string) {
   const root = tempRoot();
@@ -36,14 +39,15 @@ async function fixture(existingManagementProvider = false, removedPlugin?: strin
   return { repository, dbPath, catalog, seeded };
 }
 
-function settle(repository: ConfigRepository): void {
-  const active = repository.getActivePublication();
+function settle(repository: ConfigRepository, pluginCatalogHash: Parameters<ConfigRepository['claimPublicationTarget']>[0]): void {
+  let now = 100;
+  const active = repository.claimPublicationTarget(pluginCatalogHash, ++now);
   if (!active) throw new Error('missing simulation publication');
   const id = active.operation.mutation_id;
-  let now = 100;
   repository.beginPublication(id, ++now);
   for (const target of active.targets) {
     repository.beginWorkerAttempt(id, target.worker_slot, 0, 'initial', ++now);
+    settleWorkerLaunch(repository, id, target.worker_slot, 1, ++now);
     repository.recordWorkerResult(id, target.worker_slot, {
       kind: 'converged', attempt_no: 1, applied_revision: active.snapshot.revision,
     }, ++now);
@@ -55,7 +59,7 @@ function settle(repository: ConfigRepository): void {
 describe('master startup dependency reconciliation', () => {
   test.each(['local-accounts', 'removed-plugin'])('removes absent %s records once before dependency reconciliation', async name => {
     const { repository, dbPath, catalog, seeded } = await fixture(false, name);
-    settle(repository);
+    settle(repository, catalog.hash);
     repository.appendServingSnapshot(seeded.snapshot, catalog.hash);
     const oldOperation = repository.getOperationState('old-catalog-config');
     repository.close();
@@ -82,7 +86,7 @@ describe('master startup dependency reconciliation', () => {
 
   test('the real storage worker clears a removed selected provider before returning its startup projection', async () => {
     const { repository, dbPath, catalog } = await fixture();
-    settle(repository); repository.close();
+    settle(repository, catalog.hash); repository.close();
     const prior = ConfigRepository.open(dbPath, { offline: true, compileOptions: {
       pluginSchemas: new Map(), managementProviders: new Set(['removed-auth']),
     } });
@@ -101,13 +105,18 @@ describe('master startup dependency reconciliation', () => {
 
   test('missing plugin cleanup does not overwrite an unfinished publication', async () => {
     const { repository, dbPath, catalog, seeded } = await fixture(false, 'removed-plugin');
+    repository.claimPublicationTarget(catalog.hash, 101);
     const operation = repository.getOperationState('old-catalog-config');
     repository.close();
-    expect(() => ConfigRepository.open(dbPath, { compileOptions: catalog.toCompileOptions() })).toThrow('operation_in_progress');
-    const checked = ConfigRepository.open(dbPath);
+    const checked = ConfigRepository.open(dbPath, { compileOptions: catalog.toCompileOptions() });
     try {
-      expect(checked.getSnapshot()).toEqual(seeded.snapshot);
+      // Cleanup persists a separate target-free revision; the claimed owner and its
+      // frozen snapshot remain the active publication.
+      expect(checked.getSnapshot().revision).toBe(seeded.snapshot.revision + 1);
       expect(checked.getOperationState('old-catalog-config')).toEqual(operation);
+      expect(checked.getActivePublication()?.operation.mutation_id).toBe('old-catalog-config');
+      expect(checked.getServingSnapshot({ revision: seeded.snapshot.revision,
+        content_hash: seeded.snapshot.content_hash, plugin_catalog_hash: catalog.hash })).toEqual(seeded.snapshot);
     } finally { checked.close(); }
   });
 
@@ -135,7 +144,7 @@ describe('master startup dependency reconciliation', () => {
             service_id: '50000000-0000-4000-8000-000000000001', weight: 100, priority: 1, is_disabled: false }], plugins: [] }],
         },
       } });
-    expect(seeded.kind).toBe('committed'); settle(repository); repository.close();
+    expect(seeded.kind).toBe('committed'); settle(repository, TEST_CATALOG_HASH); repository.close();
     const checked = ConfigRepository.open(dbPath, { compileOptions: {
       availablePlugins: new Set(['present-plugin']), pluginSchemas: new Map([['present-plugin', []]]),
     } });
@@ -155,7 +164,7 @@ describe('master startup dependency reconciliation', () => {
 
   test('a cleanup failure rolls back the revision and removed records together', async () => {
     const { repository, dbPath, catalog, seeded } = await fixture(false, 'removed-plugin');
-    settle(repository); const operation = repository.getCurrentOperationState(); repository.close();
+    settle(repository, catalog.hash); const operation = repository.getCurrentOperationState(); repository.close();
     expect(() => ConfigRepository.open(dbPath, { compileOptions: catalog.toCompileOptions(),
       faultInjection(stage) { if (stage === 'after_targets') throw new Error('cleanup failed'); },
     })).toThrow();
@@ -170,7 +179,7 @@ describe('master startup dependency reconciliation', () => {
   test.each([false, true])('rejects a new management dependency before committing (existing provider: %s)', async existingProvider => {
     const { repository, catalog, seeded } = await fixture(existingProvider);
     try {
-      settle(repository);
+      settle(repository, catalog.hash);
       const oldOperation = repository.getCurrentOperationState();
       await expect(reconcilePluginDependencies(configurationRepositoryFixture(repository), catalog.toCompileOptions(), 2, 200,
         new Set(['provider', 'existing-auth']))).rejects.toThrow('enable the provider through management setup');
@@ -181,7 +190,7 @@ describe('master startup dependency reconciliation', () => {
   test('upgrades old activations once, preserves history and bindings, and compiles identical worker metadata', async () => {
     const { repository, dbPath, catalog, seeded } = await fixture();
     try {
-      settle(repository);
+      settle(repository, catalog.hash);
       repository.appendServingSnapshot(seeded.snapshot, catalog.hash);
       const oldOperation = repository.getOperationState('old-catalog-config');
       const next = await reconcilePluginDependencies(configurationRepositoryFixture(repository), catalog.toCompileOptions(), 2, 200, new Set());
@@ -195,7 +204,7 @@ describe('master startup dependency reconciliation', () => {
       expect(repository.getOperationState('old-catalog-config')).toEqual(oldOperation);
       expect(repository.getServingSnapshot({ revision: seeded.snapshot.revision,
         content_hash: seeded.snapshot.content_hash, plugin_catalog_hash: catalog.hash })).toEqual(seeded.snapshot);
-      expect(repository.getActivePublication()?.targets.map(value => value.worker_slot)).toEqual([0, 1]);
+      expect(repository.getCurrentOperationState()?.workers.map(value => value.worker_slot)).toEqual([0, 1]);
       // Repeated startup while this new revision is pending does not write again.
       expect(await reconcilePluginDependencies(configurationRepositoryFixture(repository), catalog.toCompileOptions(), 2, 201, new Set())).toEqual(next);
       const command = { command: 'start-current-config-worker' as const, ...PROCESS_IDENTITY,
@@ -214,11 +223,13 @@ describe('master startup dependency reconciliation', () => {
   test.each(['committed', 'publishing', 'draining'] as const)('does not overwrite an unfinished %s publication', async state => {
     const { repository, catalog, seeded } = await fixture();
     try {
-      if (state !== 'committed') repository.beginPublication('old-catalog-config', 101);
+      let now = 100;
+      repository.claimPublicationTarget(catalog.hash, ++now);
+      if (state !== 'committed') repository.beginPublication('old-catalog-config', ++now);
       if (state === 'draining') {
-        let now = 101;
         for (const slot of [0, 1]) {
           repository.beginWorkerAttempt('old-catalog-config', slot, 0, 'initial', ++now);
+          settleWorkerLaunch(repository, 'old-catalog-config', slot, 1, ++now);
           repository.recordWorkerResult('old-catalog-config', slot, {
             kind: 'converged', attempt_no: 1, applied_revision: seeded.snapshot.revision,
           }, ++now);
@@ -226,9 +237,12 @@ describe('master startup dependency reconciliation', () => {
         repository.markDraining('old-catalog-config', ++now);
       }
       const oldOperation = repository.getOperationState('old-catalog-config');
-      await expect(reconcilePluginDependencies(configurationRepositoryFixture(repository), catalog.toCompileOptions(), 2, 200, new Set())).rejects.toThrow('operation_in_progress');
-      expect(repository.getSnapshot()).toEqual(seeded.snapshot);
+      const oldOwner = repository.getActivePublication();
+      const next = await reconcilePluginDependencies(configurationRepositoryFixture(repository), catalog.toCompileOptions(), 2, 200, new Set());
+      expect(next.revision).toBe(seeded.snapshot.revision + 1);
+      expect(repository.getActivePublication()?.operation).toEqual(oldOwner?.operation);
       expect(repository.getOperationState('old-catalog-config')).toEqual(oldOperation);
+      expect(repository.getSnapshot()).toEqual(next);
     } finally { repository.close(); }
   });
 
@@ -243,28 +257,33 @@ describe('master startup dependency reconciliation', () => {
   test('does not supersede an active recovery', async () => {
     const { repository, catalog, seeded } = await fixture();
     try {
-      repository.beginPublication('old-catalog-config', 101);
-      let now = 101;
+      let now = 100;
+      repository.claimPublicationTarget(catalog.hash, ++now);
+      repository.beginPublication('old-catalog-config', ++now);
       for (const slot of [0, 1]) {
         repository.beginWorkerAttempt('old-catalog-config', slot, 0, 'initial', ++now);
         repository.recordWorkerResult('old-catalog-config', slot, {
           kind: 'failed', attempt_no: 1, error: 'simulated temporary failure',
         }, ++now);
+        fenceWorkerLaunch(repository, 'old-catalog-config', slot, 1, ++now);
       }
       repository.finalizePublication('old-catalog-config', { outcome: 'degraded',
         error_code: 'replacement_convergence_failed', error_detail: 'simulated temporary failure',
         recovery_disposition: 'retryable' }, ++now);
       const recovery = repository.getCurrentRecovery();
       expect(recovery?.state).toBe('scheduled');
-      await expect(reconcilePluginDependencies(configurationRepositoryFixture(repository), catalog.toCompileOptions(), 2, 200, new Set())).rejects.toThrow('recovery_in_progress');
-      expect(repository.getSnapshot()).toEqual(seeded.snapshot);
+      const oldOperation = repository.getOperationState('old-catalog-config');
+      const next = await reconcilePluginDependencies(configurationRepositoryFixture(repository), catalog.toCompileOptions(), 2, 200, new Set());
+      expect(next.revision).toBe(seeded.snapshot.revision + 1);
+      expect(repository.getOperationState('old-catalog-config')).toEqual(oldOperation);
       expect(repository.getCurrentRecovery()).toEqual(recovery);
+      expect(repository.getSnapshot()).toEqual(next);
     } finally { repository.close(); }
   });
 
   test('rolls back every new revision row if reconciliation materialization fails', async () => {
     const { repository, catalog, dbPath, seeded } = await fixture();
-    settle(repository);
+    settle(repository, catalog.hash);
     repository.close();
     const failing = ConfigRepository.open(dbPath, { compileOptions: catalog.toCompileOptions(),
       faultInjection(stage) { if (stage === 'after_materialization') throw new Error('simulated transaction failure'); } });

@@ -37,7 +37,7 @@ export async function createSourceDraft(source: UpstreamSource, accountRef: stri
   const url = new URL(draft.target);
   if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password
     || !draft.bindingOptions || typeof draft.bindingOptions !== 'object' || Array.isArray(draft.bindingOptions)
-    || draft.bindingOptions.accountRef !== accountRef) throw new Error('插件返回的上游草稿无效');
+    || draft.bindingOptions.accountRef !== accountRef) throw new Error('插件返回的上游配置无效');
   return draft;
 }
 

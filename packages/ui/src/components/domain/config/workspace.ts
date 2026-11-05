@@ -150,7 +150,7 @@ export function aggregateCounts(aggregate: ConfigurationAggregate) {
     bindings: aggregate.logical_configuration.plugins.length, activations: aggregate.plugin_activations.length };
 }
 export function publicationBusy(publication: ConfigurationPublication | null): boolean {
-  return !!publication && (['committed', 'publishing', 'draining'].includes(publication.operation?.state ?? '')
+  return !!publication && (['pending', 'committed', 'publishing', 'draining'].includes(publication.operation?.state ?? '')
     || publication.cleanup?.active === true
     || ['scheduled', 'running'].includes(publication.recovery?.state ?? ''));
 }

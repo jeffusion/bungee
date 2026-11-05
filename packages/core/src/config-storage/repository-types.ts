@@ -14,16 +14,22 @@ type ConfigurationOperationBase = {
   readonly target_worker_count: number;
   readonly drain_recovery_generation: number;
   readonly last_drain_recovery_previous_generation: number | null;
+  readonly plugin_catalog_hash: Sha256Digest | null;
+  readonly cancel_requested: boolean;
+  readonly prepare_started: boolean;
   readonly created_at: number;
   readonly updated_at: number;
 };
 
 export type ConfigurationOperation = ConfigurationOperationBase & (
+  | { readonly state: 'pending'; readonly result_status: null; readonly error_code: null; readonly error_detail: null }
   | { readonly state: 'committed' | 'publishing' | 'draining'; readonly result_status: null;
       readonly error_code: null; readonly error_detail: null }
   | { readonly state: 'converged'; readonly result_status: 200; readonly error_code: null; readonly error_detail: null }
   | { readonly state: 'degraded'; readonly result_status: 202;
       readonly error_code: 'replacement_convergence_failed' | 'old_worker_drain_failed' | 'control_readiness_failed'; readonly error_detail: string }
+  | { readonly state: 'superseded'; readonly result_status: 409;
+      readonly error_code: 'revision_superseded'; readonly error_detail: string }
 );
 
 type ConfigurationOperationWorkerBase = {
@@ -130,10 +136,30 @@ export type ServingSnapshotKey = {
 };
 
 export type ActiveConfigurationPublication = {
-  readonly operation: Extract<ConfigurationOperation, { readonly result_status: null }>;
+  readonly operation: Extract<ConfigurationOperation, { readonly state: 'committed' | 'publishing' | 'draining' }>;
   readonly snapshot: RepositorySnapshot;
   readonly targets: readonly ConfigurationOperationWorker[];
+  readonly plugin_catalog_hash: Sha256Digest;
 };
+
+/** Per-attempt proof recorded before a cancelled candidate may be superseded. */
+export type PublicationCandidateExitEvidence =
+  | { readonly kind: 'not_started' }
+  | { readonly kind: 'exited'; readonly cleanup: 'released' };
+
+export type PublicationCandidateAllocation = {
+  readonly mutation_id: string;
+  readonly committed_revision: number;
+  readonly plugin_catalog_hash: Sha256Digest | null;
+  readonly worker_slot: number;
+  readonly attempt_no: number;
+  readonly state: 'pending' | 'converged' | 'failed';
+  readonly updated_at: number;
+};
+
+export type PublicationPrepareDecision =
+  | { readonly kind: 'granted'; readonly operation: ConfigurationOperation }
+  | { readonly kind: 'cancelled' };
 
 export type CommitConfigurationCommandV1 = {
   readonly mutation_id: string;
@@ -148,11 +174,7 @@ export type CommitConfigurationResult =
   | { readonly kind: 'committed'; readonly snapshot: RepositorySnapshot; readonly operation: ConfigurationOperation }
   | { readonly kind: 'duplicate'; readonly operation: ConfigurationOperation }
   | { readonly kind: 'stale_revision'; readonly expected_revision: number; readonly active_revision: number }
-  | { readonly kind: 'idempotency_key_reused'; readonly mutation_id: string }
-  | { readonly kind: 'operation_in_progress'; readonly mutation_id: string; readonly committed_revision: number;
-      readonly state: 'committed' | 'publishing' | 'draining' }
-  | { readonly kind: 'recovery_in_progress'; readonly recovery_id: string; readonly target_revision: number;
-      readonly state: 'scheduled' | 'running' };
+  | { readonly kind: 'idempotency_key_reused'; readonly mutation_id: string };
 
 export type ConfigRepositoryErrorCode =
   | 'connection_invariant'
@@ -164,6 +186,7 @@ export type ConfigRepositoryErrorCode =
   | 'idempotency_key_reused'
   | 'recovery_in_progress'
   | 'cas_conflict'
+  | 'cancellation_not_permitted'
   | 'retry_not_due'
   | 'attempts_exhausted'
   | 'migration_failed'

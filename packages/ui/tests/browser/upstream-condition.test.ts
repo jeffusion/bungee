@@ -68,7 +68,7 @@ try {
         revision++;
         writes.push(config);
         return respond({ operation_id: body.mutation_id, revision,
-          operation: { mutation_id: body.mutation_id, state: 'committed' }, workers: [] }, 202);
+          operation: { mutation_id: body.mutation_id, state: 'committed', result_status: null, error_code: null, expected_revision: revision - 1, committed_revision: revision }, workers: [] }, 202);
       }
       if (url.pathname === '/api/config/runtime') return respond({ config, revision,
         content_hash: 'sha256:fixture', workers: [], publication: { operation: null, recovery: null,
@@ -93,6 +93,7 @@ try {
     const response = page.waitForResponse(response => response.request().method() === 'PUT');
     await page.getByTestId('service-save-button').click();
     assert.equal((await response).status(), 202);
+    await page.getByTestId('service-editor-back').click();
     await page.locator('[title="renamed"]').waitFor();
     assert.equal(writes.length, 2);
     const saved = config.logical_configuration.services[1]!;

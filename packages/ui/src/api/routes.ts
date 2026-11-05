@@ -8,7 +8,7 @@ import type {
   ConfigurationRoute,
 } from '@jeffusion/bungee-types';
 import { getConfigSnapshot, validateConfig } from './config';
-import { isEqual } from 'lodash-es';
+import { cloneDeep, isEqual } from 'lodash-es';
 import {
   toEditorRoute,
   toEditorService,
@@ -51,15 +51,17 @@ export class RouteStaleError extends Error {
   readonly name = 'RouteStaleError';
   constructor(readonly routePath: string, readonly reason: 'changed' | 'deleted') {
     super(reason === 'deleted'
-      ? '该路由已被删除，未保存任何修改。当前草稿仍保留，请勿覆盖同名的新路由。'
-      : '该路由已被其他操作修改，未保存任何修改。当前草稿仍保留，请重新加载最新版本后再编辑。');
+      ? '该路由已被删除，本次未保存。未保存的更改已保留，请勿覆盖同名的新路由。'
+      : '该路由已被其他操作修改，本次未保存。未保存的更改已保留，请重新加载路由后再保存。');
   }
 }
 
 export type RouteBaseline = ConfigurationRoute;
 
 function persistedRoute(route: ConfigurationRoute, logical: Awaited<ReturnType<typeof getConfigSnapshot>>['config']['logical_configuration']): ConfigurationRoute {
-  return toV2Route(toEditorRoute(route, logical.services), logical, route, route.position);
+  const persisted = toV2Route(toEditorRoute(route, logical.services), logical, route, route.position);
+  // Baselines can carry editor keys holding undefined; only the JSON wire form is persisted.
+  return JSON.parse(JSON.stringify(persisted));
 }
 
 /** Read-only leaf projection for previews and validation; never used as a save payload. */
@@ -96,18 +98,25 @@ export class RoutesAPI {
     return { route: toEditorRoute(existing, logical.services), baseline: structuredClone(persistedRoute(existing, logical)) };
   }
 
-  static async create(route: Route): Promise<void> {
+  static async create(route: Route): Promise<RouteBaseline> {
+    // Snapshot reactive drafts before the first await.
+    route = cloneDeep(route);
     const snapshot = await getConfigSnapshot();
     const logical = snapshot.config.logical_configuration;
     if (logical.routes.some((candidate) => candidate.path === route.path)) throw new RouteConflictError(route.path);
     const position = logical.routes.reduce((maximum, candidate) => Math.max(maximum, candidate.position), -1) + 1;
+    const created = toV2Route(route, logical, undefined, position);
     await saveLogicalConfiguration(snapshot, {
       ...logical,
-      routes: [...logical.routes, toV2Route(route, logical, undefined, position)],
+      routes: [...logical.routes, created],
     });
+    return created;
   }
 
-  static async update(originalPath: string, updatedRoute: Route, baseline?: RouteBaseline): Promise<void> {
+  static async update(originalPath: string, updatedRoute: Route, baseline?: RouteBaseline): Promise<RouteBaseline> {
+    // Snapshot reactive drafts before the first await.
+    updatedRoute = cloneDeep(updatedRoute);
+    baseline = cloneDeep(baseline);
     const snapshot = await getConfigSnapshot();
     const logical = snapshot.config.logical_configuration;
     const existing = baseline === undefined
@@ -128,6 +137,7 @@ export class RoutesAPI {
       ...logical,
       routes: logical.routes.map((route) => route.id === existing.id ? replacement : route),
     });
+    return replacement;
   }
 
   static async delete(path: string): Promise<void> {

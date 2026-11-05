@@ -1,6 +1,7 @@
 import type { AsyncConfigRepository } from '../config-storage/async-config-repository';
 import type { PublicationRetirement } from '../config-storage/retirement-store';
-import { probeExistingProcessLifetimeGuard, armProcessLifetimeGuard, PROCESS_LIFETIME_GUARD_ENV } from '../supervision/process-lifetime-guard';
+import { probeExistingProcessLifetimeGuard, armProcessLifetimeGuard, PROCESS_LIFETIME_GUARD_ENV, type ProcessLifetimeGuardFacts } from '../supervision/process-lifetime-guard';
+import type { UnsettledWorkerLaunch, WorkerLaunch as DurableWorkerLaunch, WorkerLaunchAllocation, WorkerLaunchAllocationFacts, WorkerLaunchExitEvidence } from '../config-storage';
 import { readKernelDeadlineClockId } from './kernel-monotonic-clock';
 import { spawn as spawnChild, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { join, resolve } from 'node:path';
@@ -27,6 +28,40 @@ import { DAEMON_PROCESS_IDENTITY_MARKER_PREFIX, type Sha256Digest } from '@jeffu
 export type SupervisedControlPortAllocator = (identity: ConfigProcessIdentity) => number;
 export type SupervisedConfigWorkerSpawn = (executable: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
 
+/** Durable pre-fork launch ledger. Registration must succeed before the native fork. */
+export type WorkerLaunchRepository = {
+  registerWorkerLaunch(
+    identity: ConfigProcessIdentity,
+    guard: ProcessLifetimeGuardFacts,
+    allocation: WorkerLaunchAllocation | null,
+    updatedAt: number,
+  ): Promise<DurableWorkerLaunch>;
+  recordWorkerLaunchExit(workerInstanceId: string, evidence: WorkerLaunchExitEvidence, updatedAt: number): Promise<DurableWorkerLaunch>;
+  recordWorkerLaunchAdmitted(workerInstanceId: string, updatedAt: number): Promise<DurableWorkerLaunch>;
+  fenceWorkerLaunchNotStarted(mutationId: string, workerSlot: number, attemptNo: number, updatedAt: number): Promise<void>;
+  getWorkerLaunch(workerInstanceId: string): Promise<DurableWorkerLaunch | null>;
+  /** Authoritative per-allocation facts; `settled` covers fences and exit+cleanup proofs. */
+  getWorkerLaunchAllocationFacts(allocation: WorkerLaunchAllocation): Promise<WorkerLaunchAllocationFacts | null>;
+  /**
+   * Global unsettled inventory: every reservation without a fence/candidate proof and
+   * every intent without `exited + cleanup_released`, including admitted workers, old
+   * owners and `allocation: null` startup launches.
+   */
+  getWorkerLaunchInventory(): Promise<readonly UnsettledWorkerLaunch[]>;
+};
+
+export type WorkerLaunchCommand = {
+  readonly mutation_id: string;
+  readonly committed_revision: number;
+  readonly attempt_no: number;
+};
+
+export type WorkerLaunchDebtSettlement = {
+  readonly released: readonly ConfigProcessIdentity[];
+  readonly fenced: readonly WorkerLaunchAllocation[];
+  readonly unknown: readonly (DurableWorkerLaunch | WorkerLaunchAllocation)[];
+};
+
 export type SupervisedConfigWorkerFactoryOptions = {
   readonly launch: WorkerLaunch;
   readonly rootKey: SupervisionRootKeyMaterial;
@@ -50,7 +85,9 @@ export type SupervisedConfigWorkerFactoryOptions = {
   /** Injectable host boot identity; production always defaults to native OS evidence. */
   readonly kernelBootId?: () => Promise<string>;
   /** Re-checks signed ingress registry membership immediately before orphan cleanup. */
-  readonly retirementRepository?: Pick<AsyncConfigRepository, 'getPublicationServingSet' | 'confirmPublicationServingMemberExit' | 'getRetirementDescriptorCleanupState' | 'getRetiredWorkerInstanceIds' | 'getPublicationRetirement' | 'recordPublicationRetirementEvidence' | 'stopPublicationRetirement'>;
+  readonly retirementRepository?: Pick<AsyncConfigRepository, 'getPublicationServingSet' | 'confirmPublicationServingMemberExit' | 'getRetirementDescriptorCleanupState' | 'getRetiredWorkerInstanceIds' | 'getPublicationRetirement' | 'recordPublicationRetirementEvidence' | 'stopPublicationRetirement' | 'getOutstandingPublicationCandidates' | 'recordPublicationCandidateExit'>;
+  /** Durable launch ledger; required for real native forks on guard-backed platforms. */
+  readonly launchRepository?: WorkerLaunchRepository;
   readonly confirmOrphan?: () => Promise<AdmissionRegistryStatus>;
 };
 
@@ -207,6 +244,13 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
   private readonly unavailableListeners = new Set<(process: SupervisedConfigWorkerProcessAdapter, evidence: WorkerUnavailableEvidence) => void>();
   private readonly exitListeners = new Set<(process: ConfigPublicationWorkerProcess, evidence: WorkerExitEvidence) => void>();
   private readonly eligibilityListeners = new Set<() => void>();
+  /** Last durable launch-exit state written per instance; keeps a later signed cleanup upgrade. */
+  private readonly launchExitStates = new Map<string, {
+    readonly state: 'unknown' | 'released';
+    readonly written: Promise<void>;
+  }>();
+  /** First durable write failure per instance; it survives entry replacement and later success. */
+  private readonly launchExitFailures = new Map<string, { readonly error: unknown }>();
 
   constructor(private readonly options: SupervisedConfigWorkerFactoryOptions) {
     this.spawnWorker = options.spawn ?? DEFAULT_SPAWN;
@@ -222,7 +266,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
     }
   }
 
-  spawn(identity: ConfigProcessIdentity): SupervisedConfigWorkerProcessAdapter {
+  async spawn(identity: ConfigProcessIdentity, publication?: WorkerLaunchCommand): Promise<SupervisedConfigWorkerProcessAdapter> {
     const key = identityKey(identity);
     if (this.retiredInstanceIds.has(identity.worker_instance_id)) throw new SupervisedConfigWorkerFactoryError('already_owned', 'retired worker identity cannot rejoin');
     if (this.identities.has(key)) throw new SupervisedConfigWorkerFactoryError('already_owned', 'supervised worker identity is already owned');
@@ -236,8 +280,29 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
       if (STRIPPED_ROOT_ENV_NAMES_LOWER.has(name.toLowerCase())) delete env[name];
     }
     clearDaemonBootstrapEnvironment(env);
-    const lifetimeGuard = this.options.spawn === undefined && process.platform !== 'win32'
+    const lifetimeGuard = process.platform !== 'win32'
+      && (this.options.spawn === undefined || this.options.launchRepository !== undefined)
       ? armProcessLifetimeGuard({ directory: join(this.options.runtimeWorkersDirectory, 'guards'), processInstanceId: identity.worker_instance_id }) : undefined;
+    const launchRepository = this.options.launchRepository;
+    if (this.options.spawn === undefined && launchRepository === undefined) {
+      lifetimeGuard?.closeAfterChildExit();
+      throw new Error('worker launch intent storage is unavailable');
+    }
+    // Reserve the identity before the first await so a concurrent spawn can never pass
+    // the ownership checks for the same identity; never mint a replacement to escape debt.
+    this.identities.add(key);
+    const allocation: WorkerLaunchAllocation | null = publication === undefined ? null : {
+      mutation_id: publication.mutation_id, worker_slot: identity.worker_slot, attempt_no: publication.attempt_no,
+    };
+    if (launchRepository !== undefined && lifetimeGuard !== undefined) {
+      try {
+        await launchRepository.registerWorkerLaunch(identity, lifetimeGuard.facts, allocation, Date.now());
+      } catch (error) {
+        lifetimeGuard.closeAfterChildExit();
+        this.identities.delete(key);
+        throw error;
+      }
+    }
     let child: ChildProcess;
     try { child = this.spawnWorker(this.options.launch.executable, [...this.options.launch.args,
       `${DAEMON_PROCESS_IDENTITY_MARKER_PREFIX}${identity.worker_instance_id}`], {
@@ -256,7 +321,18 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
         ...(this.options.configDbPath === undefined ? {} : { BUNGEE_CONFIG_DB_PATH: resolve(this.options.configDbPath) }),
         ...rateLimitSessionEnvironment(this.rateLimitSession),
       },
-    }); } catch (error) { lifetimeGuard?.closeAfterChildExit(); throw error; }
+    }); } catch (error) {
+      // A rejected fork created no child. Keep the identity reserved (no reuse by
+      // another attempt) and record the proof only when the ledger holds an intent.
+      lifetimeGuard?.closeAfterChildExit();
+      if (allocation !== null) {
+        try { await launchRepository?.fenceWorkerLaunchNotStarted(allocation.mutation_id, allocation.worker_slot, allocation.attempt_no, Date.now()); }
+        catch { /* unknown stays debt; never retry the fork under this identity */ }
+      }
+      try { await launchRepository?.recordWorkerLaunchExit(identity.worker_instance_id, { kind: 'not_started' }, Date.now()); }
+      catch { /* no intent for a failed registration; nothing to settle */ }
+      throw error;
+    }
     child.once('exit', () => lifetimeGuard?.closeAfterChildExit());
     child.once('error', () => lifetimeGuard?.closeAfterChildExit());
     // No child.kill anywhere in the spawn path: every spawned worker carries its own
@@ -271,7 +347,6 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
       processIdentity: this.options.processIdentity,
       kernelBootId: this.kernelBootId,
     });
-    this.identities.add(key);
     this.adapters.set(key, workerProcess);
     this.owned.set(workerProcess, { process: workerProcess, child });
     this.bindUnavailable(workerProcess);
@@ -460,48 +535,258 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
     return (await this.provePublicationRetirement(registry, retirement)).kind === 'confirmed';
   }
 
-  /** A new attempt is allowed only after every prior target has a durable exact exit fence. */
+  /**
+   * A new attempt is allowed only after every prior target has a durable exact exit fence.
+   * This covers both a frozen serving set and pre-ready allocations that never wrote one.
+   */
   async confirmActivePublicationExited(active: import('../config-storage/repository-types').ActiveConfigurationPublication): Promise<boolean> {
     const repository = this.options.retirementRepository;
     if (repository === undefined) return false;
-    let set = await repository.getPublicationServingSet(active.operation.mutation_id, active.operation.drain_recovery_generation);
-    if (set === null || set.workers.length !== active.targets.length) return false;
-    for (const member of set.workers) {
-      const target = active.targets.find(target => target.worker_slot === member.identity.worker_slot);
-      if (target === undefined || member.publication?.mutation_id !== active.operation.mutation_id
-        || member.publication.attempt_no !== target.attempt_no || member.publication.drain_recovery_generation !== target.drain_recovery_generation
-        || member.revision !== active.snapshot.revision || member.content_hash !== active.snapshot.content_hash) return false;
-      if (set.exited.includes(member.identity.worker_instance_id)) continue;
-      let fence: import('../supervision/process-lifetime-guard').ProcessLifetimeRetirementFence | undefined;
+    const mutationId = active.operation.mutation_id;
+    const set = await repository.getPublicationServingSet(mutationId, active.operation.drain_recovery_generation);
+    if (set !== null) {
+      if (set.workers.length !== active.targets.length) return false;
+      for (const member of set.workers) {
+        const target = active.targets.find(target => target.worker_slot === member.identity.worker_slot);
+        if (target === undefined || member.publication?.mutation_id !== active.operation.mutation_id
+          || member.publication.attempt_no !== target.attempt_no || member.publication.drain_recovery_generation !== target.drain_recovery_generation
+          || member.revision !== active.snapshot.revision || member.content_hash !== active.snapshot.content_hash) return false;
+        const instance = member.identity.worker_instance_id;
+        let fence: import('../supervision/process-lifetime-guard').ProcessLifetimeRetirementFence | undefined;
+        try {
+          const launch = this.options.launchRepository === undefined ? null
+            : await this.options.launchRepository.getWorkerLaunch(instance);
+          // A freed guard and a prior physical-exit row are not cleanup proof. Only a
+          // durable launch settlement or the signed stopped descriptor proves cleanup.
+          const launchSettled = launch !== null && launch.exited && launch.cleanup_released;
+          if (!launchSettled) {
+            const raw: unknown = JSON.parse(await readFile(join(this.options.runtimeWorkersDirectory, `${instance}.json`), 'utf8'));
+            const seed = deriveWorkerSupervisionSeed(this.options.rootKey, member.identity.master_generation, member.identity.worker_instance_id, member.identity.worker_slot);
+            const descriptor = parseWorkerDescriptor(raw, deriveWorkerSupervisionCredential(seed, member.boot_nonce));
+            const message = descriptor.evidence.message;
+            if (identityKey(descriptor) !== identityKey(member.identity) || descriptor.boot_nonce !== member.boot_nonce
+              || descriptor.revision !== member.revision || descriptor.content_hash !== member.content_hash
+              || descriptor.plugin_catalog_hash !== member.plugin_catalog_hash || descriptor.private_port !== member.private_port
+              || message === undefined || !('publication' in message) || canonicalJson(message.publication) !== canonicalJson(member.publication)) return false;
+            const cleanup = descriptor.cleanup;
+            if (descriptor.phase !== 'stopped' || cleanup === undefined || cleanup.cleanup_state !== 'success'
+              || cleanup.revision !== active.snapshot.revision || cleanup.content_hash !== active.snapshot.content_hash
+              || cleanup.plugin_catalog_hash !== active.plugin_catalog_hash
+              || canonicalJson(cleanup.publication) !== canonicalJson(member.publication)) return false;
+            if (member.guard !== null) {
+              const held = descriptor.lifetime_guard;
+              if (held === undefined) return false;
+              const { held: _held, ...facts } = held;
+              if (canonicalJson(facts) !== canonicalJson(member.guard)) return false;
+              const saved = this.retirementProofFences.get(instance);
+              const proof = saved === undefined ? probeExistingProcessLifetimeGuard(member.guard)
+                : saved.isCurrent() ? { kind: 'confirmed' as const, fence: saved } : { kind: 'unknown' as const };
+              if (proof.kind !== 'confirmed') return false;
+              fence = proof.fence; this.retirementProofFences.set(instance, fence);
+            } else if (process.platform === 'win32') {
+              if (member.kernel_boot_id !== await this.kernelBootId()) return false;
+              const proof = await (this.options.processIdentity?.probeInstance ?? probeProcessInstance)(descriptor.pid, instance);
+              if (proof !== 'dead' && proof !== 'mismatch') return false;
+            } else return false;
+          }
+          // Settle the exact attempt in both ledgers before the serving-set row. Candidate
+          // evidence is only meaningful while the owner can still host a candidate.
+          if (target.attempt_no > 0 && active.operation.state !== 'draining') {
+            await repository.recordPublicationCandidateExit(mutationId, active.operation.committed_revision,
+              target.worker_slot, target.attempt_no, { kind: 'exited', cleanup: 'released' }, Date.now());
+          }
+          if (launch !== null) {
+            await this.options.launchRepository!.recordWorkerLaunchExit(instance,
+              { kind: 'exited', cleanup: 'released' }, Date.now());
+          }
+          await repository.confirmPublicationServingMemberExit(active.operation.mutation_id, set.generation, instance);
+          this.retiredInstanceIds.add(instance);
+          fence?.close(); this.retirementProofFences.delete(instance);
+        } catch { return false; }
+      }
+      return true;
+    }
+    // No serving set was frozen yet. The exact durable allocation facts are the
+    // authority; an empty unsettled list is not settlement proof (admitted live
+    // processes and already settled intents are absent from it).
+    const outstanding = (await repository.getOutstandingPublicationCandidates())
+      .filter(item => item.mutation_id === mutationId && item.attempt_no > 0);
+    if (outstanding.length > 0 && active.operation.state === 'draining') return false;
+    const launchRepository = this.options.launchRepository;
+    if (outstanding.length > 0 && launchRepository === undefined) return false;
+    for (const item of outstanding) {
+      const target = active.targets.find(target => target.worker_slot === item.worker_slot
+        && target.attempt_no === item.attempt_no);
+      if (target === undefined) return false;
+      const allocation: WorkerLaunchAllocation = { mutation_id: mutationId,
+        worker_slot: item.worker_slot, attempt_no: item.attempt_no };
+      const facts = await launchRepository!.getWorkerLaunchAllocationFacts(allocation);
+      if (facts === null) return false;
+      if (facts.settled) continue;
+      if (facts.launch === null) {
+        // Only an intent-free reservation is the atomic proof that no child was forked.
+        if (facts.reserved_at === null) return false;
+        try {
+          await launchRepository!.fenceWorkerLaunchNotStarted(
+            mutationId, item.worker_slot, item.attempt_no, Date.now());
+          await repository.recordPublicationCandidateExit(mutationId, active.operation.committed_revision,
+            item.worker_slot, item.attempt_no, { kind: 'not_started' }, Date.now());
+        } catch { return false; }
+        continue;
+      }
+      // Admitted occupancy is legal serving; a generic reserved/exited flag without
+      // cleanup is not exit proof. Only the signed cleanup + original guard may settle it.
+      if (facts.admitted_at !== null || facts.launch.admitted) return false;
+      if (!await this.proveWorkerLaunchExit(facts.launch, active)) return false;
       try {
-        const raw: unknown = JSON.parse(await readFile(join(this.options.runtimeWorkersDirectory, `${member.identity.worker_instance_id}.json`), 'utf8'));
-        const seed = deriveWorkerSupervisionSeed(this.options.rootKey, member.identity.master_generation, member.identity.worker_instance_id, member.identity.worker_slot);
-        const descriptor = parseWorkerDescriptor(raw, deriveWorkerSupervisionCredential(seed, member.boot_nonce));
-        const message = descriptor.evidence.message;
-        if (identityKey(descriptor) !== identityKey(member.identity) || descriptor.boot_nonce !== member.boot_nonce
-          || descriptor.revision !== member.revision || descriptor.content_hash !== member.content_hash
-          || descriptor.plugin_catalog_hash !== member.plugin_catalog_hash || descriptor.private_port !== member.private_port
-          || message === undefined || !('publication' in message) || canonicalJson(message.publication) !== canonicalJson(member.publication)) return false;
-        if (member.guard !== null) {
-          const held = descriptor.lifetime_guard;
-          if (held === undefined) return false;
-          const { held: _held, ...facts } = held;
-          if (canonicalJson(facts) !== canonicalJson(member.guard)) return false;
-          const saved = this.retirementProofFences.get(member.identity.worker_instance_id);
-          const proof = saved === undefined ? probeExistingProcessLifetimeGuard(member.guard)
-            : saved.isCurrent() ? { kind: 'confirmed' as const, fence: saved } : { kind: 'unknown' as const };
-          if (proof.kind !== 'confirmed') return false;
-          fence = proof.fence; this.retirementProofFences.set(member.identity.worker_instance_id, fence);
-        } else if (process.platform === 'win32') {
-          if (member.kernel_boot_id !== await this.kernelBootId()) return false;
-          const proof = await (this.options.processIdentity?.probeInstance ?? probeProcessInstance)(descriptor.pid, member.identity.worker_instance_id);
-          if (proof !== 'dead' && proof !== 'mismatch') return false;
-        } else return false;
-        set = await repository.confirmPublicationServingMemberExit(active.operation.mutation_id, set.generation, member.identity.worker_instance_id);
-        this.retiredInstanceIds.add(member.identity.worker_instance_id);
-        fence?.close(); this.retirementProofFences.delete(member.identity.worker_instance_id);
+        await repository.recordPublicationCandidateExit(mutationId, active.operation.committed_revision,
+          item.worker_slot, item.attempt_no, { kind: 'exited', cleanup: 'released' }, Date.now());
       } catch { return false; }
     }
+    return true;
+  }
+
+  /**
+   * Debt-only pass for the serialized recovery/publication queue: settle durable launch
+   * debt from fresh signed evidence without forking or terminating anything. Legal
+   * members of the freshly read admission registry are skipped, never released.
+   */
+  async settleWorkerLaunchDebt(registry: AdmissionRegistryStatus): Promise<WorkerLaunchDebtSettlement> {
+    const repository = this.options.launchRepository;
+    if (repository === undefined) throw new Error('worker launch intent storage is unavailable');
+    const legal = new Set(([registry.active, registry.prepared, ...registry.retired]
+      .flatMap(set => set === null ? [] : parseAdmissionSet(set).workers))
+      .map(worker => identityKey({
+        master_generation: worker.master_generation,
+        worker_instance_id: worker.worker_instance_id,
+        worker_slot: worker.worker_slot,
+      })));
+    const released: ConfigProcessIdentity[] = [];
+    const fenced: WorkerLaunchAllocation[] = [];
+    const unknown: (DurableWorkerLaunch | WorkerLaunchAllocation)[] = [];
+    for (const entry of await repository.getWorkerLaunchInventory()) {
+      if (entry.kind === 'reservation') {
+        // beginWorkerAttempt always writes the reservation; fencing is only possible
+        // while that exact attempt is still the current open owner.
+        try {
+          await repository.fenceWorkerLaunchNotStarted(entry.allocation.mutation_id,
+            entry.allocation.worker_slot, entry.allocation.attempt_no, Date.now());
+          fenced.push(entry.allocation);
+        } catch { unknown.push(entry.allocation); }
+        continue;
+      }
+      const { launch } = entry;
+      if (legal.has(identityKey(launch.identity))) continue;
+      if (launch.not_started || (launch.exited && launch.cleanup_released)) continue;
+      if (await this.proveStandaloneWorkerLaunchExit(launch)) released.push(launch.identity);
+      else unknown.push(launch);
+    }
+    return { released, fenced, unknown };
+  }
+
+  /**
+   * Proves a historical or startup launch exited with signed cleanup and a free original
+   * guard. Unlike publication-attempt proof this does not need a live active snapshot.
+   */
+  private async proveStandaloneWorkerLaunchExit(launch: DurableWorkerLaunch): Promise<boolean> {
+    const repository = this.options.launchRepository;
+    if (repository === undefined) return false;
+    let descriptor: ReturnType<typeof parseWorkerDescriptor>;
+    try {
+      const raw: unknown = JSON.parse(await readFile(join(this.options.runtimeWorkersDirectory,
+        `${launch.identity.worker_instance_id}.json`), 'utf8'));
+      const hint = parseWorkerDescriptorHint(raw);
+      if (hint.master_generation !== launch.identity.master_generation
+        || hint.worker_instance_id !== launch.identity.worker_instance_id
+        || hint.worker_slot !== launch.identity.worker_slot) return false;
+      const seed = deriveWorkerSupervisionSeed(this.options.rootKey, hint.master_generation,
+        hint.worker_instance_id, hint.worker_slot);
+      descriptor = parseWorkerDescriptor(raw, deriveWorkerSupervisionCredential(seed, hint.boot_nonce));
+    } catch { return false; }
+    const cleanup = descriptor.cleanup;
+    if (descriptor.phase !== 'stopped' || cleanup === undefined || cleanup.cleanup_state !== 'success') return false;
+    if (launch.allocation === null) {
+      // A startup launch has no publication; any signed publication in cleanup means
+      // this intent was not the process that performed that start.
+      if (cleanup.publication !== null) return false;
+    } else {
+      if (launch.identity.worker_slot !== launch.allocation.worker_slot
+        || cleanup.publication === null
+        || cleanup.publication.mutation_id !== launch.allocation.mutation_id
+        || cleanup.publication.attempt_no !== launch.allocation.attempt_no) return false;
+    }
+    let guardProven = false;
+    if (descriptor.lifetime_guard !== undefined) {
+      const { held: _held, ...facts } = descriptor.lifetime_guard;
+      if (canonicalJson(facts) !== canonicalJson(launch.guard)) return false;
+      const proof = probeExistingProcessLifetimeGuard(launch.guard);
+      if (proof.kind !== 'confirmed') return false;
+      proof.fence.close();
+      guardProven = true;
+    }
+    if (!guardProven) {
+      if (process.platform !== 'win32') return false;
+      const proof = await (this.options.processIdentity?.probeInstance ?? probeProcessInstance)(
+        descriptor.pid, launch.identity.worker_instance_id);
+      if (proof !== 'dead' && proof !== 'mismatch') return false;
+    }
+    await repository.recordWorkerLaunchExit(launch.identity.worker_instance_id,
+      { kind: 'exited', cleanup: 'released' }, Date.now());
+    this.retiredInstanceIds.add(launch.identity.worker_instance_id);
+    return true;
+  }
+
+  /**
+   * Proves one durable launch intent exited with signed cleanup for this publication
+   * attempt. A freed guard is physical exit only; the signed stopped descriptor is the
+   * cleanup proof, and both must match the intent's identity before recording `released`.
+   */
+  private async proveWorkerLaunchExit(
+    launch: DurableWorkerLaunch,
+    active: import('../config-storage/repository-types').ActiveConfigurationPublication,
+  ): Promise<boolean> {
+    const repository = this.options.launchRepository;
+    if (repository === undefined) return false;
+    if (launch.not_started) return true;
+    const allocation = launch.allocation;
+    if (allocation === null || allocation.mutation_id !== active.operation.mutation_id) return false;
+    if (launch.exited && launch.cleanup_released) { this.retiredInstanceIds.add(launch.identity.worker_instance_id); return true; }
+    let descriptor: ReturnType<typeof parseWorkerDescriptor>;
+    try {
+      const raw: unknown = JSON.parse(await readFile(join(this.options.runtimeWorkersDirectory, `${launch.identity.worker_instance_id}.json`), 'utf8'));
+      const hint = parseWorkerDescriptorHint(raw);
+      if (hint.master_generation !== launch.identity.master_generation
+        || hint.worker_instance_id !== launch.identity.worker_instance_id
+        || hint.worker_slot !== launch.identity.worker_slot) return false;
+      const seed = deriveWorkerSupervisionSeed(this.options.rootKey, hint.master_generation, hint.worker_instance_id, hint.worker_slot);
+      descriptor = parseWorkerDescriptor(raw, deriveWorkerSupervisionCredential(seed, hint.boot_nonce));
+    } catch { return false; }
+    const cleanup = descriptor.cleanup;
+    const publication = {
+      mutation_id: allocation.mutation_id, attempt_no: allocation.attempt_no,
+      drain_recovery_generation: active.operation.drain_recovery_generation,
+    };
+    if (descriptor.phase !== 'stopped' || cleanup === undefined || cleanup.cleanup_state !== 'success'
+      || cleanup.revision !== active.snapshot.revision || cleanup.content_hash !== active.snapshot.content_hash
+      || cleanup.plugin_catalog_hash !== active.plugin_catalog_hash
+      || canonicalJson(cleanup.publication) !== canonicalJson(publication)) return false;
+    let guardProven = false;
+    if (descriptor.lifetime_guard !== undefined) {
+      const { held: _held, ...facts } = descriptor.lifetime_guard;
+      if (canonicalJson(facts) !== canonicalJson(launch.guard)) return false;
+      const proof = probeExistingProcessLifetimeGuard(launch.guard);
+      if (proof.kind === 'live') return false;
+      if (proof.kind !== 'confirmed') return false;
+      proof.fence.close();
+      guardProven = true;
+    }
+    if (!guardProven) {
+      if (process.platform !== 'win32') return false;
+      const proof = await (this.options.processIdentity?.probeInstance ?? probeProcessInstance)(descriptor.pid, launch.identity.worker_instance_id);
+      if (proof !== 'dead' && proof !== 'mismatch') return false;
+    }
+    await repository.recordWorkerLaunchExit(launch.identity.worker_instance_id, { kind: 'exited', cleanup: 'released' }, Date.now());
+    this.retiredInstanceIds.add(launch.identity.worker_instance_id);
     return true;
   }
 
@@ -682,6 +967,19 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
   async shutdownAll(): Promise<readonly ProcessCleanupResult[]> {
     const processes = this.snapshot();
     await this.shutdownOwned();
+    // Durable exit/cleanup facts are part of shutdown: wait for every write started by
+    // exit listeners, without turning a rejected write into a cached success.
+    const entries = [...this.launchExitStates.values()];
+    const settled = await Promise.allSettled(entries.map((entry) => entry.written));
+    const failures: unknown[] = [...this.launchExitFailures.values()].map((failure) => failure.error);
+    for (const result of settled) if (result.status === 'rejected') failures.push(result.reason);
+    if (failures.length > 0) {
+      // Keep both the entries and the first-failure facts so a repeated shutdown cannot
+      // turn a previously failed durable write into success.
+      throw new AggregateError(failures, 'worker launch exit fact write failed');
+    }
+    this.launchExitStates.clear();
+    this.launchExitFailures.clear();
     // Evidence is paired per process object, never re-associated by PID.
     return processes.map((process) => ({ process, exitEvidence: this.exitHistory.get(process) ?? null }));
   }
@@ -697,15 +995,27 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
     this.notifyEligibilityChange();
   }
 
-  markCommitted(processes: readonly ConfigPublicationWorkerProcess[]): void {
+  async markCommitted(processes: readonly ConfigPublicationWorkerProcess[]): Promise<void> {
+    // Memory first: an actually admitted group must be protected from a stop decision
+    // even if the durable admitted fact cannot be written in time.
     let changed = false;
+    const committed: ConfigPublicationWorkerProcess[] = [];
     for (const process of processes) {
       if (this.owned.has(process) && !this.committed.has(process)) {
         this.committed.add(process);
+        committed.push(process);
         changed = true;
       }
     }
     if (changed) this.notifyEligibilityChange();
+    const repository = this.options.launchRepository;
+    if (repository === undefined) return;
+    for (const process of processes) {
+      // An adopted pre-launch-ledger worker has no intent; never rebuild guard trust
+      // or invent a launch row from adoption. Only an existing intent is confirmed.
+      if (!this.owned.has(process) || await repository.getWorkerLaunch(process.identity.worker_instance_id) === null) continue;
+      await repository.recordWorkerLaunchAdmitted(process.identity.worker_instance_id, Date.now());
+    }
   }
 
   disconnectProcesses(processes: readonly ConfigPublicationWorkerProcess[]): void {
@@ -1064,12 +1374,34 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
       evidence = value;
       resolveExit();
     });
+    if (process.origin === 'adopted') {
+      // Adopted workers have no child exit event: poll the exact guard/signed
+      // descriptor proof inside the existing shutdown deadline instead of doing one
+      // immediate probe after the graceful ACK.
+      const deadline = Date.now() + this.options.shutdownTimeoutMs;
+      try {
+        while (evidence === null) {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) break;
+          if (typeof process.verifyExactExit === 'function') {
+            try {
+              const verified = await process.verifyExactExit();
+              if (verified !== null && this.exitEvidenceIsUsable(process, verified)) evidence = verified;
+            } catch { /* unknown exit stays unproven */ }
+          }
+          if (evidence !== null) break;
+          const left = deadline - Date.now();
+          if (left <= 0) break;
+          await Promise.race([exited, Bun.sleep(Math.min(left, 5))]);
+        }
+      } finally { unsubscribe(); }
+      return evidence;
+    }
     try { await Promise.race([exited, Bun.sleep(this.options.shutdownTimeoutMs)]); }
     finally { unsubscribe(); }
     if (evidence !== null) return evidence;
-    // No child exit event (adopted workers never had one): ask the adapter for an OS-level
-    // exact-exit proof. An unknown probe keeps ownership with the caller and is reported
-    // through the existing unconfirmed-exit channels.
+    // Spawned fallback: an exact OS probe after its existing bounded wait. An unknown
+    // probe keeps ownership with the caller.
     if (typeof process.verifyExactExit === 'function') {
       try {
         const verified = await process.verifyExactExit();
@@ -1136,6 +1468,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
 
   private bindExit(process: SupervisedConfigWorkerProcessAdapter): void {
     process.subscribeExit((evidence) => {
+      void this.recordLaunchExit(process.identity.worker_instance_id, evidence).catch(() => undefined);
       const known = this.exitHistory.get(process);
       if (known !== undefined && this.exitEvidenceIsUsable(process, known)) return;
       this.exitHistory.set(process, evidence);
@@ -1153,6 +1486,37 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
     });
   }
 
+  /**
+   * Best-effort durable exit fact for a registered launch. Physical exit is not cleanup
+   * proof: only a signed worker cleanup report may upgrade the ledger to `released`.
+   */
+  private recordLaunchExit(workerInstanceId: string, evidence: WorkerExitEvidence): Promise<void> {
+    const repository = this.options.launchRepository;
+    if (repository === undefined) return Promise.resolve();
+    const cleanup = evidence.cleanup_state === 'success' ? 'released' as const : 'unknown' as const;
+    const previous = this.launchExitStates.get(workerInstanceId);
+    if (previous !== undefined && (previous.state === 'released' || previous.state === cleanup)) {
+      return previous.written;
+    }
+    const write = (previous?.written ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(() => repository.recordWorkerLaunchExit(workerInstanceId, { kind: 'exited', cleanup }, Date.now()))
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        // The first failure belongs to the instance, not to whichever entry is current
+        // when it rejects; a queued upgrade must not lose it or turn it into success.
+        if (!this.launchExitFailures.has(workerInstanceId)) {
+          this.launchExitFailures.set(workerInstanceId, { error });
+        }
+        throw error;
+      });
+    this.launchExitStates.set(workerInstanceId, { state: cleanup, written: write });
+    // The event listener must not leak an unhandled rejection; shutdownAll awaits the
+    // same promise and reports the actual durable-write failure.
+    void write.catch(() => undefined);
+    return write;
+  }
+
   async shutdownOwned(): Promise<readonly WorkerExitEvidence[]> {
     const processes = [...this.owned.values()];
     const exits: WorkerExitEvidence[] = [];
@@ -1168,6 +1532,11 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
       });
       try {
         try { await process.terminate('graceful'); } catch { /* force below */ }
+        if (process.origin === 'adopted' && exit === null) {
+          // Graceful /shutdown ACK is not exit proof. Wait for the exact guard/signed
+          // descriptor proof within the existing bounded shutdown deadline.
+          exit = await this.waitForExactExit(process);
+        }
         if (process.origin === 'spawned' && exit === null) {
           await Promise.race([exitPromise, Bun.sleep(this.options.shutdownTimeoutMs)]);
         }
@@ -1177,8 +1546,8 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
           try { await process.terminate('force'); } catch { /* retain unknown exit */ }
           await Promise.race([exitPromise, Bun.sleep(this.options.shutdownTimeoutMs)]);
         }
-        if (exit === null && typeof process.verifyExactExit === 'function') {
-          // Adopted workers have no child exit event; fall back to the exact OS probe.
+        if (exit === null && process.origin !== 'adopted' && typeof process.verifyExactExit === 'function') {
+          // Spawned fallback only; an adopted worker already had its bounded exact wait.
           try {
             const verified = await process.verifyExactExit();
             if (verified !== null && this.exitEvidenceIsUsable(process, verified)) exit = verified;

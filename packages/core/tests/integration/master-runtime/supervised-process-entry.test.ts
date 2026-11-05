@@ -9,6 +9,7 @@ import {
   deriveWorkerSupervisionCredential,
   deriveWorkerSupervisionSeed,
   hashSupervisionBody,
+  parseWorkerDescriptor,
   serializeWorkerSupervisionSeed,
   signSupervisionMessage,
 } from '../../../src/supervision';
@@ -86,6 +87,17 @@ test('supervised process clears the global provider on normal shutdown and start
     await running;
     expect(exitProcess).toHaveBeenCalledWith(0);
     expect(hasBoundControlClientProvider()).toBe(false);
+    // Only the signed cleanup record written after the shutdown cleanup settled
+    // releases a candidate that never received a start command.
+    const released = parseWorkerDescriptor(
+      JSON.parse(await readFile(env.BUNGEE_WORKER_DESCRIPTOR_PATH!, 'utf8')),
+      credential,
+    );
+    expect(released.phase).toBe('stopped');
+    expect(released.cleanup).toEqual({
+      cleanup_state: 'success', revision: null, content_hash: null,
+      plugin_catalog_hash: null, publication: null,
+    });
 
     const occupied = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('occupied') });
     try {

@@ -11,7 +11,8 @@ function harness(unknownCommit: boolean, committed?: () => Promise<void>) {
   const operation: ConfigurationOperation = { mutation_id: 'original-id', request_hash: hashConfigurationContent(aggregate),
     expected_revision: 1, committed_revision: 2, kind: 'config', state: 'committed', result_status: null,
     error_code: null, error_detail: null, target_worker_count: 1, drain_recovery_generation: 0,
-    last_drain_recovery_previous_generation: null, created_at: 1, updated_at: 1 };
+    last_drain_recovery_previous_generation: null, plugin_catalog_hash: hashConfigurationContent(aggregate),
+    cancel_requested: false, prepare_started: false, created_at: 1, updated_at: 1 };
   let snapshot = {revision:1,content_hash:hashConfigurationContent(aggregate),aggregate};
   const options = {
     managementAuth: new ManagementAuthentication({get:()=>null} as unknown as PluginControlHost,()=>snapshot.aggregate,new Set()),
@@ -29,9 +30,9 @@ function harness(unknownCommit: boolean, committed?: () => Promise<void>) {
     },
     onConfigurationCommitted: committed,
     admission: { snapshot: () => [] }, workerCount: 1, clock: { now: () => 1 }, resolveAuthToken: (value: string) => value,
-    parseAggregate: parseNormalizeCompileAggregate, publicationTasks: { enqueue() {} }, isMutationReady: () => true,
+    parseAggregate: parseNormalizeCompileAggregate, publicationTasks: { wake() {} }, isMutationReady: () => true,
     pluginControlPreflight: {
-      controlNames: new Set(['control']),
+      controlNames: new Set(['control']), managementNames: new Set(['control']),
       async activate() { events.push('activate'); }, async deactivate() { events.push('deactivate'); },
     },
   };

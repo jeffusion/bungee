@@ -19,7 +19,7 @@ import {pluginStateFixturePath} from '../helpers/plugin-state-fixture';
  */
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -66,6 +66,8 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
   let lease: PortLease | undefined;
   let master: OwnedMaster | undefined;
   const masterStartup: GatewayMasterStartupState = { attempted: false, errors: [] };
+  // Only the last case sets this; a failed run must keep its fixture for diagnosis.
+  let preserveFixtureOnFailure = false;
 
   async function startGatewayMaster(currentFixture: GatewayFixture, currentLease: PortLease): Promise<OwnedMaster> {
     try {
@@ -109,15 +111,19 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
     }
     const portsVerifiedClosed = !masterStartup.attempted || leaseReleased;
     if (fixture !== undefined) {
-      try {
-        const removed = await cleanupGatewayFixture(fixture, {
-          startupAttempted: masterStartup.attempted,
-          master,
-          shutdownVerified,
-          portsVerifiedClosed,
-        });
-        if (!removed) cleanupErrors.push(new Error(`startup, process ownership, or port closure is unverified; preserving fixture and logs at ${fixture.root}`));
-      } catch (error) { cleanupErrors.push(error); }
+      if (preserveFixtureOnFailure) {
+        console.error(`preserving fixture of failed case at ${fixture.root}`);
+      } else {
+        try {
+          const removed = await cleanupGatewayFixture(fixture, {
+            startupAttempted: masterStartup.attempted,
+            master,
+            shutdownVerified,
+            portsVerifiedClosed,
+          });
+          if (!removed) cleanupErrors.push(new Error(`startup, process ownership, or port closure is unverified; preserving fixture and logs at ${fixture.root}`));
+        } catch (error) { cleanupErrors.push(error); }
+      }
       fixture = undefined;
     }
     if (cleanupErrors.length) {
@@ -375,11 +381,15 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
 
   test('real protected requests prepare and settle the budget through peer Host RPC', async () => {
     if (!fixture || !lease || !master) throw new Error('fixture unavailable');
+    preserveFixtureOnFailure = true;
     const currentFixture = fixture, currentLease = lease;
     const management = `http://127.0.0.1:${lease.base}`;
-    let upstreamCalls = 0;
+    let upstreamCalls = 0, heldEntered = false, releaseHold = () => {};
+    const holdGate = new Promise<void>(resolve => { releaseHold = resolve; });
+    let heldRequest: Promise<{status: number; text: string}> | undefined;
     const upstream = Bun.serve({hostname: '127.0.0.1', port: 0, fetch: async request => {
       await request.json(); upstreamCalls++;
+      if (request.headers.get('x-hold') === '1') { heldEntered = true; await holdGate; }
       return Response.json({id: 'chatcmpl-budget', object: 'chat.completion', model: 'gpt-4o-mini', choices: [{index: 0, message: {role: 'assistant', content: 'ok'}, finish_reason: 'stop'}], usage: {prompt_tokens: 4, completion_tokens: 6, total_tokens: 10}});
     }});
     try {
@@ -392,7 +402,9 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
       const changed = await requestJson(`${management}/api/config`, {method: 'PUT', headers: {'content-type': 'application/json'}, body: JSON.stringify({expected_revision: (initial.body as any).revision, mutation_id: mutationId, aggregate})}, currentFixture);
       expect(changed.response.status).toBe(202);
       await waitForOperation(management, mutationId, currentFixture);
-      await recordOwnedWorkers(master, await waitForWorkers(management, (initial.body as any).revision + 1, currentFixture));
+      const revision = Number((initial.body as any).revision) + 1;
+      const servingWorkers = await waitForWorkers(management, revision, currentFixture);
+      await recordOwnedWorkers(master, servingWorkers);
       const issued = await requestJson(`${management}/api/plugins/key-access/control/credentials`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({name: 'Peer Budget'})}, currentFixture);
       expect(issued.response.status).toBe(201);
       const keyId = (issued.body as any).key.id, token = (issued.body as any).token;
@@ -422,7 +434,103 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
         const old = await fetch(`http://127.0.0.1:${currentLease.block.ports[3]}${path}`, {method: 'POST', body: '{}'});
         expect(old.status).toBe(404); await old.text();
       }
-    } finally {await upstream.stop(true);}
+
+      // ---- a newer request is held upstream while its credential is revoked
+      // and the budget's only control generation is asked to stop.
+      const raised = await requestJson(policyUrl, {method: 'PUT', headers: {'content-type': 'application/json'}, body: JSON.stringify({mode: 'cumulative', limit: 30})}, currentFixture);
+      expect(raised.response.status).toBe(200);
+      const held = fetch(publicUrl, {...input, headers: {...input.headers, 'x-hold': '1'}})
+        .then(async response => ({status: response.status, text: await response.text()}));
+      // Observe only: the main path still awaits the original promise and propagates failures.
+      void held.catch(() => undefined);
+      heldRequest = held;
+      await waitUntil(() => heldEntered, 'held upstream request did not enter', 10_000);
+
+      const revoked = await requestJson(`${management}/api/plugins/key-access/control/credentials/${encodeURIComponent(keyId)}`, {method: 'DELETE'}, currentFixture);
+      expect(revoked.response.status).toBe(200);
+      expect(revoked.body).toMatchObject({deleted: true, id: keyId, published: true, ready: true});
+      const revokedAttempt = await fetch(publicUrl, input);
+      expect(revokedAttempt.status).toBe(401); await revokedAttempt.text();
+      expect(upstreamCalls).toBe(2);
+
+      const disableSnapshot = await requestJson(`${management}/api/config`, {}, currentFixture);
+      const disableRevision = Number((disableSnapshot.body as any).revision);
+      const disableId = randomUUID();
+      const disabled = await requestJson(`${management}/api/plugins/token-budget/disable`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({expected_revision: disableRevision, mutation_id: disableId})}, currentFixture);
+      expect(disabled.response.status).toBe(202);
+      await waitForOperation(management, disableId, currentFixture, ['draining']);
+      // The operation's draining state can precede admission commit; wait for the
+      // ingress to actually serve the new revision before reading retired state.
+      const disabledWorkers = await waitForWorkers(management, disableRevision + 1, currentFixture);
+      await recordOwnedWorkers(master, disabledWorkers);
+      const drainingCatalog = await requestJson(`${management}/api/plugins`, {}, currentFixture);
+      expect(drainingCatalog.response.status).toBe(200);
+      expect((drainingCatalog.body as any[]).find(plugin => plugin.name === 'token-budget')).toMatchObject({
+        enabled: false, lifecycle: 'draining', blockedReason: 'in_flight_requests',
+      });
+
+      releaseHold();
+      const heldResult = await held;
+      expect(heldResult.status).toBe(200);
+      const durableKey = `key:${createHash('sha256').update(keyId).digest('hex')}`;
+      const durableDb = new Database(pluginStateFixturePath(currentFixture.configDbPath), {readonly: true});
+      let durableCumulative = -1, durableSettled = 0;
+      try {
+        await waitUntil(() => {
+          const record = durableDb.query<{value_json: string}, [string, string]>('SELECT value_json FROM plugin_durable_records WHERE namespace = ? AND key = ?').get('token-budget', durableKey);
+          if (!record) return false;
+          durableCumulative = (JSON.parse(record.value_json) as {ledger?: {cumulative?: number}}).ledger?.cumulative ?? -1;
+          durableSettled = durableDb.query<{value_json: string}, []>("SELECT value_json FROM plugin_durable_records WHERE namespace = 'token-budget' AND key LIKE 'attempt:%'").all()
+            .map(row => JSON.parse(row.value_json) as {keyId?: string; status?: string})
+            .filter(attempt => attempt.keyId === keyId && attempt.status === 'settled').length;
+          return durableCumulative === 20 && durableSettled === 2;
+        }, 'held request did not settle through the draining control generation', 10_000);
+      } finally { durableDb.close(); }
+      expect(durableCumulative).toBe(20);
+      expect(durableSettled).toBe(2);
+
+      await waitForOperation(management, disableId, currentFixture);
+      const stoppedCatalog = await requestJson(`${management}/api/plugins`, {}, currentFixture);
+      expect((stoppedCatalog.body as any[]).find(plugin => plugin.name === 'token-budget')).toMatchObject({enabled: false, lifecycle: 'stopped'});
+      for (const worker of disabledWorkers) {
+        expect(servingWorkers.some(serving => serving.worker_instance_id === worker.worker_instance_id)).toBe(false);
+      }
+      await waitUntil(async () => (await Promise.all(servingWorkers.map(worker => probeProcessInstance(worker.pid, worker.worker_instance_id))))
+        .every(state => state === 'dead'), 'old budget workers did not physically exit', 15_000);
+
+      // ---- resuming the budget keeps the durable ledger but not the revoked key.
+      const beforeEnable = await requestJson(`${management}/api/config`, {}, currentFixture);
+      const enableRevision = Number((beforeEnable.body as any).revision);
+      const enableId = randomUUID();
+      const enabled = await requestJson(`${management}/api/plugins/token-budget/enable`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({expected_revision: enableRevision, mutation_id: enableId})}, currentFixture);
+      expect(enabled.response.status).toBe(202);
+      await waitForOperation(management, enableId, currentFixture);
+      const enabledWorkers = await waitForWorkers(management, enableRevision + 1, currentFixture);
+      await recordOwnedWorkers(master, enabledWorkers);
+      for (const worker of enabledWorkers) {
+        expect(disabledWorkers.some(disabledWorker => disabledWorker.worker_instance_id === worker.worker_instance_id)).toBe(false);
+      }
+      await waitUntil(async () => (await Promise.all(disabledWorkers.map(worker => probeProcessInstance(worker.pid, worker.worker_instance_id))))
+        .every(state => state === 'dead'), 'disabled budget workers did not physically exit', 15_000);
+      const enabledCatalog = await requestJson(`${management}/api/plugins`, {}, currentFixture);
+      expect((enabledCatalog.body as any[]).find(plugin => plugin.name === 'token-budget')).toMatchObject({
+        enabled: true, lifecycle: 'ready', ready: true,
+      });
+      await waitUntil(async () => {
+        const ledger = await requestJson(policyUrl, {}, currentFixture);
+        const usage = (ledger.body as any)?.usage?.attempts ?? [];
+        return ledger.response.status === 200 && (ledger.body as any).value?.cumulative === 20
+          && usage.filter((attempt: any) => attempt.status === 'settled').length === 2;
+      }, 'restored budget control did not retain the settled ledger', 10_000);
+      const revokedAgain = await fetch(publicUrl, input);
+      expect(revokedAgain.status).toBe(401); await revokedAgain.text();
+      expect(upstreamCalls).toBe(2);
+    } finally {
+      releaseHold();
+      await heldRequest?.catch(() => undefined);
+      await upstream.stop(true);
+    }
+    preserveFixtureOnFailure = false;
   }, 90000);
 });
 
@@ -460,14 +568,14 @@ function numberOrNull(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-async function waitForOperation(portBaseUrl: string, mutationId: string, fixture: GatewayFixture): Promise<void> {
+async function waitForOperation(portBaseUrl: string, mutationId: string, fixture: GatewayFixture, states: readonly string[] = ['converged']): Promise<void> {
   await waitUntil(async () => {
     const result = await requestJson(`${portBaseUrl}/api/config/operations/${mutationId}`, {}, fixture);
     const body = result.body as { operation?: { state?: string } };
     if (body.operation?.state === 'degraded' || body.operation?.state === 'failed') {
       throw new Error(`config operation ${body.operation.state}: ${scrub(result.text, fixture)}`);
     }
-    return result.response.status === 200 && body.operation?.state === 'converged';
+    return (result.response.status === 200 || result.response.status === 202) && states.includes(body.operation?.state ?? '');
   }, `configuration mutation ${mutationId} did not converge`, 30_000);
 }
 

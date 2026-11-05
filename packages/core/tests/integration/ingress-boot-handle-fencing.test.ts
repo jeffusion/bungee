@@ -679,7 +679,7 @@ test('publication task releases before new-boot recovery callback enqueue comple
       return result.kind;
     };
     await controller.connect();
-    publicationTasks.enqueue({} as never, []);
+    publicationTasks.wake();
     await waitWithTimeout(callbackCompleted, 'recovery callback timed out');
     await publicationTasks.stop();
 

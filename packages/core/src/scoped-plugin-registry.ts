@@ -47,6 +47,33 @@ import * as path from 'path';
 import { PluginPathResolver } from './plugin-path-resolver';
 import { resolveReachableServices, resolveReachableEndpoints } from './utils/endpoint-resolver';
 
+/**
+ * A plugin instance was created (or partially created) and its own cleanup did
+ * not complete. It is never a retryable initialization failure: retrying could
+ * create a fresh instance and hide that the previous one stayed unreleased.
+ */
+export class PluginInstanceCleanupError extends Error {
+  constructor(readonly initError: unknown, readonly cleanupErrors: readonly unknown[]) {
+    super('plugin instance initialization cleanup failed', { cause: initError });
+    this.name = 'PluginInstanceCleanupError';
+  }
+}
+
+/**
+ * Waits before an initialization retry, ending immediately when the host
+ * cancels the attempt. A rejected reason is the abort reason, never a plugin
+ * error, so cancellation is not recorded as a transient failure.
+ */
+function cancellableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal === undefined) return new Promise(resolve => setTimeout(resolve, delayMs));
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, delayMs);
+    const abort = () => { clearTimeout(timer); reject(signal.reason); };
+    signal.addEventListener('abort', abort, { once: true });
+  });
+}
+
 // ============ 配置常量 ============
 
 /**
@@ -436,6 +463,9 @@ export class ScopedPluginRegistry {
 
   /** 是否已销毁 */
   private destroyed: boolean = false;
+  private destroyTask: Promise<void> | null = null;
+  /** Uninstalled partial instance whose cleanup failed; teardown must keep it. */
+  private initializationCleanupFailure: unknown;
 
   /** 是否已完成预编译 */
   private precompiled: boolean = false;
@@ -533,16 +563,25 @@ export class ScopedPluginRegistry {
   private async createInstanceWithRetry(
     scope: PluginScope,
     pluginConfig: PluginConfig,
-    retryCount: number = this.initRetryCount
+    retryCount: number = this.initRetryCount,
+    signal?: AbortSignal
   ): Promise<{ success: boolean; instance?: ScopedPluginInstance; error?: Error }> {
     let lastError: Error | undefined;
 
     for (let attempt = 0; attempt <= retryCount; attempt++) {
       try {
-        const instance = await this.createInstance(scope, pluginConfig);
+        const instance = await this.createInstance(scope, pluginConfig, signal);
         return { success: true, instance };
       } catch (error) {
         lastError = error as Error;
+        // A partial instance that could not be released must never be replaced
+        // by a retry that succeeds; keep it for the subsequent teardown.
+        if (error instanceof PluginInstanceCleanupError) {
+          this.initializationCleanupFailure ??= error;
+          throw error;
+        }
+        // Cancellation is not a transient initialization failure.
+        if (signal?.aborted) throw error;
 
         if (attempt < retryCount) {
           logger.warn(
@@ -556,8 +595,8 @@ export class ScopedPluginRegistry {
             'Plugin initialization failed, retrying'
           );
 
-          // 等待后重试
-          await new Promise(resolve => setTimeout(resolve, this.initRetryDelayMs));
+          // 等待后重试；取消时立即结束，不留在无界等待里
+          await cancellableDelay(this.initRetryDelayMs, signal);
         }
       }
     }
@@ -665,9 +704,17 @@ export class ScopedPluginRegistry {
         const instance = new PluginClassDef(config);
         assertBodyContract(instance);
 
-        // 调用插件的 init 方法（如果存在）
+        // 调用插件的 init 方法（如果存在）。初始化失败时实例已存在，
+        // 必须给它一次 onDestroy 收尾机会；收尾失败保留初始化错误。
         if (instance.init) {
-          await instance.init(initContext);
+          try {
+            await instance.init(initContext);
+          } catch (error) {
+            if (!instance.onDestroy) throw error;
+            try { await instance.onDestroy(); }
+            catch (cleanupError) { throw new PluginInstanceCleanupError(error, [cleanupError]); }
+            throw error;
+          }
         }
 
         // 创建基础 handler
@@ -800,7 +847,8 @@ export class ScopedPluginRegistry {
    * @param pluginConfig 插件配置
    * @returns 创建的实例
    */
-  async createInstance(scope: PluginScope, pluginConfig: PluginConfig): Promise<ScopedPluginInstance> {
+  async createInstance(scope: PluginScope, pluginConfig: PluginConfig, signal?: AbortSignal): Promise<ScopedPluginInstance> {
+    signal?.throwIfAborted();
     if (this.dependencies) {
       for (const provider of this.dependencies.localDependenciesOf(pluginConfig.name, 'worker')) {
         if (!this.serviceHost.isReady(provider, 'global')) {
@@ -815,9 +863,9 @@ export class ScopedPluginRegistry {
     const config = this.validatedPluginOptions(pluginClass, pluginConfig, scope);
 
     // 创建初始化上下文（包含 scope 信息）
-    let createdHandler: PluginHandler;
+    let createdHandler: PluginHandler | undefined;
     try {
-      const initContext = await this.createInitContext(effectivePluginName, config, scope);
+      const initContext = await this.createInitContext(effectivePluginName, config, scope, signal);
       Object.defineProperty(initContext, 'initializationKind', {
         value: scope.type === 'global' && isAutomaticGlobalProvider(pluginConfig) ? 'automatic-provider' : 'configured',
         enumerable: true,
@@ -826,17 +874,27 @@ export class ScopedPluginRegistry {
       // frame: a starting instance may only use explicitly bootstrap-allowed
       // methods, and any nested local/RPC consumption carries that purpose.
       const servicesContext = initContext.services;
+      const bootstrapFrame = signal === undefined ? { purpose: 'bootstrap' as const } : { purpose: 'bootstrap' as const, signal };
       createdHandler = this.serviceHost.rpc === undefined || servicesContext === undefined
         ? await pluginClass.createHandler(config, initContext)
-        : await this.serviceHost.runInInvocation(servicesContext, { purpose: 'bootstrap' }, () => pluginClass.createHandler(config, initContext));
+        : await this.serviceHost.runInInvocation(servicesContext, bootstrapFrame, () => pluginClass.createHandler(config, initContext));
       assertBodyContract(createdHandler);
       this.serviceHost.markReady(effectivePluginName, getScopeKey(scope));
     } catch (error) {
-      // Failed initialization must not retain publications or block the retry.
-      try { await this.serviceHost.dispose(effectivePluginName, getScopeKey(scope)); } catch { /* preserve initialization evidence */ }
+      // Failed initialization must not retain publications. A handler that was
+      // already created is not installed in the registry yet, so this is the
+      // only place that can release it together with its service context.
+      const cleanupErrors: unknown[] = [];
+      try { await this.serviceHost.dispose(effectivePluginName, getScopeKey(scope)); }
+      catch (cleanupError) { cleanupErrors.push(cleanupError); }
+      if (createdHandler !== undefined) {
+        try { await createdHandler.destroy?.(); }
+        catch (cleanupError) { cleanupErrors.push(cleanupError); }
+      }
+      if (cleanupErrors.length > 0) throw new PluginInstanceCleanupError(error, cleanupErrors);
       throw error;
     }
-    const handler = createdHandler.pluginName === effectivePluginName
+    const handler = createdHandler!.pluginName === effectivePluginName
       ? createdHandler
       : {
         ...createdHandler,
@@ -929,9 +987,12 @@ export class ScopedPluginRegistry {
   private async createInitContext(
     pluginName: string,
     config: Record<string, any>,
-    scope?: PluginScope
+    scope?: PluginScope,
+    signal?: AbortSignal
   ): Promise<PluginInitContext> {
     const scopeInfo = scope ? toPluginScopeInfo(scope) : undefined;
+    // The signal belongs to this attempt, never to the plugin-name-cached context.
+    const attemptSignal = signal === undefined ? {} : { signal };
     const dispatchTargets = scope?.type === 'route' ? declaredDispatchTargets(config,this.pluginClasses.get(pluginName)?.configSchema ?? []) : [];
     const services = this.serviceHost.createContext(pluginName, scope ? getScopeKey(scope) : 'global', this.serviceDependencies.get(pluginName) ?? {});
     this.rpcContexts.set(`${pluginName}\0${scope ? getScopeKey(scope) : 'global'}`, services);
@@ -945,13 +1006,13 @@ export class ScopedPluginRegistry {
           ...existingContext,
           config,
           scope: scopeInfo,
-          services,dispatchTargets,
+          services, dispatchTargets, ...attemptSignal,
         };
       }
 
       // 创建新的 context
       const newContext = contextManager.getOrCreateContext(pluginName, '', config);
-      return { ...newContext, scope: scopeInfo, services,dispatchTargets };
+      return { ...newContext, scope: scopeInfo, services, dispatchTargets, ...attemptSignal };
     }
 
     // 降级：创建简单的 context
@@ -960,7 +1021,7 @@ export class ScopedPluginRegistry {
       storage: this.createDummyStorage(),
       logger: this.createPluginLogger(pluginName),
       scope: scopeInfo,
-      services,dispatchTargets,
+      services, dispatchTargets, ...attemptSignal,
     };
   }
 
@@ -1570,7 +1631,8 @@ export class ScopedPluginRegistry {
     }>;
     services?: Service[];
     [key: string]: any; // 允许额外字段
-  }, dependencies?: PluginDependencyGraph): Promise<{ success: number; failed: number }> {
+  }, dependencies?: PluginDependencyGraph, signal?: AbortSignal): Promise<{ success: number; failed: number }> {
+    signal?.throwIfAborted();
     this.dependencies = dependencies;
     if (dependencies) {
       this.setServiceDependencies(dependencies.declarations());
@@ -1602,6 +1664,7 @@ export class ScopedPluginRegistry {
         controller.abort('before-bootstrap gate completed');
       }
     }
+    signal?.throwIfAborted();
 
     // 辅助函数：记录失败
     const recordFailure = (pluginName: string, error: Error) => {
@@ -1630,7 +1693,7 @@ export class ScopedPluginRegistry {
     // 1. 加载全局插件
     for (const pluginConfig of globalPlugins) {
       const normalized = normalizePluginConfig(pluginConfig);
-      const result = await this.createInstanceWithRetry({ type: 'global' }, normalized);
+      const result = await this.createInstanceWithRetry({ type: 'global' }, normalized, this.initRetryCount, signal);
       if (result.success) {
         successCount++;
         this.clearRuntimeFailure(normalized.name);
@@ -1647,7 +1710,7 @@ export class ScopedPluginRegistry {
 
       for (const pluginConfig of orderBindings(route.plugins || [])) {
         const normalized = normalizePluginConfig(pluginConfig);
-        const result = await this.createInstanceWithRetry({ type: 'route', routeId }, normalized);
+        const result = await this.createInstanceWithRetry({ type: 'route', routeId }, normalized, this.initRetryCount, signal);
         if (result.success) {
           successCount++;
           this.clearRuntimeFailure(normalized.name);
@@ -1667,7 +1730,7 @@ export class ScopedPluginRegistry {
 
           for (const pluginConfig of orderBindings(service.plugins)) {
             const normalized = normalizePluginConfig(pluginConfig);
-            const result = await this.createInstanceWithRetry({ type: 'service', routeId, serviceName }, normalized);
+            const result = await this.createInstanceWithRetry({ type: 'service', routeId, serviceName }, normalized, this.initRetryCount, signal);
             if (result.success) {
               successCount++;
               this.clearRuntimeFailure(normalized.name);
@@ -1689,7 +1752,7 @@ export class ScopedPluginRegistry {
         for (const pluginConfig of orderBindings(upstream.plugins || [])) {
           const normalized = normalizePluginConfig(pluginConfig);
           // 🔧 upstream scope 现在包含 routeId，确保插件隔离到 route+upstream 组合
-          const result = await this.createInstanceWithRetry({ type: 'upstream', routeId, upstreamId }, normalized);
+          const result = await this.createInstanceWithRetry({ type: 'upstream', routeId, upstreamId }, normalized, this.initRetryCount, signal);
           if (result.success) {
             successCount++;
             this.clearRuntimeFailure(normalized.name);
@@ -1709,6 +1772,7 @@ export class ScopedPluginRegistry {
       }
     }
 
+    signal?.throwIfAborted();
     this.warnForSameNameCrossScopePlugins();
 
     // 4. 预编译所有 Hooks
@@ -2000,8 +2064,14 @@ export class ScopedPluginRegistry {
    *
    * @param timeoutMs 单个插件销毁超时时间（默认 DEFAULT_CONFIG.DESTROY_TIMEOUT_MS）
    */
-  async destroy(timeoutMs: number = DEFAULT_CONFIG.DESTROY_TIMEOUT_MS): Promise<void> {
-    if (this.destroyed) return;
+  destroy(timeoutMs: number = DEFAULT_CONFIG.DESTROY_TIMEOUT_MS): Promise<void> {
+    // One shared attempt: a failed teardown keeps its rejection instead of a
+    // later call reporting success after `destroyed` was already set.
+    if (this.destroyTask === null) this.destroyTask = this.destroyInstances(timeoutMs);
+    return this.destroyTask;
+  }
+
+  private async destroyInstances(timeoutMs: number): Promise<void> {
     this.destroyed = true;
 
     logger.info('Destroying scoped plugin registry');
@@ -2031,10 +2101,13 @@ export class ScopedPluginRegistry {
         );
         await Promise.race([destroyPromise, timeoutPromise]);
       } catch (error) {
+        // Destroy failure is cleanup evidence: propagate, never report a clean
+        // registry after a handler or its timeout did not settle.
         logger.error(
           { error, pluginName: instance.handler.pluginName },
           'Error destroying plugin handler'
         );
+        throw error;
       }
       if (cleanupFailure) throw cleanupFailure;
     };
@@ -2072,6 +2145,10 @@ export class ScopedPluginRegistry {
     this.lastPrecompileDuration = 0;
     this.initFailures.clear();
     this.runtimeFailures.clear();
+
+    // A partial instance that was never installed still belongs to this
+    // registry's cleanup: teardown must not report success after it failed.
+    if (this.initializationCleanupFailure !== undefined) failures.push(this.initializationCleanupFailure);
 
     logger.info({ destroyedCount: allInstances.length }, 'Scoped plugin registry destroyed');
     if (failures.length) throw new AggregateError(failures, 'Scoped plugin registry cleanup failed');

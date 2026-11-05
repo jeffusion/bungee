@@ -18,7 +18,7 @@ import {
   signWorkerDescriptor,
   type WorkerDescriptorBody,
 } from '../../../src/supervision';
-import { STRIPPED_ROOT_ENV_NAMES, SupervisedConfigWorkerFactory, SupervisedConfigWorkerFactoryError } from '../../../src/master-runtime/supervised-worker-factory';
+import { STRIPPED_ROOT_ENV_NAMES, SupervisedConfigWorkerFactory, SupervisedConfigWorkerFactoryError, type WorkerLaunchRepository } from '../../../src/master-runtime/supervised-worker-factory';
 import type { ProcessIdentityControl } from '../../../src/master-runtime/supervised-worker-process-adapter';
 import { ProcessIdentityUnavailableError, type CapturedProcessIdentity, type ProcessIdentityProbe } from '../../../src/master-runtime/process-identity';
 import type { AdmissionRegistryStatus, AdmissionSet } from '../../../src/ingress';
@@ -35,7 +35,7 @@ const CATALOG = `sha256:${'b'.repeat(64)}` as const;
 
 async function triggerExitAndWaitForFactory(
   workerFactory: SupervisedConfigWorkerFactory,
-  process: ReturnType<SupervisedConfigWorkerFactory['spawn']>,
+  process: Awaited<ReturnType<SupervisedConfigWorkerFactory['spawn']>>,
   trigger: () => void,
 ): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -143,10 +143,11 @@ function factory(
   identity: ProcessIdentityControl = fakeIdentityControl().control,
   kernelBootId: () => Promise<string> = async () => TEST_KERNEL_BOOT_ID,
   retirementRepository?: import('../../../src/master-runtime/supervised-worker-factory').SupervisedConfigWorkerFactoryOptions['retirementRepository'],
+  launchRepository?: import('../../../src/master-runtime/supervised-worker-factory').WorkerLaunchRepository,
 ) {
   const byPort = new Map(workers.map((worker) => [worker.descriptor.control_port, worker]));
   return new SupervisedConfigWorkerFactory({
-    kernelBootId, retirementRepository,
+    kernelBootId, retirementRepository, launchRepository,
     launch: { source: 'compiled', executable: process.execPath, args: [] }, rootKey: ROOT,
     runtimeWorkersDirectory: directory, authority: AUTHORITY, masterControlPort: 3011,
     accessLogDbPath: join(directory, 'access.db'),
@@ -160,11 +161,15 @@ function factory(
   });
 }
 
-function spawnedEnvironment(
+function launchRepositoryFixture(repository: ConfigRepository): WorkerLaunchRepository {
+  return configurationRepositoryFixture(repository) as unknown as WorkerLaunchRepository;
+}
+
+async function spawnedEnvironment(
   directory: string,
   env: NodeJS.ProcessEnv,
   rateLimitSession?: SupervisedWorkerRateLimitSession,
-): NodeJS.ProcessEnv {
+): Promise<NodeJS.ProcessEnv> {
   let spawned: NodeJS.ProcessEnv | undefined;
   const child = {
     pid: 12_345,
@@ -184,7 +189,7 @@ function spawnedEnvironment(
     },
   });
   try {
-    workerFactory.spawn({ master_generation: GENERATION, worker_instance_id: '40000000-0000-4000-8000-000000000010', worker_slot: 0 });
+    await workerFactory.spawn({ master_generation: GENERATION, worker_instance_id: '40000000-0000-4000-8000-000000000010', worker_slot: 0 });
     if (spawned === undefined) throw new Error('test worker was not spawned');
     return spawned;
   } finally { workerFactory.disconnect(); }
@@ -204,6 +209,7 @@ test('recovery uses durable members, separates exit/cleanup and ignores unrelate
     aggregate: { logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [] },
     kind: 'config', created_at: 1, target_worker_slots: [] });
   expect(committed.kind).toBe('committed');
+  expect(repository.claimPublicationTarget(CATALOG, 2)?.operation.mutation_id).toBe('retirement-authority');
   const terminal = old.descriptor.evidence.message as import('../../../src/config-publication').WorkerDrainedMessage;
   repository.freezePublicationRetirement('retirement-authority', 0, [{ identity: old.identity,
     boot_nonce: old.descriptor.boot_nonce, pid: old.descriptor.pid, private_port: old.descriptor.private_port!, revision: 1,
@@ -315,9 +321,9 @@ function putOwned(workerFactory: SupervisedConfigWorkerFactory, process: object)
 test('does not inherit rate-limit ingress environment from the master', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-rate-env-'));
   try {
-    const onlyPort = spawnedEnvironment(directory, { BUNGEE_INGRESS_SUPERVISION_PORT: '3010' });
+    const onlyPort = await spawnedEnvironment(directory, { BUNGEE_INGRESS_SUPERVISION_PORT: '3010' });
     expect(onlyPort.BUNGEE_INGRESS_SUPERVISION_PORT).toBeUndefined();
-    const forged = spawnedEnvironment(directory, {
+    const forged = await spawnedEnvironment(directory, {
       BUNGEE_INGRESS_SUPERVISION_PORT: '3010',
       BUNGEE_INGRESS_PROCESS_INSTANCE_ID: '70000000-0000-4000-8000-000000000001',
       BUNGEE_INGRESS_BOOT_NONCE: '70000000-0000-4000-8000-000000000002',
@@ -328,7 +334,7 @@ test('does not inherit rate-limit ingress environment from the master', async ()
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('worker script and compiled launches retain their shape and carry exact non-secret replacement markers', () => {
+test('worker script and compiled launches retain their shape and carry exact non-secret replacement markers', async () => {
   const workerInstanceIds = [
     '40000000-0000-4000-8000-000000000010',
     '40000000-0000-4000-8000-000000000011',
@@ -348,7 +354,7 @@ test('worker script and compiled launches retain their shape and carry exact non
     });
     try {
       for (const [workerSlot, worker_instance_id] of workerInstanceIds.entries()) {
-        workerFactory.spawn({ master_generation: GENERATION, worker_instance_id, worker_slot: workerSlot });
+        await workerFactory.spawn({ master_generation: GENERATION, worker_instance_id, worker_slot: workerSlot });
       }
       expect(captured).toEqual(workerInstanceIds.map((worker_instance_id) => [
         ...(source === 'source' ? ['/tmp/worker.ts'] : []),
@@ -369,7 +375,7 @@ test('worker script and compiled launches retain their shape and carry exact non
 test('strips bootstrap secrets case-insensitively from worker children', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-bootstrap-env-'));
   try {
-    const spawned = spawnedEnvironment(directory, {
+    const spawned = await spawnedEnvironment(directory, {
       bUnGeE_dAeMoN_mEtAdAtA_pAtH: '/tmp/metadata',
       BUNGEE_DAEMON_BOOT_NONCE: 'boot',
       bungee_daemon_shutdown_secret: 'secret',
@@ -387,7 +393,7 @@ test('strips every listed root-only environment name regardless of casing and ke
       ...STRIPPED_ROOT_ENV_NAMES.map((name) => [mixedCase(name), 'must-not-cross']),
       ['BUNGEE_TEST_BUSINESS_ENV', 'keep-me'],
     ]);
-    const spawned = spawnedEnvironment(directory, env);
+    const spawned = await spawnedEnvironment(directory, env);
     expect(spawned.BUNGEE_TEST_BUSINESS_ENV).toBe('keep-me');
     const stripped = new Set(STRIPPED_ROOT_ENV_NAMES.map((name) => name.toLowerCase()));
     expect(Object.keys(spawned).some((name) => stripped.has(name.toLowerCase()))).toBeFalse();
@@ -404,7 +410,7 @@ test('injects only an explicit complete rate-limit ingress session', async () =>
     },
   } as const;
   try {
-    const spawned = spawnedEnvironment(directory, {
+    const spawned = await spawnedEnvironment(directory, {
       BUNGEE_INGRESS_SUPERVISION_PORT: '3010',
       BUNGEE_INGRESS_PROCESS_INSTANCE_ID: '70000000-0000-4000-8000-000000000001',
       BUNGEE_INGRESS_BOOT_NONCE: '70000000-0000-4000-8000-000000000002',
@@ -450,9 +456,9 @@ test('updates the rate-limit session for future spawns without changing an exist
     },
   });
   try {
-    workerFactory.spawn({ master_generation: GENERATION, worker_instance_id: '40000000-0000-4000-8000-000000000011', worker_slot: 0 });
+    await workerFactory.spawn({ master_generation: GENERATION, worker_instance_id: '40000000-0000-4000-8000-000000000011', worker_slot: 0 });
     workerFactory.setRateLimitSession(second);
-    workerFactory.spawn({ master_generation: GENERATION, worker_instance_id: '40000000-0000-4000-8000-000000000012', worker_slot: 1 });
+    await workerFactory.spawn({ master_generation: GENERATION, worker_instance_id: '40000000-0000-4000-8000-000000000012', worker_slot: 1 });
     expect(environments[0]?.BUNGEE_INGRESS_SUPERVISION_PORT).toBe('3011');
     expect(environments[0]?.BUNGEE_INGRESS_BOOT_NONCE).toBe(first.expectedIngress.boot_nonce);
     expect(environments[1]?.BUNGEE_INGRESS_SUPERVISION_PORT).toBe('3012');
@@ -466,12 +472,12 @@ test('updates the rate-limit session for future spawns without changing an exist
 test('rejects incomplete rate-limit ingress sessions', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-rate-invalid-'));
   try {
-    expect(() => spawnedEnvironment(directory, {}, {
+    await expect(spawnedEnvironment(directory, {}, {
       supervisionPort: 65_536,
       expectedIngress: { process_instance_id: '70000000-0000-4000-8000-000000000003', boot_nonce: '70000000-0000-4000-8000-000000000004' },
-    })).toThrow('rate-limit ingress port');
-    expect(() => spawnedEnvironment(directory, {}, { supervisionPort: 3010 } as SupervisedWorkerRateLimitSession))
-      .toThrow('rate-limit ingress identity');
+    })).rejects.toThrow('rate-limit ingress port');
+    await expect(spawnedEnvironment(directory, {}, { supervisionPort: 3010 } as SupervisedWorkerRateLimitSession))
+      .rejects.toThrow('rate-limit ingress identity');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -811,7 +817,7 @@ test('spawn initialization failure keeps ownership until the child handle report
       private_port: null, revision: null, content_hash: null, plugin_catalog_hash: null,
       started_at: 1, evidence: { kind: 'candidate' },
     }, spawnCredential.process_key)));
-    const process = workerFactory.spawn(spawnIdentity);
+    const process = await workerFactory.spawn(spawnIdentity);
     await process.initialization.catch(() => undefined);
     // Initialization failed (attach unreachable) even though capture succeeded: no OS
     // signal is sent and ownership is retained.
@@ -845,7 +851,7 @@ test('spawn initialization failure without capture still keeps ownership until t
     spawn: () => child,
   });
   try {
-    const process = workerFactory.spawn(spawnIdentity);
+    const process = await workerFactory.spawn(spawnIdentity);
     await process.initialization.catch(() => undefined);
     // No capture, no exit proof: nothing is signaled and nothing is released.
     expect(identity.captures).toEqual([]);
@@ -871,8 +877,8 @@ test('two adapters sharing a PID never consume each other exit proof', async () 
     spawn: () => { const current = next; next = second; return current.child; },
   });
   try {
-    const firstProcess = workerFactory.spawn({ master_generation: GENERATION, worker_instance_id: '40000000-0000-4000-8000-000000000052', worker_slot: 0 });
-    const secondProcess = workerFactory.spawn({ master_generation: GENERATION, worker_instance_id: '40000000-0000-4000-8000-000000000053', worker_slot: 1 });
+    const firstProcess = await workerFactory.spawn({ master_generation: GENERATION, worker_instance_id: '40000000-0000-4000-8000-000000000052', worker_slot: 0 });
+    const secondProcess = await workerFactory.spawn({ master_generation: GENERATION, worker_instance_id: '40000000-0000-4000-8000-000000000053', worker_slot: 1 });
     await Promise.all([firstProcess, secondProcess].map((process) => process.initialization.catch(() => undefined)));
     // Only the first child exits; the second adapter keeps the shared PID and its own —
     // still unproven — ownership.
@@ -936,8 +942,8 @@ test('disconnectAll does not mask later real child exits and ownership converges
   let next = first;
   function firstOrSecond() { const current = next; next = second; return current.child; }
   try {
-    const firstProcess = workerFactory.spawn({ master_generation: GENERATION, worker_instance_id: '40000000-0000-4000-8000-000000000057', worker_slot: 0 });
-    const secondProcess = workerFactory.spawn({ master_generation: GENERATION, worker_instance_id: '40000000-0000-4000-8000-000000000058', worker_slot: 1 });
+    const firstProcess = await workerFactory.spawn({ master_generation: GENERATION, worker_instance_id: '40000000-0000-4000-8000-000000000057', worker_slot: 0 });
+    const secondProcess = await workerFactory.spawn({ master_generation: GENERATION, worker_instance_id: '40000000-0000-4000-8000-000000000058', worker_slot: 1 });
     await Promise.all([firstProcess, secondProcess].map((process) => process.initialization.catch(() => undefined)));
     workerFactory.disconnectAll();
     // The real child exit after disconnectAll is no longer forgotten: exactly the exited
@@ -1032,12 +1038,15 @@ test('a new attempt requires all prior serving targets to exit and persists the 
   const worker = onlineWorker(randomUUID(), randomUUID(), 40111, 41111);
   const guard = armProcessLifetimeGuard({ directory: join(directory, 'guards'), processInstanceId: worker.identity.worker_instance_id });
   const workers = factory(directory, [], undefined, fakeIdentityControl(() => 'mismatch').control,
-    async () => TEST_KERNEL_BOOT_ID, configurationRepositoryFixture(repository));
+    async () => TEST_KERNEL_BOOT_ID, configurationRepositoryFixture(repository), launchRepositoryFixture(repository));
   try {
     repository.commit({ mutation_id: 'target-exit', expected_revision: 1, kind: 'config', created_at: 1, target_worker_slots: [0],
       aggregate: { logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [] } });
+    repository.claimPublicationTarget(CATALOG, 2);
     repository.beginPublication('target-exit', 2);
     repository.beginWorkerAttempt('target-exit', 0, 0, 'initial', 3);
+    repository.registerWorkerLaunch(worker.identity, guard.facts,
+      { mutation_id: 'target-exit', worker_slot: 0, attempt_no: 1 }, 3);
     repository.recordWorkerResult('target-exit', 0, { kind: 'converged', attempt_no: 1, applied_revision: 2 }, 4);
     const publication = { mutation_id: 'target-exit', attempt_no: 1, drain_recovery_generation: 0 };
     const contentHash = repository.getSnapshot().content_hash;
@@ -1045,7 +1054,9 @@ test('a new attempt requires all prior serving targets to exit and persists the 
     const message = body.evidence.message;
     if (message?.status !== 'config-ready') throw new Error('target ready fixture missing');
     const descriptor = signWorkerDescriptor({ ...body, revision: 2, content_hash: contentHash,
-      lifetime_guard: { ...guard.facts, held: true },
+      phase: 'stopped', lifetime_guard: { ...guard.facts, held: true },
+      cleanup: { cleanup_state: 'success', revision: 2, content_hash: contentHash,
+        plugin_catalog_hash: CATALOG, publication: { ...publication } },
       evidence: { kind: 'ready', message: { ...message, revision: 2, content_hash: contentHash, publication } } }, worker.credential.process_key);
     const path = join(directory, `${worker.identity.worker_instance_id}.json`);
     await writeFile(path, JSON.stringify(descriptor));
@@ -1064,6 +1075,7 @@ test('a new attempt requires all prior serving targets to exit and persists the 
     await writeFile(path, JSON.stringify(descriptor));
     expect(await workers.confirmActivePublicationExited(active)).toBe(true);
     expect(repository.getPublicationServingSet('target-exit', 0)?.exited).toEqual([worker.identity.worker_instance_id]);
+    expect(repository.getWorkerLaunch(worker.identity.worker_instance_id)).toMatchObject({ exited: true, cleanup_released: true });
     expect(repository.getRetiredWorkerInstanceIds()).toContain(worker.identity.worker_instance_id);
     expect((await workers.discoverAndAdopt(admission(worker))).kind).toBe('recovering');
     // Proof alone does not consume an attempt. Only the caller's actual new attempt does.
@@ -1071,4 +1083,443 @@ test('a new attempt requires all prior serving targets to exit and persists the 
     repository.beginDrainingRecovery('target-exit', 0, 6);
     expect(repository.getActivePublication()?.targets[0]).toMatchObject({ attempt_no: 2, drain_recovery_generation: 1 });
   } finally { guard.closeAfterChildExit(); workers.disconnect(); repository.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('awaits durable launch intent registration before the native fork and fails closed when it is unknown', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-launch-intent-'));
+  try {
+    const order: string[] = [];
+    let failRegistration = true;
+    const registered: { identity: ConfigProcessIdentity; guard: { readonly process_instance_id: string }; allocation: unknown }[] = [];
+    const admitted: string[] = [];
+    const repository = {
+      registerWorkerLaunch: async (identity: ConfigProcessIdentity, guard: { readonly process_instance_id: string }, allocation: unknown) => {
+        order.push(`register:${identity.worker_instance_id}`);
+        registered.push({ identity, guard, allocation });
+        if (failRegistration) throw new Error('launch intent storage is unknown');
+        return {} as never;
+      },
+      recordWorkerLaunchExit: async () => ({} as never),
+      recordWorkerLaunchAdmitted: async (workerInstanceId: string) => { admitted.push(workerInstanceId); return {} as never; },
+      fenceWorkerLaunchNotStarted: async () => undefined,
+      getWorkerLaunch: async (workerInstanceId: string) => workerInstanceId === second.worker_instance_id ? ({} as never) : null,
+      getUnsettledWorkerLaunches: async () => [],
+    };
+    const child = { pid: 12_345, unref: () => undefined, kill: () => true, once() { return this; } } as unknown as ChildProcess;
+    const workerFactory = new SupervisedConfigWorkerFactory({
+      kernelBootId: async () => TEST_KERNEL_BOOT_ID,
+      launch: { source: 'compiled', executable: process.execPath, args: [] }, rootKey: ROOT,
+      runtimeWorkersDirectory: directory, authority: AUTHORITY, masterControlPort: 8089,
+      accessLogDbPath: join(directory, 'access.db'), transportSecret: 'secret', initializationTimeoutMs: 1, shutdownTimeoutMs: 25,
+      processIdentity: fakeIdentityControl().control,
+      launchRepository: repository as unknown as WorkerLaunchRepository,
+      spawn: () => { order.push('fork'); return child; },
+    });
+    const first = { master_generation: GENERATION, worker_instance_id: '40000000-0000-4000-8000-0000000000a1', worker_slot: 0 };
+    const second = { ...first, worker_instance_id: '40000000-0000-4000-8000-0000000000a2' };
+    await expect(workerFactory.spawn(first)).rejects.toThrow('launch intent storage is unknown');
+    expect(order).toEqual([`register:${first.worker_instance_id}`]);
+    expect(workerFactory.snapshot()).toEqual([]);
+    failRegistration = false;
+    const spawnedProcess = await workerFactory.spawn(second, { mutation_id: '90000000-0000-4000-8000-000000000001', committed_revision: 2, attempt_no: 1 });
+    expect(order).toEqual([`register:${first.worker_instance_id}`, `register:${second.worker_instance_id}`, 'fork']);
+    expect(registered[1]!.allocation).toEqual({ mutation_id: '90000000-0000-4000-8000-000000000001', worker_slot: 0, attempt_no: 1 });
+    expect(registered[1]!.guard.process_instance_id).toBe(second.worker_instance_id);
+    expect(Object.keys(registered[1]!.guard)).not.toContain('held');
+    await workerFactory.markCommitted([spawnedProcess]);
+    expect(admitted).toEqual([second.worker_instance_id]);
+    workerFactory.disconnect();
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('fences a pre-ready reservation without a launch intent as not_started', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-pre-ready-fence-'));
+  const repository = ConfigRepository.open(join(directory, 'config.db'));
+  const fixture = configurationRepositoryFixture(repository);
+  const workers = factory(directory, [], undefined, fakeIdentityControl().control,
+    async () => TEST_KERNEL_BOOT_ID, fixture, launchRepositoryFixture(repository));
+  try {
+    repository.commit({ mutation_id: 'pre-ready-fence', expected_revision: 1, kind: 'config', created_at: 1,
+      target_worker_slots: [0],
+      aggregate: { logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [] } });
+    repository.claimPublicationTarget(CATALOG, 2);
+    repository.beginPublication('pre-ready-fence', 3);
+    repository.beginWorkerAttempt('pre-ready-fence', 0, 0, 'initial', 4);
+    const active = repository.getActivePublication();
+    if (active === null) throw new Error('pre-ready publication missing');
+    expect(repository.getUnsettledWorkerLaunches()).toHaveLength(1);
+    expect(await workers.confirmActivePublicationExited(active)).toBe(true);
+    // The reservation was fenced and its candidate evidence recorded: no unsettled
+    // launch remains even though the attempt row itself is still the current attempt.
+    expect(repository.getUnsettledWorkerLaunches()).toEqual([]);
+    expect(await workers.confirmActivePublicationExited(active)).toBe(true);
+  } finally { workers.disconnect(); repository.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('serving-set confirmation requires signed cleanup even after a physical exit row and settles both ledgers', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-serving-cleanup-'));
+  const repository = ConfigRepository.open(join(directory, 'config.db'));
+  const fixture = configurationRepositoryFixture(repository);
+  const worker = onlineWorker('40000000-0000-4000-8000-0000000000b1', '50000000-0000-4000-8000-0000000000b1', 45101, 46101);
+  const guard = armProcessLifetimeGuard({ directory: join(directory, 'guards'), processInstanceId: worker.identity.worker_instance_id });
+  const workers = factory(directory, [], undefined, fakeIdentityControl().control,
+    async () => TEST_KERNEL_BOOT_ID, fixture, launchRepositoryFixture(repository));
+  try {
+    repository.commit({ mutation_id: 'serving-cleanup', expected_revision: 1, kind: 'config', created_at: 1,
+      target_worker_slots: [0],
+      aggregate: { logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [] } });
+    repository.claimPublicationTarget(CATALOG, 2);
+    repository.beginPublication('serving-cleanup', 3);
+    repository.beginWorkerAttempt('serving-cleanup', 0, 0, 'initial', 4);
+    repository.registerWorkerLaunch(worker.identity, guard.facts,
+      { mutation_id: 'serving-cleanup', worker_slot: 0, attempt_no: 1 }, 4);
+    repository.recordWorkerResult('serving-cleanup', 0, { kind: 'converged', attempt_no: 1, applied_revision: 2 }, 4);
+    const publication = { mutation_id: 'serving-cleanup', attempt_no: 1, drain_recovery_generation: 0 };
+    const contentHash = repository.getSnapshot().content_hash;
+    const { descriptor_mac: _mac, ...body } = worker.descriptor;
+    const message = body.evidence.message;
+    if (message?.status !== 'config-ready') throw new Error('cleanup fixture message missing');
+    const ready = { ...message, revision: 2, content_hash: contentHash, publication };
+    const cleanup = { cleanup_state: 'success' as const, revision: 2, content_hash: contentHash,
+      plugin_catalog_hash: CATALOG, publication: { ...publication } };
+    const path = join(directory, `${worker.identity.worker_instance_id}.json`);
+    await writeFile(path, JSON.stringify(signWorkerDescriptor({ ...body, revision: 2, content_hash: contentHash,
+      lifetime_guard: { ...guard.facts, held: true }, evidence: { kind: 'ready', message: ready } },
+    worker.credential.process_key)));
+    repository.freezePublicationServingSet('serving-cleanup', 0, [{ identity: worker.identity,
+      boot_nonce: worker.descriptor.boot_nonce, pid: worker.descriptor.pid, private_port: 46101, revision: 2,
+      content_hash: contentHash, plugin_catalog_hash: CATALOG, publication, guard: guard.facts, kernel_boot_id: TEST_KERNEL_BOOT_ID }]);
+    const active = repository.getActivePublication();
+    if (active === null) throw new Error('serving cleanup publication missing');
+    expect(active.operation.state).toBe('publishing');
+    // A prior physical-exit row must not bypass the missing signed cleanup.
+    repository.confirmPublicationServingMemberExit('serving-cleanup', 0, worker.identity.worker_instance_id);
+    guard.closeAfterChildExit();
+    expect(await workers.confirmActivePublicationExited(active)).toBe(false);
+    await writeFile(path, JSON.stringify(signWorkerDescriptor({ ...body, revision: 2, content_hash: contentHash,
+      phase: 'stopped', lifetime_guard: { ...guard.facts, held: true }, cleanup,
+      evidence: { kind: 'ready', message: ready } }, worker.credential.process_key)));
+    expect(await workers.confirmActivePublicationExited(active)).toBe(true);
+    expect(repository.getWorkerLaunch(worker.identity.worker_instance_id))
+      .toMatchObject({ exited: true, cleanup_released: true });
+    // The exact candidate proof exists: cancellation can now terminalize the owner.
+    repository.requestPublicationCancellation('serving-cleanup', 2, 7);
+    expect(repository.confirmPublicationCandidateExited('serving-cleanup', 2, 8).state).toBe('superseded');
+  } finally { guard.closeAfterChildExit(); workers.disconnect(); repository.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('pre-ready candidate whose launch already settled still writes the missing candidate proof', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-pre-ready-settled-'));
+  const repository = ConfigRepository.open(join(directory, 'config.db'));
+  const fixture = configurationRepositoryFixture(repository);
+  const worker = onlineWorker('40000000-0000-4000-8000-0000000000b2', '50000000-0000-4000-8000-0000000000b2', 45102, 46102);
+  const guard = armProcessLifetimeGuard({ directory: join(directory, 'guards'), processInstanceId: worker.identity.worker_instance_id });
+  const workers = factory(directory, [], undefined, fakeIdentityControl().control,
+    async () => TEST_KERNEL_BOOT_ID, fixture, launchRepositoryFixture(repository));
+  try {
+    repository.commit({ mutation_id: 'pre-ready-settled', expected_revision: 1, kind: 'config', created_at: 1,
+      target_worker_slots: [0],
+      aggregate: { logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [] } });
+    repository.claimPublicationTarget(CATALOG, 2);
+    repository.beginPublication('pre-ready-settled', 3);
+    repository.beginWorkerAttempt('pre-ready-settled', 0, 0, 'initial', 4);
+    repository.registerWorkerLaunch(worker.identity, guard.facts,
+      { mutation_id: 'pre-ready-settled', worker_slot: 0, attempt_no: 1 }, 4);
+    // Generic exit listener settlement: no serving set and no candidate evidence yet.
+    repository.recordWorkerLaunchExit(worker.identity.worker_instance_id, { kind: 'exited', cleanup: 'released' }, 5);
+    guard.closeAfterChildExit();
+    expect(repository.getUnsettledWorkerLaunches()).toEqual([]);
+    const active = repository.getActivePublication();
+    if (active === null) throw new Error('pre-ready settled publication missing');
+    expect(await workers.confirmActivePublicationExited(active)).toBe(true);
+    repository.requestPublicationCancellation('pre-ready-settled', 2, 7);
+    expect(repository.confirmPublicationCandidateExited('pre-ready-settled', 2, 8).state).toBe('superseded');
+  } finally { guard.closeAfterChildExit(); workers.disconnect(); repository.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('an admitted live pre-ready launch is not released just because unsettled launches are empty', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-pre-ready-admitted-'));
+  const repository = ConfigRepository.open(join(directory, 'config.db'));
+  const fixture = configurationRepositoryFixture(repository);
+  const worker = onlineWorker('40000000-0000-4000-8000-0000000000b3', '50000000-0000-4000-8000-0000000000b3', 45103, 46103);
+  const guard = armProcessLifetimeGuard({ directory: join(directory, 'guards'), processInstanceId: worker.identity.worker_instance_id });
+  const workers = factory(directory, [], undefined, fakeIdentityControl().control,
+    async () => TEST_KERNEL_BOOT_ID, fixture, launchRepositoryFixture(repository));
+  try {
+    repository.commit({ mutation_id: 'pre-ready-admitted', expected_revision: 1, kind: 'config', created_at: 1,
+      target_worker_slots: [0],
+      aggregate: { logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [] } });
+    repository.claimPublicationTarget(CATALOG, 2);
+    repository.beginPublication('pre-ready-admitted', 3);
+    repository.beginWorkerAttempt('pre-ready-admitted', 0, 0, 'initial', 4);
+    repository.registerWorkerLaunch(worker.identity, guard.facts,
+      { mutation_id: 'pre-ready-admitted', worker_slot: 0, attempt_no: 1 }, 4);
+    repository.recordWorkerLaunchAdmitted(worker.identity.worker_instance_id, 5);
+    expect(repository.getUnsettledWorkerLaunches()).toEqual([]);
+    const active = repository.getActivePublication();
+    if (active === null) throw new Error('pre-ready admitted publication missing');
+    expect(await workers.confirmActivePublicationExited(active)).toBe(false);
+    expect(repository.getWorkerLaunch(worker.identity.worker_instance_id))
+      .toMatchObject({ admitted: true, exited: false, cleanup_released: false });
+  } finally { guard.closeAfterChildExit(); workers.disconnect(); repository.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('a pre-ready attempt without durable allocation facts is not released', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-pre-ready-no-facts-'));
+  const repository = ConfigRepository.open(join(directory, 'config.db'));
+  const fixture = configurationRepositoryFixture(repository);
+  const workers = factory(directory, [], undefined, fakeIdentityControl().control,
+    async () => TEST_KERNEL_BOOT_ID, fixture,
+    { getWorkerLaunchAllocationFacts: async () => null } as unknown as WorkerLaunchRepository);
+  try {
+    repository.commit({ mutation_id: 'pre-ready-no-facts', expected_revision: 1, kind: 'config', created_at: 1,
+      target_worker_slots: [0],
+      aggregate: { logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [] } });
+    repository.claimPublicationTarget(CATALOG, 2);
+    repository.beginPublication('pre-ready-no-facts', 3);
+    repository.beginWorkerAttempt('pre-ready-no-facts', 0, 0, 'initial', 4);
+    expect(repository.getOutstandingPublicationCandidates()).toHaveLength(1);
+    const active = repository.getActivePublication();
+    if (active === null) throw new Error('pre-ready facts publication missing');
+    expect(await workers.confirmActivePublicationExited(active)).toBe(false);
+  } finally { workers.disconnect(); repository.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('debt-only pass fences a crashed reservation without forking', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-debt-reservation-'));
+  const repository = ConfigRepository.open(join(directory, 'config.db'));
+  const fixture = configurationRepositoryFixture(repository);
+  const allocation = { mutation_id: 'debt-reservation', worker_slot: 0, attempt_no: 1 } as const;
+  const launchRepository = {
+    ...fixture,
+    getWorkerLaunchInventory: async () => [{ kind: 'reservation' as const, allocation }],
+  } as unknown as WorkerLaunchRepository;
+  const workers = factory(directory, [], { active: null, prepared: null, retired: [] } as never,
+    fakeIdentityControl().control, async () => TEST_KERNEL_BOOT_ID, fixture, launchRepository);
+  try {
+    repository.commit({ mutation_id: 'debt-reservation', expected_revision: 1, kind: 'config', created_at: 1,
+      target_worker_slots: [0],
+      aggregate: { logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [] } });
+    repository.claimPublicationTarget(CATALOG, 2);
+    repository.beginPublication('debt-reservation', 3);
+    repository.beginWorkerAttempt('debt-reservation', 0, 0, 'initial', 4);
+    const result = await workers.settleWorkerLaunchDebt({ active: null, prepared: null, retired: [] });
+    expect(result).toMatchObject({ fenced: [allocation], unknown: [], released: [] });
+    expect(repository.getUnsettledWorkerLaunches()).toEqual([]);
+    expect(workers.snapshot()).toEqual([]);
+  } finally { workers.disconnect(); repository.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('a startup launch stays unknown until signed cleanup arrives, then releases', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-debt-startup-'));
+  const repository = ConfigRepository.open(join(directory, 'config.db'));
+  const fixture = configurationRepositoryFixture(repository);
+  const worker = onlineWorker('40000000-0000-4000-8000-0000000000c1', '50000000-0000-4000-8000-0000000000c1', 45104, 46104);
+  const guard = armProcessLifetimeGuard({ directory: join(directory, 'guards'), processInstanceId: worker.identity.worker_instance_id });
+  const launchRepository = {
+    ...fixture,
+    getWorkerLaunchInventory: async () => {
+      const launch = repository.getWorkerLaunch(worker.identity.worker_instance_id);
+      return launch === null ? [] : [{ kind: 'launch' as const, launch }];
+    },
+  } as unknown as WorkerLaunchRepository;
+  const workers = factory(directory, [], undefined, fakeIdentityControl().control,
+    async () => TEST_KERNEL_BOOT_ID, fixture, launchRepository);
+  try {
+    repository.registerWorkerLaunch(worker.identity, guard.facts, null, 1);
+    repository.recordWorkerLaunchExit(worker.identity.worker_instance_id, { kind: 'exited', cleanup: 'unknown' }, 2);
+    const first = await workers.settleWorkerLaunchDebt({ active: null, prepared: null, retired: [] });
+    expect(first.released).toEqual([]);
+    expect(first.unknown).toHaveLength(1);
+    const { descriptor_mac: _mac, ...body } = worker.descriptor;
+    const path = join(directory, `${worker.identity.worker_instance_id}.json`);
+    await writeFile(path, JSON.stringify(signWorkerDescriptor({ ...body, phase: 'stopped', lifetime_guard: { ...guard.facts, held: true },
+      cleanup: { cleanup_state: 'success', revision: null, content_hash: null, plugin_catalog_hash: null,
+        publication: null } }, worker.credential.process_key)));
+    guard.closeAfterChildExit();
+    const second = await workers.settleWorkerLaunchDebt({ active: null, prepared: null, retired: [] });
+    expect(second).toMatchObject({ released: [worker.identity], unknown: [] });
+    expect(repository.getWorkerLaunch(worker.identity.worker_instance_id))
+      .toMatchObject({ exited: true, cleanup_released: true });
+  } finally { guard.closeAfterChildExit(); workers.disconnect(); repository.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('debt-only pass leaves a legal admitted member alone', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-debt-legal-'));
+  const repository = ConfigRepository.open(join(directory, 'config.db'));
+  const fixture = configurationRepositoryFixture(repository);
+  const worker = onlineWorker('40000000-0000-4000-8000-0000000000c2', '50000000-0000-4000-8000-0000000000c2', 45105, 46105);
+  const guard = armProcessLifetimeGuard({ directory: join(directory, 'guards'), processInstanceId: worker.identity.worker_instance_id });
+  const launchRepository = {
+    ...fixture,
+    getWorkerLaunchInventory: async () => {
+      const launch = repository.getWorkerLaunch(worker.identity.worker_instance_id);
+      return launch === null ? [] : [{ kind: 'launch' as const, launch }];
+    },
+  } as unknown as WorkerLaunchRepository;
+  const workers = factory(directory, [], undefined, fakeIdentityControl().control,
+    async () => TEST_KERNEL_BOOT_ID, fixture, launchRepository);
+  try {
+    repository.registerWorkerLaunch(worker.identity, guard.facts, null, 1);
+    repository.recordWorkerLaunchAdmitted(worker.identity.worker_instance_id, 2);
+    const result = await workers.settleWorkerLaunchDebt({ active: admission(worker), prepared: null, retired: [] });
+    expect(result).toEqual({ released: [], fenced: [], unknown: [] });
+    expect(repository.getWorkerLaunch(worker.identity.worker_instance_id))
+      .toMatchObject({ admitted: true, exited: false, cleanup_released: false });
+  } finally { guard.closeAfterChildExit(); workers.disconnect(); repository.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('adopted shutdown waits for delayed exact proof and the durable launch-exit ACK', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-adopted-delayed-proof-'));
+  const worker = onlineWorker('40000000-0000-4000-8000-0000000000d1', '50000000-0000-4000-8000-0000000000d1', 43252, 44252);
+  await writeWorkers(directory, [worker]);
+  let released = false;
+  let proofSeen!: () => void;
+  const proofObserved = new Promise<void>((resolve) => { proofSeen = resolve; });
+  let writeSeen!: () => void;
+  const writeStarted = new Promise<void>((resolve) => { writeSeen = resolve; });
+  let writeAck!: () => void;
+  const writeGate = new Promise<void>((resolve) => { writeAck = resolve; });
+  const identity = fakeIdentityControl();
+  const control: ProcessIdentityControl = {
+    ...identity.control,
+    probe: async () => { proofSeen(); return released ? 'dead' : 'exact'; },
+  };
+  const launchRepository = {
+    recordWorkerLaunchExit: async (workerInstanceId: string) => {
+      writeSeen();
+      await writeGate;
+      return { identity: { worker_instance_id: workerInstanceId } } as never;
+    },
+  } as unknown as WorkerLaunchRepository;
+  const workerFactory = factory(directory, [worker], undefined, control,
+    async () => TEST_KERNEL_BOOT_ID, undefined, launchRepository);
+  try {
+    expect((await workerFactory.discoverAndAdopt(admission(worker))).kind).toBe('adopted');
+    let completed = false;
+    const shutdown = workerFactory.shutdownAll().then((results) => { completed = true; return results; });
+    await proofObserved;
+    // The graceful ACK already returned; the physical guard is still live, so the
+    // bounded wait must not report an exit yet.
+    expect(completed).toBe(false);
+    released = true;
+    await writeStarted;
+    // Exact OS proof arrived, but the durable launch-exit fact is still unacknowledged.
+    expect(completed).toBe(false);
+    writeAck();
+    const results = await shutdown;
+    expect(results).toMatchObject([{ exitEvidence: { exited: true, pid: worker.descriptor.pid } }]);
+    expect(completed).toBe(true);
+    expect(workerFactory.snapshot()).toEqual([]);
+  } finally {
+    workerFactory.disconnect();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('adopted shutdown reports a rejected durable launch-exit write', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-adopted-write-failure-'));
+  const worker = onlineWorker('40000000-0000-4000-8000-0000000000d2', '50000000-0000-4000-8000-0000000000d2', 43253, 44253);
+  await writeWorkers(directory, [worker]);
+  const launchRepository = {
+    recordWorkerLaunchExit: async () => { throw new Error('launch ledger write failed'); },
+  } as unknown as WorkerLaunchRepository;
+  const workerFactory = factory(directory, [worker], undefined, fakeIdentityControl(() => 'dead').control,
+    async () => TEST_KERNEL_BOOT_ID, undefined, launchRepository);
+  try {
+    expect((await workerFactory.discoverAndAdopt(admission(worker))).kind).toBe('adopted');
+    await expect(workerFactory.shutdownAll()).rejects.toMatchObject({ name: 'AggregateError' });
+  } finally {
+    workerFactory.disconnect();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('unknown durable exit failure survives a queued released write', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-launch-write-chain-unknown-'));
+  let rejectUnknown!: (error: unknown) => void;
+  let resolveReleased!: () => void;
+  let unknownStarted!: () => void;
+  let releasedStarted!: () => void;
+  const unknownStartedGate = new Promise<void>((resolve) => { unknownStarted = resolve; });
+  const releasedStartedGate = new Promise<void>((resolve) => { releasedStarted = resolve; });
+  const calls: string[] = [];
+  const launchRepository = {
+    recordWorkerLaunchExit: async (_workerInstanceId: string, evidence: { readonly cleanup: string }) => {
+      calls.push(evidence.cleanup);
+      if (evidence.cleanup === 'unknown') {
+        unknownStarted();
+        return new Promise((_resolve, reject) => { rejectUnknown = reject; }) as never;
+      }
+      releasedStarted();
+      return new Promise((resolve) => { resolveReleased = () => resolve({} as never); }) as never;
+    },
+  } as unknown as WorkerLaunchRepository;
+  const workerFactory = factory(directory, [], undefined, fakeIdentityControl().control,
+    async () => TEST_KERNEL_BOOT_ID, undefined, launchRepository);
+  const record = (workerFactory as unknown as {
+    recordLaunchExit(id: string, evidence: { readonly exited: true; readonly pid: number; readonly cleanup_state?: 'success' | 'failed' }): Promise<void>;
+  }).recordLaunchExit.bind(workerFactory);
+  const workerInstanceId = '40000000-0000-4000-8000-0000000000d3';
+  try {
+    const unknown = record(workerInstanceId, { exited: true, pid: 1 });
+    await unknownStartedGate;
+    const released = record(workerInstanceId, { exited: true, pid: 1, cleanup_state: 'success' });
+    rejectUnknown(new Error('unknown launch write failed'));
+    await expect(unknown).rejects.toThrow('unknown launch write failed');
+    await releasedStartedGate;
+    expect(calls).toEqual(['unknown', 'released']);
+    resolveReleased();
+    await expect(released).resolves.toBeUndefined();
+    await expect(workerFactory.shutdownAll()).rejects.toMatchObject({ name: 'AggregateError' });
+    // A second shutdown must not forget the first durable-write failure.
+    await expect(workerFactory.shutdownAll()).rejects.toMatchObject({ name: 'AggregateError' });
+  } finally {
+    workerFactory.disconnect();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('a failed unknown write stays sticky when a later released write succeeds', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-launch-write-chain-sticky-'));
+  let rejectUnknown!: (error: unknown) => void;
+  let resolveReleased!: () => void;
+  let unknownStarted!: () => void;
+  let releasedStarted!: () => void;
+  const unknownStartedGate = new Promise<void>((resolve) => { unknownStarted = resolve; });
+  const releasedStartedGate = new Promise<void>((resolve) => { releasedStarted = resolve; });
+  const calls: string[] = [];
+  const launchRepository = {
+    recordWorkerLaunchExit: async (_workerInstanceId: string, evidence: { readonly cleanup: string }) => {
+      calls.push(evidence.cleanup);
+      if (evidence.cleanup === 'unknown') {
+        unknownStarted();
+        return new Promise((_resolve, reject) => { rejectUnknown = reject; }) as never;
+      }
+      releasedStarted();
+      return new Promise((resolve) => { resolveReleased = () => resolve({} as never); }) as never;
+    },
+  } as unknown as WorkerLaunchRepository;
+  const workerFactory = factory(directory, [], undefined, fakeIdentityControl().control,
+    async () => TEST_KERNEL_BOOT_ID, undefined, launchRepository);
+  const record = (workerFactory as unknown as {
+    recordLaunchExit(id: string, evidence: { readonly exited: true; readonly pid: number; readonly cleanup_state?: 'success' | 'failed' }): Promise<void>;
+  }).recordLaunchExit.bind(workerFactory);
+  const workerInstanceId = '40000000-0000-4000-8000-0000000000d4';
+  try {
+    const unknown = record(workerInstanceId, { exited: true, pid: 1 });
+    await unknownStartedGate;
+    rejectUnknown(new Error('unknown launch write failed'));
+    await expect(unknown).rejects.toThrow('unknown launch write failed');
+    const released = record(workerInstanceId, { exited: true, pid: 1, cleanup_state: 'success' });
+    await releasedStartedGate;
+    expect(calls).toEqual(['unknown', 'released']);
+    resolveReleased();
+    await expect(released).resolves.toBeUndefined();
+    await expect(workerFactory.shutdownAll()).rejects.toMatchObject({ name: 'AggregateError' });
+    await expect(workerFactory.shutdownAll()).rejects.toMatchObject({ name: 'AggregateError' });
+  } finally {
+    workerFactory.disconnect();
+    await rm(directory, { recursive: true, force: true });
+  }
 });

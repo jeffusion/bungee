@@ -3,7 +3,7 @@ import { Database } from 'bun:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
+import type { ConfigurationAggregate, Sha256Digest } from '@jeffusion/bungee-types';
 import {
   ConfigRepository,
   ConfigRepositoryError,
@@ -11,6 +11,7 @@ import {
   hashConfigurationRequest,
 } from '../../src/config-storage';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
+import { settleWorkerLaunch } from '../helpers/worker-launch';
 
 setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
@@ -45,10 +46,18 @@ function reopen(repository: ConfigRepository, dbPath: string): ConfigRepository 
   return reopened;
 }
 
+const CATALOG: Sha256Digest = `sha256:${'b'.repeat(64)}`;
+
+function claim(repository: ConfigRepository) {
+  const active = repository.claimPublicationTarget(CATALOG, CREATED_AT);
+  if (active === null) throw new Error('expected a claimed publication target');
+  return active;
+}
+
 function commit(repository: ConfigRepository, mutationId: string, targets: readonly number[]): void {
   const result = repository.commit({
     mutation_id: mutationId,
-    expected_revision: 1,
+    expected_revision: repository.getSnapshot().revision,
     aggregate: AGGREGATE,
     kind: 'config',
     created_at: CREATED_AT,
@@ -129,6 +138,7 @@ describe('ConfigRepository active publication recovery', () => {
     // Given
     const { repository, dbPath } = openRepository();
     commit(repository, 'recover-committed', [4, 1]);
+    claim(repository);
     const reopened = reopen(repository, dbPath);
     const beforeRead = persistedPublicationRows(dbPath);
 
@@ -151,6 +161,7 @@ describe('ConfigRepository active publication recovery', () => {
         content_hash: hashConfigurationContent(AGGREGATE),
         aggregate: AGGREGATE,
       },
+      plugin_catalog_hash: CATALOG,
       targets: [
         {
           mutation_id: 'recover-committed', worker_slot: 1, target_revision: 2,
@@ -174,6 +185,7 @@ describe('ConfigRepository active publication recovery', () => {
     // Given
     const { repository, dbPath } = openRepository();
     commit(repository, 'recover-publishing', [7, 2, 5]);
+    claim(repository);
     repository.beginPublication('recover-publishing', CREATED_AT + 1);
     for (const slot of [2, 5]) repository.beginWorkerAttempt('recover-publishing', slot, 0, 'initial', CREATED_AT + 2);
     repository.recordWorkerResult('recover-publishing', 2, {
@@ -205,17 +217,20 @@ describe('ConfigRepository active publication recovery', () => {
     for (const outcome of ['converged', 'degraded'] as const) {
       const { repository } = openRepository();
       commit(repository, `terminal-${outcome}`, [0]);
+      claim(repository);
       repository.beginPublication(`terminal-${outcome}`, CREATED_AT + 1);
       repository.beginWorkerAttempt(`terminal-${outcome}`, 0, 0, 'initial', CREATED_AT + 2);
       if (outcome === 'converged') {
         repository.recordWorkerResult(`terminal-${outcome}`, 0, {
           kind: 'converged', attempt_no: 1, applied_revision: 2,
         }, CREATED_AT + 3);
+        settleWorkerLaunch(repository, `terminal-${outcome}`, 0, 1, CREATED_AT + 4);
         repository.markDraining(`terminal-${outcome}`, CREATED_AT + 4);
       } else {
         repository.recordWorkerResult(`terminal-${outcome}`, 0, {
           kind: 'failed', attempt_no: 1, error: 'unavailable',
         }, CREATED_AT + 3);
+        settleWorkerLaunch(repository, `terminal-${outcome}`, 0, 1, CREATED_AT + 4);
       }
       const terminalOutcome = outcome === 'converged'
         ? { outcome: 'converged' as const, old_workers_exited: true as const }
@@ -242,20 +257,23 @@ describe('ConfigRepository active publication recovery', () => {
     for (const sql of corruptions) {
       const { repository } = openRepository();
       commit(repository, 'corrupt-recovery', [1, 3]);
+      claim(repository);
       corrupt(repository, sql);
       expectSchemaCorrupt(() => repository.getActivePublication());
     }
   }, 30_000);
 
-  test('explicit maintenance audit fails closed on a resurrected historical publication', () => {
+  test('rejects reviving a historical terminal operation as a second publication owner', () => {
     // Given
     const { repository, dbPath } = openRepository();
     commit(repository, 'historical-operation', [0]);
+    claim(repository);
     repository.beginPublication('historical-operation', CREATED_AT + 1);
     repository.beginWorkerAttempt('historical-operation', 0, 0, 'initial', CREATED_AT + 2);
     repository.recordWorkerResult('historical-operation', 0, {
       kind: 'failed', attempt_no: 1, error: 'historical failure',
     }, CREATED_AT + 3);
+    settleWorkerLaunch(repository, 'historical-operation', 0, 1, CREATED_AT + 4);
     repository.finalizePublication('historical-operation', {
       outcome: 'degraded', error_code: 'replacement_convergence_failed', error_detail: 'historical failure', recovery_disposition: 'retryable',
     }, CREATED_AT + 4);
@@ -269,16 +287,24 @@ describe('ConfigRepository active publication recovery', () => {
       created_at: CREATED_AT + 4, target_worker_slots: [1],
     });
     expect(next.kind).toBe('committed');
-    corrupt(repository, `UPDATE configuration_operations SET state='publishing',result_status=NULL,error_code=NULL,error_detail=NULL
-      WHERE mutation_id='historical-operation'`);
-    corrupt(repository, `UPDATE configuration_operation_workers
-      SET state='pending',applied_revision=NULL,last_error=NULL WHERE mutation_id='historical-operation'`);
+    claim(repository);
 
     // When / Then
-    // Ordinary lookup is bounded to the current revision. Historical corruption is
-    // checked at startup or by the stopped-instance maintenance audit.
+    const db = repository['db'];
     expect(repository.getActivePublication()?.operation.mutation_id).toBe('active-operation');
-    expectSchemaCorrupt(() => repository.verify());
-    expectSchemaCorrupt(() => ConfigRepository.open(dbPath));
+    const trigger = db.query<{ readonly sql: string }, []>(`SELECT sql FROM sqlite_schema
+      WHERE type='trigger' AND name='configuration_operations_terminal_immutable_update'`).get();
+    if (trigger === null) throw new Error('terminal trigger missing');
+    db.run('DROP TRIGGER configuration_operations_terminal_immutable_update');
+    expect(() => db.run(`UPDATE configuration_operations SET state='publishing',result_status=NULL,error_code=NULL,error_detail=NULL
+      WHERE mutation_id='historical-operation'`)).toThrow();
+    db.run(trigger.sql);
+    expect(() => repository.verify()).not.toThrow();
+    const reopened = ConfigRepository.open(dbPath);
+    try {
+      expect(reopened.getActivePublication()?.operation.mutation_id).toBe('active-operation');
+    } finally {
+      reopened.close();
+    }
   });
 });

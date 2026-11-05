@@ -1,47 +1,33 @@
 import type { LogicalConfiguration } from '@jeffusion/bungee-types';
 import {
-  commitLogicalConfiguration, ConfigurationOperationConflictError, ConfigurationOperationDegradedError,
-  ConfigurationSubmissionUnknownError, duplicateConfigurationRoute, waitForConfigurationOperation, type ConfigurationSnapshot,
-  type ConfigurationCommitOptions, type ConfigurationOperationState,
+  commitLogicalConfiguration, duplicateConfigurationRoute, isDefinitiveConfigurationRejection,
+  type ConfigurationSnapshot, type ConfigurationCommitOptions, type ConfigurationOperationState,
 } from './config';
 import { publicationRecovery } from '../stores/runtime';
-import { retainAccepted } from '../components/domain/config/publication-state';
-import { pendingPublicationKey } from '../components/domain/config/workspace';
+import { configurationWrite } from '../stores/configuration-write';
 
-/** Storage ACK ends an entity save. Publication remains visible across navigation. */
-export async function saveLogicalConfiguration(snapshot: ConfigurationSnapshot, logical: LogicalConfiguration): Promise<void> {
-  await saveConfigurationOperation(options => commitLogicalConfiguration(snapshot, logical, options), snapshot.revision);
+/** Persistence ACK ends an entity save. Publication continues in the shared runtime view. */
+export async function saveLogicalConfiguration(snapshot: ConfigurationSnapshot, logical: LogicalConfiguration): Promise<ConfigurationOperationState> {
+  return saveConfigurationOperation(options => commitLogicalConfiguration(snapshot, logical, options));
 }
 
-export async function saveRouteCopy(path: string): Promise<void> {
-  await saveConfigurationOperation(options => duplicateConfigurationRoute(path, options));
+export async function saveRouteCopy(path: string): Promise<ConfigurationOperationState> {
+  return saveConfigurationOperation(options => duplicateConfigurationRoute(path, options));
 }
 
 async function saveConfigurationOperation(
-  submit: (options: ConfigurationCommitOptions) => Promise<ConfigurationOperationState>, expectedRevision?: number,
-): Promise<void> {
-  const commit = () => submit({
-    completion: 'committed',
-    onOperation(state) { retainAccepted(state.operation.mutation_id); },
-  });
+  submit: (options: ConfigurationCommitOptions) => Promise<ConfigurationOperationState>,
+): Promise<ConfigurationOperationState> {
   try {
-    try { await commit(); }
-    catch (error) {
-      if (!(error instanceof ConfigurationOperationConflictError)
-        || (expectedRevision !== undefined && error.revision !== expectedRevision)) throw error;
-      // The rejected write changed nothing; wait for the preceding publication.
-      try { await waitForConfigurationOperation(error.operationId, { timeoutMs: 120_000 }); }
-      catch (publicationError) {
-        if (!(publicationError instanceof ConfigurationOperationDegradedError)) throw publicationError;
-      }
-      await commit();
-    }
+    return await submit({
+      completion: 'committed',
+      onDispatch(mutationId) { configurationWrite.markDispatched(mutationId); },
+      onOperation(state) { configurationWrite.markAccepted(state.operation.mutation_id); },
+    });
   } catch (error) {
-    if (error instanceof ConfigurationSubmissionUnknownError) {
-      // The settings workspace can reconcile this UUID after navigation/reload.
-      // A plain UUID records an unknown result, rather than a storage ACK.
-      try { sessionStorage.setItem(pendingPublicationKey, error.mutationId); } catch { /* Memory/error still carries the UUID. */ }
-    }
+    // Only a rejection that proves nothing was committed may release the identity. Malformed
+    // ACKs, transport failures, result_unknown and unproven lookups keep the original marker.
+    if (isDefinitiveConfigurationRejection(error)) configurationWrite.clear();
     throw error;
   } finally {
     void publicationRecovery.refresh();

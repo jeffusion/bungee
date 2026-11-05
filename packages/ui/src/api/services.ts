@@ -2,7 +2,7 @@ import { saveLogicalConfiguration } from './configuration-save';
 import { getConfigSnapshot } from './config';
 import { toEditorService, toV2Service, type EditorService } from './config-adapters';
 import type { ConfigurationService } from '@jeffusion/bungee-types';
-import { isEqual } from 'lodash-es';
+import { cloneDeep, isEqual } from 'lodash-es';
 
 export type Service = EditorService;
 export type ServiceBaseline = ConfigurationService;
@@ -11,14 +11,16 @@ export class ServiceStaleError extends Error {
   readonly name = 'ServiceStaleError';
   constructor(readonly serviceName: string, readonly reason: 'changed' | 'deleted') {
     super(reason === 'deleted'
-      ? '该服务已被删除，未保存任何修改。当前草稿仍保留，请勿覆盖同名的新服务。'
-      : '该服务已被其他操作修改，未保存任何修改。当前草稿仍保留，请重新加载最新版本后再编辑。');
+      ? '该服务已被删除，本次未保存。未保存的更改已保留，请勿覆盖同名的新服务。'
+      : '该服务已被其他操作修改，本次未保存。未保存的更改已保留，请重新加载服务后再保存。');
   }
 }
 
 // Reuse the persistence adapter: editor descriptions and endpoint health are not configuration.
 function persistedService(service: ConfigurationService): ConfigurationService {
-  return toV2Service(toEditorService(service), service, service.position);
+  const persisted = toV2Service(toEditorService(service), service, service.position);
+  // Baselines can carry editor keys holding undefined; only the JSON wire form is persisted.
+  return JSON.parse(JSON.stringify(persisted));
 }
 
 export class ServiceReferencedError extends Error {
@@ -60,6 +62,8 @@ export class ServicesAPI {
   }
 
   static async create(service: Service): Promise<ServiceBaseline> {
+    // Snapshot reactive drafts before the first await.
+    service = cloneDeep(service);
     const snapshot = await getConfigSnapshot();
     const logical = snapshot.config.logical_configuration;
     if (logical.services.some((candidate) => candidate.name === service.name)) {
@@ -75,6 +79,9 @@ export class ServicesAPI {
   }
 
   static async update(originalName: string, updatedService: Service, baseline: ServiceBaseline): Promise<ServiceBaseline> {
+    // Snapshot reactive drafts before the first await.
+    updatedService = cloneDeep(updatedService);
+    baseline = cloneDeep(baseline);
     const snapshot = await getConfigSnapshot();
     const logical = snapshot.config.logical_configuration;
     const existing = logical.services.find((service) => service.id === baseline.id);

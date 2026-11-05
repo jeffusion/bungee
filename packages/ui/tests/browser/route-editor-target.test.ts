@@ -55,9 +55,9 @@ await page.route(/^https?:\/\/[^/]+\/api(?:\/|$)/,async route=>{const request=ro
           state.writes.push(payload);
           state.logical.routes.push({ id: 'copied-route', position: 2, path: '/fixture-custom/-copy', endpoints: [endpoint('copied-endpoint', 'https://example.test')], plugins: [] });
           revision++;
-          return route.fulfill({status:202,json:{operation_id:payload.mutation_id,revision,operation:{state:'committed',mutation_id:payload.mutation_id},workers:[]}});
+          return route.fulfill({status:202,json:{operation_id:payload.mutation_id,revision,operation:{state:'committed',result_status:null,error_code:null,mutation_id:payload.mutation_id,expected_revision:revision-1,committed_revision:revision},workers:[]}});
         }
-        else if (key === 'PUT /api/config') { const payload = request.postDataJSON(); assert.equal(payload.expected_revision, revision); state.writes.push(payload); state.logical = payload.aggregate.logical_configuration; revision++; return route.fulfill({status:202,json:{operation_id:payload.mutation_id,revision,operation:{state:'converged',mutation_id:payload.mutation_id},workers:[]}}); }
+        else if (key === 'PUT /api/config') { const payload = request.postDataJSON(); assert.equal(payload.expected_revision, revision); state.writes.push(payload); state.logical = payload.aggregate.logical_configuration; revision++; return route.fulfill({status:202,json:{operation_id:payload.mutation_id,revision,operation:{state:'converged',result_status:200,error_code:null,mutation_id:payload.mutation_id,expected_revision:revision-1,committed_revision:revision},workers:[]}}); }
         else if (key === 'POST /api/config/validate') body = { valid: true, errors: [] };
         else {
           errors.push(`Unexpected API ${key}`);
@@ -154,6 +154,7 @@ const targetPanel=page.locator('[data-testid="route-target-section"][data-testid
           ]);
           assert.equal(response.status(),202);
           assert.equal(await response.finished(),null);
+          await page.getByTestId('route-editor-back').click();
           await page.waitForURL(`${runtime.origin}/#/routes`);
           await page.waitForLoadState('networkidle');
           assert.equal(state.writes.length,writesBefore+1);
@@ -179,7 +180,6 @@ const targetPanel=page.locator('[data-testid="route-target-section"][data-testid
         assert.equal(state.writes.length,2);
       }
 
-await expect(page.getByTestId('configuration-publication-banner')).toHaveCount(0);
 });
 },240_000);
 
@@ -357,6 +357,7 @@ test('Service mixed targets share ordering and preserve endpoint and Service plu
     assert.equal(saved.endpoints.length,1);assert.equal(saved.endpoints[0].position,1);
     assert.equal(saved.service_references[0].position,0);assert.equal(saved.service_references[0].service_id,'service-secondary');
     assert.equal(saved.endpoints[0].plugins[0].name,'beta');assert.equal(saved.plugins[0].name,'beta');
+    await page.getByTestId('service-editor-back').click();
     await expect(page).toHaveURL(`${runtime.origin}/#/services`);
     await page.goto(url);await page.getByTestId('service-nav-endpoints').first().click();
     await expect(targets.getByTestId('service-reference-row')).toHaveCount(1);
@@ -522,3 +523,121 @@ for (const scenario of ['custom','mixed','pending']) test(`extracting Route targ
     }
   },true);
 },60_000);
+
+test('a Route created in this session keeps one identity when saved again', async () => {
+  // Risk: saving a just-created Route from the same editor could persist a second Route, send a
+  // stale baseline, or drop what the user typed while the ACK was in flight. Existing cases save
+  // once and reopen by path, so they cannot observe the create → update handoff at all.
+  await withEditor(async (page,state) => {
+    const initialRoutes = state.logical.routes.length;
+    await recordResponseDelivery(page, '/api/config');
+    await openEditorWithHistory(page, '/routes/new');
+    await page.getByTestId('route-nav-target').click();
+    await page.getByRole('button', { name: /使用模板/ }).click({ timeout: 4000 });
+    await page.getByRole('button', { name: /Simple Proxy/ }).click({ timeout: 4000 });
+    // The template ships a placeholder endpoint; repoint it through the real endpoint editor so
+    // the persisted draft comes from the same UI path real users take (HeadersEditor included).
+    const targetPanel = page.locator('[data-testid="route-target-section"][data-testid-section="target"]');
+    await targetPanel.getByTestId('upstream-endpoint-row').getByRole('button', { name: '编辑', exact: true }).click();
+    const endpointDialog = page.getByRole('dialog');
+    await endpointDialog.getByPlaceholder('https://api.example.com', { exact: true }).fill('https://example.test');
+    await page.getByTestId('upstream-modal-save').click();
+    await expect(endpointDialog).toHaveCount(0);
+    await expect(targetPanel.getByTestId('upstream-endpoint-row')).toContainText('https://example.test');
+    // Simple Proxy carries its own path (/api), so the target path is entered after the template.
+    await page.getByTestId('route-nav-match').click();
+    const pathInput = page.getByTestId('route-path-input');
+    await pathInput.fill('/fresh-route/');
+    const save = page.getByTestId('route-save-button');
+    await expect(save).toBeEnabled();
+    // Hold the first PUT's JSON so the ACK is on the wire while the user keeps editing.
+    await holdResponseJson(page, 'route-create', { method: 'PUT', path: '/api/config' });
+    await save.click();
+    const createRequest = await waitForResponseReceipt(page, 'route-create');
+    await expect.poll(() => state.writes.length).toBe(1);
+    const createWrite = state.writes[0];
+    const created = createWrite.aggregate.logical_configuration.routes.find((route: any) => route.path === '/fresh-route/');
+    assert.ok(created, 'the created Route must be persisted');
+    assert.equal(createWrite.aggregate.logical_configuration.routes.length, initialRoutes + 1);
+    // The response body is parsed but its JSON is not delivered to the client yet: mid-save.
+    await expect(save).toBeDisabled();
+    await page.getByTestId('route-nav-match').click();
+    await pathInput.fill('/fresh-route-renamed/');
+    assert.equal(await pathInput.inputValue(), '/fresh-route-renamed/');
+    await releaseResponseJson(page, createRequest);
+    await waitForResponseDelivery(page, createRequest);
+    assert.equal(await pathInput.inputValue(), '/fresh-route-renamed/',
+      'typing made while the ACK was in flight must survive delivery');
+    // Client-observable completion of the first save: the editor enters edit mode for the saved
+    // Route and the save action leaves its saving state.
+    await expect(page).toHaveURL(/\/routes\/edit\//);
+    await expect(save).toBeEnabled();
+    // Gate the update's snapshot read too, so the second save resolves only after a real
+    // configuration read returns; the clone failure this case guards appears after that read.
+    await holdResponseJson(page, 'route-update-snapshot', { method: 'GET', path: '/api/config' });
+    await save.click();
+    const snapshotRequest = await waitForResponseReceipt(page, 'route-update-snapshot');
+    assert.equal(await pathInput.inputValue(), '/fresh-route-renamed/');
+    await releaseResponseJson(page, snapshotRequest);
+    await waitForResponseDelivery(page, snapshotRequest);
+    await expect.poll(() => state.writes.length).toBe(2);
+    await expect(save).toBeEnabled();
+    const updateWrite = state.writes[1];
+    assert.equal(updateWrite.expected_revision, createWrite.expected_revision + 1);
+    const routes = updateWrite.aggregate.logical_configuration.routes;
+    assert.equal(routes.length, initialRoutes + 1, 'the second save must not create another Route');
+    assert.deepEqual(routes.filter((route: any) => route.id === created.id).map((route: any) => route.path), ['/fresh-route-renamed/']);
+    assert.equal(routes.some((route: any) => route.path === '/fresh-route/'), false);
+    assert.equal(await pathInput.inputValue(), '/fresh-route-renamed/', 'the second save must not overwrite the draft');
+    assert.equal(new URL(page.url()).hash, `#/routes/edit/${encodeURIComponent('/fresh-route-renamed/')}`, 'a reload must reopen the renamed route');
+    await expect(page.getByTestId('route-stale-warning')).toHaveCount(0);
+    // A clone failure would surface as an error toast instead of the update; the formal
+    // regression requires a clean second save, not merely a tolerated error.
+    await expect(page.getByTestId('toast-container').getByRole('status')
+      .filter({ hasText: /could not be cloned|structuredclone/i })).toHaveCount(0);
+    // A real remote change must surface the core Chinese conflict copy and reload action even
+    // though this fixture installs no OAuth plugin, and it must keep the draft without writing.
+    state.logical.routes.find((route: any) => route.id === created.id).endpoints[0].target = 'https://changed.example.test';
+    await save.click();
+    const staleWarning = page.getByTestId('route-stale-warning');
+    await expect(staleWarning).toContainText('路由已被其他操作修改');
+    await expect(staleWarning.getByRole('button', { name: '重新加载路由', exact: true })).toBeVisible();
+    assert.doesNotMatch(await staleWarning.innerText(), /ui\.routestale/i);
+    assert.equal(await pathInput.inputValue(), '/fresh-route-renamed/', 'the stale result must keep the draft');
+    assert.equal(state.writes.length, 2, 'a stale save must not write');
+  });
+}, 60_000);
+
+test('a late save ACK after leaving the editor keeps the list URL and does not resave', async () => {
+  // Risk: the save tail rewrites the URL to the persisted path; if the user already left the
+  // editor, the destroyed instance must not move the page the user is now on.
+  await withEditor(async (page,state) => {
+    await recordResponseDelivery(page, '/api/config');
+    await openEditorWithHistory(page, '/routes/edit/%2Ffixture-custom%2F');
+    await page.getByTestId('route-nav-match').click();
+    const pathInput = page.getByTestId('route-path-input');
+    await pathInput.fill('/late-renamed/');
+    const save = page.getByTestId('route-save-button');
+    await expect(save).toBeEnabled();
+    await holdResponseJson(page, 'route-late-ack', { method: 'PUT', path: '/api/config' });
+    await save.click();
+    const putRequest = await waitForResponseReceipt(page, 'route-late-ack');
+    await expect.poll(() => state.writes.length).toBe(1);
+    const write = state.writes[0];
+    assert.equal(write.aggregate.logical_configuration.routes.find((route: any) => route.id === 'route-custom').path, '/late-renamed/');
+    // Leave the editor before the ACK is delivered, accepting the unsaved-changes prompt, then
+    // prove the old editor is gone: its late continuation is the only thing left to run.
+    await openEditorWithHistory(page, '/routes');
+    await page.getByRole('button', { name: '放弃并离开', exact: true }).click();
+    await expect(page.getByTestId('route-save-button')).toHaveCount(0);
+    await expect(page.getByTestId('route-rules-table')).toBeVisible();
+    await releaseResponseJson(page, putRequest);
+    await waitForResponseDelivery(page, putRequest);
+    // The success toast is emitted after the guarded URL update, so seeing it means the tail ran.
+    const lateSaved = page.getByTestId('toast-container').getByRole('status').filter({ hasText: '保存成功' });
+    await expect(lateSaved).toHaveCount(1);
+    assert.equal(new URL(page.url()).hash, '#/routes');
+    await expect(page.getByTestId('route-save-button')).toHaveCount(0);
+    assert.equal(state.writes.length, 1);
+  });
+}, 60_000);

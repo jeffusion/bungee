@@ -4,6 +4,8 @@ import {
   createConfigWorkerLifecycle,
   type ProductionResources,
 } from '../../../src/config-worker/lifecycle';
+import { ConfigWorkerLifecycleCleanupError } from '../../../src/config-publication/worker-runtime-contract';
+import { PluginRuntimeInitializationCleanupError } from '../../../src/plugin-runtime-orchestrator';
 import { startCurrentMessage } from '../../helpers/config-publication-worker-runtime';
 import {
   privateWorkerHeaders,
@@ -38,7 +40,7 @@ function fixture(options: {
   let requestHandlerCalls = 0;
   let requestServingRevision: number | undefined;
   const drain = new Promise<void>((resolve) => { resolveDrain = resolve; });
-  const resources = {
+  const resources: ProductionResources = {
     configureBodyStorage() { calls.push('body'); },
     initializeRuntimeState() { calls.push('runtime'); },
     cleanupRuntimeState() { calls.push('cleanup-runtime'); },
@@ -207,9 +209,10 @@ describe('config worker Bun lifecycle', () => {
       (failure: unknown) => failure,
     );
 
-    expect(error).toBeInstanceOf(AggregateError);
-    if (!(error instanceof AggregateError)) throw new Error('expected aggregate startup failure');
-    expect(error.errors.map(String)).toEqual([
+    expect(error).toBeInstanceOf(ConfigWorkerLifecycleCleanupError);
+    if (!(error instanceof ConfigWorkerLifecycleCleanupError)) throw new Error('expected cleanup failure');
+    expect(error.cause).toBeInstanceOf(AggregateError);
+    expect((error.cause as AggregateError).errors.map(String)).toEqual([
       'Error: Bun server did not bind a positive port',
       'Error: force stop failed',
       'Error: plugin cleanup failed',
@@ -330,6 +333,58 @@ describe('config worker Bun lifecycle', () => {
   });
 });
 
+
+test('aborts in-flight plugin initialization on the shutdown signal and still cleans up', async () => {
+  const testFixture = fixture();
+  let receivedSignal: AbortSignal | undefined;
+  testFixture.resources.initializePluginRuntime = async (...args: any[]) => {
+    receivedSignal = args[4] as AbortSignal | undefined;
+    await new Promise<void>((_resolve, reject) => {
+      if (receivedSignal === undefined) return reject(new Error('initialization signal is missing'));
+      receivedSignal.addEventListener('abort', () => reject(receivedSignal!.reason), { once: true });
+    });
+    return { generation: 1, status: emptyStatus };
+  };
+  const lifecycle = createTestLifecycle(async () => testFixture.resources);
+  const controller = new AbortController();
+  const pending = lifecycle.start(config, startCurrentMessage(), controller.signal);
+  while (receivedSignal === undefined) await Bun.sleep(1);
+
+  controller.abort(new Error('worker shutdown'));
+
+  await expect(pending).rejects.toThrow('worker shutdown');
+  expect(receivedSignal.aborted).toBe(true);
+  expect(testFixture.calls).toContain('cleanup-plugins');
+  expect(testFixture.calls).not.toContain('serve');
+});
+
+test('initialization cleanup failure is reported, not hidden behind the abort', async () => {
+  const testFixture = fixture({ failCleanup: true });
+  testFixture.resources.initializePluginRuntime = async (_config, _names, _services, _before, signal?: AbortSignal) => {
+    await new Promise<void>((_resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+    return { generation: 1, status: emptyStatus };
+  };
+  const lifecycle = createTestLifecycle(async () => testFixture.resources);
+  const controller = new AbortController();
+  const pending = lifecycle.start(config, startCurrentMessage(), controller.signal);
+  await Bun.sleep(1);
+  controller.abort(new Error('worker shutdown'));
+
+  await expect(pending).rejects.toBeInstanceOf(ConfigWorkerLifecycleCleanupError);
+});
+
+test('plugin runtime teardown failure is reported as cleanup failure', async () => {
+  const testFixture = fixture();
+  testFixture.resources.initializePluginRuntime = async () => {
+    throw new PluginRuntimeInitializationCleanupError(new Error('init failed'), new Error('teardown failed'));
+  };
+  const lifecycle = createTestLifecycle(async () => testFixture.resources);
+
+  await expect(lifecycle.start(config, startCurrentMessage()))
+    .rejects.toBeInstanceOf(ConfigWorkerLifecycleCleanupError);
+});
 
 test('worker lifecycle leaves client admission to ingress and retains buffer budgets', async () => {
   const testFixture = fixture();

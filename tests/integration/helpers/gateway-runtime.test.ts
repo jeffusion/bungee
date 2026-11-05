@@ -11,6 +11,7 @@ import {
   reservePortBlock,
   releasePortBlock,
   requestJson,
+  safeGatewayError,
   startTrackedGatewayMaster,
   stopOwnedMaster,
   waitForHealth,
@@ -19,6 +20,16 @@ import {
   type OwnedMaster,
   type PortLease,
 } from '../../helpers/gateway-runtime';
+
+test('long diagnostics preserve the primary error and redact credentials before truncation', () => {
+  const fixture = { root: '', configDbPath: '', accessDbPath: '', pluginsPath: '', pluginSecretsKey: 'diagnostic-fixture-secret' };
+  const primary = 'master graceful shutdown failed (exitCode=1)';
+  const message = safeGatewayError(new Error(`${primary}; ${fixture.pluginSecretsKey}; diagnostics=${'x'.repeat(512)}`), fixture, 128);
+  expect(message.startsWith(primary)).toBe(true);
+  expect(message).toContain('[REDACTED_PLUGIN_KEY]');
+  expect(message).not.toContain(fixture.pluginSecretsKey);
+  expect(message).toHaveLength(128);
+});
 
 test('HTTP timeout diagnostics identify method, path and response stage without exposing credentials', async () => {
   let received!: () => void;
@@ -323,6 +334,53 @@ test('restart startup failure keeps the newly spawned child registered and aggre
   expect(state.master?.child).toBe(restartedChild);
   expect(state.errors).toHaveLength(1);
   expect(state.errors[0]).toBeInstanceOf(Error);
+});
+
+test('stops exact-owned ingress when master shutdown failed and preserves that failure', async () => {
+  const workerChildren: ChildProcess[] = [];
+  let ingressChild: ChildProcess | undefined;
+  try {
+    const workerRecords: Array<{ pid: number; workerInstanceId: string; identity: Awaited<ReturnType<typeof captureProcessIdentity>> }> = [];
+    for (let index = 0; index < 2; index++) {
+      const workerInstanceId = randomUUID();
+      const worker = spawn(process.execPath, [
+        '-e', 'console.log("READY"); setInterval(() => {}, 1000);',
+        `--bungee-process-identity=${workerInstanceId}`,
+      ], { stdio: ['ignore', 'pipe', 'ignore'] });
+      workerChildren.push(worker);
+      worker.unref();
+      const identity = await captureReadyWorkerIdentity(worker, workerInstanceId);
+      workerRecords.push({ pid: identity.pid, workerInstanceId, identity });
+    }
+    expect(await terminateExactlyOwnedChildren(workerChildren)).toEqual([]);
+
+    const masterChild = spawn(process.execPath, ['-e', 'process.exit(1)'], { stdio: 'ignore' });
+    await new Promise<void>((resolve, reject) => {
+      masterChild.once('error', reject);
+      masterChild.once('close', (code) => code === 1 ? resolve() : reject(new Error(`expected master exit 1, got ${String(code)}`)));
+    });
+
+    const ingressInstanceId = randomUUID();
+    ingressChild = spawn(process.execPath, [
+      '-e', 'process.on("SIGTERM", () => process.exit(0)); console.log("READY"); setInterval(() => {}, 1000);',
+      `--bungee-process-identity=${ingressInstanceId}`,
+    ], { stdio: ['ignore', 'pipe', 'ignore'] });
+    ingressChild.unref();
+    const ingressIdentity = await captureReadyWorkerIdentity(ingressChild, ingressInstanceId);
+    const master: OwnedMaster = {
+      child: masterChild,
+      output: [],
+      workers: new Map(workerRecords.map((worker) => [worker.workerInstanceId, worker])),
+      ingress: { pid: ingressIdentity.pid, workerInstanceId: ingressInstanceId, identity: ingressIdentity },
+      workerInventoryComplete: true,
+    };
+
+    const failure = await stopFailure(master, { graceTimeoutMs: 500, forceTimeoutMs: 500 });
+    expect(failure.message).toContain('exitCode=1');
+    expect(await probeProcessIdentity(ingressIdentity)).toBe('dead');
+  } finally {
+    await terminateExactlyOwnedChildren(ingressChild === undefined ? [] : [ingressChild]);
+  }
 });
 
 async function stopFailure(master: OwnedMaster, options: { graceTimeoutMs: number; forceTimeoutMs: number }): Promise<Error> {

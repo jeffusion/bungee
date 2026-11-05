@@ -82,12 +82,16 @@ export function auditConfigurationTables(db: Database): AuditedConfigurationStat
     }
     workersByMutation.set(worker.mutation_id, [...(workersByMutation.get(worker.mutation_id) ?? []), worker]);
   }
+  let owner: ConfigurationOperation | undefined;
   for (const operation of operations) {
     const workers = workersByMutation.get(operation.mutation_id) ?? [];
     validateOperationRelations(operation, workers);
-    if (operation.committed_revision !== state.active_revision &&
-        (operation.state === 'committed' || operation.state === 'publishing' || operation.state === 'draining')) {
-      throw new ConfigRepositoryError('schema_corrupt', 'non-active operation is not terminal');
+    if (operation.state === 'committed' || operation.state === 'publishing' || operation.state === 'draining') {
+      if (owner !== undefined) throw new ConfigRepositoryError('schema_corrupt', 'multiple publication owners exist');
+      owner = operation;
+    }
+    if (operation.state === 'superseded' && operation.committed_revision === state.active_revision) {
+      throw new ConfigRepositoryError('schema_corrupt', 'the latest revision cannot be superseded');
     }
   }
   const activeRevisionRow = revisions.at(-1);

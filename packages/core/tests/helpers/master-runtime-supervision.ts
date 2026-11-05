@@ -179,7 +179,7 @@ export function supervisionFixture(
       },
     },
     publicationTasks: {
-      enqueue() {},
+      wake() {},
       async enqueueRecovery(task) { return enqueueRecovery(task); },
       setFatalHandler(handler) { publicationFatal = handler; },
       async stop() {},

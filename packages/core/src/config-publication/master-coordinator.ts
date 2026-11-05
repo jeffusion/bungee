@@ -48,6 +48,12 @@ export type MasterConfigPublicationCoordinatorOptions = {
     readonly workers: readonly ServingConfigWorker[]; readonly admission: import('./coordinator-types').PreparedWorkerAdmission;
   } | null>;
   readonly confirmPreviousWorkersExited?: (replacements: readonly ServingConfigWorker[]) => Promise<boolean>;
+  /**
+   * Shared creation gate for every real fork. It runs inside the serialized
+   * publication/recovery queue, settles debt-only, re-reads fresh authority and
+   * returns false without creating anything when capacity or proof is unknown.
+   */
+  readonly ensureCreationPermitted: () => Promise<import('./coordinator-types').CreationPermit>;
 };
 
 function requirePositiveSafeInteger(value: number, name: string): void {
@@ -141,7 +147,8 @@ export class MasterConfigPublicationCoordinator {
         workerCount: this.options.workerCount,
         scheduler: this.scheduler, applyTimeoutMs: this.options.startupApplyTimeoutMs,
         drainTimeoutMs: this.options.drainTimeoutMs, identities: this.identities,
-        pluginCatalogHash: this.options.pluginCatalogHash, admission: this.options.admission, retireWorkers, signal },
+        pluginCatalogHash: this.options.pluginCatalogHash, admission: this.options.admission, retireWorkers, signal,
+        ensureCreationPermitted: this.options.ensureCreationPermitted },
       snapshot, existingWorkers);
     } finally {
       this.release();
@@ -152,11 +159,12 @@ export class MasterConfigPublicationCoordinator {
     active: ActiveConfigurationPublication,
     oldWorkers: readonly ServingConfigWorker[],
     signal?: PublicationCancellationSignal,
+    updateSignal?: AbortSignal,
   ): Promise<MasterPublicationOutcome> {
     this.acquire();
     try {
       this.validateServingWorkers(oldWorkers);
-      return await this.runPublish(active, oldWorkers, signal);
+      return await this.runPublish(active, oldWorkers, signal, updateSignal);
     } finally {
       this.release();
     }
@@ -166,6 +174,7 @@ export class MasterConfigPublicationCoordinator {
     active: ActiveConfigurationPublication,
     oldWorkers: readonly ServingConfigWorker[],
     signal?: PublicationCancellationSignal,
+    updateSignal?: AbortSignal,
   ): Promise<MasterPublicationOutcome> {
     if (!exactTargets(active, this.options.workerCount)) {
       return Promise.reject(new MasterConfigPublicationError(
@@ -178,15 +187,26 @@ export class MasterConfigPublicationCoordinator {
       applyTimeoutMs: this.options.startupApplyTimeoutMs, drainTimeoutMs: this.options.drainTimeoutMs,
       identities: this.identities, oldWorkers, owned: new OwnedProcessCollection(),
       pluginCatalogHash: this.options.pluginCatalogHash, admission: this.options.admission,
-      recoveringMaster: false, signal }, active, oldWorkers);
+      latestRevision: () => this.options.repository.getSnapshot().revision,
+      recoveringMaster: false, signal, updateSignal,
+      ensureCreationPermitted: this.options.ensureCreationPermitted }, active, oldWorkers);
   }
 
   async recoverAndPublish(signal?: PublicationCancellationSignal): Promise<MasterPublicationOutcome | null> {
     this.acquire();
     try {
       let active: ActiveConfigurationPublication | null;
-      try { active = await this.options.repository.getActivePublication(); }
+      try {
+        active = this.options.repository.claimPublicationTarget === undefined
+          ? await this.options.repository.getActivePublication()
+          : await this.options.repository.claimPublicationTarget(this.options.pluginCatalogHash, this.options.clock.now());
+      }
       catch (error) {
+        const code = (error as { readonly code?: unknown }).code;
+        if (code === 'recovery_in_progress' || code === 'invalid_operation') {
+          return { kind: 'outcome_unknown', fatal: false, code: 'control_recovering',
+            error, serving: [], pending: [] };
+        }
         return { kind: 'outcome_unknown', fatal: true, code: 'repository_failure', error,
           serving: [], pending: [] };
       }
@@ -195,6 +215,36 @@ export class MasterConfigPublicationCoordinator {
         throw new MasterConfigPublicationError(
           'target_set_mismatch', 'durable target worker slots do not match coordinator slots',
         );
+      }
+      // A crash before prepare may leave only pre-ready attempt allocations with no
+      // frozen serving set. They still occupy candidates and must be settled first.
+      const outstanding = await (this.options.repository as typeof this.options.repository & {
+        getOutstandingPublicationCandidates?: () => Promise<readonly { readonly mutation_id: string; readonly attempt_no: number }[]>;
+      }).getOutstandingPublicationCandidates?.() ?? [];
+      const hasPriorAttempts = outstanding.some(item =>
+        item.mutation_id === active!.operation.mutation_id && item.attempt_no > 0);
+      if (active.operation.cancel_requested) {
+        // Recovery only settles the already-requested cancellation; it never starts a
+        // new attempt or resumes publication.
+        let exited: boolean;
+        try { exited = await this.options.workerFactory.confirmActivePublicationExited?.(active) === true; }
+        catch { exited = false; }
+        if (!exited) {
+          return { kind: 'outcome_unknown', fatal: false, code: 'control_recovering',
+            error: new Error('cancelled publication candidates are not settled'), serving: [], pending: [] };
+        }
+        try {
+          const confirmed = await this.options.repository.confirmPublicationCandidateExited?.(
+            active.operation.mutation_id, active.operation.committed_revision, this.options.clock.now());
+          if (confirmed === undefined) {
+            return { kind: 'outcome_unknown', fatal: false, code: 'control_recovering',
+              error: new Error('cancelled publication confirmation is unavailable'), serving: [], pending: [] };
+          }
+          return { kind: 'superseded', operation: confirmed, serving: [] };
+        } catch (error) {
+          return { kind: 'outcome_unknown', fatal: false, code: 'control_recovering',
+            error, serving: [], pending: [] };
+        }
       }
       const recoveredActive = await this.options.recoverActiveServingWorkers?.(active) ?? undefined;
       if (recoveredActive !== undefined && (recoveredActive.workers.length !== this.options.workerCount
@@ -208,7 +258,7 @@ export class MasterConfigPublicationCoordinator {
       }
       const authority = recoveredActive === undefined
         ? await this.options.repository.getPublicationServingSet?.(active.operation.mutation_id, active.operation.drain_recovery_generation) ?? null : null;
-      const requiresPriorExit = active.operation.state === 'draining' || authority !== null;
+      const requiresPriorExit = active.operation.state === 'draining' || authority !== null || hasPriorAttempts;
       const priorAttemptExited = recoveredActive === undefined && requiresPriorExit
         && await this.options.workerFactory.confirmActivePublicationExited?.(active) === true;
       const oldWorkers = recoveredActive !== undefined || active.operation.state === 'draining'
@@ -223,7 +273,9 @@ export class MasterConfigPublicationCoordinator {
         applyTimeoutMs: this.options.startupApplyTimeoutMs, drainTimeoutMs: this.options.drainTimeoutMs,
         identities: this.identities, oldWorkers, owned: new OwnedProcessCollection(),
         pluginCatalogHash: this.options.pluginCatalogHash, admission: this.options.admission,
-        recoveringMaster: true, recoveredActive, priorAttemptExited, confirmPreviousWorkersExited: this.options.confirmPreviousWorkersExited, signal }, active, oldWorkers);
+        latestRevision: () => this.options.repository.getSnapshot().revision,
+        recoveringMaster: true, recoveredActive, priorAttemptExited, confirmPreviousWorkersExited: this.options.confirmPreviousWorkersExited, signal,
+        ensureCreationPermitted: this.options.ensureCreationPermitted }, active, oldWorkers);
     } finally {
       this.release();
     }

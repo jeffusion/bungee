@@ -150,6 +150,7 @@ test('offline recovery removes obsolete plugin activations and preserves their b
   const repository=ConfigRepository.open(path);try{
    const snapshot=repository.getSnapshot();
    expect(repository.commit({mutation_id:'missing-auth',expected_revision:snapshot.revision,aggregate:{...snapshot.aggregate,plugin_activations:[{plugin_name:'missing-provider'}]},kind:'config',created_at:Date.now(),target_worker_slots:[0]}).kind).toBe('committed');
+   repository.claimPublicationTarget(`sha256:${'b'.repeat(64)}`,Date.now());
    repository.beginPublication('missing-auth',Date.now());
    repository.beginWorkerAttempt('missing-auth',0,0,'initial',Date.now());
    repository.recordWorkerResult('missing-auth',0,{kind:'converged',attempt_no:1,applied_revision:snapshot.revision+1},Date.now());

@@ -345,6 +345,79 @@ test('adopted worker already dead is released only with signed terminal descript
   expect(await adapter.verifyExactExit()).toEqual({ exited: true, pid: PID, terminalDrain: message });
 });
 
+test('adopted candidate cleanup is released only from its signed boot-local cleanup record', async () => {
+  const body = {
+    schema: 'bungee-worker-descriptor-v1' as const, role: 'worker' as const, ...IDENTITY, boot_nonce: BOOT,
+    pid: PID, control_port: 45_001, phase: 'stopped' as const, frozen: true,
+    private_port: null, revision: null, content_hash: null, plugin_catalog_hash: null,
+    started_at: 1, evidence: { kind: 'candidate' as const },
+  };
+  const cleanup = {
+    cleanup_state: 'success' as const, revision: null, content_hash: null,
+    plugin_catalog_hash: null, publication: null,
+  };
+  const adopted = async (raw: unknown) => {
+    const adapter = new SupervisedConfigWorkerProcessAdapter({
+      identity: IDENTITY, descriptorPath: 'in-memory-worker-descriptor', supervisionSeed: SEED,
+      client: { authority: AUTHORITY }, pid: PID, readyClient: readyClient() as any,
+      processIdentity: identityControl({ probe: async () => 'dead' }).control,
+      kernelBootId: async () => KERNEL_BOOT_ID, readDescriptor: async () => raw,
+    });
+    await adapter.initialization;
+    return adapter;
+  };
+
+  expect(await (await adopted(signWorkerDescriptor({ ...body, cleanup }, CREDENTIAL.process_key))).verifyExactExit())
+    .toEqual({ exited: true, pid: PID, cleanup_state: 'success' });
+
+  // A cleanup target this adapter never dispatched cannot prove this candidate's release.
+  const foreignTarget = signWorkerDescriptor({ ...body, cleanup: { ...cleanup, revision: 7,
+    content_hash: `sha256:${'a'.repeat(64)}`, plugin_catalog_hash: `sha256:${'b'.repeat(64)}` } }, CREDENTIAL.process_key);
+  expect(await (await adopted(foreignTarget)).verifyExactExit()).toEqual({ exited: true, pid: PID });
+
+  // Changing the state without re-signing the descriptor leaves cleanup unknown.
+  const failed = signWorkerDescriptor({ ...body, cleanup: { ...cleanup, cleanup_state: 'failed' } }, CREDENTIAL.process_key);
+  expect(await (await adopted({ ...failed, cleanup: { ...cleanup, cleanup_state: 'success' } })).verifyExactExit())
+    .toEqual({ exited: true, pid: PID });
+});
+
+test('candidate cleanup needs a fully candidate-only descriptor for a boot that never applied a start', async () => {
+  const base = {
+    schema: 'bungee-worker-descriptor-v1' as const, role: 'worker' as const, ...IDENTITY, boot_nonce: BOOT,
+    pid: PID, control_port: 45_001, phase: 'stopped' as const, frozen: true,
+    private_port: null, revision: null, content_hash: null, plugin_catalog_hash: null,
+    started_at: 1, evidence: { kind: 'candidate' as const },
+  };
+  const cleanup = {
+    cleanup_state: 'success' as const, revision: null, content_hash: null,
+    plugin_catalog_hash: null, publication: null,
+  };
+  const adopted = async (raw: unknown) => {
+    const adapter = new SupervisedConfigWorkerProcessAdapter({
+      identity: IDENTITY, descriptorPath: 'in-memory-worker-descriptor', supervisionSeed: SEED,
+      client: { authority: AUTHORITY }, pid: PID, readyClient: readyClient() as any,
+      processIdentity: identityControl({ probe: async () => 'dead' }).control,
+      kernelBootId: async () => KERNEL_BOOT_ID, readDescriptor: async () => raw,
+    });
+    await adapter.initialization;
+    return adapter.verifyExactExit();
+  };
+
+  expect(await adopted(signWorkerDescriptor({ ...base, cleanup }, CREDENTIAL.process_key)))
+    .toEqual({ exited: true, pid: PID, cleanup_state: 'success' });
+
+  // No target but a publication is contradictory, never a negative proof.
+  expect(await adopted(signWorkerDescriptor({ ...base,
+    cleanup: { ...cleanup, publication: { mutation_id: '94000000-0000-4000-8000-0000000000a1', attempt_no: 1, drain_recovery_generation: 0 } },
+  }, CREDENTIAL.process_key))).toEqual({ exited: true, pid: PID });
+
+  // A boot that served or applied something is not "never started".
+  expect(await adopted(signWorkerDescriptor({ ...base,
+    revision: 7, content_hash: `sha256:${'a'.repeat(64)}`, plugin_catalog_hash: `sha256:${'b'.repeat(64)}`, private_port: 45_002,
+    cleanup,
+  }, CREDENTIAL.process_key))).toEqual({ exited: true, pid: PID });
+});
+
 test('a spawned worker whose capture never proves the marker stays not ready', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'bungee-adapter-identity-'));
   try {

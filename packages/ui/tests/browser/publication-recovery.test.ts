@@ -144,6 +144,11 @@ test('runtime facts distinguish historical failure, active cleanup, dependency f
       await page.route('https://fonts.googleapis.com/**', route => route.fulfill({ status: 200, contentType: 'text/css', body: '' }));
       const evidenceApi=collectApiEvidence(page);
       const errors=evidenceApi.errors;
+      const refreshStatus = () => Promise.all([
+        page.waitForResponse(response => new URL(response.url()).pathname === '/api/config/runtime'
+          && response.request().method() === 'GET'),
+        page.getByRole('button', { name: locale === 'en' ? 'Refresh status' : '刷新状态', exact: true }).click(),
+      ]);
       let unavailable = false;
       let writes = 0;
       const id = '10000000-0000-4000-8000-000000000001';
@@ -173,27 +178,25 @@ test('runtime facts distinguish historical failure, active cleanup, dependency f
         errors.push(`Unexpected API: ${path}`); return json({ error: 'unexpected_request' }, 500);
       });
       await page.goto(`${ui.origin}/#/config`, { waitUntil: 'networkidle' });
-      const historical = locale === 'en' ? 'Historical finalization failure' : '历史收尾失败记录';
-      await page.getByTestId('settings-publication-state').getByText(new RegExp(historical)).waitFor();
-      assert.equal(await page.getByTestId('configuration-publication-banner').count(), 0);
-      await page.getByTestId('publication-history-time').waitFor();
-      const details = page.locator('[aria-controls="settings-publication-details"]');
-      await details.click();
-      await page.getByTestId('cleanup-unavailable').waitFor();
+      // A historical drain failure is not a current fault and must not leak operation detail.
       assert.equal((await page.locator('body').innerText()).includes('PRIVATE-DRAIN-DETAIL'), false);
+      await expect(page.getByTestId('settings-notice')).toHaveCount(0);
+      await expect(page.getByTestId('runtime-fault')).toHaveCount(0);
 
       runtime = { ...runtime, publication: { ...runtime.publication, cleanup: { active: true, state: 'pending', reason_code: null,
         pending_count: 2, exit_unknown_count: 0, failed_count: 0, unknown_count: 2, remaining_ms: 8000,
         members: [{ slot: 0, exit_state: 'live', cleanup_state: 'unknown', remaining_ms: 9000 },
           { slot: 1, exit_state: 'live', cleanup_state: 'unknown', remaining_ms: 8000 }] } } };
-      await page.getByRole('button', { name: locale === 'en' ? 'Refresh status' : '刷新状态', exact: true }).click();
-      await page.getByTestId('configuration-publication-banner').waitFor();
-      assert.equal(await page.getByTestId('publication-history-time').count(), 0);
+      await refreshStatus();
+      await expect(page.getByTestId('settings-notice')).toBeVisible();
+      assert.equal(writes, 0);
+
       runtime = { ...runtime, publication: { ...runtime.publication, cleanup: { ...runtime.publication.cleanup!, remaining_ms: 2000 } } };
       runtime = { ...runtime, publication: { ...runtime.publication, cleanup: { ...runtime.publication.cleanup!,
         state: 'stopped', reason_code: 'exit_unknown', pending_count: 1, exit_unknown_count: 1, remaining_ms: 0 } } };
-      await page.getByRole('button', { name: locale === 'en' ? 'Refresh status' : '刷新状态', exact: true }).click();
-      await page.getByTestId('cleanup-reason').waitFor();
+      await refreshStatus();
+      await expect(page.getByTestId('settings-notice')).toBeVisible();
+      assert.equal(writes, 0);
 
       runtime = { ...runtime, publication: { ...runtime.publication, cleanup: { ...runtime.publication.cleanup!, state: 'released', active: false,
         reason_code: null,
@@ -202,19 +205,21 @@ test('runtime facts distinguish historical failure, active cleanup, dependency f
       runtime = { ...runtime, health: { observed_at: Date.now(), component_recovery: [{ component: 'plugin_state', state: 'stopped',
         attempt_count: 6, max_attempts: 6, next_retry_at: null, reason_code: 'retry_exhausted' }],
         dependencies: [{ component: 'management_provider', state: 'unavailable', fresh: true, observed_at: Date.now() }] } };
-      await page.getByRole('button', { name: locale === 'en' ? 'Refresh status' : '刷新状态', exact: true }).click();
-      await page.getByTestId('component-recovery').waitFor();
+      await refreshStatus();
+      await expect(page.getByTestId('runtime-fault')).toBeVisible();
+      await expect(page.getByTestId('settings-notice')).toHaveCount(0);
+      assert.equal(writes, 0);
 
       runtime = { ...runtime, health: { observed_at: Date.now(), component_recovery: [],
         dependencies: [{ component: 'management_provider', state: 'ready', fresh: false, observed_at: 1 }] } };
-      await page.getByRole('button', { name: locale === 'en' ? 'Refresh status' : '刷新状态', exact: true }).click();
-      await page.getByTestId('runtime-dependency').getByText(new RegExp(locale === 'en' ? 'Stale' : '过期')).waitFor();
+      await refreshStatus();
+      await expect(page.getByTestId('runtime-fault')).toBeVisible();
+      assert.equal(writes, 0);
 
       unavailable = true;
-      await page.getByRole('button', { name: locale === 'en' ? 'Refresh status' : '刷新状态', exact: true }).click();
-      await page.getByTestId('runtime-uncertain').waitFor();
-      await page.getByTestId('cleanup-unavailable').waitFor();
-      await page.getByTestId('health-unavailable').waitFor();
+      await refreshStatus();
+      await expect(page.getByTestId('runtime-uncertain')).toBeVisible();
+      await expect(page.getByTestId('runtime-fault')).toHaveCount(0);
 
       assert.equal(writes, 0);
 

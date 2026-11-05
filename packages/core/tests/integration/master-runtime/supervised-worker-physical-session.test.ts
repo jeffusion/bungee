@@ -695,7 +695,7 @@ test('an attached worker fact becomes null after injected child exit without rel
       revision: null, content_hash: null, plugin_catalog_hash: null,
       started_at: 1, evidence: { kind: 'candidate' },
     }, credential.process_key)));
-    const adapter = workerFactory.spawn(identity);
+    const adapter = await workerFactory.spawn(identity);
     await adapter.initialization;
     const before = workerFactory.lookupPhysicalSession({ ...identity, boot_nonce: boot });
     expect(before).not.toBeNull();

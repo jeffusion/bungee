@@ -1059,10 +1059,12 @@ Keep component tests under `tests/browser/`, pure logic under `tests/unit/`, and
 
 ---
 
-## 11. Reference and integer inputs
+## 11. Reference and numeric inputs
 
 The maintained visual reference is `/#/design`, implemented by `src/routes/DesignSystem.svelte`. Repository screenshots illustrate the product; personal inspiration files and session memory are not project dependencies.
 
-Use `ui/number-input` for bounded integer fields. It accepts ASCII digits only, rejects invalid paste as a whole, and publishes undefined when cleared. Required validation prevents empty submission. Editing may temporarily exceed min/max; blur or Enter clamps and removes leading zeros. Buttons and arrow keys step by one, respect bounds/disabled/readonly, and never submit a form. Preserve text selection, external-value synchronization and spinbutton accessibility. The server still validates integers and ranges.
+Use `ui/number-input` for bounded numeric fields, including every numeric field in Global Settings. Its default mode accepts ASCII digits only; `step="any"` also accepts a decimal point. Both modes reject invalid paste as a whole and publish undefined when cleared. Required validation prevents empty submission. Editing may temporarily exceed min/max; blur or Enter clamps and removes leading zeros. Buttons and arrow keys step by one current unit, respect bounds/disabled/readonly, and never submit a form. Preserve text selection, external-value synchronization and spinbutton accessibility.
+
+Pass domain or server errors through `invalid`; they combine with the component's own validation. Unit conversion remains the caller's responsibility: MiB/KiB fields may accept decimals but must resolve to whole bytes. Merely focusing or leaving a field must not write its displayed default into configuration. Inputs whose values include unit text, such as `50mb`, remain text inputs. The server still validates numeric types and ranges.
 
 Domain ranges belong to the [models-dev contract](../../../plugins/models-dev/README.md); automated tests verify domain validation and conversion.

@@ -19,6 +19,7 @@ function harness(initial: any = {
   const repository: any = {
     getSnapshot: () => snapshot,
     getCurrentRecovery: async () => recovery,
+    getActivePublication: async () => null,
     claimRecoveryAttempt: async (_id: string, attempt: number) => {
       events.push(`claim:${attempt}`);
       recovery = { ...recovery, state: 'running', attempt_count: attempt + 1, updated_at: now };
@@ -44,6 +45,7 @@ function harness(initial: any = {
       recovery = { ...recovery, state: 'scheduled', next_retry_at: null, updated_at: now };
       return recovery;
     },
+    getUnsettledWorkerLaunches: async () => [],
   };
   const delays: number[] = [];
   const scheduler = { callbacks: [] as Array<() => void>, schedule(delay: number, callback: () => void) {
@@ -51,12 +53,90 @@ function harness(initial: any = {
     this.callbacks.push(callback);
     return { cancel: () => undefined };
   } };
-  const tasks = new PublicationTaskManager({ publish: async () => ({ kind: 'converged' } as never) });
+  let publishes = 0;
+  const tasks = new PublicationTaskManager({ publish: async () => { publishes += 1; return { kind: 'converged' } as never; } });
   tasks.setFatalHandler((error) => { throw error; });
-  return { repository, recovery: () => recovery, scheduler, tasks, events, delays, now: () => now, setNow: (value: number) => { now = value; }, worker };
+  return { repository, recovery: () => recovery, setRecovery: (next: any) => { recovery = next; }, scheduler, tasks, events, delays, now: () => now, setNow: (value: number) => { now = value; }, worker, publishes: () => publishes };
 }
 
 describe('ConfigurationRecoveryRunner', () => {
+  test('verifies an older target revision before stopping a drifted recovery', async () => {
+    const h = harness();
+    h.repository.getSnapshot = () => ({ ...(snapshot as object), revision: 8 });
+    const runner = new ConfigurationRecoveryRunner({
+      repository: h.repository, publicationTasks: h.tasks, admission: { snapshot: () => [h.worker] },
+      workerCount: 1, pluginCatalogHash: HASH, now: () => 0, scheduler: h.scheduler,
+      coordinator: { startCurrent: async () => { throw new Error('must not publish an older target'); }, recoverAndPublish: async () => null },
+      onFatal: (error) => { throw error; },
+    });
+    await runner.start();
+    expect(h.events).toEqual(['succeed:0:target_serving']);
+  });
+
+  test('supersedes an older target only after proving it is not serving', async () => {
+    const h = harness();
+    h.repository.getSnapshot = () => ({ ...(snapshot as object), revision: 8 });
+    const runner = new ConfigurationRecoveryRunner({
+      repository: h.repository, publicationTasks: h.tasks,
+      admission: { snapshot: () => [{ ...(h.worker as object), revision: 8 } as never] },
+      workerCount: 1, pluginCatalogHash: HASH, now: () => 0, scheduler: h.scheduler,
+      coordinator: { startCurrent: async () => { throw new Error('must not publish an older target'); }, recoverAndPublish: async () => null },
+      onFatal: (error) => { throw error; },
+    });
+    await runner.start();
+    expect(h.events).toEqual(['stop:0:revision_superseded']);
+  });
+
+  test('keeps a superseded running recovery blocked by an unsettled launch', async () => {
+    const h = harness({ ...harness().recovery(), state: 'running', attempt_count: 1 });
+    h.repository.getSnapshot = () => ({ ...(snapshot as object), revision: 8 });
+    h.repository.getUnsettledWorkerLaunches = async () => [{ kind: 'launch' }];
+    let fatal: Error | null = null;
+    const runner = new ConfigurationRecoveryRunner({
+      repository: h.repository, publicationTasks: h.tasks, admission: { snapshot: () => [] },
+      workerCount: 1, pluginCatalogHash: HASH, now: () => 0, scheduler: h.scheduler,
+      coordinator: { startCurrent: async () => { throw new Error('must not publish while a launch is unsettled'); }, recoverAndPublish: async () => null },
+      onFatal: (error) => { fatal = error; },
+    });
+    await runner.start();
+    // The barrier stays real: no fabricated release, and a late signed cleanup gets a
+    // retry instead of an immediate terminal safety_outcome_unknown.
+    expect(h.events).toEqual(['schedule:500']);
+    expect(h.recovery().state).toBe('scheduled');
+    expect(fatal).toBeNull();
+  });
+
+  test('supersedes a running recovery after its launches are settled on a retry', async () => {
+    const h = harness({ ...harness().recovery(), state: 'running', attempt_count: 1 });
+    h.repository.getSnapshot = () => ({ ...(snapshot as object), revision: 8 });
+    h.repository.getUnsettledWorkerLaunches = async () => [{ kind: 'launch' }];
+    const runner = new ConfigurationRecoveryRunner({
+      repository: h.repository, publicationTasks: h.tasks, admission: { snapshot: () => [] },
+      workerCount: 1, pluginCatalogHash: HASH, now: () => 0, scheduler: h.scheduler,
+      coordinator: { startCurrent: async () => { throw new Error('must not publish an older target'); }, recoverAndPublish: async () => null },
+      onFatal: (error) => { throw error; },
+    });
+    await runner.start();
+    expect(h.recovery().state).toBe('scheduled');
+    h.repository.getUnsettledWorkerLaunches = async () => [];
+    h.scheduler.callbacks.shift()?.();
+    await h.tasks.enqueueRecovery(async () => ({ kind: 'complete' }));
+    expect(h.events).toContain('stop:1:revision_superseded');
+  });
+
+  test('supersedes a running recovery only when its launches are settled', async () => {
+    const h = harness({ ...harness().recovery(), state: 'running', attempt_count: 1 });
+    h.repository.getSnapshot = () => ({ ...(snapshot as object), revision: 8 });
+    const runner = new ConfigurationRecoveryRunner({
+      repository: h.repository, publicationTasks: h.tasks, admission: { snapshot: () => [] },
+      workerCount: 1, pluginCatalogHash: HASH, now: () => 0, scheduler: h.scheduler,
+      coordinator: { startCurrent: async () => { throw new Error('must not publish an older target'); }, recoverAndPublish: async () => null },
+      onFatal: (error) => { throw error; },
+    });
+    await runner.start();
+    expect(h.events).toEqual(['stop:1:revision_superseded']);
+  });
+
   test('claims before startCurrent and coalesces duplicate wakeups', async () => {
     const h = harness();
     let starts = 0;
@@ -67,7 +147,7 @@ describe('ConfigurationRecoveryRunner', () => {
         starts += 1;
         expect(h.events[0]).toBe('claim:0');
         return { kind: 'startup_failed', failures: [{ slot: 0, code: 'timeout', detail: 'timeout', recovery_disposition: 'retryable' }], serving: [] };
-      } }, onFatal: (error) => { throw error; },
+      }, recoverAndPublish: async () => null }, onFatal: (error) => { throw error; },
     });
     const first = runner.wake();
     expect(runner.wake()).toBe(first);
@@ -82,7 +162,7 @@ describe('ConfigurationRecoveryRunner', () => {
     const runner = new ConfigurationRecoveryRunner({
       repository: h.repository, publicationTasks: h.tasks, admission: { snapshot: () => [h.worker] },
       workerCount: 1, pluginCatalogHash: HASH, now: () => 0, scheduler: h.scheduler,
-      coordinator: { startCurrent: async () => { starts += 1; return { kind: 'startup_ready', serving: [h.worker] }; } },
+      coordinator: { startCurrent: async () => { starts += 1; return { kind: 'startup_ready', serving: [h.worker] }; }, recoverAndPublish: async () => null },
       onFatal: (error) => { throw error; },
     });
     await runner.start();
@@ -99,7 +179,7 @@ describe('ConfigurationRecoveryRunner', () => {
       coordinator: { startCurrent: async () => {
         starts += 1;
         return { kind: 'startup_failed', failures: [{ slot: 0, code: 'timeout', detail: 'timeout', recovery_disposition: 'retryable' }], serving: [] };
-      } }, onFatal: (error) => { throw error; },
+      }, recoverAndPublish: async () => null }, onFatal: (error) => { throw error; },
     });
     await runner.start();
     for (const due of [250, 750, 1_750, 3_750, 7_750, 15_750]) {
@@ -122,7 +202,7 @@ describe('ConfigurationRecoveryRunner', () => {
         repository: h.repository, publicationTasks: h.tasks, admission: { snapshot: () => [] },
         workerCount: 1, pluginCatalogHash: HASH, now: h.now, scheduler: h.scheduler,
         coordinator: { startCurrent: async () => ({ kind: 'startup_failed', failures: [{ slot: 0, code: 'apply_failed',
-          detail: 'deterministic', recovery_disposition: disposition }], serving: [] }) },
+          detail: 'deterministic', recovery_disposition: disposition }], serving: [] }) , recoverAndPublish: async () => null},
         onFatal: (error) => { throw error; },
       });
       await runner.start();
@@ -134,7 +214,7 @@ describe('ConfigurationRecoveryRunner', () => {
       repository: control.repository, publicationTasks: control.tasks, admission: { snapshot: () => [] },
       workerCount: 1, pluginCatalogHash: HASH, now: control.now, scheduler: control.scheduler,
       coordinator: { startCurrent: async () => ({ kind: 'startup_degraded', http_status: 202,
-        error_code: 'control_readiness_failed', recovery_disposition: 'deterministic_control_failure', failures: [], serving: [] }) },
+        error_code: 'control_readiness_failed', recovery_disposition: 'deterministic_control_failure', failures: [], serving: [] }) , recoverAndPublish: async () => null},
       onFatal: (error) => { throw error; },
     });
     await controlRunner.start();
@@ -149,7 +229,7 @@ describe('ConfigurationRecoveryRunner', () => {
       repository: h.repository, publicationTasks: h.tasks, admission: { snapshot: () => [] },
       workerCount: 1, pluginCatalogHash: HASH, now: h.now, scheduler: h.scheduler,
       coordinator: { startCurrent: async () => ({ kind: 'startup_degraded', http_status: 202,
-        error_code: 'admission_outcome_unknown', recovery_disposition: 'fatal', failures: [], serving: [] }) },
+        error_code: 'admission_outcome_unknown', recovery_disposition: 'fatal', failures: [], serving: [] }) , recoverAndPublish: async () => null},
       onFatal: (error) => { fatals.push(error); },
     });
     await runner.start();
@@ -166,7 +246,7 @@ describe('ConfigurationRecoveryRunner', () => {
       repository: h.repository, publicationTasks: h.tasks, admission: { snapshot: () => [] },
       workerCount: 1, pluginCatalogHash: HASH, now: h.now, scheduler: h.scheduler,
       coordinator: { startCurrent: async () => ({ kind: 'startup_degraded', http_status: 202,
-        error_code: 'admission_outcome_unknown', recovery_disposition: 'fatal', failures: [], serving: [h.worker] }) },
+        error_code: 'admission_outcome_unknown', recovery_disposition: 'fatal', failures: [], serving: [h.worker] }) , recoverAndPublish: async () => null},
       onFatal: (error) => { fatals.push(error); },
     });
     await runner.start();
@@ -179,7 +259,7 @@ describe('ConfigurationRecoveryRunner', () => {
     const runner = new ConfigurationRecoveryRunner({
       repository: h.repository, publicationTasks: h.tasks, admission: { snapshot: () => [] },
       workerCount: 1, pluginCatalogHash: HASH, now: h.now, scheduler: h.scheduler,
-      coordinator: { startCurrent: async () => ({ kind: 'startup_failed', failures: [], serving: [] }) },
+      coordinator: { startCurrent: async () => ({ kind: 'startup_failed', failures: [], serving: [] }) , recoverAndPublish: async () => null},
       onFatal: (error) => { throw error; },
     });
     await runner.start();
@@ -200,7 +280,7 @@ describe('ConfigurationRecoveryRunner', () => {
     const runner = new ConfigurationRecoveryRunner({
       repository: h.repository, publicationTasks: h.tasks, admission: { snapshot: () => [] },
       workerCount: 1, pluginCatalogHash: HASH, now: h.now, scheduler: h.scheduler,
-      coordinator: { startCurrent: async () => { starts += 1; return { kind: 'startup_ready', serving: [] }; } },
+      coordinator: { startCurrent: async () => { starts += 1; return { kind: 'startup_ready', serving: [] }; }, recoverAndPublish: async () => null },
       onFatal: (error) => { throw error; },
     });
     await runner.start();
@@ -215,7 +295,7 @@ describe('ConfigurationRecoveryRunner', () => {
     const runner = new ConfigurationRecoveryRunner({
       repository: h.repository, publicationTasks: h.tasks, admission: { snapshot: () => [] },
       workerCount: 1, pluginCatalogHash: HASH, now: h.now, scheduler: h.scheduler,
-      coordinator: { startCurrent: async () => { starts += 1; return { kind: 'startup_ready', serving: [] }; } },
+      coordinator: { startCurrent: async () => { starts += 1; return { kind: 'startup_ready', serving: [] }; }, recoverAndPublish: async () => null },
       onFatal: (error) => { throw error; },
     });
     await runner.start();
@@ -232,7 +312,7 @@ describe('ConfigurationRecoveryRunner', () => {
       coordinator: { startCurrent: async () => {
         admitted = [h.worker];
         return { kind: 'startup_ready', serving: [h.worker] };
-      } }, onFatal: (error) => { throw error; },
+      }, recoverAndPublish: async () => null }, onFatal: (error) => { throw error; },
     });
     await runner.start();
     expect(h.events[0]).toBe('claim:0');
@@ -249,7 +329,7 @@ describe('ConfigurationRecoveryRunner', () => {
         await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
         throwIfPublicationCancelled(signal);
         return { kind: 'startup_failed', failures: [], serving: [] };
-      } }, onFatal: (error) => { throw error; },
+      }, recoverAndPublish: async () => null }, onFatal: (error) => { throw error; },
     });
     const started = runner.start();
     for (let step = 0; step < 10; step += 1) await Promise.resolve();
@@ -271,11 +351,302 @@ describe('ConfigurationRecoveryRunner', () => {
       const runner = new ConfigurationRecoveryRunner({
         repository: h.repository, publicationTasks: h.tasks, admission: { snapshot: () => [] },
         workerCount: 1, pluginCatalogHash: HASH, now: () => 0, scheduler: h.scheduler,
-        coordinator: { startCurrent: async () => outcome }, onFatal: () => { fatal += 1; },
+        coordinator: { startCurrent: async () => outcome , recoverAndPublish: async () => null}, onFatal: () => { fatal += 1; },
       });
       await runner.start();
       expect(fatal).toBe(1);
       expect(h.events).toContain('stop:1:safety_outcome_unknown');
     }
+  });
+
+  for (const owner of [
+    { label: 'a cancelled pre-prepare owner', operation: { mutation_id: 'held-owner', state: 'publishing',
+      cancel_requested: true, prepare_started: false },
+      finalOutcome: { kind: 'superseded', operation: { mutation_id: 'held-owner', state: 'superseded' }, serving: [] } },
+    { label: 'a draining owner', operation: { mutation_id: 'held-owner', state: 'draining',
+      cancel_requested: false, prepare_started: true },
+      finalOutcome: { kind: 'degraded', http_status: 202, error_code: 'old_worker_drain_failed',
+        recovery_disposition: 'retryable', failures: [], serving: [],
+        operation: { mutation_id: 'held-owner', state: 'degraded' } } },
+  ]) {
+    test(`observes ${owner.label} after late evidence without a recovery row`, async () => {
+      const h = harness();
+      const active = { operation: owner.operation, snapshot } as never;
+      let recovered = 0;
+      const outcomes = [
+        ...Array.from({ length: 8 }, () => ({ kind: 'outcome_unknown', fatal: false, code: 'control_recovering',
+          error: new Error('cleanup is still in flight'), serving: [], pending: [] })),
+        owner.finalOutcome,
+      ] as never[];
+      const repository = {
+        ...h.repository,
+        current: active,
+        async getCurrentRecovery() { return null; },
+        async getActivePublication() { return this.current; },
+      };
+      const coordinator = {
+        outcomes,
+        calls: 0,
+        async startCurrent() { throw new Error('observation must not take the current-startup path'); },
+        async recoverAndPublish() {
+          return this.outcomes[this.calls++] ?? this.outcomes[this.outcomes.length - 1]!;
+        },
+      };
+      const runner = new ConfigurationRecoveryRunner({
+        repository,
+        publicationTasks: h.tasks, admission: { snapshot: () => [] },
+        workerCount: 1, pluginCatalogHash: HASH, now: () => 0, scheduler: h.scheduler,
+        coordinator,
+        onRecovered: () => { recovered += 1; },
+        onFatal: (error) => { throw error; },
+      });
+
+      await runner.wake(true);
+      expect(coordinator.calls).toBe(1);
+      expect(h.delays).toEqual([250]);
+      for (let step = 0; step < 8; step += 1) {
+        h.scheduler.callbacks.shift()?.();
+        await h.tasks.enqueueRecovery(async () => ({ kind: 'complete' }));
+      }
+      await h.tasks.enqueueRecovery(async () => ({ kind: 'complete' }));
+
+      expect(coordinator.calls).toBe(9);
+      expect(h.delays).toEqual([250, 500, 1_000, 2_000, 4_000, 8_000, 8_000, 8_000]);
+      expect(h.events).toEqual([]);
+      expect(recovered).toBe(1);
+      expect(h.publishes()).toBe(1);
+    });
+  }
+
+  test('observes the owner even when the recovery row is terminal succeeded', async () => {
+    const h = harness({ ...harness().recovery(), state: 'succeeded', final_reason_code: 'target_serving' });
+    let calls = 0;
+    let recovered = 0;
+    const runner = new ConfigurationRecoveryRunner({
+      repository: {
+        ...h.repository,
+        async getActivePublication() { return { operation: { mutation_id: 'held-owner', cancel_requested: true, prepare_started: false }, snapshot } as never; },
+      },
+      publicationTasks: h.tasks, admission: { snapshot: () => [] },
+      workerCount: 1, pluginCatalogHash: HASH, now: () => 0, scheduler: h.scheduler,
+      coordinator: {
+        startCurrent: async () => { throw new Error('terminal observation must not initialize'); },
+        recoverAndPublish: async () => {
+          calls += 1;
+          return { kind: 'superseded', operation: { mutation_id: 'held-owner' }, serving: [] } as never;
+        },
+      },
+      onRecovered: () => { recovered += 1; },
+      onFatal: (error) => { throw error; },
+    });
+
+    await runner.wake(true);
+    expect(calls).toBe(1);
+    expect(recovered).toBe(1);
+    expect(h.events).toEqual([]);
+  });
+
+  test('keeps the stopped safety-unknown barrier closed to owner observation', async () => {
+    const h = harness({ ...harness().recovery(), state: 'stopped', final_reason_code: 'safety_outcome_unknown' });
+    let calls = 0;
+    const runner = new ConfigurationRecoveryRunner({
+      repository: {
+        ...h.repository,
+        async getActivePublication() { return { operation: { mutation_id: 'held-owner', cancel_requested: true, prepare_started: false }, snapshot } as never; },
+      },
+      publicationTasks: h.tasks, admission: { snapshot: () => [] },
+      workerCount: 1, pluginCatalogHash: HASH, now: () => 0, scheduler: h.scheduler,
+      coordinator: {
+        startCurrent: async () => { throw new Error('barrier must not initialize'); },
+        recoverAndPublish: async () => { calls += 1; return null; },
+      },
+      onFatal: (error) => { throw error; },
+    });
+
+    await runner.wake(true);
+    expect(calls).toBe(0);
+    expect(h.delays).toEqual([]);
+  });
+
+  test('consumes an observation requested while a recovery task is in flight', async () => {
+    const h = harness();
+    const active = { operation: { mutation_id: 'held-owner', cancel_requested: true, prepare_started: false }, snapshot } as never;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let began!: () => void;
+    const started = new Promise<void>((resolve) => { began = resolve; });
+    let observations = 0;
+    const runner = new ConfigurationRecoveryRunner({
+      repository: {
+        ...h.repository,
+        async getActivePublication() { return active; },
+      },
+      publicationTasks: h.tasks, admission: { snapshot: () => [] },
+      workerCount: 1, pluginCatalogHash: HASH, now: () => 0, scheduler: h.scheduler,
+      coordinator: {
+        startCurrent: async () => {
+          began();
+          await gate;
+          return { kind: 'startup_ready', serving: [h.worker] } as never;
+        },
+        recoverAndPublish: async () => {
+          observations += 1;
+          return { kind: 'superseded', operation: { mutation_id: 'held-owner' }, serving: [] } as never;
+        },
+      },
+      onFatal: (error) => { throw error; },
+    });
+
+    const running = runner.start();
+    await started;
+    runner.wake(true);
+    release();
+    await running;
+    await h.tasks.enqueueRecovery(async () => ({ kind: 'complete' }));
+
+    expect(observations).toBe(1);
+    expect(h.delays).toEqual([]);
+  });
+
+  test('does not let a pending observation bypass the stopped safety-unknown barrier', async () => {
+    const h = harness();
+    h.repository.getActivePublication = async () => ({
+      operation: { mutation_id: 'held-owner', cancel_requested: true, prepare_started: false }, snapshot,
+    }) as never;
+    let observations = 0;
+    const runner = new ConfigurationRecoveryRunner({
+      repository: h.repository, publicationTasks: h.tasks, admission: { snapshot: () => [] },
+      workerCount: 1, pluginCatalogHash: HASH, now: () => 0, scheduler: h.scheduler,
+      coordinator: {
+        startCurrent: async () => { throw new Error('barrier must not initialize'); },
+        recoverAndPublish: async () => { observations += 1; return null; },
+      },
+      onFatal: (error) => { throw error; },
+    });
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const blocker = h.tasks.enqueueRecovery(async () => {
+      await gate;
+      return { kind: 'complete' };
+    });
+    const running = runner.start();
+    runner.wake(true);
+    h.setRecovery({ ...h.recovery(), state: 'stopped', final_reason_code: 'safety_outcome_unknown', next_retry_at: null });
+    release();
+    await blocker;
+    await running;
+    await h.tasks.enqueueRecovery(async () => ({ kind: 'complete' }));
+
+    expect(observations).toBe(0);
+    expect(h.delays).toEqual([]);
+  });
+
+  test('coordinates an owner-evidence timer with a future normal recovery deadline', async () => {
+    const h = harness({ ...harness().recovery(), state: 'scheduled', next_retry_at: 5_000 });
+    const outcomes = [
+      { kind: 'outcome_unknown', fatal: false, code: 'control_recovering',
+        error: new Error('cleanup is still in flight'), serving: [], pending: [] },
+      { kind: 'superseded', operation: { mutation_id: 'held-owner' }, serving: [] },
+    ] as never[];
+    let calls = 0;
+    const runner = new ConfigurationRecoveryRunner({
+      repository: {
+        ...h.repository,
+        getActivePublication: async () => ({
+          operation: { mutation_id: 'held-owner', cancel_requested: true, prepare_started: false }, snapshot,
+        }) as never,
+      },
+      publicationTasks: h.tasks, admission: { snapshot: () => [] },
+      workerCount: 1, pluginCatalogHash: HASH, now: () => 0, scheduler: h.scheduler,
+      coordinator: {
+        startCurrent: async () => { throw new Error('owner evidence must not initialize'); },
+        recoverAndPublish: async () => outcomes[calls++] ?? outcomes[outcomes.length - 1]!,
+      },
+      onFatal: (error) => { throw error; },
+    });
+
+    await runner.wake(true);
+    expect(h.delays).toEqual([250]);
+    h.scheduler.callbacks.shift()?.();
+    await h.tasks.enqueueRecovery(async () => ({ kind: 'complete' }));
+
+    expect(calls).toBe(2);
+    expect(h.events).toEqual([]);
+    expect(h.delays).toEqual([250, 5_000]);
+  });
+
+  test('runs a follow-up pass for a plain wake during an in-flight task', async () => {
+    const h = harness();
+    let reads = 0;
+    const repository = {
+      ...h.repository,
+      async getCurrentRecovery() { reads += 1; return h.recovery(); },
+    };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let began!: () => void;
+    const started = new Promise<void>((resolve) => { began = resolve; });
+    let starts = 0;
+    const runner = new ConfigurationRecoveryRunner({
+      repository, publicationTasks: h.tasks, admission: { snapshot: () => [] },
+      workerCount: 1, pluginCatalogHash: HASH, now: h.now, scheduler: h.scheduler,
+      coordinator: {
+        startCurrent: async () => {
+          starts += 1;
+          began();
+          await gate;
+          return { kind: 'startup_failed',
+            failures: [{ slot: 0, code: 'apply_failed', detail: 'retry', recovery_disposition: 'retryable' }],
+            serving: [] } as never;
+        },
+        recoverAndPublish: async () => null,
+      },
+      onFatal: (error) => { throw error; },
+    });
+
+    const running = runner.start();
+    await started;
+    runner.wake();
+    release();
+    await running;
+    await h.tasks.enqueueRecovery(async () => ({ kind: 'complete' }));
+
+    expect(reads).toBe(2);
+    expect(starts).toBe(1);
+  });
+
+  test('drops a late observation callback after stopAccepting', async () => {
+    const h = harness();
+    let recovered = 0;
+    let calls = 0;
+    const runner = new ConfigurationRecoveryRunner({
+      repository: {
+        ...h.repository,
+        getCurrentRecovery: async () => null,
+        getActivePublication: async () => ({ operation: { mutation_id: 'held-owner', cancel_requested: true, prepare_started: false }, snapshot }) as never,
+      },
+      publicationTasks: h.tasks, admission: { snapshot: () => [] },
+      workerCount: 1, pluginCatalogHash: HASH, now: () => 0, scheduler: h.scheduler,
+      coordinator: {
+        startCurrent: async () => { throw new Error('observation must not fork'); },
+        recoverAndPublish: async () => {
+          calls += 1;
+          return { kind: 'outcome_unknown', fatal: false, code: 'control_recovering',
+            error: new Error('cleanup is still in flight'), serving: [], pending: [] } as never;
+        },
+      },
+      onRecovered: () => { recovered += 1; },
+      onFatal: (error) => { throw error; },
+    });
+
+    await runner.wake(true);
+    expect(h.delays).toEqual([250]);
+    runner.stopAccepting();
+    h.scheduler.callbacks.shift()?.();
+    await h.tasks.enqueueRecovery(async () => ({ kind: 'complete' }));
+
+    expect(calls).toBe(1);
+    expect(recovered).toBe(0);
   });
 });

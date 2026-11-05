@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { retainAccepted, forgetDispatch, submissionLocked, isTerminal, queryFailure, replacementSummary, publicationMessage, historicalDrainFailure, runtimeHealthFault } from '../../../../../src/components/domain/config/publication-state';
+import { retainAccepted, forgetDispatch, submissionLocked, isTerminal, queryFailure, publicationMessage, historicalDrainFailure, runtimeHealthFault } from '../../../../../src/components/domain/config/publication-state';
 import { readPendingPublication, pendingPublicationKey } from '../../../../../src/components/domain/config/workspace';
 import { preCommitRejection } from '../../../../../src/components/domain/config/publication-state';
 import { ApiError } from '../../../../../src/api/client';
@@ -34,19 +34,22 @@ test('storage set failure warns without throwing or invalidating acceptance', ()
 });
 test('terminal outcome survives local remove failure', () => {
   expect(forgetDispatch({ removeItem() { throw new Error('denied'); } })).toBe(false);
-  for (const state of ['degraded', 'converged']) expect(isTerminal(state)).toBe(true);
+  for (const state of ['degraded', 'converged', 'superseded']) expect(isTerminal(state)).toBe(true);
   expect(submissionLocked('terminal')).toBe(false); expect(submissionLocked('rejected')).toBe(false);
-  expect(submissionLocked('unknown')).toBe(true); expect(submissionLocked('active')).toBe(true);
+  expect(submissionLocked('active')).toBe(false);
+  expect(submissionLocked('unknown')).toBe(true);
+});
+test('publication message separates pending, superseded history and cleanup faults', () => {
+  const base = (operation: unknown, cleanup: unknown = null) => ({ operation, cleanup, serving_complete: true, serving_revision: 8, target_revision: 8 }) as any;
+  // A newer desired target is still pending; the superseded record is history.
+  expect(publicationMessage({ ...base({ state: 'superseded', result_status: 409, error_code: 'revision_superseded', committed_revision: 8 }), target_revision: 9 }, true)).toBe('pending');
+  expect(publicationMessage(base({ state: 'superseded', result_status: 409, error_code: 'revision_superseded' }), true)).toBe('superseded');
+  expect(publicationMessage(base({ state: 'superseded', result_status: 409, error_code: 'revision_superseded' },
+    { active: false, state: 'stopped', failed_count: 0, unknown_count: 0, exit_unknown_count: 0 }), true)).toBe('supersededFailed');
 });
 test('query 404, unauthorized and network are distinct and do not authorize a resend', () => {
   expect(queryFailure(404)).toBe('queryNotFound'); expect(queryFailure(401)).toBe('queryUnauthorized');
   expect(queryFailure(403)).toBe('queryUnauthorized'); expect(queryFailure(503)).toBe('queryNetwork');
-});
-test('replacement slots/attempts/revisions are bounded; raw errors are excluded', () => {
-  const result = replacementSummary([{ worker_slot: 1, attempt_no: 2, applied_revision: 42, state: 'failed', last_error: 'SECRET' }, { worker_slot: 'SECRET', attempt_no: -1, applied_revision: NaN, state: 'SECRET' }]);
-  expect(result[0]).toEqual({ slot: 1, attempt: 2, revision: 42, state: 'failed' });
-  expect(result[1]).toEqual({ slot: null, attempt: null, revision: null, state: 'unknown' });
-  expect(JSON.stringify(result)).not.toContain('SECRET');
 });
 test('historical drain failure requires fresh confirmed serving and no active cleanup', () => {
   const publication = { operation: { state: 'degraded', error_code: 'old_worker_drain_failed' }, serving_complete: true, serving_revision: 8, target_revision: 8, cleanup: null } as any;

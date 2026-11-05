@@ -60,7 +60,7 @@ export function sourceHandoffUrl(handoff: SourceHandoff, serviceName?: string) {
 /** Returns an unsaved replacement only; publication belongs to ServiceEditor.handleSave. */
 export async function prepareSourceHandoff(service: EditorService, handoff: SourceHandoff, signal?: AbortSignal) {
   if ((handoff.mode === 'existing' && service._uid !== handoff.serviceId) || (handoff.mode === 'new' && service._uid)) {
-    throw new Error('服务标识已变化，未修改当前草稿。请重新选择服务。');
+    throw new Error('服务已变化，未修改当前配置。请重新选择服务。');
   }
   const sources = (await listUpstreamSources()).filter(source => source.plugin.name === handoff.sourcePlugin && source.contribution.id === handoff.sourceId);
   if (sources.length !== 1 || !sources[0].plugin.enabled) throw new Error('上游来源不存在或插件未启用。');

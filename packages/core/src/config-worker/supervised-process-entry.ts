@@ -1,6 +1,8 @@
 import { holdInheritedProcessLifetimeGuard, writeProcessLifetimeHeldAck } from '../supervision/process-lifetime-guard';
 import { randomUUID } from 'node:crypto';
 import { basename, resolve } from 'node:path';
+import type { Sha256Digest } from '@jeffusion/bungee-types';
+import type { ConfigPublicationIdentity } from '../config-publication/types';
 import { createConfigWorkerRuntimeController } from '../config-publication/worker-runtime';
 import { PluginPathResolver } from '../plugin-path-resolver';
 import { PluginManifestCatalog } from '../plugin-manifest-catalog';
@@ -71,6 +73,13 @@ export async function runSupervisedWorkerProcess(
   setWorkerRateLimitFailureObserver(profile?.observer ?? null);
   let profileWritten = false;
   let shuttingDown = false;
+  /** Last start target observed before initialization settled; null means no start began. */
+  let startTarget: {
+    readonly revision: number;
+    readonly content_hash: Sha256Digest;
+    readonly plugin_catalog_hash: Sha256Digest;
+    readonly publication: ConfigPublicationIdentity | null;
+  } | null = null;
   let storageClosed = false;
   let resolveStopped!: () => void;
   const stopped = new Promise<void>((resolvePromise) => { resolveStopped = resolvePromise; });
@@ -83,6 +92,7 @@ export async function runSupervisedWorkerProcess(
     shuttingDown = true;
     retireCommunication();
     let exitCode = code;
+    let cleanupState: 'success' | 'failed' = 'failed';
     const cleanupErrors: unknown[] = [];
     try {
       await runtime.failClosed(async () => {
@@ -98,9 +108,25 @@ export async function runSupervisedWorkerProcess(
         try { await server?.stop(); } catch (error) { cleanupErrors.push(error); }
         if (cleanupErrors.length > 0) throw new AggregateError(cleanupErrors, 'worker resource or supervision cleanup failed');
       });
+      cleanupState = 'success';
     } catch (error) {
       exitCode = exitCode === 0 ? 1 : exitCode;
       process.stderr.write(`${JSON.stringify({ event: 'worker_shutdown_failure', stage: 'shutdown_cleanup',
+        error: error instanceof Error ? error.message.slice(0, 512) : 'unknown failure' })}\n`);
+    }
+    // Signed cleanup proof is written only after the runtime settled every owned
+    // cleanup step. A failed write leaves the state unknown, never successful.
+    try {
+      if (server === null) throw new Error('worker supervision server is unavailable for cleanup evidence');
+      await server.persistCleanupEvidence({
+        cleanup_state: cleanupState,
+        revision: startTarget?.revision ?? null,
+        content_hash: startTarget?.content_hash ?? null,
+        plugin_catalog_hash: startTarget?.plugin_catalog_hash ?? null,
+        publication: startTarget?.publication ?? null,
+      });
+    } catch (error) {
+      process.stderr.write(`${JSON.stringify({ event: 'worker_shutdown_failure', stage: 'cleanup_evidence',
         error: error instanceof Error ? error.message.slice(0, 512) : 'unknown failure' })}\n`);
     }
     if (profile !== null && !profileWritten) {
@@ -202,6 +228,16 @@ export async function runSupervisedWorkerProcess(
     identity: environment.identity,
     bootNonce,
     bootId: kernelBootId,
+    // Pinned before compilation and any wait, so a cancelled candidate still
+    // reports the exact target its cleanup evidence belongs to.
+    observeStartCommand: (command) => {
+      startTarget ??= Object.freeze({
+        revision: command.revision,
+        content_hash: command.content_hash,
+        plugin_catalog_hash: command.plugin_catalog_hash,
+        publication: command.publication,
+      });
+    },
     persistTerminalEvidence: async (message) => {
       if (server === null) throw new Error('worker supervision server is unavailable for terminal evidence persistence');
       await server.persistTerminalEvidence(message);

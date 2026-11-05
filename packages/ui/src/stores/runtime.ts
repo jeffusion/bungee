@@ -42,7 +42,7 @@ export function unresolvedPublication(publication: ConfigurationPublication | nu
 
 export function publicationInProgress(publication: ConfigurationPublication | null): boolean {
   const state = publication?.operation?.state;
-  return publication?.cleanup?.active === true || state === 'committed' || state === 'publishing' || state === 'draining';
+  return publication?.cleanup?.active === true || state === 'pending' || state === 'committed' || state === 'publishing' || state === 'draining';
 }
 
 export function publicationRetryKey(operationId: string, revision: number): string {

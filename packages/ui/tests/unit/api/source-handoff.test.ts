@@ -36,7 +36,7 @@ function mockApi(options: { enabled?: boolean; available?: boolean; current?: Co
     if (request.method === 'PUT') {
       published = await request.json();
       return Response.json({ operation_id: published.mutation_id, revision: 5,
-        operation: { state: 'converged', result_status: 200, error_code: null, mutation_id: published.mutation_id }, workers: [] }, { status: 202 });
+        operation: { state: 'converged', result_status: 200, error_code: null, mutation_id: published.mutation_id, expected_revision: 4, committed_revision: 5 }, workers: [] }, { status: 202 });
     }
     return Response.json({ config: options.current ?? aggregate, revision: 4, content_hash: 'before' });
   }) as typeof fetch;

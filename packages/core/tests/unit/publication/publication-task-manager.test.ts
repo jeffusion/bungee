@@ -1,10 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import type { ActiveConfigurationPublication } from '../../../src/config-storage';
-import type { MasterPublicationOutcome, ServingConfigWorker } from '../../../src/config-publication';
+import type { MasterPublicationOutcome } from '../../../src/config-publication';
 import { PublicationTaskManager } from '../../../src/master-runtime/publication-task-manager';
 
-const active = { operation: { mutation_id: 'queued-operation' } } as ActiveConfigurationPublication;
-const workers: readonly ServingConfigWorker[] = [];
 const converged = { kind: 'converged' } as MasterPublicationOutcome;
 
 class ManualScheduler {
@@ -18,35 +15,62 @@ async function settle(): Promise<void> {
 }
 
 describe('PublicationTaskManager', () => {
-  test('starts after scheduling, serializes publications, and stop waits for the queue', async () => {
+  test('starts after scheduling, coalesces wakes during a run, and stop waits for the run', async () => {
     const scheduler = new ManualScheduler();
-    const calls: string[] = [];
+    let calls = 0;
     let releaseFirst = (): void => undefined;
     const first = new Promise<void>((resolve) => { releaseFirst = resolve; });
     const manager = new PublicationTaskManager({
       schedule: scheduler.schedule,
-      async publish(publication) {
-        calls.push(publication.operation.mutation_id);
-        if (calls.length === 1) await first;
+      async publish() {
+        calls += 1;
+        if (calls === 1) await first;
         return converged;
       },
     });
     manager.setFatalHandler(() => { throw new Error('unexpected fatal'); });
 
-    manager.enqueue(active, workers);
-    manager.enqueue({ ...active, operation: { ...active.operation, mutation_id: 'second' } }, workers);
-    expect(calls).toEqual([]);
+    manager.wake();
+    manager.wake();
+    manager.wake();
+    expect(calls).toBe(0);
     scheduler.flush();
     await settle();
-    expect(calls).toEqual(['queued-operation']);
+    expect(calls).toBe(1);
     let stopped = false;
     const stopping = manager.stop().then(() => { stopped = true; });
     await settle();
     expect(stopped).toBeFalse();
     releaseFirst();
     await stopping;
-    expect(calls).toEqual(['queued-operation']);
-    expect(() => manager.enqueue(active, workers)).toThrow();
+    expect(calls).toBe(1);
+    manager.wake();
+    await settle();
+    expect(calls).toBe(1);
+  });
+
+  test('runs one follow-up after saves arrive during a publication', async () => {
+    let calls = 0;
+    let releaseFirst = (): void => undefined;
+    const first = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const manager = new PublicationTaskManager({
+      async publish() {
+        calls += 1;
+        if (calls === 1) await first;
+        return converged;
+      },
+    });
+    manager.setFatalHandler(() => { throw new Error('unexpected fatal'); });
+
+    manager.wake();
+    await settle();
+    manager.wake();
+    manager.wake();
+    manager.wake();
+    releaseFirst();
+    await settle();
+    await manager.stop();
+    expect(calls).toBe(2);
   });
 
   test('stop aborts an active H wait and treats its bounded unknown result as nonfatal', async () => {
@@ -55,7 +79,7 @@ describe('PublicationTaskManager', () => {
     let observedSignal: AbortSignal | undefined;
     const manager = new PublicationTaskManager({
       schedule: scheduler.schedule,
-      async publish(_publication, _oldWorkers, signal) {
+      async publish(signal) {
         observedSignal = signal;
         await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
         return { kind: 'outcome_unknown', fatal: false, code: 'control_recovering', error: new Error('H cancelled'),
@@ -63,7 +87,7 @@ describe('PublicationTaskManager', () => {
       },
     });
     manager.setFatalHandler((error) => failures.push(error));
-    manager.enqueue(active, workers);
+    manager.wake();
     scheduler.flush();
     await settle();
     const stopping = manager.stop();
@@ -83,7 +107,7 @@ describe('PublicationTaskManager', () => {
         publish: async () => { if (result instanceof Error) throw result; return result; },
       });
       manager.setFatalHandler((error) => { failures.push(error); });
-      manager.enqueue(active, workers);
+      manager.wake();
       await settle();
       await manager.stop();
       expect(failures).toHaveLength(1);
@@ -98,7 +122,7 @@ describe('PublicationTaskManager', () => {
     let release!: () => void;
     const slow = new Promise<void>((resolve) => { release = resolve; });
     const events: string[] = [];
-    manager.enqueue(active, workers);
+    manager.wake();
     const recovery = manager.enqueueRecovery(async () => {
       events.push('recovery-start');
       await slow;

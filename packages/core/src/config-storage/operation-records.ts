@@ -1,4 +1,5 @@
 import type { Database } from 'bun:sqlite';
+import type { Sha256Digest } from '@jeffusion/bungee-types';
 import { requireSafeInteger } from './persisted-validation';
 import type { ConfigurationOperation, ConfigurationOperationWorker, WorkerAttemptReason } from './repository-types';
 import { ConfigRepositoryError } from './repository-types';
@@ -12,6 +13,8 @@ export type OperationRow = {
   readonly error_code: string | null; readonly error_detail: string | null;
   readonly drain_recovery_generation: number;
   readonly last_drain_recovery_previous_generation: number | null;
+  readonly plugin_catalog_hash: string | null;
+  readonly cancel_requested: number; readonly prepare_started: number;
   readonly created_at: number; readonly updated_at: number;
 };
 
@@ -25,7 +28,7 @@ export type WorkerRow = {
 
 export const OPERATION_SELECT = `SELECT mutation_id,request_hash,expected_revision,committed_revision,kind,state,
   target_worker_count,result_status,error_code,error_detail,drain_recovery_generation,
-  last_drain_recovery_previous_generation,created_at,updated_at
+  last_drain_recovery_previous_generation,plugin_catalog_hash,cancel_requested,prepare_started,created_at,updated_at
   FROM configuration_operations`;
 export const WORKER_SELECT = `SELECT mutation_id,worker_slot,target_revision,drain_recovery_generation,
   attempt_no,last_begin_previous_attempt_no,last_begin_reason,state,applied_revision,last_error,updated_at
@@ -57,20 +60,43 @@ export function operationFromRow(row: OperationRow): ConfigurationOperation {
     throw new ConfigRepositoryError('schema_corrupt', 'operation drain recovery phase is invalid');
   }
   if (row.updated_at < row.created_at) throw new ConfigRepositoryError('schema_corrupt', 'operation timestamps are invalid');
+  if (row.plugin_catalog_hash !== null && !validateDigest(row.plugin_catalog_hash)) {
+    throw new ConfigRepositoryError('schema_corrupt', 'operation plugin catalog identity is invalid');
+  }
+  if ((row.cancel_requested !== 0 && row.cancel_requested !== 1) ||
+      (row.prepare_started !== 0 && row.prepare_started !== 1)) {
+    throw new ConfigRepositoryError('schema_corrupt', 'operation cancellation flags are invalid');
+  }
   const kind: 'config' | 'admin_state' = row.kind === 'config' ? 'config' : 'admin_state';
   const base = {
     mutation_id: row.mutation_id, request_hash: row.request_hash, expected_revision: row.expected_revision,
     committed_revision: row.committed_revision, kind, target_worker_count: row.target_worker_count,
     drain_recovery_generation: row.drain_recovery_generation,
     last_drain_recovery_previous_generation: row.last_drain_recovery_previous_generation,
+    plugin_catalog_hash: row.plugin_catalog_hash as Sha256Digest | null,
+    cancel_requested: row.cancel_requested === 1, prepare_started: row.prepare_started === 1,
     created_at: row.created_at, updated_at: row.updated_at,
   };
   switch (row.state) {
+    case 'pending':
+      if (row.result_status === null && row.error_code === null && row.error_detail === null &&
+          row.drain_recovery_generation === 0 && !base.cancel_requested && !base.prepare_started) {
+        return { ...base, state: 'pending', result_status: null, error_code: null, error_detail: null };
+      }
+      break;
     case 'committed':
     case 'publishing':
     case 'draining':
       if (row.result_status === null && row.error_code === null && row.error_detail === null) {
         return { ...base, state: row.state, result_status: null, error_code: null, error_detail: null };
+      }
+      break;
+    case 'superseded':
+      if (row.result_status === 409 && row.error_code === 'revision_superseded' &&
+          row.drain_recovery_generation === 0 && !base.prepare_started &&
+          row.error_detail !== null && row.error_detail.length <= 512 && row.error_detail.trim().length > 0) {
+        return { ...base, state: 'superseded', result_status: 409,
+          error_code: 'revision_superseded', error_detail: row.error_detail };
       }
       break;
     case 'converged':

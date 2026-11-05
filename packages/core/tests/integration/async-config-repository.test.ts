@@ -10,6 +10,7 @@ import { CONFIG_MIGRATIONS } from '../../src/config-storage/migrations';
 import { readRepositorySnapshot } from '../../src/config-storage/repository-snapshot';
 import { PluginDependencyGraph } from '../../src/plugin-dependencies';
 import { acquireMasterInstanceLock, mintControllerClaimCapability } from '../../src/master-runtime/instance-lock';
+import { settleWorkerLaunch } from '../helpers/worker-launch';
 
 const aggregate = { logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [] } as const;
 const snapshot = { revision: 1, content_hash: hashConfigurationContent(aggregate), aggregate };
@@ -79,7 +80,7 @@ describe('configuration storage execution boundary', () => {
     expect(sql.length).toBeGreaterThan(0);
     expect(sql.some(query => /PRAGMA|sqlite_schema|FROM configuration_revisions|FROM services/i.test(query))).toBe(false);
     for (const query of sql.filter(query => /FROM configuration_operations/.test(query))) {
-      expect(query).toMatch(/WHERE (mutation_id|committed_revision)=\?/);
+      expect(query).toMatch(/WHERE (mutation_id|committed_revision)=\?|WHERE state IN/);
     }
     intercept.mockRestore();
   });
@@ -93,9 +94,11 @@ describe('configuration storage execution boundary', () => {
     });
     try {
       expect(backend.commit(command('bounded-mutations')).kind).toBe('committed');
+      backend.claimPublicationTarget(`sha256:${'1'.repeat(64)}`, 2);
       backend.beginPublication('bounded-mutations', 2);
       backend.beginWorkerAttempt('bounded-mutations', 0, 0, 'initial', 3);
       backend.recordWorkerResult('bounded-mutations', 0, { kind: 'failed', attempt_no: 1, error: 'unavailable' }, 4);
+      settleWorkerLaunch(backend, 'bounded-mutations', 0, 1, 5);
       backend.finalizePublication('bounded-mutations', { outcome: 'degraded',
         error_code: 'replacement_convergence_failed', error_detail: 'unavailable', recovery_disposition: 'retryable' }, 5);
       const recovery = backend.getCurrentRecovery(); if (!recovery) throw new Error('recovery missing');
@@ -103,7 +106,7 @@ describe('configuration storage execution boundary', () => {
       expect(backend.commit({ ...command('bounded-next'), expected_revision: 2, created_at: 7 }).kind).toBe('committed');
       expect(sql.some(query => /PRAGMA|pragma_|FROM configuration_state ORDER|FROM configuration_revisions ORDER/i.test(query))).toBe(false);
       for (const query of sql.filter(query => /FROM configuration_(operations|operation_workers|revisions|recoveries)\b/i.test(query))) {
-        expect(query).toMatch(/WHERE\s+(?:mutation_id|revision|committed_revision|recovery_id|target_revision)=\?|ORDER BY recovery_sequence DESC LIMIT 1/);
+        expect(query).toMatch(/WHERE\s+(?:[a-z_]+\.)?(?:mutation_id|revision|committed_revision|recovery_id|target_revision)=\?|WHERE state\s*(?:=|IN)|ORDER BY (?:CASE WHEN state IN|recovery_sequence DESC LIMIT 1)/);
       }
       expect(sql.some(query => /FROM sqlite_schema/.test(query))).toBe(true);
     } finally { intercept.mockRestore(); }

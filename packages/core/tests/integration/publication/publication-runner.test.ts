@@ -51,18 +51,53 @@ function servingWorker(slot: number, origin: string | undefined, exitProven = fa
     publication: null, private_port: 10_000 + slot } as any;
 }
 
+function candidateWorker(identity: any, exitOnTerminate: boolean, cleanupState: 'success' | 'failed' = 'success', emitReady = true, readyDelayMs = 0) {
+  const exitListeners: Array<(evidence: any) => void> = [];
+  const messageListeners: Array<(message: unknown) => void> = [];
+  const bootNonce = '60000000-0000-4000-8000-000000000001';
+  const process = {
+    slot: identity.worker_slot, identity, pid: 300 + identity.worker_slot,
+    async send(command: any) {
+      if (!emitReady || command.command !== 'start-config-worker') return;
+      const ready = { status: 'config-ready', boot_nonce: bootNonce, pid: 300 + identity.worker_slot,
+        revision: command.revision, content_hash: command.content_hash,
+        plugin_catalog_hash: command.plugin_catalog_hash, private_port: 20_000 + identity.worker_slot,
+        plugin_runtime_generation: 1, required_plugins: [], serving_plugins: [],
+        publication: command.publication, ...identity };
+      if (readyDelayMs > 0) setTimeout(() => { for (const listener of messageListeners) listener(ready); }, readyDelayMs);
+      else for (const listener of messageListeners) listener(ready);
+    },
+    subscribeMessage(listener: (message: unknown) => void) { messageListeners.push(listener); return () => undefined; },
+    subscribeExit(listener: (evidence: any) => void) { exitListeners.push(listener); return () => undefined; },
+    async terminate() {
+      if (exitOnTerminate) for (const listener of [...exitListeners]) listener({ exited: true, pid: 300 + identity.worker_slot,
+        terminalDrain: { status: 'worker-drained', cleanup_state: cleanupState } });
+    },
+  } as any;
+  return process;
+}
+
 function publicationHarness(oldWorkers: readonly any[], options: {
   readonly recoveringMaster?: boolean; readonly commitError?: Error;
+  readonly targets?: readonly any[];
+  readonly spawn?: (identity: any) => any;
+  readonly workerCount?: number;
 } = {}) {
   const active = {
-    operation: { mutation_id: 'mutation-1', state: 'committed', drain_recovery_generation: 0 },
+    operation: { mutation_id: 'mutation-1', state: 'committed', committed_revision: 7, drain_recovery_generation: 0 },
     snapshot: { revision: 7, content_hash: HASH, aggregate: { plugin_activations: [], logical_configuration: { services: [], routes: [], plugins: [] } } },
-    targets: [],
+    targets: options.targets ?? [],
   } as any;
   const factoryOwned = new Set(oldWorkers.map(({ process }) => process));
   const repository = {
     beginPublication: () => undefined,
     getActivePublication: () => active,
+    beginWorkerAttempt: (_mutationId: string, workerSlot: number, previousAttemptNo: number) => ({
+      mutation_id: 'mutation-1', worker_slot: workerSlot,
+      attempt_no: previousAttemptNo + 1, drain_recovery_generation: 0,
+    }),
+    recordWorkerResult: () => undefined,
+    recordPublicationCandidateExit: () => undefined,
     markDraining: () => undefined,
     finalizePublication: (_mutationId: string, outcome: unknown) => {
       active.finalOutcome = outcome;
@@ -70,7 +105,7 @@ function publicationHarness(oldWorkers: readonly any[], options: {
     },
   } as any;
   const workerFactory = {
-    spawn: () => { throw new Error('unexpected spawn'); },
+    spawn: options.spawn ?? (() => { throw new Error('unexpected spawn'); }),
     markCommitted: () => undefined,
     disconnectProcesses: () => { throw new Error('unexpected disconnect'); },
     discardConfirmedUncommitted: async () => undefined,
@@ -88,7 +123,7 @@ function publicationHarness(oldWorkers: readonly any[], options: {
     drainTimeoutMs: 10,
     owned: new OwnedProcessCollection(),
     identities: new ProcessIdentityAllocator(
-      '30000000-0000-4000-8000-000000000001', 0,
+      '30000000-0000-4000-8000-000000000001', options.workerCount ?? 0,
       () => '40000000-0000-4000-8000-000000000001',
     ),
     oldWorkers,
@@ -99,6 +134,7 @@ function publicationHarness(oldWorkers: readonly any[], options: {
        handoffStatus: async () => ({ retired_id: `sha256:${'e'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0 }),
     }) },
     recoveringMaster: options.recoveringMaster ?? false,
+    ensureCreationPermitted: async () => ({ allowed: true as const }),
   } as any;
   return { active, factoryOwned, options: harnessOptions, retiredReleases: () => retiredReleases };
 }
@@ -128,8 +164,10 @@ describe('publication phase diagnostics', () => {
         () => '40000000-0000-4000-8000-000000000001',
       ),
       oldWorkers: [], owned: new OwnedProcessCollection(), pluginCatalogHash: HASH,
+      latestRevision: () => 7,
       admission: { prepare: async () => ({ commit: async () => undefined }) } as any,
       recoveringMaster: false, stderr: { write: (line: string) => { lines.push(line); } },
+      ensureCreationPermitted: async () => ({ allowed: true as const }),
     }, active(), []);
 
     const events = lines.map((line) => JSON.parse(line));
@@ -261,6 +299,54 @@ describe('publication phase diagnostics', () => {
     expect(spawns).toBe(0); expect(generations).toBe(0); expect(releases).toBe(0);
   });
 
+  test('denies draining recovery creation before fencing a generation or attempt', async () => {
+    const harness = publicationHarness([], { recoveringMaster: true });
+    harness.active.operation.state = 'draining';
+    harness.options.priorAttemptExited = true;
+    harness.options.ensureCreationPermitted = async () => ({ allowed: false, error: new Error('historical launch debt') });
+    let generations = 0; let attempts = 0; let allocations = 0; let spawns = 0; let prepares = 0;
+    harness.options.repository.beginDrainingRecovery = () => { generations += 1; throw new Error('must not fence a generation'); };
+    harness.options.repository.beginWorkerAttempt = () => { attempts += 1; throw new Error('must not begin an attempt'); };
+    harness.options.identities.allocate = () => { allocations += 1; throw new Error('must not reserve identities'); };
+    harness.options.workerFactory.spawn = () => { spawns += 1; throw new Error('must not spawn'); };
+    harness.options.admission.prepare = async () => { prepares += 1; throw new Error('must not prepare admission'); };
+
+    const outcome = await runPublication(harness.options, harness.active, []);
+
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false, code: 'control_recovering' });
+    expect({ generations, attempts, allocations, spawns, prepares }).toEqual({
+      generations: 0, attempts: 0, allocations: 0, spawns: 0, prepares: 0 });
+    expect(harness.active.finalOutcome).toBeUndefined();
+  });
+
+  test('does not fence a draining generation when the permit is cancelled while waiting', async () => {
+    const harness = publicationHarness([], { recoveringMaster: true });
+    harness.active.operation.state = 'draining';
+    harness.options.priorAttemptExited = true;
+    const controller = new AbortController();
+    harness.options.signal = controller.signal;
+    let release!: (permit: { readonly allowed: true }) => void;
+    let permitRequested!: () => void;
+    const requested = new Promise<void>((resolve) => { permitRequested = resolve; });
+    harness.options.ensureCreationPermitted = () => {
+      permitRequested();
+      return new Promise((resolve) => { release = resolve; });
+    };
+    let generations = 0; let attempts = 0; let spawns = 0;
+    harness.options.repository.beginDrainingRecovery = () => { generations += 1; throw new Error('must not fence a generation'); };
+    harness.options.repository.beginWorkerAttempt = () => { attempts += 1; throw new Error('must not begin an attempt'); };
+    harness.options.workerFactory.spawn = () => { spawns += 1; throw new Error('must not spawn'); };
+
+    const pending = runPublication(harness.options, harness.active, []);
+    await requested;
+    controller.abort();
+    release({ allowed: true });
+
+    await expect(pending).rejects.toThrow('configuration publication cancelled');
+    expect({ generations, attempts, spawns }).toEqual({ generations: 0, attempts: 0, spawns: 0 });
+    expect(harness.active.finalOutcome).toBeUndefined();
+  });
+
   test('keeps admission commit identity uncertainty fatal before classifying retired-only uncertainty', async () => {
     const commitError = Object.assign(new Error('signed active admission identity is unknown'), { code: 'control_recovering' });
     const harness = publicationHarness([], { commitError });
@@ -332,7 +418,9 @@ describe('publication phase diagnostics', () => {
           () => newIdentity.worker_instance_id), owned, pluginCatalogHash: HASH,
         admission: { prepare: async () => prepared } as any,
         oldWorkers: [oldWorker],
+        latestRevision: () => active.operation.committed_revision,
         recoveringMaster: false,
+        ensureCreationPermitted: async () => ({ allowed: true as const }),
       }, active, [oldWorker]);
       expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false, code: 'control_recovering' });
       expect(outcome.serving).toHaveLength(1);
@@ -364,6 +452,227 @@ describe('publication phase diagnostics', () => {
 
     expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false, code: 'control_recovering' });
     expect(harness.factoryOwned.size).toBe(2);
+    expect(harness.active.finalOutcome).toBeUndefined();
+  });
+});
+
+describe('publication candidate supersession', () => {
+  function candidateHarness(latestRevision: number, exitOnTerminate = true,
+    cleanupState: 'success' | 'failed' = 'success', emitReady = true, readyDelayMs = 0) {
+    const harness = publicationHarness([], {
+      targets: [{ worker_slot: 0, attempt_no: 0 }], workerCount: 1,
+      spawn: (identity) => candidateWorker(identity, exitOnTerminate, cleanupState, emitReady, readyDelayMs),
+    });
+    harness.options.latestRevision = () => latestRevision;
+    harness.options.scheduler = {
+      schedule(delay: number, callback: () => void) {
+        const timer = setTimeout(callback, delay);
+        return { cancel: () => clearTimeout(timer) };
+      },
+    };
+    return harness;
+  }
+
+  test('cancels a ready candidate before admission preparation and records exit evidence', async () => {
+    const harness = candidateHarness(8);
+    const calls: string[] = [];
+    let preparations = 0;
+    harness.options.admission.prepare = async () => { preparations += 1; throw new Error('must not prepare'); };
+    harness.options.repository.requestPublicationCancellation = async () => {
+      calls.push('cancel');
+      return harness.active.operation;
+    };
+    harness.options.repository.enterPublicationPrepare = async () => {
+      calls.push('prepare-decision');
+      return { kind: 'cancelled' };
+    };
+    harness.options.repository.recordPublicationCandidateExit = async (
+      _mutationId: string, _revision: number, workerSlot: number, attemptNo: number, evidence: unknown,
+    ) => {
+      calls.push(`exit:${workerSlot}:${attemptNo}:${JSON.stringify(evidence)}`);
+    };
+    harness.options.repository.confirmPublicationCandidateExited = async (
+      _mutationId: string, _revision: number,
+    ) => {
+      calls.push('confirmed');
+      return { ...harness.active.operation, state: 'superseded', result_status: 409,
+        error_code: 'revision_superseded', error_detail: 'cancelled' };
+    };
+
+    const outcome = await runPublication(harness.options, harness.active, []);
+
+    expect(outcome).toMatchObject({ kind: 'superseded' });
+    expect(preparations).toBe(0);
+    expect(calls).toEqual([
+      'cancel', 'prepare-decision',
+      'exit:0:1:{"kind":"exited","cleanup":"released"}',
+      'confirmed',
+    ]);
+    expect(harness.active.finalOutcome).toBeUndefined();
+  });
+
+  test('keeps the original publication when preparation wins the cancellation race', async () => {
+    const harness = candidateHarness(8);
+    let preparations = 0;
+    let supersessions = 0;
+    harness.options.admission.prepare = async () => {
+      preparations += 1;
+      return { async commit() {}, async abort() {}, async releaseRetiredAfterExitProof() {} };
+    };
+    harness.options.repository.requestPublicationCancellation = async () => harness.active.operation;
+    harness.options.repository.enterPublicationPrepare = async () => ({ kind: 'granted' });
+    harness.options.repository.confirmPublicationCandidateExited = async () => {
+      supersessions += 1;
+      throw new Error('must not supersede a preparation winner');
+    };
+
+    const outcome = await runPublication(harness.options, harness.active, []);
+
+    expect(outcome).toMatchObject({ kind: 'converged', http_status: 200 });
+    expect(preparations).toBe(1);
+    expect(supersessions).toBe(0);
+  });
+
+  test('does not release publication ownership when the candidate exit stays unknown', async () => {
+    const harness = candidateHarness(8, false);
+    let supersessions = 0;
+    harness.options.admission.prepare = async () => { throw new Error('must not prepare'); };
+    harness.options.repository.requestPublicationCancellation = async () => harness.active.operation;
+    harness.options.repository.enterPublicationPrepare = async () => ({ kind: 'cancelled' });
+    harness.options.repository.confirmPublicationCandidateExited = async () => {
+      supersessions += 1;
+      return harness.active.operation;
+    };
+
+    const outcome = await runPublication(harness.options, harness.active, []);
+
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false, code: 'worker_exit_unconfirmed' });
+    expect(supersessions).toBe(0);
+    expect(harness.active.finalOutcome).toBeUndefined();
+  });
+
+  test('does not release a cancelled candidate when worker cleanup failed', async () => {
+    const harness = candidateHarness(8, true, 'failed');
+    let supersessions = 0;
+    let evidence = 0;
+    harness.options.admission.prepare = async () => { throw new Error('must not prepare'); };
+    harness.options.repository.requestPublicationCancellation = async () => harness.active.operation;
+    harness.options.repository.enterPublicationPrepare = async () => ({ kind: 'cancelled' });
+    harness.options.repository.recordPublicationCandidateExit = async () => { evidence += 1; };
+    harness.options.repository.confirmPublicationCandidateExited = async () => {
+      supersessions += 1;
+      return harness.active.operation;
+    };
+
+    const outcome = await runPublication(harness.options, harness.active, []);
+
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false, code: 'worker_exit_unconfirmed' });
+    expect(evidence).toBe(0);
+    expect(supersessions).toBe(0);
+    expect(harness.active.finalOutcome).toBeUndefined();
+  });
+
+  test('does not supersede when candidate exit proof cannot be persisted', async () => {
+    const harness = candidateHarness(8);
+    let confirmations = 0;
+    harness.options.repository.requestPublicationCancellation = async () => harness.active.operation;
+    harness.options.repository.enterPublicationPrepare = async () => ({ kind: 'cancelled' });
+    harness.options.repository.recordPublicationCandidateExit = async () => { throw new Error('storage unavailable'); };
+    harness.options.repository.confirmPublicationCandidateExited = async () => {
+      confirmations += 1;
+      return harness.active.operation;
+    };
+
+    const outcome = await runPublication(harness.options, harness.active, []);
+
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true, code: 'repository_failure' });
+    expect((outcome as { readonly error: Error }).error.message).toBe('storage unavailable');
+    expect(confirmations).toBe(0);
+  });
+
+  test('keeps an admitted group when the durable admitted proof fails', async () => {
+    const harness = candidateHarness(7);
+    let aborts = 0;
+    harness.options.admission.prepare = async () => ({
+      async commit() {},
+      async abort() { aborts += 1; },
+      async releaseRetiredAfterExitProof() {},
+    });
+    harness.options.workerFactory.markCommitted = async () => { throw new Error('ledger write failed'); };
+
+    const outcome = await runPublication(harness.options, harness.active, []);
+
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: true, code: 'repository_failure' });
+    expect(aborts).toBe(0);
+  });
+
+  test('cancels during candidate startup when a newer target is signalled', async () => {
+    const harness = candidateHarness(8, true, 'success', false);
+    const update = new AbortController();
+    harness.options.updateSignal = update.signal;
+    harness.options.applyTimeoutMs = 1_000;
+    let preparations = 0;
+    let supersessions = 0;
+    harness.options.admission.prepare = async () => { preparations += 1; throw new Error('must not prepare'); };
+    harness.options.repository.requestPublicationCancellation = async () => harness.active.operation;
+    harness.options.repository.enterPublicationPrepare = async () => ({ kind: 'cancelled' });
+    harness.options.repository.confirmPublicationCandidateExited = async () => {
+      supersessions += 1;
+      return { ...harness.active.operation, state: 'superseded', result_status: 409,
+        error_code: 'revision_superseded', error_detail: 'startup update' };
+    };
+
+    const publication = runPublication(harness.options, harness.active, []);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    update.abort('newer target');
+    const outcome = await publication;
+
+    expect(outcome).toMatchObject({ kind: 'superseded' });
+    expect(preparations).toBe(0);
+    expect(supersessions).toBe(1);
+  });
+
+  test('ignores a late ready after startup cancellation', async () => {
+    const harness = candidateHarness(8, true, 'success', true, 5);
+    const update = new AbortController();
+    harness.options.updateSignal = update.signal;
+    harness.options.applyTimeoutMs = 1_000;
+    let preparations = 0;
+    let supersessions = 0;
+    harness.options.admission.prepare = async () => { preparations += 1; throw new Error('must not prepare'); };
+    harness.options.repository.requestPublicationCancellation = async () => harness.active.operation;
+    harness.options.repository.enterPublicationPrepare = async () => ({ kind: 'cancelled' });
+    harness.options.repository.confirmPublicationCandidateExited = async () => {
+      supersessions += 1;
+      return { ...harness.active.operation, state: 'superseded', result_status: 409,
+        error_code: 'revision_superseded', error_detail: 'late ready' };
+    };
+
+    const publication = runPublication(harness.options, harness.active, []);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    update.abort('newer target');
+    expect(await publication).toMatchObject({ kind: 'superseded' });
+    await new Promise<void>((resolve) => setTimeout(resolve, 15));
+    expect(preparations).toBe(0);
+    expect(supersessions).toBe(1);
+  });
+
+  test('does not spawn a candidate when a restart finds cancellation already requested', async () => {
+    const harness = candidateHarness(7);
+    harness.active.operation.cancel_requested = true;
+    harness.active.operation.prepare_started = false;
+    harness.active.operation.state = 'committed';
+    harness.active.targets = [{ worker_slot: 0, attempt_no: 1 }];
+    let spawns = 0;
+    harness.options.workerFactory.spawn = (identity: any) => {
+      spawns += 1;
+      return candidateWorker(identity, true);
+    };
+
+    const outcome = await runPublication(harness.options, harness.active, []);
+
+    expect(outcome).toMatchObject({ kind: 'outcome_unknown', fatal: false, code: 'control_recovering' });
+    expect(spawns).toBe(0);
     expect(harness.active.finalOutcome).toBeUndefined();
   });
 });

@@ -28,7 +28,7 @@ function mockValidatedSave() {
     const result = parseNormalizeCompileAggregate(body.aggregate);
     if (!result.ok) return Response.json({ error: 'invalid_configuration', errors: result.errors }, { status: 422 });
     return Response.json({ operation_id: body.mutation_id, revision: 5,
-      operation: { mutation_id: body.mutation_id, state: 'committed' }, workers: [] }, { status: 202 });
+      operation: { mutation_id: body.mutation_id, state: 'committed', expected_revision: 4, committed_revision: 5, result_status: null }, workers: [] }, { status: 202 });
   }) as typeof fetch;
   return () => submitted!;
 }
