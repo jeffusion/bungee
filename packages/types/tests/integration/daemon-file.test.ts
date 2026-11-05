@@ -927,8 +927,12 @@ setInterval(() => {}, 1000);
 `;
     await withFakePowerShell(dir, source, async () => {
       let error: unknown;
+      // The timeout diagnostic must use a monotonic clock, not wall-clock time.
+      const realDateNow = Date.now;
+      Date.now = () => 1_700_000_000_000;
       try { await __testReadWindowsAcl(path, 4_000); }
       catch (caught) { error = caught; }
+      finally { Date.now = realDateNow; }
       const diagnostic = diagnosticFrom(error);
       expect(diagnostic).toMatchObject({
         operation: 'read', outcome: 'timeout', elapsed_ms: 4_000, exit_code: null, signal: 'SIGKILL',
