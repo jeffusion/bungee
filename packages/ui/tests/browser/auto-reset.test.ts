@@ -11,9 +11,53 @@ browserTest('auto reset', async () => {
 const manifest = JSON.parse(await readFile(new URL('../../../../plugins/chatgpt-oauth/manifest.json', import.meta.url), 'utf8'));
 const uiRuntime = await startUiRuntime({ mode: 'component-fixture', entries: ['tests/fixtures/oauth.html'] });
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+let collectDiagnostics: (() => Promise<string>) | undefined;
 try {
     browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1100, height: 850 } });
+  // Bounded, passive input trail for CI failures; never records text or key contents.
+  await page.addInitScript(() => {
+    const events: unknown[] = [];
+    const ids = new WeakMap<Element, number>();
+    let nextId = 0;
+    const idOf = (element: Element) => {
+      let id = ids.get(element);
+      if (!id) ids.set(element, id = ++nextId);
+      return id;
+    };
+    const describe = (element: Element | null) => element && {
+      id: idOf(element), tag: element.tagName, role: element.getAttribute('role'),
+      label: element.getAttribute('aria-label'), checked: element.getAttribute('aria-checked'),
+    };
+    const push = (entry: unknown) => {
+      events.push(entry);
+      if (events.length > 200) events.shift();
+    };
+    const record = (type: string, phase: 'capture' | 'bubble', event: Event) => {
+      const keyboard = event as KeyboardEvent;
+      push({
+        t: +performance.now().toFixed(2), type, phase,
+        ...('key' in event && (keyboard.code === 'Space' || keyboard.key === ' ') ? { space: true, repeat: keyboard.repeat } : {}),
+        target: describe(event.target instanceof Element ? event.target : null),
+        active: describe(document.activeElement), defaultPrevented: event.defaultPrevented,
+        isTrusted: event.isTrusted, hasFocus: document.hasFocus(),
+      });
+    };
+    for (const type of ['keydown', 'keyup', 'keypress', 'click', 'focusin', 'focusout']) {
+      window.addEventListener(type, event => record(type, 'capture', event), true);
+      window.addEventListener(type, event => record(type, 'bubble', event), false);
+    }
+    new MutationObserver(records => {
+      for (const entry of records) {
+        const target = entry.target;
+        if (target instanceof Element && target.getAttribute('role') === 'switch')
+          push({ t: +performance.now().toFixed(2), type: 'aria-checked', target: describe(target),
+            from: entry.oldValue, to: target.getAttribute('aria-checked') });
+      }
+    }).observe(document, { attributes: true, attributeFilter: ['aria-checked'], attributeOldValue: true, subtree: true });
+    (window as any).__autoResetDiagnostics = () => events.slice();
+  });
+  collectDiagnostics = async () => JSON.stringify(await page.evaluate(() => (window as any).__autoResetDiagnostics?.() ?? []));
   const errors: string[] = [];
   observeNetwork(page, errors);
   page.on('pageerror', error => errors.push(error.message));
@@ -96,6 +140,14 @@ try {
 
   assert.deepEqual(errors, []);
 
+} catch (error) {
+  try {
+    const diagnostics = await collectDiagnostics?.();
+    if (diagnostics) console.error(`[auto-reset diagnostics] ${diagnostics}`);
+  } catch {
+    // Diagnostics must never replace the original failure.
+  }
+  throw error;
 } finally {
   try { await browser?.close(); } finally { await uiRuntime.close(); }
 }
