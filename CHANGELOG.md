@@ -1,3 +1,16 @@
+# [6.12.0](https://github.com/jeffusion/bungee/compare/v6.11.3...v6.12.0) (2026-11-05)
+
+
+### Bug Fixes
+
+* **tests:** 修复 macOS 网关进程归属盘点 ([eed07ad](https://github.com/jeffusion/bungee/commit/eed07ad38268e358cc68c3e0e75d5c403912ceeb))
+* **types:** 使用单调时钟记录 ACL 超时耗时 ([3999520](https://github.com/jeffusion/bungee/commit/399952018013625287cb9c67c85a07f36198f1a0))
+
+
+### Features
+
+* **config:** 解耦配置保存与后台发布 ([deedeb9](https://github.com/jeffusion/bungee/commit/deedeb94c8b0cad3678e23bef174a279e5557485))
+
 ## [6.11.3](https://github.com/jeffusion/bungee/compare/v6.11.2...v6.11.3) (2026-11-01)
 
 
