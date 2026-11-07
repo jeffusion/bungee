@@ -98,6 +98,7 @@ export type PluginContributions = Readonly<{
     icon?: string;
     target?: 'sidebar' | 'header';
     component?: string;
+    layout?: 'standalone';
   }>[];
   settings?: string;
   nativeSettingsComponent?: string;

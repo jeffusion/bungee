@@ -1,5 +1,6 @@
 import type { DataAdmissionHost, DataAdmissionPublication } from '../data-admission/host';
 import { randomUUID } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import { snapshotJsonGraph } from '../config-storage/json-preflight';
 import {
   acceptAttach,
@@ -328,6 +329,7 @@ export class IngressSupervisionHttpServer {
   private readonly onShutdown?: () => Promise<void> | void;
   private attached = false;
   private frozen = true;
+  private admissionFence = 0;
   private deadline: number | null = null;
   private deadlineTimer: ReturnType<typeof setTimeout> | null = null;
   private statusSequence = 1;
@@ -387,6 +389,7 @@ export class IngressSupervisionHttpServer {
   }
 
   stop(): void {
+    this.admissionFence++;
     if (this.deadlineTimer !== null) clearTimeout(this.deadlineTimer);
     this.deadlineTimer = null;
     this.deadline = null;
@@ -394,6 +397,7 @@ export class IngressSupervisionHttpServer {
 
   private freezeAt(deadline: number): void {
     if (this.deadline !== deadline) return;
+    this.admissionFence++;
     this.frozen = true;
     this.deadline = null;
     if (this.deadlineTimer !== null) clearTimeout(this.deadlineTimer);
@@ -488,6 +492,7 @@ export class IngressSupervisionHttpServer {
       throw new SupervisionProtocolError('malformed_message', 'attach grace deadline is out of range');
     }
     acceptAttach(message as AttachMessage, this.credential, this.challenges, this.authority);
+    this.admissionFence++;
     this.attached = true;
     this.frozen = true;
     this.registry.setFrozen(true);
@@ -525,7 +530,15 @@ export class IngressSupervisionHttpServer {
       throw new SupervisionProtocolError('malformed_message', 'command body hash does not match');
     }
     if (this.isFrozen()) throw new SupervisionProtocolError('ingress_frozen', 'ingress admission is frozen');
+    const admissionFence = this.admissionFence;
+    const assertStillAuthorized = () => {
+      this.authority.assertAuthority(message);
+      if (this.isFrozen() || this.admissionFence !== admissionFence) {
+        throw new SupervisionProtocolError('ingress_frozen', 'ingress admission authority changed during command');
+      }
+    };
     const result = await this.commands.execute(message as CommandEnvelope, `command:${message.request_id}`, async () => {
+      assertStillAuthorized();
       const commandBody = body.body;
       if (message.method !== 'POST') throw new SupervisionProtocolError('malformed_message', 'ingress mutation must use POST');
       if (message.path === '/data-admission/publish') {
@@ -556,7 +569,29 @@ export class IngressSupervisionHttpServer {
           || body.handoff_timeout_ms <= 0 || body.handoff_timeout_ms > 2_147_483_000) {
           throw new SupervisionProtocolError('malformed_message', 'handoff timeout is invalid');
         }
-        this.registry.prepare(body.admission, body.handoff_timeout_ms);
+        const admission = parseAdmissionSet(body.admission);
+        if (admission.request_log_collector_entry !== undefined) {
+          const entry = pathToFileURL(admission.request_log_collector_entry);
+          entry.searchParams.set('catalog', admission.plugin_catalog_hash);
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const load = async () => {
+            const module = await import(entry.href);
+            assertStillAuthorized();
+            if (typeof module.createIngressRequestLogCollector !== 'function') {
+              throw new AdmissionSetError('malformed', 'missing ingress request log collector factory');
+            }
+            return module.createIngressRequestLogCollector();
+          };
+          const deadline = new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new AdmissionSetError('malformed', 'ingress request log collector timed out')), 1000);
+          });
+          const collector = await Promise.race([load(), deadline]).finally(() => clearTimeout(timer));
+          assertStillAuthorized();
+          if (typeof collector !== 'function') throw new AdmissionSetError('malformed', 'invalid ingress request log collector');
+          this.registry.prepare(admission, body.handoff_timeout_ms, collector);
+        } else {
+          this.registry.prepare(admission, body.handoff_timeout_ms);
+        }
         return { operation: 'prepared', status: this.registry.status() };
       }
       if (message.path === '/__supervision/commit' || message.path === '/commit') {

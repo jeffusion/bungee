@@ -4,6 +4,7 @@ import type { Plugin } from '$api/plugins';
 export function resolveNativeSettings<T>(plugin: Plugin, currentPath: string, registry: Record<string, T>, owners: Record<string, string>) {
   const name = plugin.metadata?.contributes?.nativeSettingsComponent;
   if (name === undefined) return { kind: 'sandbox' } as const;
+  if (!plugin.enabled) return { kind: 'disabled' } as const;
   if (!plugin.metadata?.contributes?.settings || currentPath !== plugin.metadata.contributes.settings) {
     return { kind: 'error', message: `原生设置路径不匹配：${currentPath}。已阻止加载，请打开插件声明的设置路径。` } as const;
   }

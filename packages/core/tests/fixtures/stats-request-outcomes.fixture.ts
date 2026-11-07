@@ -1,6 +1,7 @@
 import type { AppConfig } from '@jeffusion/bungee-types';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { registerRequestLogs } from '../helpers/request-log';
 
 type Scenario = 'managed' | 'failover' | 'cancelled' | 'timed-out' | 'edges' | 'aborted' | 'stats-api'
   | 'terminal-responses' | 'terminal-chat' | 'terminal-anthropic' | 'terminal-incomplete'
@@ -44,6 +45,10 @@ async function main(): Promise<void> {
   const { accessLogWriter } = await import('../../src/logger/access-log-writer');
   const { fileLogWriter } = await import('../../src/logger/file-log-writer');
   const { handleRequest } = await import('../../src/worker/request/handler');
+  const { createGatewayHooks, runWithGatewayHooks } = await import('../../src/gateway/runtime');
+  const gatewayHooks = createGatewayHooks();
+  registerRequestLogs(gatewayHooks);
+  const logging = { accessLogWriter, fileLogWriter };
   const { initializeRuntimeState, runtimeState } = await import('../../src/worker/state/runtime-state');
   const { setPluginRegistry } = await import('../../src/worker/state/plugin-manager');
   const { setBoundControlClientProvider } = await import('../../src/config-worker/runtime-dependencies');
@@ -61,7 +66,7 @@ async function main(): Promise<void> {
       const server = Bun.serve({
         hostname: '127.0.0.1',
         port: 0,
-        fetch: (request) => handleRequest(request, config, { servingRevision: 1 }),
+        fetch: (request) => runWithGatewayHooks(gatewayHooks, () => handleRequest(request, config, { servingRevision: 1, logging })),
       });
       servers.push(server);
       return server;

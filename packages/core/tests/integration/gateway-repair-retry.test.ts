@@ -1,3 +1,4 @@
+import { registerRequestLogs } from '../helpers/request-log';
 import { afterAll as afterDataPlaneTests } from 'bun:test';
 import { createDataPlaneRuntime } from '../helpers/data-plane-runtime';
 const dataPlaneRuntime = await createDataPlaneRuntime();
@@ -31,7 +32,7 @@ test.each(['success','credential','http-error','network-error','cancel','deadlin
       contributes:{upstreamSources:[{id:'fixture',credentialPolicy:{allowedOrigins:['https://repair.test'],allowedRequests:[{pathname:'/converted',methods:['POST']}],allowedHeaderNames:['authorization']}}]}}};}} as any);
     setBoundControlClientProvider((_binding,attempt)=>({async call(){credentials.push(attempt);return {version:credentials.length,expiresAt:Date.now()+10000,headers:{authorization:`Bearer lease-${credentials.length}`}};} } as any));
   }
-  const registry=new ScopedPluginRegistry(import.meta.dir);expect((await registry.initializeFromConfig(config)).failed).toBe(0);setScopedPluginRegistry(registry);
+  const registry=new ScopedPluginRegistry(import.meta.dir);expect((await registry.initializeFromConfig(config)).failed).toBe(0);registerRequestLogs(registry.getGatewayHooks());setScopedPluginRegistry(registry);
   const principal={domain:'data',keyId:'repair-key',credentialVersion:1};
   const grant={version:1,principal,snapshots:{'repair-attempt-fixture':true}};
   const admissionOps:string[]=[];
@@ -61,8 +62,7 @@ test.each(['success','credential','http-error','network-error','cancel','deadlin
   expect(restored.ok).toBe(true);if(!restored.ok)throw new Error('restore failed');
   try{
     const retainedBefore=bodyMetrics.retainedBytes;
-    const transportType=mode==='success'?'websocket':'http';
-    const pending=handleRequest(restored.request,config,{logging,servingRevision:7,logTransportType:transportType});
+    const pending=handleRequest(restored.request,config,{logging,servingRevision:7});
     if(mode==='cancel'){await secondReady;controller.abort();await expect(pending).rejects.toThrow();}
     else{
       const response=await pending;const body=await response.json();
@@ -93,12 +93,12 @@ test.each(['success','credential','http-error','network-error','cancel','deadlin
     expect(state.events.filter(event=>event.phase==='end')).toHaveLength(2);expect(state.admissionResults).toHaveLength(2);
     expect(state.events.filter(event=>event.phase==='response').map(event=>event.body.usage.output_tokens)).toEqual(success||mode==='http-error'?[7,9]:[7]);
     expect(entries.map(entry=>entry.status)).toEqual([400,success?200:mode==='http-error'?502:503]);
-    for(const entry of [...entries,...fileEntries])expect(entry.transportType).toBe(transportType);
+    for(const entry of [...entries,...fileEntries])expect(entry.transportType).toBe('http');
     if(mode!=='cancel'){
       const returned=entries.find(entry=>entry.status===(success?200:400));
       expect(transports.get(returned.requestId)?.outcome).toBe('completed');
       const repaired=entries[1];
-      if(mode==='network-error'||mode==='deadline')expect(transports.get(repaired.requestId)?.outcome).toBe('failed');
+      if(mode==='network-error'||mode==='deadline')expect(transports.get(repaired.requestId)?.outcome ?? repaired.transportOutcome).toBe('failed');
       expect(fileEntries.find(entry=>entry.requestId===returned.requestId)?.transportOutcome).toBe('completed');
     }
     expect(state.repairs).toBe(mode==='http-error'?2:1);

@@ -5,7 +5,7 @@ export const CURRENT_PLUGIN_SCHEMA_VERSION = 3;
 export const VALID_PLUGIN_UI_EXTENSION_MODES = ['none', 'native-static', 'sandbox-iframe'] as const;
 export const VALID_PLUGIN_ARTIFACT_KINDS = ['runtime-plugin'] as const;
 export const SUPPORTED_PLUGIN_CAPABILITIES = [
-  'hooks', 'api', 'nativeWidgetsStatic', 'sandboxUiExtension', 'dynamicRuntimeLoad', 'controlPlane',
+  'hooks', 'api', 'nativeWidgetsStatic', 'sandboxUiExtension', 'dynamicRuntimeLoad', 'controlPlane', 'requestLogging',
 ] as const;
 
 export const PLUGIN_MANIFEST_UNSUPPORTED_CAPABILITY_ERROR =

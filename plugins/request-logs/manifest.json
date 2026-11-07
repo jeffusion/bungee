@@ -1,0 +1,68 @@
+{
+  "name": "request-logs",
+  "version": "1.0.0",
+  "builtin": true,
+  "schemaVersion": 3,
+  "artifactKind": "runtime-plugin",
+  "main": "server/index.ts",
+  "runtimeScope": "global",
+  "capabilities": [
+    "hooks",
+    "dynamicRuntimeLoad",
+    "requestLogging",
+    "nativeWidgetsStatic"
+  ],
+  "ingress": {
+    "entry": "ingress/index.ts"
+  },
+  "uiExtensionMode": "native-static",
+  "engines": {
+    "bungee": "^6.0.0"
+  },
+  "metadata": {
+    "name": "metadata.name",
+    "description": "plugin.description",
+    "icon": "receipt_long"
+  },
+  "ui": {
+    "components": [
+      {
+        "name": "RequestLogsPage",
+        "entry": "ui/RequestLogsPage.svelte"
+      },
+      {
+        "name": "RequestLogsSettings",
+        "entry": "ui/RequestLogsSettings.svelte"
+      }
+    ]
+  },
+  "configSchema": [],
+  "contributes": {
+    "settings": "/settings",
+    "nativeSettingsComponent": "RequestLogsSettings",
+    "navigation": [
+      {
+        "label": "page.title",
+        "path": "/logs",
+        "component": "RequestLogsPage",
+        "layout": "standalone",
+        "target": "header",
+        "icon": "lucide:file-text"
+      }
+    ]
+  },
+  "translations": {
+    "en": {
+      "metadata.name": "Request Logs",
+      "plugin.description": "Collect gateway access and upstream attempt records.",
+      "page.title": "Request Logs",
+      "settings.title": "Log Settings"
+    },
+    "zh-CN": {
+      "metadata.name": "请求日志",
+      "plugin.description": "采集网关访问和上游尝试记录。",
+      "page.title": "请求日志",
+      "settings.title": "日志设置"
+    }
+  }
+}

@@ -18,10 +18,14 @@ export interface WorkerAdmissionPlugin {
   }): Promise<PreparedAdmissionAttempt>;
 }
 type Rpc = (operation: string,payload: unknown,signal?:AbortSignal)=>Promise<unknown>;
-export interface WorkerAdmissionSession { admission: Rpc }
+export interface WorkerAdmissionSession { admission: Rpc; requestLogActive?: () => Promise<boolean> }
 let session: WorkerAdmissionSession | null = null;
 export function setWorkerAdmissionSession(value: WorkerAdmissionSession | null): void { session=value; }
 export function hasWorkerAdmissionSession(): boolean { return session!==null; }
+export async function canStartRequestLogOperation(): Promise<boolean> {
+  try { return await (session?.requestLogActive?.() ?? true); }
+  catch { return false; }
+}
 export class WorkerRequestAdmission {
   private grant: AdmissionGrant | null = null;
   private admittedBody: unknown;

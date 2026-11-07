@@ -6,7 +6,7 @@
 |---|---|---|
 | `bungee.db` | 配置、revision、发布、恢复、监督元数据及实例菜单布局 | 配置存储 Worker |
 | `plugin-state.db` | 插件状态、密钥、KV、命令日志、可靠事件、快照 | 插件存储 Worker |
-| `access.db` | 请求日志、统计、插件观察数据 | 观察 Worker；数据面日志写入仍在请求 Worker |
+| `access.db` | 请求日志、统计、插件观察数据 | 观察 Worker 处理查询及采集器提交的入口记录，请求 Worker 写入已启用的应用操作和执行尝试 |
 
 主进程协调生命周期与消息，不执行上述数据库的查询或维护扫描。
 配置快照在启动校验和成功提交后建立；普通 `getSnapshot()` 返回不可变内存投影，不执行 SQL。
@@ -85,11 +85,17 @@ user-auth 的状态查询只取得 `get/list`，空命名空间返回未初始�
 | `access.db` | 001 / `current_access_baseline` | 002 | [日志 schema](../../packages/core/src/migrations/schema.ts)、[迁移注册](../../packages/core/src/migrations/index.ts) |
 | `plugin-state.db` | `PRAGMA user_version=1` | 2 | [插件状态 schema](../../packages/core/src/plugin-state/schema.ts) |
 
+日志库迁移 006 添加访问、应用操作和执行尝试的关联字段。HTTP 访问与关联执行组成一条查询链，WS 按已识别的客户端业务请求查询。旧连接和内部执行记录仍可按原记录 ID 查询，默认列表和统计排除这些记录。迁移保留既有行的身份和结果字段，新增字段对既有行为空。
+
+配置库迁移 9 添加请求日志默认激活的结算记录。安装目录包含 `request-logs` 时，存储通过配置提交事务写入一次默认激活。发布或恢复持有配置时延后，恢复后的发布队列会重新检查。显式保存的激活列表具有优先权。
+
 配置库迁移 4（`management_protection`）添加强制认证 guard，记录 required、selected provider 与 generation；它不进入普通配置导入导出。插件状态库继续使用现有表，插件业务记录格式独立于数据库迁移编号。
 
 配置库迁移 5（`service_references`）将 Route 的单一 Service 关联转换为独立关系行，并移除 `routes.service_id` 列。关系表区分 Route 和 Service 所有者，目标使用稳定 Service ID；引用具有独立 ID、position、weight、priority 和 disabled 状态。Route 和 Service 均可同时拥有 endpoints 与服务引用，两类目标共用所属对象当前层的 position 分组；关系读取、配置校验与运行时编译均保留完整的混合目标集合。
 
 配置库迁移 8（`publication_targets_and_cancellation`）增加待领取和被取代状态、唯一发布归属、取消与切换准备围栏，以及按 operation、slot、attempt 绑定的不可变候选退出证明；启动账本记录尝试预占、绑定进程身份与原始 guard 的 fork 前意图及退出／清理事实。迁移不翻译未完成的发布，不使用当前 catalog 猜测旧 owner 身份；须先按升级前置条件安全完成原有操作。
+
+配置库迁移 10（`worker_launch_capacity`）添加只追加的容量回收事实，通过 Worker 实例身份关联不可变启动意图。迁移不补写历史事实。Master 在首次确认原始生命周期锁已释放后写入；该记录只用于创建容量，不能替代发布、退休或资源清理证明。仅支持迁移 9 的可执行程序不会打开已迁移到 10 的数据库。
 
 已有库首次由配置 Worker 打开时自动升级，包括 Docker 和 CLI 升级后的首次启动。转换改变配置内容时，在结构迁移的同一事务内通过既有 CAS 提交机制创建新 revision 与匹配的 operation/request identity；旧 revision、hash 和 serving snapshot 保持不可变。新库及内容未改变的库不产生转换 revision，重复打开不再次产生 revision。启动审计校验历史快照的原始规范化字节、hash 和 revision 关系；历史格式只能审计，不能作为当前运行配置加载。
 

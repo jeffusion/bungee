@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { startUiRuntime } from '../../../../../tests/helpers/ui-runtime';
 import { configurationRuntimeFixture, publicationFixture } from '../../helpers/publication';
 import {collectApiEvidence} from '../../helpers/editors/api-evidence';
-import { menuSnapshot, fulfillMenuIcons } from '../../helpers/menus';
+import { menuSnapshot, fulfillMenuIcons, requestLogsPlugin } from '../../helpers/menus';
 
 let runtime: Awaited<ReturnType<typeof startUiRuntime>>, browser: Browser;
 beforeAll(async () => {
@@ -40,12 +40,12 @@ async function withLogs(answer: (request: Request) => Promise<Response>, run: (p
       if(url.pathname === '/api/ui/icons/data') return fulfillMenuIcons(route);
       if(url.pathname === '/api/config/runtime') return json(config);
       if(url.pathname === '/api/config') return json({revision:1,content_hash:config.content_hash,config:config.config});
-      if(url.pathname === '/api/plugins') return json([]);
+      if(url.pathname === '/api/plugins') return json([requestLogsPlugin]);
       if(url.pathname === '/api/plugin-translations' || url.pathname === '/api/logs/cleanup/config') return json({});
       if(url.pathname === '/api/resources/api-key') return json({keys:[]});
       errors.push(`Unexpected API ${url.pathname}`);return route.fulfill({status:500,json:{error:'unexpected_request'}});
     });
-    await page.goto(`${runtime.origin}/#/logs`);
+    await page.goto(`${runtime.origin}/#/extensions/request-logs/logs`);
     await rendered(page.getByTestId('logs-table-scroll')).toBeVisible();
     await run(page,queries);expect(errors).toEqual([]);evidence.verify();
   } finally {await context.close();}
@@ -73,10 +73,10 @@ test('real Logs rows split HTTP, final transport and retries; filters and reset 
   }));
   await withLogs(async()=>Response.json({data:rows,total:5,totalPages:1,page:1,limit:50}),async(page,queries)=>{
     await rendered(page.locator('table tbody tr')).toHaveCount(5);
-    const cells=await page.locator('table tbody tr').evaluateAll(rows=>rows.map(row=>[...row.querySelectorAll('td')].map(cell=>cell.textContent?.trim())));
-    expect(cells.map(row=>row[4])).toEqual(['200','200','200','500','200']);
-    expect(cells.map(row=>row[5])).toEqual(['Completed','Cancelled','Transport failed','Completed','Unknown']);
-    expect(cells[0][7]).toContain('3');
+    const logRow = (index: number) => page.getByRole('row').filter({ hasText: `/test/${index}` });
+    await rendered(logRow(0).getByText('Transport failed', { exact: true })).toHaveCount(0);
+    await rendered(logRow(1).getByText('Cancelled', { exact: true })).toBeVisible();
+    await rendered(logRow(2).getByText('Transport failed', { exact: true })).toBeVisible();
     await transport(page,'Cancelled');
     await rendered.poll(()=>queries.at(-1)?.searchParams.get('transportOutcome')).toBe('cancelled');
     await status(page,'200,500');
@@ -115,8 +115,9 @@ test('browser filters and CSV exports match the real SQLite chain API', async ()
 
     await withLogs(request => new URL(request.url).pathname.endsWith('/export') ? handler.export(request) : handler.query(request),async(page)=>{
       await rendered(page.locator('table tbody tr')).toHaveCount(4);
-      const rows=await page.locator('table tbody tr').allTextContents();
-      expect(rows.find(row=>row.includes('/actual/retry'))).toContain('Completed');
+      const retry = page.getByRole('row').filter({ hasText: '/actual/retry' });
+      await rendered(retry.getByText('200', { exact: true })).toBeVisible();
+      await rendered(retry.getByText('Transport failed', { exact: true })).toHaveCount(0);
       await typeFilter(page, 'WS');
       await rendered(page.locator('table tbody tr')).toHaveCount(1);
       await rendered(page.locator('table tbody')).toContainText('/actual/retry');

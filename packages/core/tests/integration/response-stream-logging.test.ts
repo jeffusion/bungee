@@ -6,6 +6,7 @@ import { afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import fs from 'fs';
 import path from 'path';
 import type { AppConfig, ModificationRules } from '@jeffusion/bungee-types';
+import { parseLogSse } from '../helpers/request-log';
 import type { ExpressionContext } from '../../src/expression-engine';
 
 
@@ -87,7 +88,7 @@ afterEach(async () => {
 
 describe('prepareResponse streamed logging', () => {
   test('body logging discards cancelled partial streams without blocking', async () => {
-    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages'), undefined, { bodyStorage });
+    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages'), undefined, { accessLogWriter, fileLogWriter, bodyStorage, bodyParser: () => parseLogSse });
     const steps = spyOn(reqLogger, 'addStep');
     const requestId = reqLogger.getRequestId();
     trackedRequestIds.push(requestId);
@@ -119,7 +120,7 @@ describe('prepareResponse streamed logging', () => {
 
   test('opaque SSE errors retain the HTTP-200 failure reason without forcing capture', async () => {
     for (const withPartialBody of [true, false]) {
-      const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages'), undefined, { bodyStorage });
+      const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages'), undefined, { accessLogWriter, fileLogWriter, bodyStorage });
       const requestId = reqLogger.getRequestId();
       trackedRequestIds.push(requestId);
       let sourceController!: ReadableStreamDefaultController<Uint8Array>;
@@ -150,7 +151,7 @@ describe('prepareResponse streamed logging', () => {
   });
 
   test('fills failure reasons on already persisted records without overwriting existing explanations', async () => {
-    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages'), undefined, { bodyStorage });
+    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages'), undefined, { accessLogWriter, fileLogWriter, bodyStorage });
     const requestId = reqLogger.getRequestId();
     trackedRequestIds.push(requestId);
     await reqLogger.complete(200, { errorMessage: 'Specific upstream error' });
@@ -161,7 +162,7 @@ describe('prepareResponse streamed logging', () => {
   });
 
   test('applies pending resp_body_id update when log entry is written later', async () => {
-    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages?stream=true', { method: 'POST' }), undefined, { bodyStorage });
+    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages?stream=true', { method: 'POST' }), undefined, { accessLogWriter, fileLogWriter, bodyStorage });
     const requestId = reqLogger.getRequestId();
     trackedRequestIds.push(requestId);
 
@@ -181,7 +182,7 @@ describe('prepareResponse streamed logging', () => {
   });
 
   test('opaque SSE beyond logging size remains byte-exact and reports incomplete', async () => {
-    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages?stream=true', { method: 'POST' }), undefined, { bodyStorage });
+    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages?stream=true', { method: 'POST' }), undefined, { accessLogWriter, fileLogWriter, bodyStorage, bodyParser: () => parseLogSse });
     const steps = spyOn(reqLogger, 'addStep');
     const requestId = reqLogger.getRequestId();
     trackedRequestIds.push(requestId);
@@ -255,7 +256,7 @@ describe('prepareResponse streamed logging', () => {
   });
 
   test('does not record streamed body when body logging is disabled', async () => {
-    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages?stream=true', { method: 'POST' }), undefined, { bodyStorage });
+    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages?stream=true', { method: 'POST' }), undefined, { accessLogWriter, fileLogWriter, bodyStorage, bodyParser: () => parseLogSse });
     const requestId = reqLogger.getRequestId();
     trackedRequestIds.push(requestId);
     enqueueAccessLog(requestId);
@@ -304,7 +305,7 @@ describe('prepareResponse streamed logging', () => {
   });
 
   test('writes the final protocol outcome and code to SQLite and file logs', async () => {
-    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages'), undefined, { bodyStorage });
+    const reqLogger = new RequestLogger(new Request('http://localhost/v1/messages'), undefined, { accessLogWriter, fileLogWriter, bodyStorage });
     const requestId = reqLogger.getRequestId();
     trackedRequestIds.push(requestId);
 

@@ -1,4 +1,5 @@
 import type { MasterStatsApi, MasterLoggingConfig } from './master-stats';
+import type { AccessLogEntry } from '../logger/access-log-writer';
 
 function headerEntries(headers:Headers):[string,string][] {const values:[string,string][]=[];headers.forEach((value,key)=>values.push([key,value]));return values;}
 export function resolveObservabilityWorkerUrl(moduleUrl: string | URL): URL {
@@ -119,4 +120,47 @@ export async function createAsyncMasterStats(path:string,options:{workerUrl?:str
 export async function migrateAccessDatabaseAsync(path:string,workerUrl=resolveObservabilityWorkerUrl(import.meta.url)):Promise<void> {
   const transport=new ObservationTransport(workerUrl);
   try {await transport.call('migrate',[path]);}finally{transport.terminate();}
+}
+
+/** Keep SQLite lock waits and file rotation off the public listener. */
+export async function createAsyncAccessLog(path: string, directory: string): Promise<{
+  write(entry: AccessLogEntry): void;
+  close(): Promise<void>;
+}> {
+  const transport = new ObservationTransport(resolveObservabilityWorkerUrl(import.meta.url));
+  try { await transport.call('openAccessLog', [path, directory]); }
+  catch (error) { transport.terminate(); throw error; }
+
+  const queue: AccessLogEntry[] = [];
+  let inFlight: Promise<void> | undefined;
+  let lost = 0;
+  let failure: unknown;
+  const flush = () => {
+    if (lost) { console.error('Ingress access log queue lost entries:', lost); lost = 0; }
+    if (!inFlight && queue.length && transport.healthy()) {
+      const batch = queue.splice(0, 256);
+      inFlight = transport.call<void>('writeAccessLog', [batch]).catch(error => {
+        failure = error;
+        console.error('Ingress access log delivery failed:', error);
+      }).finally(() => { inFlight = undefined; });
+    }
+    return inFlight;
+  };
+  const timer = setInterval(flush, 250);
+  timer.unref();
+  return {
+    write(entry) {
+      if (queue.length >= 4096 || !transport.healthy()) { lost++; return; }
+      queue.push(entry);
+      if (queue.length >= 256) void flush();
+    },
+    async close() {
+      clearInterval(timer);
+      try {
+        do { await flush(); } while (queue.length && transport.healthy());
+        await transport.close();
+        if (failure) throw failure;
+      } finally { transport.terminate(); }
+    },
+  };
 }

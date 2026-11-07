@@ -5,6 +5,7 @@ const { dataPlaneAccessDb } = dataPlaneRuntime;
 const { setWorkerAdmissionSession } = await import('../../../src/data-admission/worker');
 import { afterAll, afterEach, beforeAll, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { basename } from 'node:path';
+import { registerRequestLogs } from '../../helpers/request-log';
 import type { AppConfig } from '@jeffusion/bungee-types';
 
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../../helpers/test-budgets';
@@ -21,7 +22,10 @@ function logPhase(phase: string, startedAt: number, details?: string): void {
   console.log(`[bungee-test-phase] phase=${phase} elapsed_ms=${(performance.now() - startedAt).toFixed(1)}${suffix}`);
 }
 
-let handleRequest: typeof import('../../../src/worker/request/handler').handleRequest;
+const { handleRequest } = await import('../../../src/worker/request/handler');
+const { createGatewayHooks, runWithGatewayHooks } = await import('../../../src/gateway/runtime');
+const gatewayHooks = createGatewayHooks();
+registerRequestLogs(gatewayHooks);
 let accessLogWriter: typeof import('../../../src/logger/access-log-writer').accessLogWriter;
 const paths: string[] = [];
 
@@ -29,7 +33,6 @@ beforeAll(async () => {
   const startedAt = performance.now();
   logPhase('beforeAll:start', startedAt);
 
-  ({ handleRequest } = await import('../../../src/worker/request/handler'));
   ({ accessLogWriter } = await import('../../../src/logger/access-log-writer'));
   logPhase('beforeAll:done', startedAt);
 }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
@@ -65,7 +68,9 @@ async function request(
   init?: RequestInit,
   runtimeContext?: { servingRevision?: number },
 ): Promise<Record<string, unknown>[]> {
-  const response = await handleRequest(new Request(`http://localhost${path}`, init), config, runtimeContext);
+  const response = await runWithGatewayHooks(gatewayHooks, () => handleRequest(new Request(`http://localhost${path}`, init), config, {
+    ...runtimeContext, logging: { accessLogWriter },
+  }));
   await accessLogWriter.flush();
   expect(response.status).toBe(expectedStatus);
   if (expectedStatus === 401) expect(await response.json()).toEqual({ error: 'unauthorized' });

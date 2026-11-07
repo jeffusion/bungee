@@ -25,6 +25,7 @@ import {
   parseWorkerDescriptor, signWorkerDescriptor, type WorkerDescriptor, type WorkerDescriptorBody,
 } from '../../packages/core/src/supervision';
 import { probeProcessInstance } from '../../packages/core/src/master-runtime/process-identity';
+import { armProcessLifetimeGuard } from '../../packages/core/src/supervision/process-lifetime-guard';
 import { IngressControllerClient } from '../../packages/core/src/ingress/supervision-http';
 import { readShutdownDiagnostic, SHUTDOWN_DIAGNOSTIC_MESSAGE, type ShutdownDiagnostic } from '../../packages/core/src/master-runtime/shutdown-diagnostics';
 import { readWorkerInitializationDiagnostic, WORKER_INITIALIZATION_DIAGNOSTIC_MESSAGE, type WorkerInitializationDiagnostic } from '../../packages/core/src/master-runtime/worker-initialization-diagnostics';
@@ -1648,6 +1649,90 @@ async function cleanupDirect(children: readonly ChildProcess[], upstream: Return
   try { releaseTestPortBlock(lease.block); } catch (error) { errors.push(error); }
   if (errors.length > 0) throw new AggregateError(errors, 'canonical test cleanup failed');
 }
+
+test('cold startup serves after an exited publication worker left signed failed cleanup', async () => {
+  const root = makeCanonicalTempDir('bungee-canonical-failed-cleanup', { daemonSafe: true });
+  const { lease, upstream, managedUpstream, fixture, daemon } = await createUnownedCoreSetup(root, reservePortBlock, () => 'recovered');
+  const identity = { master_generation: randomUUID(), worker_instance_id: randomUUID(), worker_slot: 1 };
+  const workersDirectory = join(fixture.root, 'data', 'runtime', 'workers');
+  const publication = { mutation_id: randomUUID(), attempt_no: 1, drain_recovery_generation: 0 };
+  const descriptorPath = join(workersDirectory, `${identity.worker_instance_id}.json`);
+  const rootKey = new Uint8Array(32).fill(9);
+  const bootNonce = randomUUID();
+  const credential = deriveWorkerSupervisionCredential(deriveWorkerSupervisionSeed(rootKey,
+    identity.master_generation, identity.worker_instance_id, identity.worker_slot), bootNonce);
+  try {
+    const guard = armProcessLifetimeGuard({ directory: join(workersDirectory, 'guards'), processInstanceId: identity.worker_instance_id });
+    try {
+      const repository = ConfigRepository.open(fixture.dbPath);
+      try {
+        const id = publication.mutation_id;
+        const catalog = repository.getSnapshot().content_hash;
+        repository.commit({ mutation_id: id, expected_revision: 1, kind: 'config', created_at: 1,
+          target_worker_slots: [1], aggregate: aggregate(upstream.port!, '/proxy') });
+        repository.claimPublicationTarget(catalog, 2);
+        repository.beginPublication(id, 3);
+        repository.beginWorkerAttempt(id, 1, 0, 'initial', 4);
+        repository.registerWorkerLaunch(identity, guard.facts, { mutation_id: id, worker_slot: 1, attempt_no: 1 }, 4);
+        repository.recordWorkerResult(id, 1, { kind: 'converged', attempt_no: 1, applied_revision: 2 }, 5);
+        repository.markDraining(id, 6);
+        repository.recordWorkerLaunchAdmitted(identity.worker_instance_id, 6);
+        repository.finalizePublication(id, { outcome: 'converged', old_workers_exited: true }, 7);
+        repository.recordWorkerLaunchExit(identity.worker_instance_id, { kind: 'exited', cleanup: 'unknown' }, 8);
+        const target = { revision: 2, content_hash: repository.getSnapshot().content_hash, plugin_catalog_hash: catalog };
+        const worker = { ...identity, ...target, boot_nonce: bootNonce, pid: process.pid, private_port: lease.base + 1 };
+        await writeFile(descriptorPath, JSON.stringify(signWorkerDescriptor({
+          schema: 'bungee-worker-descriptor-v1', role: 'worker', ...worker, lifetime_guard: { ...guard.facts, held: true },
+          control_port: lease.base + 2, master_control_port: lease.base + 3, phase: 'stopped', frozen: true, started_at: 1,
+          evidence: { kind: 'ready', message: { ...worker, status: 'config-ready', publication,
+            plugin_runtime_generation: 1, required_plugins: [], serving_plugins: [] } },
+          cleanup: { ...target, cleanup_state: 'failed', publication: { ...publication } },
+        }, credential.process_key)));
+        // Recreate the schema prefix that originally wrote this launch.
+        repository.getDatabase().run('DROP TABLE configuration_worker_launch_capacity_reclaims');
+        repository.getDatabase().run('DELETE FROM schema_migrations WHERE version=10');
+      } finally { repository.close(); }
+    } finally { guard.closeAfterChildExit(); }
+
+    await daemon.manager.start({ workers: '2', port: String(lease.base + 1) });
+    await waitUntil(async (signal) => {
+      const health = await fetch(`http://127.0.0.1:${lease.base}/health/data`, { signal });
+      return health.status === 200;
+    }, 'data health did not recover from a historical cleanup failure');
+    const workers = await runtimeWorkers(lease.base);
+    expect(workers).toHaveLength(2);
+    expect(workers.every(worker => worker.worker_instance_id !== identity.worker_instance_id)).toBeTrue();
+    const response = await fetch(`http://127.0.0.1:${lease.base + 1}/proxy`);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('recovered');
+    const nextMutation = randomUUID();
+    expect((await publish(lease.base, upstream.port!, nextMutation, 2, '/after-recovery')).status).toBe(202);
+    await awaitConverged(lease.base, nextMutation);
+    expect(await (await fetch(`http://127.0.0.1:${lease.base + 1}/after-recovery`)).text()).toBe('recovered');
+    const database = new Database(fixture.dbPath, { readonly: true, strict: true });
+    try {
+      expect(database.query('SELECT kind FROM configuration_worker_launch_facts WHERE worker_instance_id=? ORDER BY kind').all(identity.worker_instance_id))
+        .toEqual([{ kind: 'admitted' }, { kind: 'exited' }]);
+      expect(database.query('SELECT worker_instance_id FROM configuration_worker_launch_capacity_reclaims').all())
+        .toEqual([{ worker_instance_id: identity.worker_instance_id }]);
+    } finally { database.close(); }
+    const stopped = parseWorkerDescriptor(JSON.parse(await readFile(descriptorPath, 'utf8')), credential);
+    expect(stopped.cleanup?.cleanup_state).toBe('failed');
+    if (stopped.lifetime_guard === undefined) throw new Error('historical guard is missing from fixture');
+    await daemon.manager.stop();
+    await closePorts(lease);
+    // The original lock cannot be proved again, as with a change of host boot identity.
+    await rm(stopped.lifetime_guard.path);
+    await daemon.manager.start({ workers: '2', port: String(lease.base + 1) });
+    await waitUntil(async (signal) => (await fetch(`http://127.0.0.1:${lease.base}/health/data`, { signal })).status === 200,
+      'data health did not recover from the durable reclaim without the original guard');
+    expect(await (await fetch(`http://127.0.0.1:${lease.base + 1}/after-recovery`)).text()).toBe('recovered');
+    expect(parseWorkerDescriptor(JSON.parse(await readFile(descriptorPath, 'utf8')), credential).cleanup?.cleanup_state).toBe('failed');
+  } finally {
+    try { await daemon.manager.stop(); }
+    finally { await cleanupDirect([], upstream, root, lease, managedUpstream); }
+  }
+}, { timeout: 2 * FIXTURE_STARTUP_WAIT_MS + PUBLICATION_WAIT_MS + 30_000 });
 
 describe.serial('A core lifecycle', () => {
   let state: { root: string; lease: PortLease; fixture: Fixture; upstream: ReturnType<typeof Bun.serve>; managedUpstream: ReturnType<typeof Bun.serve>; daemon: DaemonHarness; polling: AbortController; first?: ChildProcess; second?: ChildProcess; competitor?: ChildProcess; firstController?: { readonly instanceId: string; readonly epoch: number; readonly controllerId: string }; marker: string } | undefined;

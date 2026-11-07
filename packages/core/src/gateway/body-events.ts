@@ -39,57 +39,70 @@ export class BodySSEFramer {
   }
 }
 interface SharedFrame {event:BodyEvent;bytes:number;lease:BodyBufferLease;refs:number}
-interface Subscriber {queue:SharedFrame[];held:number;current?:SharedFrame;wake?:()=>void;error?:unknown;done:boolean;consumer?:BodyConsumer}
+interface Subscriber {queue:SharedFrame[];held:number;current?:SharedFrame;wake?:()=>void;error?:unknown;done:boolean;consumer?:BodyConsumer;drainOnCancel:boolean}
 /** A single decoder/framer fans out borrowed frame references to isolated bounded subscribers. */
 export class BodyEventSession {
   private chunks:Uint8Array[]=[];private wireLease=new BodyBufferLease(true);private wake?:()=>void;private eof=false;private ended=false;private error?:unknown;
   private subscribers=new Set<Subscriber>();private work:Promise<void>;private decodedStream?:ReturnType<typeof decodeStream>;private pendingLease?:BodyBufferLease;
-  constructor(readonly coding:string,public maxBytes:number,readonly signal?:AbortSignal,readonly decodedChunk?:(chunk:Uint8Array)=>void,readonly decodedEnd?:()=>void,readonly captureFrame?:(event:BodyEvent,bytes:number,retain:()=>()=>void)=>void) {
+  private readonly decodeAbort=new AbortController();private cancelled=false;
+  constructor(readonly coding:string,public maxBytes:number,readonly decodedChunk?:(chunk:Uint8Array)=>void,readonly decodedEnd?:()=>void) {
     const input=new ReadableStream<Uint8Array>({pull:async controller=>{
       while(!this.chunks.length&&!this.eof&&!this.ended)await new Promise<void>(resolve=>{this.wake=resolve;});this.wake=undefined;
       const chunk=this.chunks.shift();if(chunk){this.wireLease.release(chunk.byteLength);controller.enqueue(chunk);}else controller.close();
     }},{highWaterMark:0});
     this.work=(async()=>{let stream:ReturnType<typeof decodeStream>|undefined;let reader:ReadableStreamDefaultReader<Uint8Array>|undefined;const pending=new BodyBufferLease(true);this.pendingLease=pending;let pendingBytes=0;
-      try{await Promise.resolve();stream=decodeStream(input,coding,Number.MAX_SAFE_INTEGER,signal,![...this.subscribers].some(s=>s.consumer?.mandatory!==false));this.decodedStream=stream;if([...this.subscribers].some(s=>s.consumer?.mandatory!==false)){this.wireLease.promote();pending.promote();}reader=stream.getReader();bodyMetrics.sseParses++;
+      try{await Promise.resolve();stream=decodeStream(input,coding,Number.MAX_SAFE_INTEGER,this.decodeAbort.signal,![...this.subscribers].some(s=>s.consumer?.mandatory!==false));this.decodedStream=stream;if([...this.subscribers].some(s=>s.consumer?.mandatory!==false)){this.wireLease.promote();pending.promote();}reader=stream.getReader();bodyMetrics.sseParses++;
         const parser=new BodySSEFramer(()=>this.maxBytes,(event,bytes)=>this.publish(event,bytes));
         while(this.subscribers.size || !this.ended){const part=await reader.read();if(part.done)break;
-          this.decodedChunk?.(part.value);pending.add(part.value.byteLength*6);pendingBytes+=part.value.byteLength*6;parser.feed(part.value);
+          if(!this.cancelled)this.decodedChunk?.(part.value);pending.add(part.value.byteLength*6);pendingBytes+=part.value.byteLength*6;parser.feed(part.value);
           // The framer bounds each frame. Keep a conservative one-frame lease between pulls.
           const release=Math.max(0,pendingBytes-parser.retainedBytes);pending.release(release);pendingBytes-=release;
-        }this.decodedEnd?.();parser.finish(true);
-      }catch(error){this.error=error;}
+        }if(!this.cancelled)this.decodedEnd?.();parser.finish(!this.cancelled);
+      }catch(error){this.error??=error;}
       finally{pending.dispose();stream?.dispose();await reader?.cancel().catch(()=>undefined);this.ended=true;this.wireLease.dispose();this.chunks=[];for(const sub of this.subscribers){sub.done=true;sub.error??=this.error;sub.wake?.();}}
     })();void this.work.catch(()=>undefined);
   }
   get completion():Promise<void>{return this.work;}
   push(chunk:Uint8Array):void {
-    if(this.ended||!this.subscribers.size)return;
+    if(this.ended||this.cancelled||!this.subscribers.size)return;
     try{this.wireLease.add(chunk.byteLength);this.chunks.push(new Uint8Array(chunk));this.wake?.();}
     catch(error){this.error=error;this.end();}
   }
   end(error?:unknown):void {this.error??=error;this.eof=true;this.wake?.();}
+  cancel(error:unknown):void {
+    this.cancelled=true;this.end(error);
+    // Only the log observer may finish reading the bounded backlog after wire cancellation.
+    for(const sub of this.subscribers)if(!sub.drainOnCancel){
+      sub.done=true;sub.error??=error;this.clear(sub);this.subscribers.delete(sub);
+    }
+    this.stopIfIdle();
+  }
+  private stopIfIdle():void {
+    if(this.subscribers.size)return;
+    this.end();
+    if(this.cancelled)this.decodeAbort.abort(this.error);
+  }
   private release(frame:SharedFrame):void {if(--frame.refs===0)frame.lease.dispose();}
   private clear(sub:Subscriber):void {for(const frame of sub.queue)this.release(frame);sub.queue=[];sub.held=0;if(sub.current){this.release(sub.current);sub.current=undefined;}sub.wake?.();}
   private publish(event:BodyEvent,bytes:number):void {
     const allocation=new BodyBufferLease(![...this.subscribers].some(s=>s.consumer?.mandatory!==false));allocation.add(128+bytes*4);
     const frame:SharedFrame={event,bytes,lease:allocation,refs:0};
-    this.captureFrame?.(event,bytes,()=>{frame.refs++;return()=>this.release(frame);});
     for(const sub of this.subscribers){if(sub.done)continue;
       if((sub.consumer?.mandatory===false && sub.queue.length>=(sub.consumer?.backlogEvents??bodyResources.observerBacklogEvents)) || sub.held+bytes>(sub.consumer?.backlogBytes??(sub.consumer?.mandatory===false?bodyResources.observerBacklogBytes:bodyResources.workerMemoryBytes))){sub.error=new BodyProcessingError(503,'body_observer_backlog');sub.done=true;this.clear(sub);this.subscribers.delete(sub);continue;}
       frame.refs++;sub.queue.push(frame);sub.held+=bytes;sub.wake?.();
-    }if(!frame.refs)allocation.dispose();if(!this.subscribers.size)this.end();
+    }if(!frame.refs)allocation.dispose();this.stopIfIdle();
   }
-  events(consumer?:BodyConsumer):AsyncIterable<BodyEvent> {
-    const sub:Subscriber={queue:[],held:0,done:this.ended,error:this.error,consumer};
+  events(consumer?:BodyConsumer,drainOnCancel=false):AsyncIterable<BodyEvent> {
+    const sub:Subscriber={queue:[],held:0,done:this.ended||this.cancelled,error:this.error,consumer,drainOnCancel};
     if(consumer?.mandatory!==false)try{this.decodedStream?.promote?.();this.wireLease.promote();this.pendingLease?.promote();for(const sub of this.subscribers)for(const frame of sub.queue)frame.lease.promote();}catch(error){sub.done=true;sub.error=error;}
     if(!sub.done)this.subscribers.add(sub);
-    const abort=()=>{sub.error=new BodyProcessingError(408,'body_consumer_cancelled');sub.done=true;this.clear(sub);this.subscribers.delete(sub);if(!this.subscribers.size)this.end();};
+    const abort=()=>{sub.error=new BodyProcessingError(408,'body_consumer_cancelled');sub.done=true;this.clear(sub);this.subscribers.delete(sub);this.stopIfIdle();};
     consumer?.signal?.addEventListener('abort',abort,{once:true});if(consumer?.signal?.aborted)abort();
     const session=this;
     return {async *[Symbol.asyncIterator](){try{while(true){
       if(sub.current){session.release(sub.current);sub.current=undefined;}
       while(!sub.queue.length&&!sub.done)await new Promise<void>(resolve=>{sub.wake=resolve;});sub.wake=undefined;
-      if(sub.error)throw sub.error;const frame=sub.queue.shift();if(!frame)break;sub.held-=frame.bytes;sub.current=frame;yield frame.event;
-    }}finally{session.clear(sub);session.subscribers.delete(sub);consumer?.signal?.removeEventListener('abort',abort);if(!session.subscribers.size)session.end();}}};
+      if(sub.error&&(!sub.drainOnCancel||!sub.queue.length))throw sub.error;const frame=sub.queue.shift();if(!frame)break;sub.held-=frame.bytes;sub.current=frame;yield frame.event;
+    }}finally{session.clear(sub);session.subscribers.delete(sub);consumer?.signal?.removeEventListener('abort',abort);session.stopIfIdle();}}};
   }
 }

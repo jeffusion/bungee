@@ -3,7 +3,11 @@ import type { WebSocketObservationEvent, WebSocketSessionContext } from '../gate
 
 type Detail = WebSocketObservationEvent extends infer E ? E extends WebSocketObservationEvent ? Omit<E, keyof WebSocketSessionContext | 'isActive' | 'observedAtMonotonicMs'> : never : never;
 type TimedDetail = Detail & { readonly observedAtMonotonicMs: number };
-type Owner = { pluginName: string; hooks: PluginHooks['onWebSocketObservation'] };
+type Owner = {
+  pluginName: string;
+  hooks: Pick<PluginHooks['onWebSocketObservation'], 'hasCallbacks' | 'promise'>;
+  onIncomplete?: () => void;
+};
 const MAX_BYTES = 8 * 1024 * 1024;
 const MAX_PROCESS_BYTES = 64 * 1024 * 1024;
 const MAX_MESSAGES = 64;
@@ -44,6 +48,7 @@ class Branch {
   private fail(reason: Extract<Detail,{phase:'incomplete'}>['reason']): void {
     if (this.disabled) return;
     this.disabled = true;
+    this.owner.onIncomplete?.();
     const terminal = this.queue.find(detail=>detail.phase==='close');
     this.drop();
     this.queue.push({phase:'incomplete',reason,observedAtMonotonicMs:performance.now()});

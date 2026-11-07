@@ -36,6 +36,7 @@ import type {
   PluginScopeInfo,
 } from './hooks';
 import { createPluginHooks } from './hooks';
+import { SyncBailHook } from './hooks/impl';
 import type { Endpoint, PluginConfig, Service, ServiceReference } from '@jeffusion/bungee-types';
 import type { PluginStorage, PluginMetadata, PluginConfigField, PluginTranslations } from './plugin.types';
 import { getPluginContextManager, isPluginContextManagerInitialized } from './plugin-context-manager';
@@ -1211,6 +1212,12 @@ export class ScopedPluginRegistry {
     return routePhase.handlers.length > 0 ? routePhase : null;
   }
 
+  /** Request-log extensions belong to the entry route binding only. */
+  getRequestLogHooks(routeId: string): PluginHooks | undefined {
+    if (!this.precompiled) this.precompileAllHooks();
+    return this.routePrecompiled.get(routeId)?.hooks;
+  }
+
   /**
    * 预编译所有 Hooks
    *
@@ -1306,6 +1313,7 @@ export class ScopedPluginRegistry {
     const handlers: PluginHandler[] = [];
     if (scope === 'global') registerGatewayBuiltins(hooks);
     const registeredNames = new Set<string>();
+    const unusedCollector = new SyncBailHook<[], true>('onRequestLog');
 
     for (const instance of instances) {
       if (deduplicateByName && registeredNames.has(instance.handler.pluginName)) {
@@ -1314,6 +1322,8 @@ export class ScopedPluginRegistry {
       registeredNames.add(instance.handler.pluginName);
       const ownerKey = `${instance.handler.pluginName}\0${getScopeKey(instance.scope)}`;
       const registered = {...hooks};
+      const collector = scope === 'global' && this.dependencies?.hasCapability(instance.handler.pluginName, 'requestLogging');
+      if (!collector) registered.onRequestLog = unusedCollector;
       // Response RPCs reuse the host-authenticated dispatch scope and the
       // existing request lease; a scoped owner cannot issue background peer RPC.
       for (const name of ['onResponse', 'onRawResponse'] as const) {
@@ -1332,6 +1342,9 @@ export class ScopedPluginRegistry {
         }});
       }
       instance.handler.register(registered);
+      if (collector && (hooks.onRequestLog.getStats().tapCount !== 1 || hooks.onRequestLog.call() !== true)) {
+        throw new Error('Exactly one active request logging provider must register onRequestLog');
+      }
       handlers.push(instance.handler);
     }
 

@@ -20,10 +20,11 @@ test('secret-as-key, dotted keys, numeric secrets and unknown subtrees never rea
   for (const value of ['secret-as-key-marker', 'tokens.enabled', '8675309', '987654321', 'nested.secret-key', 'hidden-value-marker']) expect(output).not.toContain(value);
 });
 
-test('review hides out-of-range body size values', () => {
+test('review shows body sizes beyond 5 MiB and hides unsafe byte counts', () => {
   const before = base(), after = structuredClone(before);
-  after.logical_configuration.logging.body.max_size = 5 * 1024 * 1024;
-  after.logical_configuration.logging.body.max_size++;
+  after.logical_configuration.logging.body.max_size = 6 * 1024 * 1024;
+  expect(configurationDiff(before, after).find(row => row.label === 'bodyMax')?.after).toBe('6144 KiB');
+  after.logical_configuration.logging.body.max_size = Number.MAX_SAFE_INTEGER + 1;
   expect(configurationDiff(before, after).find(row => row.label === 'bodyMax')?.after).toBe('hidden');
 });
 
@@ -50,8 +51,8 @@ test('large, deeply nested or excessive-item files are rejected before preview',
 test('clearing an optional logging field deletes it and preserves display defaults', () => {
   const next = withLoggingBody({ body: { enabled: true, max_size: 51200 } }, { max_size: undefined });
   expect(Object.hasOwn(next.body, 'max_size')).toBe(false);
-  expect(resolveLoggingBody(next).max_size).toBe(5120);
-  expect(resolveLoggingBody({ body: { enabled: true, max_size: undefined, retention_days: undefined } })).toEqual({ enabled: true, max_size: 5120, retention_days: 1 });
+  expect(resolveLoggingBody(next).max_size).toBe(64 * 1024);
+  expect(resolveLoggingBody({ body: { enabled: true, max_size: undefined, retention_days: undefined } })).toEqual({ enabled: true, max_size: 64 * 1024, retention_days: 1 });
 });
 
 test('resource removal and modification follow identity rather than shifted indices', () => {

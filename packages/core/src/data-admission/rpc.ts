@@ -6,6 +6,7 @@ import { DataAdmissionError, type AdmissionGrant, type DataAdmissionHost } from 
 
 export const PLUGIN_STORAGE_RPC_PATH = '/__bungee/internal/plugin-storage/v1';
 export const DATA_ADMISSION_RPC_PATH = '/__bungee/internal/data-admission/v1';
+export const REQUEST_LOG_RPC_PATH = '/__bungee/internal/request-log/v1';
 const MAX_BYTES = 262_144;
 const digest = (value: unknown) => `rlb-v1:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
 function mac(key: Uint8Array, value: unknown): string { return createHmac('sha256', key).update('bungee-data-rpc/v1\0').update(JSON.stringify(value)).digest('hex'); }

@@ -1,3 +1,4 @@
+import { registerRequestLogs } from '../helpers/request-log';
 import { afterAll as afterDataPlaneTests } from 'bun:test';
 import { createDataPlaneRuntime } from '../helpers/data-plane-runtime';
 const dataPlaneRuntime = await createDataPlaneRuntime();
@@ -54,6 +55,7 @@ test('OAuth HTTP and SSE diagnostics reach clients and durable logs with indepen
   listener.start();
   try {
     await registry.createInstance({ type: 'upstream', routeId, upstreamId: 'primary' }, { name: 'chatgpt-oauth', options: { accountRef: 'diagnostic-account' } } as any);
+    registerRequestLogs(registry.getGatewayHooks(), { sse: true });
     setScopedPluginRegistry(registry);
     for (const scenario of [
       { httpError: false, stream: true, failover: true },
@@ -77,7 +79,7 @@ test('OAuth HTTP and SSE diagnostics reach clients and durable logs with indepen
       const { flushBodyCaptures } = await import('../../src/logger/body-capture');
       await flushBodyCaptures();
       await accessLogWriter.flush();
-      const row = accessLogWriter.getDatabase().query('SELECT * FROM access_logs WHERE path=? ORDER BY id DESC LIMIT 1').get(routeId) as Record<string, any>;
+      const row = accessLogWriter.getDatabase().query("SELECT * FROM access_logs WHERE path=? AND record_kind IS NULL ORDER BY id DESC LIMIT 1").get(routeId) as Record<string, any>;
       expect(row).toMatchObject({ status: expectedStatus, success: 0, protocol_outcome: 'failed', protocol_code: httpError ? 'upstream_http_error' : 'failed' });
       expect(row.error_message).toContain(code);
       expect(row.error_message).toContain('Retry later');

@@ -14,7 +14,8 @@ async function sample(size:number,coding:string,concurrency=1,mixed=false){
     input=Array.from({length:size-12},()=>{state^=state<<13;state^=state>>>17;state^=state<<5;return alphabet[(state>>>0)%alphabet.length];}).join('');}
   const text=JSON.stringify({input});const raw=encoder.encode(text);const wire=new Uint8Array(coding==='gzip'?gzipSync(raw):coding==='zstd'?zstdCompressSync(raw):raw);
   await Promise.all(Array.from({length:concurrency},async()=>{
-    const capture=captureBody(new Response(wire).body!,1024*1024,coding,async()=>{saved++;},reason=>incomplete.push(reason),undefined,'application/json');
+    const capture=captureBody(new Response(wire).body!,1024*1024,coding,
+      async (body, consumer) => JSON.stringify(await body.json(consumer)), async()=>{saved++;},reason=>incomplete.push(reason));
     const source=new BodySource(capture.body,limit,coding);
     try{
       await source.handle().json({id:'mandatory',mandatory:true});

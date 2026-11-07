@@ -35,7 +35,7 @@ export function menuCatalog(records: readonly PluginManifestRecord[], snapshot: 
       source: 'plugin' as const, pluginName: record.name, defaultIcon: defaultMenuIcon(nav.icon ?? record.manifest.metadata?.icon), available: active.has(record.name),
     }));
   });
-  const catalog = [...BUILTIN_MENU_PAGES.slice(0,4), ...plugins, ...BUILTIN_MENU_PAGES.slice(4)];
+  const catalog = [...BUILTIN_MENU_PAGES.slice(0,3), ...plugins, ...BUILTIN_MENU_PAGES.slice(3)];
   if (catalog.length > 512 || new Set(catalog.map(page => page.id)).size !== catalog.length
     || catalog.some(page => !isMenuPageId(page.id)) || Buffer.byteLength(JSON.stringify(catalog)) > MAX_MENU_LAYOUT_BYTES) {
     throw new InvalidMenuCatalogError('menu catalog exceeds limits or contains duplicate pages');

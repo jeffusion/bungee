@@ -19,7 +19,7 @@ const CONTRIBUTION_FIELDS = new Set([
 const NATIVE_WIDGET_FIELDS = new Set(['id', 'title', 'size', 'component', 'props', 'presentation']);
 const API_FIELDS = new Set(['path', 'methods', 'handler', 'execution', 'capability', 'methodCapabilities']);
 const WIDGET_FIELDS = new Set(['title', 'path', 'size']);
-const NAVIGATION_FIELDS = new Set(['label', 'path', 'icon', 'target', 'component']);
+const NAVIGATION_FIELDS = new Set(['label', 'path', 'icon', 'target', 'component', 'layout']);
 const COMMAND_FIELDS = new Set(['command', 'title', 'category', 'icon']);
 const COMPONENT_FIELDS = new Set(['name', 'entry']);
 const METADATA_FIELDS = new Set(['name', 'description', 'icon']);
@@ -236,11 +236,16 @@ export function parseContributions(value: PluginConfigValue | undefined, path: s
   const navigation = objects(object.navigation, `${path}.navigation`, (item, itemPath) => {
     const navigationItem = record(item, itemPath);
     exact(navigationItem, NAVIGATION_FIELDS, itemPath);
+    if (navigationItem.layout !== undefined && navigationItem.component === undefined) {
+      throw new PluginManifestCatalogError(`${itemPath}.layout`, 'requires a native component');
+    }
     return {
       label: string(navigationItem.label, `${itemPath}.label`),
       path: internalRoute(string(navigationItem.path, `${itemPath}.path`), `${itemPath}.path`),
       ...optionalProperty('component', navigationItem.component === undefined ? undefined
         : safeIdentifier(string(navigationItem.component, `${itemPath}.component`), `${itemPath}.component`)),
+      ...optionalProperty('layout', navigationItem.layout === undefined ? undefined
+        : literal(navigationItem.layout, ['standalone'] as const, `${itemPath}.layout`)),
       ...optionalProperty('icon', optionalString(navigationItem.icon, `${itemPath}.icon`)),
       ...optionalProperty('target', navigationItem.target === undefined ? undefined
         : literal(navigationItem.target, ['sidebar', 'header'] as const, `${itemPath}.target`)),

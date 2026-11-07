@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -163,7 +163,14 @@ describe('AccessLogWriter', () => {
     try {
       expect((await new MigrationManager(dbPath).migrate()).success).toBeTrue();
       writer = new AccessLogWriter(dbPath);
-      writer.write({ requestId: 'retry', timestamp: Date.now(), method: 'GET', path: '/retry', status: 200, duration: 1 });
+      const operation = {
+        requestId: 'retry', timestamp: Date.now(), method: 'response.create', path: '/retry', status: 0, duration: 1,
+        recordKind: 'operation', protocolOutcome: 'completed', replacePendingTransport: true,
+      } as const;
+      writer.write(operation);
+      await writer.flush();
+      const processingSteps = [{ step: 'body_logging_incomplete', timestamp: Date.now(), detail: { direction: 'response', reason: 'size_limit' } }];
+      writer.write({ ...operation, originalReqBodyId: 'saved-client-request', processingSteps });
       const db = writer.getDatabase();
       const originalRun = (db as unknown as { run: (...args: any[]) => unknown }).run.bind(db);
       let fail = true;
@@ -183,17 +190,21 @@ describe('AccessLogWriter', () => {
       }
       expect(flushError).toBeInstanceOf(Error);
       expect((flushError as Error).message).toContain('database is locked');
+      const result = writer.getDatabase().query<{
+        protocol_outcome: string; original_req_body_id: string | null; processing_steps: string | null;
+      }, [string]>('SELECT protocol_outcome, original_req_body_id, processing_steps FROM access_logs WHERE request_id = ?');
+      expect(result.get('retry')).toMatchObject({ protocol_outcome: 'completed', original_req_body_id: null });
       await writer.flush();
-      expect(writer.getDatabase().query<{ readonly count: number }, [string]>(
-        'SELECT COUNT(*) AS count FROM access_logs WHERE request_id = ?',
-      ).get('retry')?.count).toBe(1);
+      expect(result.get('retry')).toEqual({
+        protocol_outcome: 'completed', original_req_body_id: 'saved-client-request', processing_steps: JSON.stringify(processingSteps),
+      });
     } finally {
       if (writer !== null) await writer.close();
       await rm(root, { recursive: true, force: true });
     }
   }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
-  test('reports close failure instead of dropping an unflushed queue', async () => {
+  test('reports a failed final flush and releases the database connection', async () => {
     const root = makeCanonicalTempDir('bungee-access-writer');
     const dbPath = join(root, 'access.db');
     let writer: AccessLogWriter | null = null;
@@ -212,17 +223,13 @@ describe('AccessLogWriter', () => {
         return originalRun(...args);
       };
 
-      let closeError: unknown;
+      const errors = spyOn(console, 'error').mockImplementation(() => {});
       try {
         await writer.close();
-      } catch (error) {
-        closeError = error;
-      }
-      expect(closeError).toBeInstanceOf(Error);
-      expect((closeError as Error).message).toContain('database is locked');
-      await writer.flush();
-      await writer.close();
-      writer = null;
+        writer = null;
+        expect(errors).toHaveBeenCalledWith('Failed to flush access logs during close:', expect.any(Error));
+        expect(() => db.query('SELECT 1').get()).toThrow();
+      } finally { errors.mockRestore(); }
     } finally {
       if (writer !== null) await writer.close();
       await rm(root, { recursive: true, force: true });

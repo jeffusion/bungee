@@ -34,6 +34,7 @@ import {
 import { OPERATION_SELECT, operationFromRow, type OperationRow, readOperationWorkers } from './operation-records';
 import { prepareCommitCommand } from './prepared-command';
 import { readRepositorySnapshot, verifyRepositoryIntegrity } from './repository-snapshot';
+import { applyRequestLogsDefault, settleRequestLogsDefault } from './request-logs-default';
 import { appendServingSnapshot, getServingSnapshot } from './serving-snapshot';
 import {
   claimRecoveryAttempt,
@@ -91,6 +92,7 @@ import {
   readWorkerLaunch,
   readWorkerLaunchAllocationFacts,
   recordWorkerLaunchAdmitted,
+  recordWorkerLaunchCapacityReclaimed,
   recordWorkerLaunchExit,
   registerWorkerLaunch,
   fenceWorkerLaunchNotStarted,
@@ -368,11 +370,18 @@ export class ConfigRepository {
     return this.commitPrepared(prepareCommitCommand(command, this.options.compileOptions));
   }
 
+  applyPendingRequestLogsDefault(targetWorkerSlots: readonly number[]): ControlProjection | null {
+    const applied = this.mutationTransaction(() => applyRequestLogsDefault(this.db, this.options, targetWorkerSlots));
+    return applied ? this.getControlProjection() : null;
+  }
+
   /** Executes a main-thread compiled command in the exclusive storage thread. */
   commitPrepared(prepared: PreparedCommitCommand): CommitConfigurationResult {
     try {
       const decision = this.mutationTransaction(() => {
         const result = commitTransaction(this.db, prepared, this.options, this.snapshot);
+        // A committed aggregate explicitly selects plugins, including an empty imported list.
+        if (result.kind === 'committed') settleRequestLogsDefault(this.db, this.options, result.operation.committed_revision);
         readManagementProtection(this.db);
         return result;
       });
@@ -556,6 +565,11 @@ export class ConfigRepository {
   ): WorkerLaunch {
     return runRepositoryAction(() => this.mutationTransaction(() =>
       recordWorkerLaunchExit(this.db, workerInstanceId, evidence, updatedAt)));
+  }
+
+  recordWorkerLaunchCapacityReclaimed(workerInstanceId: string, guard: ProcessLifetimeGuardFacts, updatedAt: number): void {
+    return runRepositoryAction(() => this.mutationTransaction(() =>
+      recordWorkerLaunchCapacityReclaimed(this.db, workerInstanceId, guard, updatedAt)));
   }
 
   getWorkerLaunch(workerInstanceId: string): WorkerLaunch | null {

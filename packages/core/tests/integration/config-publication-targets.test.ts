@@ -770,6 +770,40 @@ describe('worker launch storage', () => {
     expect(() => db.run(`UPDATE configuration_worker_launch_facts SET recorded_at=recorded_at+1`)).toThrow();
     expect(() => db.run('DELETE FROM configuration_worker_launch_facts')).toThrow();
   });
+
+  test('capacity reclaim requires an admitted exit and remains distinct from attempt settlement', () => {
+    const { repository } = open();
+    commit(repository, 'capacity-r2', 1);
+    claim(repository);
+    repository.beginPublication('capacity-r2', CREATED_AT + 1);
+    repository.beginWorkerAttempt('capacity-r2', 0, 0, 'initial', CREATED_AT + 2);
+    const worker = identity('a4');
+    const workerId = worker.worker_instance_id;
+    const originalGuard = guard(workerId, 'a5');
+    const attempt = allocation('capacity-r2');
+    repository.registerWorkerLaunch(worker, originalGuard, attempt, CREATED_AT + 3);
+    const db = repository.getDatabase();
+    const save = (when: number) => repository.recordWorkerLaunchCapacityReclaimed(workerId, originalGuard, when);
+    expect(() => save(CREATED_AT + 3)).toThrow(ConfigRepositoryError);
+    repository.recordWorkerLaunchAdmitted(workerId, CREATED_AT + 4);
+    expect(() => save(CREATED_AT + 4)).toThrow(ConfigRepositoryError);
+    expect(() => db.run('INSERT INTO configuration_worker_launch_capacity_reclaims VALUES (?,?)', [workerId, CREATED_AT + 4])).toThrow();
+    repository.recordWorkerLaunchExit(workerId, { kind: 'exited', cleanup: 'unknown' }, CREATED_AT + 5);
+    expect(() => save(CREATED_AT + 4)).toThrow(ConfigRepositoryError);
+    expect(() => repository.recordWorkerLaunchCapacityReclaimed(workerId, guard(workerId, 'a6'), CREATED_AT + 5)).toThrow(ConfigRepositoryError);
+
+    save(CREATED_AT + 6);
+    save(CREATED_AT + 7);
+    expect(repository.getWorkerLaunchInventory()).toMatchObject([{ kind: 'launch', launch: { capacity_reclaimed: true, cleanup_released: false } }]);
+    expect(repository.getWorkerLaunchAllocationFacts(attempt)).toMatchObject({ settled: false, cleanup_released_at: null });
+    expect(() => repository.beginWorkerAttempt('capacity-r2', 0, 1, 'master_recovery', CREATED_AT + 8))
+      .toThrow('previous worker launch attempt has no exit and cleanup proof');
+    expect(() => db.run('UPDATE configuration_worker_launch_capacity_reclaims SET recorded_at=recorded_at+1')).toThrow();
+    expect(() => db.run('DELETE FROM configuration_worker_launch_capacity_reclaims')).toThrow();
+    expect(() => db.run('INSERT OR REPLACE INTO configuration_worker_launch_capacity_reclaims VALUES (?,?)', [workerId, CREATED_AT + 7])).toThrow();
+    expect(db.query('SELECT recorded_at FROM configuration_worker_launch_capacity_reclaims').get()).toEqual({ recorded_at: CREATED_AT + 6 });
+    expect(() => migrateConfigurationDatabase(db, CONFIG_MIGRATIONS.slice(0, 9))).toThrow('configuration migration history is not an exact baseline prefix');
+  });
 });
 
 describe('publication safety barriers', () => {

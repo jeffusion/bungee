@@ -70,7 +70,7 @@ export function configurationDiff(before: unknown, after: unknown, credentials: 
   field('authEnabled', own(aa, 'enabled'), own(ba, 'enabled'), bool);
   field('authTokens', own(aa, 'tokens'), own(ba, 'tokens'));
   field('loggingEnabled', own(ab, 'enabled'), own(bb, 'enabled'), bool);
-  field('bodyMax', own(ab, 'max_size'), own(bb, 'max_size'), v => boundedNumber(v, 1024, 5 * 1024 * 1024, n => `${n / 1024} KiB`));
+  field('bodyMax', own(ab, 'max_size'), own(bb, 'max_size'), v => boundedNumber(v, 1, Number.MAX_SAFE_INTEGER, n => `${n / 1024} KiB`));
   field('retention', own(ab, 'retention_days'), own(bb, 'retention_days'), v => boundedNumber(v, 1, 30, String));
   const ap = own(a, 'publication'), bp = own(b, 'publication');
   if ([ap, bp].some(value => value !== undefined && (value === null || typeof value !== 'object' || Array.isArray(value)))) {

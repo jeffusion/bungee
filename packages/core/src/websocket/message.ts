@@ -8,12 +8,15 @@ export function createWebSocketMessageView(message: string | Uint8Array): WebSoc
   return Object.freeze({
     kind,
     byteLength: typeof message === 'string' ? Buffer.byteLength(message) : message.byteLength,
-    json(): unknown {
+    mayContainJsonString(...prefixes: readonly string[]): boolean {
+      return typeof message !== 'string' || prefixes.some(prefix => message.includes('"' + prefix)) || message.includes('\\');
+    },
+    json(options?: { readonly binary?: boolean }): unknown {
+      if (typeof message !== 'string' && !options?.binary) return undefined;
       if (parsed) return value;
       parsed = true;
-      if (typeof message !== 'string') return undefined;
       try {
-        value = JSON.parse(message);
+        value = JSON.parse(typeof message === 'string' ? message : new TextDecoder('utf-8', { fatal: true }).decode(message));
         // Iterative traversal also handles deeply nested (valid) JSON without
         // recursive freeze overflowing the JavaScript call stack.
         const pending: unknown[] = [value];

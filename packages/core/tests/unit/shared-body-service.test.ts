@@ -4,6 +4,10 @@ import { BodySource, bodySourceFor } from '../../src/gateway/body-service';
 import { snapshotBodyResources } from '../../src/gateway/body-resources';
 import { captureBody } from '../../src/logger/body-capture';
 import { createAttemptResponseObserver } from '../../src/worker/response/attempt-observation';
+import { parseLogSse, parseLogText } from '../helpers/request-log';
+import type { RequestLogBodyParser } from '../../src/gateway/request-log-contracts';
+
+const parseLogJson: RequestLogBodyParser = async (body, consumer) => JSON.stringify(await body.json(consumer));
 const context={requestId:'synthetic',routeId:'r',attemptId:'a',upstreamId:'u',status:200};
 const encoder=new TextEncoder();
 test('800 KiB and greater than 1 MiB JSON in a single wire chunk are observed completely',async()=>{
@@ -19,7 +23,7 @@ test('mandatory parsing, logging and observation share a decode and canonical pa
   for(const [coding,compress] of [['gzip',gzipSync],['zstd',zstdCompressSync]] as const){
     const original=JSON.stringify({input:'x'.repeat(800*1024),usage:{total_tokens:7}});const wire=new Uint8Array(compress(encoder.encode(original)));let saved:unknown;const errors:string[]=[];
     const before=snapshotBodyResources();
-    const capture=captureBody(new Response(wire).body!,2*1024*1024,coding,async value=>{saved=value;},reason=>errors.push(reason),undefined,'application/json');
+    const capture=captureBody(new Response(wire).body!,2*1024*1024,coding,parseLogJson,async value=>{saved=value;},reason=>errors.push(reason));
     const source=new BodySource(capture.body,4*1024*1024,coding);
     expect(source===bodySourceFor(capture.body)).toBe(true);
     const handle=source.handle();const mandatory=await handle.json({id:'rules',mandatory:true});const observed:any[]=[];
@@ -44,7 +48,7 @@ test('a cancelled consumer leaves mandatory and another optional consumer usable
 });
 test('log max size disables only that consumer and the mandatory/observer views remain intact',async()=>{
   const text=JSON.stringify({x:'x'.repeat(800*1024)});const reasons:string[]=[];
-  const capture=captureBody(new Response(text).body!,64,'',async()=>{throw Error('must not save');},reason=>reasons.push(reason));
+  const capture=captureBody(new Response(text).body!,64,'',parseLogText,async()=>{throw Error('must not save');},reason=>reasons.push(reason));
   const source=new BodySource(capture.body,2*1024*1024);expect((await source.handle().json({id:'rules',mandatory:true}) as any).x.length).toBe(800*1024);
   await capture.completion;expect(reasons).toEqual(['size_limit']);expect((await source.json('legacy-mutable')).x.length).toBe(800*1024);source.dispose();
 });
@@ -55,7 +59,7 @@ test('opaque no-demand representation remains unread until transport pulls',asyn
 test('streaming gzip and zstd SSE logging and observation share framing and decoding',async()=>{
   for(const [coding,compress] of [['gzip',gzipSync],['zstd',zstdCompressSync]] as const){
     const text='event: named\ndata: {"usage":{"total_tokens":1}}\n\ndata: [DONE]\n\n';const wire=new Uint8Array(compress(encoder.encode(text)));const before=snapshotBodyResources();let saved:unknown;const reasons:string[]=[];
-    const capture=captureBody(new Response(wire).body!,1024,coding,async value=>{saved=value;},reason=>reasons.push(reason),undefined,'text/event-stream');
+    const capture=captureBody(new Response(wire).body!,1024,coding,parseLogSse,async value=>{saved=value;},reason=>reasons.push(reason));
     const owner=bodySourceFor(capture.body)!;const events:any[]=[];
     const observer=createAttemptResponseObserver('sse',context,async event=>{events.push(event);},undefined,coding,'response','',undefined,{bodyHandle:owner.handle(),maxBytes:1024});
     expect(new Uint8Array(await new Response(capture.body.pipeThrough(observer)).arrayBuffer())).toEqual(wire);
@@ -73,7 +77,7 @@ test('SSE frame limit is per frame, with a cumulative stream much larger than th
   expect(bytes.byteLength).toBe(frame.byteLength*100);expect(count).toBe(100);source.dispose();expect(snapshotBodyResources().retainedBytes).toBe(before.retainedBytes);
 });
 test('an opaque request with a shared optional handle observes EOF without upgrading mandatory reads',async()=>{
-  const before=snapshotBodyResources();const capture=captureBody(new Response('{"x":1}').body!,1024,'',async()=>{},()=>{});const owner=bodySourceFor(capture.body)!;const events:any[]=[];
+  const before=snapshotBodyResources();const capture=captureBody(new Response('{"x":1}').body!,1024,'',parseLogText,async()=>{},()=>{});const owner=bodySourceFor(capture.body)!;const events:any[]=[];
   const observer=createAttemptResponseObserver('json',context,async e=>{events.push(e);},undefined,'','request','/test',undefined,{bodyHandle:owner.handle(),maxBytes:1024});
   expect(await new Response(capture.body.pipeThrough(observer)).text()).toBe('{"x":1}');await Promise.all([observer.completion,capture.completion]);
   expect(events.find(e=>e.phase==='request')?.body).toEqual({x:1});owner.dispose();expect(snapshotBodyResources().retainedBytes).toBe(before.retainedBytes);
@@ -84,9 +88,9 @@ test('central SSE full frames retain raw CR/LF bytes, control-only frames and EO
   const parser=new BodySSEFramer(1024,event=>frames.push(event));for(const byte of encoder.encode(raw))parser.feed(Uint8Array.of(byte));parser.finish(true);
   expect(frames.map(frame=>frame.raw).join('')).toBe(raw);expect(frames[0].hasData).toBe(false);expect(frames[0].retry).toBe('007');expect(frames[1].json).toEqual({x:1});expect(frames.at(-1).hasData).toBe(false);expect(frames.at(-1).truncated).toBe(true);
 });
-test('missing SSE Content-Type reuses streaming decode while retaining common Accept fallback',async()=>{
+test('explicit SSE log parsing shares streaming decode even without a media type',async()=>{
   const before=snapshotBodyResources();const text='event: named\ndata: {"x":1}\n\ndata: [DONE]\n\n';const wire=new Uint8Array(gzipSync(encoder.encode(text)));let saved:unknown;
-  const capture=captureBody(new Response(wire).body!,1024,'gzip',async value=>{saved=value;},()=>{},undefined,'','text/event-stream');const owner=bodySourceFor(capture.body)!;
+  const capture=captureBody(new Response(wire).body!,1024,'gzip',parseLogSse,async value=>{saved=value;},()=>{});const owner=bodySourceFor(capture.body)!;
   const observer=createAttemptResponseObserver('sse',context,async()=>{},undefined,'gzip','response','',undefined,{bodyHandle:owner.handle(),maxBytes:1024});
   expect(new Uint8Array(await new Response(capture.body.pipeThrough(observer)).arrayBuffer())).toEqual(wire);await Promise.all([observer.completion,capture.completion]);
   expect(saved).toEqual([{event:'named',data:{x:1}},{event:'message',data:'[DONE]'}]);expect(snapshotBodyResources().decompressions-before.decompressions).toBe(1);expect(snapshotBodyResources().jsonParses-before.jsonParses).toBe(2);owner.dispose();expect(snapshotBodyResources().retainedBytes).toBe(before.retainedBytes);
@@ -94,7 +98,7 @@ test('missing SSE Content-Type reuses streaming decode while retaining common Ac
 test('shared optional response limit never truncates the wire or fails another log consumer',async()=>{
   const before=snapshotBodyResources();const text=JSON.stringify({x:'x'.repeat(2048)});let saved:unknown;
   const source=new BodySource(new Response(text).body!,1024,'',undefined,{requestId:'r',attemptId:'a',direction:'response',stage:'upstream-response',version:0,contentType:'application/json',contentEncoding:''});
-  const wire=source.take() as ReadableStream<Uint8Array>;const capture=captureBody(wire,4096,'',async value=>{saved=value;},()=>{});const events:any[]=[];
+  const wire=source.take() as ReadableStream<Uint8Array>;const capture=captureBody(wire,4096,'',parseLogText,async value=>{saved=value;},()=>{});const events:any[]=[];
   const observer=createAttemptResponseObserver('json',context,async e=>{events.push(e);},undefined,'','response','',undefined,{maxBytes:1024,bodyHandle:source.handle()});
   expect(await new Response(capture.body.pipeThrough(observer)).text()).toBe(text);await Promise.all([capture.completion,observer.completion]);
   expect(saved).toBe(text);expect(events.filter(e=>e.phase==='incomplete').map(e=>e.reason)).toEqual(['buffer-limit']);source.dispose();expect(snapshotBodyResources().retainedBytes).toBe(before.retainedBytes);
@@ -102,7 +106,7 @@ test('shared optional response limit never truncates the wire or fails another l
 test('different JSON parser and log-save limits share compressed decoding without cross-consumer failure',async()=>{
   const before=snapshotBodyResources();const text=JSON.stringify({x:'x'.repeat(2048)});const wire=new Uint8Array(gzipSync(encoder.encode(text)));let saved:unknown;
   const source=new BodySource(new Response(wire).body!,1024,'gzip',undefined,{requestId:'r',attemptId:'a',direction:'response',stage:'upstream-response',version:0,contentType:'application/json',contentEncoding:'gzip'});
-  const capture=captureBody(source.take() as ReadableStream<Uint8Array>,4096,'gzip',async value=>{saved=value;},()=>{});const events:any[]=[];
+  const capture=captureBody(source.take() as ReadableStream<Uint8Array>,4096,'gzip',parseLogText,async value=>{saved=value;},()=>{});const events:any[]=[];
   const observer=createAttemptResponseObserver('json',context,async e=>{events.push(e);},undefined,'gzip','response','',undefined,{maxBytes:1024,bodyHandle:source.handle()});
   expect(new Uint8Array(await new Response(capture.body.pipeThrough(observer)).arrayBuffer())).toEqual(wire);await Promise.all([capture.completion,observer.completion]);
   expect(saved).toBe(text);expect(events.filter(e=>e.phase==='incomplete').map(e=>e.reason)).toEqual(['buffer-limit']);expect(snapshotBodyResources().decompressions-before.decompressions).toBe(1);source.dispose();expect(snapshotBodyResources().retainedBytes).toBe(before.retainedBytes);
@@ -113,7 +117,7 @@ test('readonly JSON freezing does not add an implicit nesting limit',async()=>{
 });
 test('mandatory SSE events, token observation and logging share one decoder and parsed frame',async()=>{
   const before=snapshotBodyResources();const text='data: {"x":1}\n\ndata: [DONE]\n\n';const wire=new Uint8Array(gzipSync(encoder.encode(text)));let saved:unknown;
-  const capture=captureBody(new Response(wire).body!,1024,'gzip',async value=>{saved=value;},()=>{},undefined,'text/event-stream');const source=bodySourceFor(capture.body)!;const required:any[]=[];const observed:any[]=[];
+  const capture=captureBody(new Response(wire).body!,1024,'gzip',parseLogSse,async value=>{saved=value;},()=>{});const source=bodySourceFor(capture.body)!;const required:any[]=[];const observed:any[]=[];
   const mandatory=(async()=>{for await(const event of source.handle().events({id:'rules',mandatory:true}))if(event.json)required.push(event.json);})();
   const observer=createAttemptResponseObserver('sse',context,async event=>{if(event.phase==='response')observed.push(event.body);},undefined,'gzip','response','',undefined,{bodyHandle:source.handle(),maxBytes:1024});
   expect(new Uint8Array(await new Response(capture.body.pipeThrough(observer)).arrayBuffer())).toEqual(wire);await Promise.all([mandatory,capture.completion,observer.completion]);

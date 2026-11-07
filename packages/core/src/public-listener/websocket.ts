@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { ANONYMOUS_PRINCIPAL } from '../plugin-extensions';
 import type { ForwardPublicRequestOptions } from './forwarding';
 import { privateRequestHeaders } from './headers';
@@ -6,11 +5,11 @@ import { validateWebSocketRequest, type WebSocketBridge } from '../websocket';
 
 /** Pin the admitted worker for this connection; publication never migrates an open socket. */
 export async function forwardPublicWebSocket(request: Request, server: Bun.Server<import('../websocket').WebSocketBridgeData>, bridge: WebSocketBridge,
-  options: ForwardPublicRequestOptions, peer?: string): Promise<Response|undefined> {
+  options: ForwardPublicRequestOptions, requestId: string, peer?: string): Promise<Response|undefined> {
   const invalid=validateWebSocketRequest(request);
   if (invalid) return invalid;
   const principal=options.authenticate?.(request) ?? ANONYMOUS_PRINCIPAL;
-  const identity={requestId:randomUUID(),principal};
+  const identity={requestId,principal};
   const lease=options.admission.acquire();
   try {
     if (!lease.worker) return Response.json({error:'service_unavailable'},{status:503,headers:{'retry-after':'1'}});

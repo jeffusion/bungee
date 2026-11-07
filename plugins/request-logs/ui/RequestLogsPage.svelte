@@ -1,4 +1,5 @@
 <script lang="ts">
+  let { pluginName = "request-logs" }: { pluginName?: string; apiBase?: string } = $props();
   import { defaultLogFilters, countLogFilters } from '$components/domain/log/filter-state';
   import { onMount, onDestroy, untrack } from 'svelte';
   import { _ } from '$i18n';
@@ -8,7 +9,6 @@
   import { BSwitch, LoadingIndicator, PanelCard, BDropdownAction } from '$components/industrial';
   import { BSelect as Select } from '$components/industrial';
   import { toast } from '$stores/toast';
-  import LogMaintenance from '$components/domain/log/LogMaintenance.svelte';
   import * as Sheet from '$components/ui/sheet';
 
   // ---- Select option arrays (i18n-safe, constructed in reactive blocks) ----
@@ -409,7 +409,6 @@ let refreshIntervalOptions = $derived($isLoading ? [] : [
 </script>
 
 <div class="nx-page py-5 space-y-5" data-testid="page-logs">
-  <LogMaintenance />
   <!-- ===== Header ============================================ -->
   <div class="flex items-center gap-3">
     <span class="nx-stripe" aria-hidden="true"></span>
@@ -1061,45 +1060,18 @@ let refreshIntervalOptions = $derived($isLoading ? [] : [
             </tr>
           </thead>
           <tbody>
-            {#each logs.slice(0, 1) as firstLog (firstLog.chainId)}
-              <tr class="group border-b border-carbon-600/60 hover:bg-carbon-700/40 transition-colors" data-testid="logs-row-first">
-                <td class="py-2.5 px-4 font-mono text-[11px] text-zinc-400">{formatTime(firstLog.chainStartTs)}</td>
-                <td class="py-2.5 px-4"><span class="nx-feature-tag" title={firstLog.transportType === null ? $_('logs.transportTypeUnrecorded') : undefined}>{transportTypeLabel(firstLog.transportType)}</span></td>
-                <td class="py-2.5 px-4"><span class="nx-feature-tag">{firstLog.method}</span></td>
-                <td class="py-2.5 px-4 font-mono text-[12px] text-zinc-200 truncate max-w-xs" title={firstLog.path}>
-                  {firstLog.path}
-                </td>
-                <td class="py-2.5 px-4"><span class="nx-feature-tag">{httpStatusLabel(firstLog.chainStatus)}</span></td>
-                <td class="py-2.5 px-4"><span class={`inline-flex border px-2 py-0.5 font-mono text-[11px] ${transportTone(chainTransportOutcome(firstLog))}`}>{$_(`logs.transport.${chainTransportOutcome(firstLog)}`)}</span></td>
-                <td class="py-2.5 px-4 text-right font-mono text-[11px] text-zinc-300 tabular-nums">{formatDuration(firstLog.chainDurationMs)}</td>
-                <td class="py-2.5 px-4 font-mono text-[11px] text-zinc-400 truncate max-w-xs" title={firstLog.upstream || '-'}>
-                  {firstLog.upstream || '—'}
-                  {#if firstLog.chainAttempts > 1}
-                    <span class="ml-1 text-amber-300 text-[10px]">{$_('logs.chain.attemptsSummary', { values: { count: firstLog.chainAttempts } })}</span>
-                  {/if}
-                </td>
-                <td class="py-2.5 px-4 text-right">
-                  <button
-                    class="nx-btn-ghost nx-btn-sm"
-
-                    onclick={() => viewDetail(firstLog)}
-                  >
-                    {$_('logs.viewDetail')}
-                  </button>
-                </td>
-              </tr>
-            {/each}
-            {#each logs.slice(1) as log (log.chainId)}
-              <tr class="group border-b border-carbon-600/60 hover:bg-carbon-700/40 transition-colors">
+            {#each logs as log, index (log.chainId)}
+              {@const transport = chainTransportOutcome(log)}
+              <tr class="group border-b border-carbon-600/60 hover:bg-carbon-700/40 transition-colors" data-testid={index === 0 ? 'logs-row-first' : undefined}>
                 <td class="py-2.5 px-4 font-mono text-[11px] text-zinc-400">{formatTime(log.chainStartTs)}</td>
                 <td class="py-2.5 px-4"><span class="nx-feature-tag" title={log.transportType === null ? $_('logs.transportTypeUnrecorded') : undefined}>{transportTypeLabel(log.transportType)}</span></td>
-                <td class="py-2.5 px-4"><span class="nx-feature-tag">{log.method}</span></td>
+                <td class="py-2.5 px-4"><span class="nx-feature-tag">{log.method || '—'}</span></td>
                 <td class="py-2.5 px-4 font-mono text-[12px] text-zinc-200 truncate max-w-xs" title={log.path}>
                   {log.path}
                 </td>
                 <td class="py-2.5 px-4"><span class="nx-feature-tag">{httpStatusLabel(log.chainStatus)}</span></td>
-                <td class="py-2.5 px-4"><span class={`inline-flex border px-2 py-0.5 font-mono text-[11px] ${transportTone(chainTransportOutcome(log))}`}>{$_(`logs.transport.${chainTransportOutcome(log)}`)}</span></td>
-                <td class="py-2.5 px-4 text-right font-mono text-[11px] text-zinc-300 tabular-nums">{formatDuration(log.chainDurationMs)}</td>
+                <td class="py-2.5 px-4"><span class={`inline-flex border px-2 py-0.5 font-mono text-[11px] ${transportTone(transport)}`}>{$_(`logs.transport.${transport}`)}</span></td>
+                <td class="py-2.5 px-4 text-right font-mono text-[11px] text-zinc-300 tabular-nums">{log.transportType === 'websocket' && log.recordKind === 'access' && transport === 'pending' ? '—' : formatDuration(log.chainDurationMs)}</td>
                 <td class="py-2.5 px-4 font-mono text-[11px] text-zinc-400 truncate max-w-xs" title={log.upstream || '-'}>
                   {log.upstream || '—'}
                   {#if log.chainAttempts > 1}

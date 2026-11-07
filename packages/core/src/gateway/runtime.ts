@@ -13,7 +13,6 @@ import { RetryPlugin } from './retry-plugin';
 import { RequestRulesPlugin } from './request-rules-plugin';
 import { ResponseRulesPlugin } from './response-plugin';
 import { BodyServicePlugin } from './body-plugin';
-import { LoggingPlugin } from './logging-plugin';
 
 import { WebSocketGatewayPlugin } from './websocket-plugin';
 import type { GatewayWebSocketInput, GatewayWebSocketResult } from './websocket-contracts';
@@ -22,7 +21,7 @@ const requestHooks = new AsyncLocalStorage<PluginHooks>();
 let standaloneHooks: PluginHooks | undefined;
 export function gatewayBuiltins(): Plugin[] {
   return [new WebSocketGatewayPlugin(),new BodyServicePlugin(),new HttpRequestPlugin(),new RoutingPlugin(),new DispatchPlugin(),new AdmissionPlugin(),new SelectionPlugin(),
-    new RetryPlugin(),new RequestRulesPlugin(),new ForwardPlugin(),new ResponseRulesPlugin(),new LoggingPlugin()];
+    new RetryPlugin(),new RequestRulesPlugin(),new ForwardPlugin(),new ResponseRulesPlugin()];
 }
 /** The host only owns registration; providers use the existing Plugin contract and Hook executor. */
 export function registerGatewayBuiltins(hooks: PluginHooks, plugins: readonly Plugin[] = gatewayBuiltins()): void {

@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+import { mkdirSync, promises as files, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BodyStorageManager } from '../../../src/logger/body-storage';
 import { HeaderStorageManager } from '../../../src/logger/header-storage';
@@ -101,4 +101,22 @@ describe('body and header cleanup containment', () => {
 
     expect(await storage.save('over-limit', bodyOverLimit, 'response')).toBeNull();
   });
+  test('cancellation during commit removes the renamed body instead of returning a reference', async () => {
+    const directory = root('body-stream-cancel');
+    const storage = new BodyStorageManager({}, directory);
+    const controller = new AbortController();
+    const rename = files.rename.bind(files);
+    const interception = spyOn(files, 'rename').mockImplementation(async (source, target) => {
+      await rename(source, target);
+      controller.abort(new Error('fixture cancellation during rename'));
+    });
+    try {
+      async function* chunks() { yield '{"content":"fixture"}'; }
+      await expect(storage.saveStream('cancelled', chunks(), 'response', 1024, Promise.resolve(), controller.signal))
+        .rejects.toThrow('fixture cancellation during rename');
+      const entries = await files.readdir(directory, { recursive: true });
+      expect(entries.filter(name => name.includes('response-cancelled'))).toEqual([]);
+    } finally { interception.mockRestore(); }
+  });
+
 });

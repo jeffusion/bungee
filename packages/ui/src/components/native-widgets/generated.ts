@@ -14,6 +14,8 @@ import TpsOverview from '@plugins/llm-tps/ui/TpsOverview.svelte';
 import TpsEndpoints from '@plugins/llm-tps/ui/TpsEndpoints.svelte';
 import TpsModels from '@plugins/llm-tps/ui/TpsModels.svelte';
 import ModelsDevSettings from '@plugins/models-dev/ui/ModelsDevSettings.svelte';
+import RequestLogsPage from '@plugins/request-logs/ui/RequestLogsPage.svelte';
+import RequestLogsSettings from '@plugins/request-logs/ui/RequestLogsSettings.svelte';
 import TokenBudgetKeyPolicy from '@plugins/token-budget/ui/KeyPolicy.svelte';
 import TokenStatsChart from '@plugins/token-stats/ui/TokenStatsChart.svelte';
 import TokenStatsSettings from '@plugins/token-stats/ui/TokenStatsSettings.svelte';
@@ -34,6 +36,8 @@ export const generatedWidgetRegistry: Record<string, ComponentType<SvelteCompone
   TpsEndpoints,
   TpsModels,
   ModelsDevSettings,
+  RequestLogsPage,
+  RequestLogsSettings,
   TokenBudgetKeyPolicy,
   TokenStatsChart,
   TokenStatsSettings,
@@ -55,6 +59,8 @@ export const componentSourceMap: Record<string, string> = {
   TpsEndpoints: 'llm-tps',
   TpsModels: 'llm-tps',
   ModelsDevSettings: 'models-dev',
+  RequestLogsPage: 'request-logs',
+  RequestLogsSettings: 'request-logs',
   TokenBudgetKeyPolicy: 'token-budget',
   TokenStatsChart: 'token-stats',
   TokenStatsSettings: 'token-stats',

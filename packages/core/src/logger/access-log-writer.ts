@@ -12,7 +12,17 @@ export interface ProcessingStep {
   duration?: number;
 }
 
-export interface AccessLogEntry {
+export interface AccessLogIdentity {
+  recordKind?: 'access' | 'operation' | 'attempt';
+  accessId?: string;
+  operationId?: string;
+  protocol?: string;
+  operation?: string;
+  closeCode?: number;
+  observationOutcome?: 'complete' | 'incomplete';
+}
+
+export interface AccessLogEntry extends AccessLogIdentity {
   requestId: string;
   timestamp: number;
   method: string;
@@ -70,10 +80,11 @@ export class AccessLogWriter {
   private static readonly MAX_PENDING_UPDATES = 4096;
   private inFlightFlush: Promise<void> | null = null;
   private flushInterval: Timer | null = null;
+  private droppedEntries = 0;
 
-  constructor(database: Database);
-  constructor(dbPath: string);
-  constructor(databaseOrPath: Database | string) {
+  constructor(database: Database, maxQueuedEntries?: number);
+  constructor(dbPath: string, maxQueuedEntries?: number);
+  constructor(databaseOrPath: Database | string, private readonly maxQueuedEntries = Infinity) {
     let database: Database;
     if (typeof databaseOrPath === 'string') {
       const dir = path.dirname(databaseOrPath);
@@ -99,6 +110,12 @@ export class AccessLogWriter {
    * 注意：此方法不等待 flush() 完成，以避免阻塞请求处理
    */
   write(entry: AccessLogEntry): void {
+    if (this.writeQueue.length >= this.maxQueuedEntries) {
+      const existing = this.writeQueue.findLastIndex(row => row.requestId === entry.requestId);
+      if (existing >= 0 && entry.replacePendingTransport) { this.writeQueue[existing] = entry; return; }
+      this.droppedEntries++;
+      return;
+    }
     const pendingBodyIds = this.pendingBodyIdUpdates.get(entry.requestId);
     if (pendingBodyIds) {
       Object.assign(entry, pendingBodyIds);
@@ -170,8 +187,12 @@ export class AccessLogWriter {
           error_message, req_body_id, resp_body_id, req_header_id, resp_header_id,
           original_req_header_id, original_req_body_id, transformed_path, success, created_at,
           is_failover_attempt, parent_request_id, attempt_number, attempt_upstream, request_type,
-          protocol_outcome, protocol_code, transport_outcome, transport_code, transport_type
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          protocol_outcome, protocol_code, transport_outcome, transport_code, transport_type,
+          record_kind, access_id, operation_id, protocol, operation, close_code, observation_outcome
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?, ?, ?
+        )
         ON CONFLICT(request_id) DO UPDATE SET
           timestamp = excluded.timestamp,
           method = excluded.method,
@@ -204,7 +225,14 @@ export class AccessLogWriter {
           protocol_code = excluded.protocol_code,
           transport_outcome = excluded.transport_outcome,
           transport_code = excluded.transport_code,
-          transport_type = excluded.transport_type
+          transport_type = excluded.transport_type,
+          record_kind = excluded.record_kind,
+          access_id = excluded.access_id,
+          operation_id = excluded.operation_id,
+          protocol = excluded.protocol,
+          operation = excluded.operation,
+          close_code = excluded.close_code,
+          observation_outcome = excluded.observation_outcome
         WHERE ? = 1
       `);
 
@@ -267,6 +295,13 @@ export class AccessLogWriter {
             entry.transportOutcome ?? null,
             entry.transportCode ?? null,
             entry.transportType ?? null,
+            entry.recordKind ?? null,
+            entry.accessId ?? null,
+            entry.operationId ?? null,
+            entry.protocol ?? null,
+            entry.operation ?? null,
+            entry.closeCode ?? null,
+            entry.observationOutcome ?? null,
             entry.replacePendingTransport ? 1 : 0
           );
           this.db.run('RELEASE SAVEPOINT access_log_entry');
@@ -274,7 +309,7 @@ export class AccessLogWriter {
           if (result.changes === 0) duplicateRequestIds.push(entry.requestId);
           if (pendingBodyIds) appliedBodyUpdates.add(entry.requestId);
           if (pendingOutcome) appliedProtocolOutcomeUpdates.add(entry.requestId);
-          if (pendingTransport) appliedTransportUpdates.add(entry.requestId);
+          if (pendingTransport && result.changes > 0) appliedTransportUpdates.add(entry.requestId);
         } catch (error) {
           this.db.run('ROLLBACK TO SAVEPOINT access_log_entry');
           this.db.run('RELEASE SAVEPOINT access_log_entry');
@@ -314,6 +349,10 @@ export class AccessLogWriter {
    */
   private startFlushInterval() {
     this.flushInterval = setInterval(() => {
+      if (this.droppedEntries) {
+        console.error('SQLite access log queue lost entries:', this.droppedEntries);
+        this.droppedEntries = 0;
+      }
       this.flush().catch((error) => console.error('Background flush failed:', error));
     }, 5000);
   }
@@ -327,11 +366,14 @@ export class AccessLogWriter {
       this.flushInterval = null;
     }
 
-    await this.flush();
-    this.pendingProtocolOutcomeUpdates.clear();
-    this.pendingBodyIdUpdates.clear();
-    this.pendingTransportUpdates.clear();
-    this.db.close(true);
+    try { await this.flush(); }
+    catch (error) { console.error('Failed to flush access logs during close:', error); }
+    finally {
+      this.pendingProtocolOutcomeUpdates.clear();
+      this.pendingBodyIdUpdates.clear();
+      this.pendingTransportUpdates.clear();
+      this.db.close(true);
+    }
   }
 
   /**
@@ -389,14 +431,6 @@ export class AccessLogWriter {
     }
     this.pendingTransportUpdates.set(requestId, { outcome, code });
     for (const entry of this.writeQueue) if (entry.requestId === requestId) this.applyPendingTransport(entry);
-    try {
-      const result = this.db.query('UPDATE access_logs SET transport_outcome = ?, transport_code = ? WHERE request_id = ?')
-        .run(outcome, code ?? null, requestId);
-      if (result.changes > 0) this.pendingTransportUpdates.delete(requestId);
-    } catch (error) {
-      // Retain the bounded update for a later write/flush, unlike a lost late stream outcome.
-      console.error('Failed to update transport outcome:', { requestId, outcome, error });
-    }
   }
 
   appendProcessingStep(requestId: string, step: ProcessingStep): void {

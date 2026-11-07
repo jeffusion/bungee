@@ -60,7 +60,7 @@ test('access 001 upgrades TPS storage while preserving existing rows and support
     expect(db.query('SELECT output_tokens,generation_duration_ms FROM llm_tps_samples').all()).toEqual([{output_tokens:12,generation_duration_ms:250.5}]);
     expect(()=>db.run("INSERT INTO llm_tps_samples(attempt_id,request_id,route_id,endpoint_id,finished_at_ms,output_tokens,generation_duration_ms,output_source,model) VALUES('bad','request','route','endpoint',1000,1,0,'official',NULL)")).toThrow();
     expect(()=>db.run("INSERT INTO llm_tps_samples(attempt_id,request_id,route_id,endpoint_id,finished_at_ms,output_tokens,generation_duration_ms,output_source,model) VALUES('bad','request','route','endpoint',1000,1,1,'partial',NULL)")).toThrow();
-    expect(db.query('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([{version:'001'},{version:'002'},{version:'003'},{version:'004'},{version:'005'}]);
+    expect(db.query('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([{version:'001'},{version:'002'},{version:'003'},{version:'004'},{version:'005'},{version:'006'}]);
   }finally{db.close();}
 });
 

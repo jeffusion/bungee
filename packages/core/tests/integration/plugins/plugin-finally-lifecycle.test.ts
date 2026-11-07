@@ -211,10 +211,13 @@ describe('plugin onFinally lifecycle', () => {
       body: JSON.stringify({ stream: true }),
     });
 
-    const response = await handleRequest(request, config);
+    let completion: Promise<unknown> | undefined;
+    const response = await handleRequest(request, config, { onCompletion: value => { completion = value; } });
     expect(response.status).toBe(200);
     const bodyText = await response.text();
     expect(bodyText.includes('data: [DONE]')).toBeTrue();
+    expect(completion).toBeDefined();
+    await completion;
 
     expect(events).toEqual(['flush', 'finally']);
     expect(records).toHaveLength(1);
@@ -327,9 +330,12 @@ describe('plugin onFinally lifecycle', () => {
     };
     initializeRuntimeState(config);
 
-    const response = await handleRequest(new Request('http://localhost:8088/api/failover'), config);
+    let completion: Promise<unknown> | undefined;
+    const response = await handleRequest(new Request('http://localhost:8088/api/failover'), config, { onCompletion: value => { completion = value; } });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ upstream: 'secondary' });
+    expect(completion).toBeDefined();
+    await completion;
 
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({

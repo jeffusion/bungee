@@ -26,7 +26,7 @@ test('structural diff redacts auth, plugin options, headers and arbitrary string
   expect(configurationDiff({ plugin_activations: [{ plugin_name: 'a' }, { plugin_name: 'b' }] }, { plugin_activations: [{ plugin_name: 'b' }, { plugin_name: 'a' }] })).toMatchObject([{ action: 'reordered' }]);
 });
 
-test('51200 bytes ↔ 50 KiB exactly; values up to 5 MiB are accepted, above rejected', () => {
+test('body size conversion accepts whole bytes beyond 5 MiB up to safe integer precision', () => {
   expect(bytesToKiB(51200)).toBe(50);
   expect(kibToBytes(bytesToKiB(51200)!)).toBe(51200);
   expect(kibToBytes(101)).toBe(101 * 1024);
@@ -34,8 +34,10 @@ test('51200 bytes ↔ 50 KiB exactly; values up to 5 MiB are accepted, above rej
   expect(bytesToKiB(5 * 1024 * 1024)).toBe(5120);
   expect(bytesToKiB(undefined)).toBeUndefined();
   expect(() => kibToBytes(NaN)).toThrow();
-  expect(() => kibToBytes(5120 + 1 / 1024)).toThrow();
-  expect(() => kibToBytes(5121)).toThrow();
+  expect(kibToBytes(5120 + 1 / 1024)).toBe(5 * 1024 * 1024 + 1);
+  expect(kibToBytes(Number.MAX_SAFE_INTEGER / 1024)).toBe(Number.MAX_SAFE_INTEGER);
+  expect(() => kibToBytes((Number.MAX_SAFE_INTEGER + 1) / 1024)).toThrow();
+  expect(() => kibToBytes(1.1)).toThrow();
   expect(() => kibToBytes(0)).toThrow();
 });
 

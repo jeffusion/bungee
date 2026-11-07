@@ -9,7 +9,7 @@ import { analyzeExpressionDependencies, hasBodyModification } from '../utils/exp
 import type { RequestContext } from '../hooks';
 import type { InboundChain } from '../scoped-plugin-registry';
 import { applyBodyRules } from '../worker/rules/modifier';
-import { type BodySource, bodySourceFor, BodyBufferLease, BodyProcessingError, isJsonMediaType, isObjectBody, readBodyChunk, reconcileEntityHeaders } from '../worker/request/body-source';
+import { type BodySource, bindBodyObservationSource, bodyObservationSourceFor, bodySourceFor, BodyBufferLease, BodyProcessingError, isJsonMediaType, isObjectBody, readBodyChunk, reconcileEntityHeaders } from '../worker/request/body-source';
 import { parseBodyParserLimit } from '../config-storage/global-scalars';
 import type { RawResponseCompletion } from '../plugin-control/contracts';
 import { logger } from '../logger';
@@ -47,7 +47,7 @@ export function completionStream(source: ReadableStream<Uint8Array>, state?: Str
   const settle = (outcome: RawResponseCompletion) => { if (closed) return; closed = true; state?.complete?.(outcome); teardownResolve(); };
   const cancel = async (reason?: unknown) => { settle({status: 'cancelled'}); await reader.cancel(reason).catch(() => undefined); };
   if (state) state.teardownNow = cancel;
-  return new ReadableStream({
+  const completed = new ReadableStream<Uint8Array>({
     async pull(controller) {
       try { const part = await readBodyChunk(reader, signal);
         if (part.done) { settle({status:'completed'}); controller.close(); return; } controller.enqueue(part.value);
@@ -56,6 +56,10 @@ export function completionStream(source: ReadableStream<Uint8Array>, state?: Str
     },
     async cancel(reason) { if (state) { state.cancelled = true; state.clientCancelled = true; } await cancel(reason); },
   }, {highWaterMark:0});
+  const owner = bodyObservationSourceFor(source);
+  // The completion wrapper still owns wire reads, even if its observed representation is cached.
+  if (owner) bindBodyObservationSource(completed, owner);
+  return completed;
 }
 
 export async function executeResponseRules(

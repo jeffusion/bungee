@@ -7,6 +7,7 @@ import path from 'node:path';
 import { gzipSync, zstdCompressSync } from 'node:zlib';
 import { createServer } from 'node:http';
 import type { AppConfig } from '@jeffusion/bungee-types';
+import { parseLogSse, parseLogText, registerRequestLogs } from '../../helpers/request-log';
 
 const { makeCanonicalTempDir } = await import('../../../../../tests/helpers/canonical-temp');
 
@@ -15,7 +16,13 @@ const { accessLogWriter } = await import('../../../src/logger/access-log-writer'
 const { RequestLogger } = await import('../../../src/logger/request-logger');
 const { BodyStorageManager } = await import('../../../src/logger/body-storage');
 const { captureBody, flushBodyCaptures } = await import('../../../src/logger/body-capture');
-const { handleRequest } = await import('../../../src/worker/request/handler');
+const { handleRequest: requestHandler } = await import('../../../src/worker/request/handler');
+const { createGatewayHooks, runWithGatewayHooks } = await import('../../../src/gateway/runtime');
+const gatewayHooks = createGatewayHooks();
+registerRequestLogs(gatewayHooks);
+const handleRequest: typeof requestHandler = (...args) => runWithGatewayHooks(gatewayHooks, () => requestHandler(...args));
+const withSseBodyParser = ({ contentType }: { contentType: string }) =>
+  contentType.startsWith('text/event-stream') ? parseLogSse : undefined;
 const encoder = new TextEncoder();
 const roots: string[] = [];
 const requestIds: string[] = [];
@@ -72,7 +79,7 @@ test('models-sized opaque response is logged without a body demand', async () =>
   } finally { await server.stop(true); }
 });
 
-test('missing response media type uses final request Accept only for valid SSE log copies', async () => {
+test('media type selects the body parser independently of the final outbound Accept', async () => {
   const { logging, storage, config, rows } = await setup();
   const text = ': ping\nevent: named\ndata: {"x":1}\n\ndata: [DONE]\n\n';
   let seenAccept: string | null = null;
@@ -89,14 +96,14 @@ test('missing response media type uses final request Accept only for valid SSE l
   const target = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   try {
     const cases = [
-      { accept: 'text/event-stream', payload: text, media: '', expected: [{ event: 'named', data: { x: 1 } }, { event: 'message', data: '[DONE]' }] },
-      { accept: 'text/event-stream', payload: 'upstream failed', media: '', expected: 'upstream failed' },
+      { accept: 'text/event-stream', payload: text, media: '', expected: null },
+      { accept: 'text/event-stream', payload: 'upstream failed', media: '', expected: null },
       { accept: 'text/event-stream', payload: text, media: 'text/plain', expected: text },
-      { accept: 'application/json', payload: text, media: '', expected: text },
+      { accept: 'application/json', payload: text, media: '', expected: null },
     ];
     for (const fixture of cases) {
       payload = fixture.payload; media = fixture.media;
-      // Request rules overwrite the incoming Accept; inference must use the outbound value.
+      // Request rules overwrite the incoming Accept without changing the logging policy.
       const response = await handleRequest(new Request('http://gateway/test', { method: 'POST', body: '{"x":1}',
         headers: { accept: 'application/json', 'content-type': 'application/json' } }),
         config(target, { request: { headers: { replace: { Accept: fixture.accept } } } }), { logging });
@@ -104,7 +111,8 @@ test('missing response media type uses final request Accept only for valid SSE l
       expect(response.headers.get('content-type')).toBe(media || null);
       expect(await response.text()).toBe(payload);
       const row = (await rows()).at(-1)!;
-      expect(await storage.load(row.resp_body_id)).toEqual(fixture.expected);
+      if (fixture.expected === null) expect(row.resp_body_id).toBeNull();
+      else expect(await storage.load(row.resp_body_id)).toEqual(fixture.expected);
       expect(await storage.load(row.req_body_id)).toEqual({ x: 1 });
       expect(JSON.parse(row.processing_steps).some((step: any) => step.step === 'body_logging_incomplete')).toBe(false);
     }
@@ -123,8 +131,8 @@ test('opaque request and response logging preserve compressed, malformed and bin
     const cases = [
       { bytes: gzipSync(encoder.encode(plain)), coding: 'gzip', expected: JSON.parse(plain) },
       { bytes: zstdCompressSync(encoder.encode(plain)), coding: 'zstd', expected: JSON.parse(plain) },
-      { bytes: encoder.encode('{bad'), coding: '', expected: '{bad' },
-      { bytes: new Uint8Array([255, 128, 0, 1]), coding: 'unknown', expected: { encoding: 'base64', content_encoding: 'unknown', data: '/4AAAQ==' } },
+      { bytes: encoder.encode('{bad'), coding: '', expected: null },
+      { bytes: new Uint8Array([255, 128, 0, 1]), coding: 'unknown', expected: null },
     ];
     for (const { bytes, coding, expected } of cases) {
       const response = await handleRequest(new Request('http://gateway/test', { method: 'POST', body: Uint8Array.from(bytes),
@@ -133,7 +141,10 @@ test('opaque request and response logging preserve compressed, malformed and bin
       expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array(bytes));
       expect(forwarded).toEqual(new Uint8Array(bytes));
       const row = (await rows()).at(-1)!;
-      for (const field of ['req_body_id', 'original_req_body_id', 'resp_body_id']) expect(await storage.load(row[field])).toEqual(expected);
+      for (const field of ['req_body_id', 'original_req_body_id', 'resp_body_id']) {
+        if (expected === null) expect(row[field]).toBeNull();
+        else expect(await storage.load(row[field])).toEqual(expected);
+      }
     }
   } finally { await server.stop(true); }
 });
@@ -159,14 +170,14 @@ test('local responses and rejected requests also retain response bodies and fail
   expect(await (await handleRequest(new Request('http://gateway/test'), cfg, { logging })).text()).toBe('local');
   const missing = await handleRequest(new Request('http://gateway/missing'), cfg, { logging });
   expect(missing.status).toBe(404);
-  const missingBody = await missing.text();
+  expect(await missing.json()).toEqual({ error: 'Route not found' });
   const rejected = await handleRequest(new Request('http://gateway/test', { method: 'POST', body: 'x', headers: { 'content-length': '2048' } }),
     { ...config('http://127.0.0.1:1'), body_parser_limit: '1kb' }, { logging });
   expect(rejected.status).toBe(413);
   const rejectedBody = await rejected.json();
   const [local, notFound, failure] = await rows();
   expect(await storage.load(local.resp_body_id)).toBe('local');
-  expect(await storage.load(notFound.resp_body_id)).toEqual(JSON.parse(missingBody));
+  expect(notFound.resp_body_id).toBeNull();
   expect(await storage.load(failure.resp_body_id)).toEqual(rejectedBody);
   expect(failure.protocol_outcome).toBe('failed');
   expect(failure.protocol_code).toBe('request_body_too_large');
@@ -179,7 +190,7 @@ test('logging never reads ahead, waits for persistence, or turns storage failure
   const saveGate = new Promise<void>(resolve => { resolveSave = resolve; });
   const saved: unknown[] = [];
   const capture = captureBody(new ReadableStream<Uint8Array>({ start(c) { controller = c; }, pull() { pulls++; } }, { highWaterMark: 0 }), 1024, '',
-    async value => { saved.push(value); await saveGate; }, () => {});
+    parseLogText, async value => { saved.push(value); await saveGate; }, () => {});
   expect(pulls).toBe(0);
   const reader = capture.body.getReader();
   controller.enqueue(encoder.encode('first'));
@@ -225,7 +236,7 @@ test('oversized logs are skipped without truncating the wire and capacity is rel
   const [row] = await rows();
   expect(row.resp_body_id).toBeNull();
   expect(JSON.parse(row.processing_steps)).toContainEqual(expect.objectContaining({ step: 'body_logging_incomplete', detail: expect.objectContaining({ reason: 'size_limit' }) }));
-  const small = new RequestLogger(new Request('http://gateway/test'), undefined, logging);
+  const small = new RequestLogger(new Request('http://gateway/test'), undefined, { ...logging, bodyParser: () => parseLogText });
   const body = small.observeBody('ok', 'response', new Headers(), cfg.logging!.body);
   expect(await new Response(body).text()).toBe('ok');
   await small.bodyLoggingCompletion(); await small.complete(200);
@@ -240,12 +251,12 @@ test('route retries record the final response rather than the discarded first re
     return new Response(++attempts === 1 ? 'discarded' : 'final', { status: attempts === 1 ? 503 : 200 });
   } });
   try {
-    const response = await handleRequest(new Request('http://gateway/test', { method: 'POST', body: '{bad', headers: { 'content-type': 'application/json' } }),
+    const response = await handleRequest(new Request('http://gateway/test', { method: 'POST', body: '{"x":1}', headers: { 'content-type': 'application/json' } }),
       config(server.url.origin, { retry: { enabled: true, retry_on: [503], max_retries: 1 } }), { logging });
     expect(await response.text()).toBe('final'); expect(attempts).toBe(2);
     const [row] = await rows();
     expect(await storage.load(row.resp_body_id)).toBe('final');
-    expect(await storage.load(row.req_body_id)).toBe('{bad');
+    expect(await storage.load(row.req_body_id)).toEqual({ x: 1 });
   } finally { await server.stop(true); }
 });
 
@@ -265,7 +276,7 @@ test('SSE logging preserves the final event envelope with and without modificati
     for (const modify of [false, true]) {
       gate = new Promise<void>(resolve => { finish = resolve; });
       const response = await handleRequest(new Request('http://gateway/test'), config(server.url.origin,
-        modify ? { response: { body: { add: { x: 2 } } } } : {}), { logging });
+        modify ? { response: { body: { add: { x: 2 } } } } : {}), { logging: { ...logging, bodyParser: withSseBodyParser } });
       const reader = response.body!.getReader();
       const first = await Promise.race([reader.read(), Bun.sleep(100).then(() => 'blocked' as const)]);
       expect(first).not.toBe('blocked');
@@ -292,7 +303,7 @@ test('all SSE body directions use the same array format while preserving compres
     for (const coding of ['', 'gzip', 'zstd']) {
       const bytes = coding === 'gzip' ? gzipSync(encoder.encode(text)) : coding === 'zstd' ? zstdCompressSync(encoder.encode(text)) : encoder.encode(text);
       const response = await handleRequest(new Request('http://gateway/test', { method: 'POST', body: Uint8Array.from(bytes),
-        headers: { 'content-type': 'text/event-stream; charset=utf-8', ...(coding ? { 'content-encoding': coding } : {}) } }), config(server.url.origin), { logging });
+        headers: { 'content-type': 'text/event-stream; charset=utf-8', ...(coding ? { 'content-encoding': coding } : {}) } }), config(server.url.origin), { logging: { ...logging, bodyParser: withSseBodyParser } });
       expect(response.headers.get('content-encoding') ?? '').toBe(coding);
       expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array(bytes));
       const row = (await rows()).at(-1)!;
@@ -310,8 +321,7 @@ test('simultaneous compressed log copies preserve every SSE body direction', asy
     const failures: string[] = [];
     const copies = Array.from({ length: 3 }, (_, index) => captureBody(new ReadableStream<Uint8Array>({
       start(controller) { controller.enqueue(wire); controller.close(); },
-    }), maxBytes, coding, async value => { saved[index] = value; }, reason => { failures.push(reason); },
-    undefined, 'text/event-stream'));
+    }), maxBytes, coding, parseLogSse, async value => { saved[index] = value; }, reason => { failures.push(reason); }));
     const forwarded = await Promise.all(copies.map(copy => new Response(copy.body).arrayBuffer()));
     await Promise.all(copies.map(copy => copy.completion));
     for (const bytes of forwarded) expect(new Uint8Array(bytes)).toEqual(new Uint8Array(wire));
@@ -325,7 +335,7 @@ test('SSE array expansion obeys the log size limit without affecting the respons
   const text = 'data:\n\n'.repeat(4);
   const server = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: () => new Response(text, { headers: { 'content-type': 'text/event-stream' } }) });
   try {
-    const response = await handleRequest(new Request('http://gateway/test'), config(server.url.origin), { logging });
+    const response = await handleRequest(new Request('http://gateway/test'), config(server.url.origin), { logging: { ...logging, bodyParser: withSseBodyParser } });
     expect(response.status).toBe(200); expect(await response.text()).toBe(text);
     const [row] = await rows();
     expect(row.resp_body_id).toBeNull();
@@ -336,10 +346,10 @@ test('SSE array expansion obeys the log size limit without affecting the respons
 test('SSE parsing capacity exhaustion remains isolated and releases its reservations', async () => {
   const text = 'data:0\n\n'.repeat(200_000);
   const reasons: string[] = []; const saved: unknown[] = [];
-  const capture = captureBody(new Response(text).body!, maxBytes, '', async value => { saved.push(value); }, reason => reasons.push(reason), undefined, 'text/event-stream');
+  const capture = captureBody(new Response(text).body!, maxBytes, '', parseLogSse, async value => { saved.push(value); }, reason => reasons.push(reason));
   expect(await new Response(capture.body).text()).toBe(text); await capture.completion;
   expect(saved).toEqual([]); expect(reasons).toEqual(['buffer_capacity']);
-  const after = captureBody(new Response('data: ok\n\n').body!, 1024, '', async value => { saved.push(value); }, reason => reasons.push(reason), undefined, 'text/event-stream');
+  const after = captureBody(new Response('data: ok\n\n').body!, 1024, '', parseLogSse, async value => { saved.push(value); }, reason => reasons.push(reason));
   expect(await new Response(after.body).text()).toBe('data: ok\n\n'); await after.completion;
   expect(saved).toEqual([[{ event: 'message', data: 'ok' }]]); expect(reasons).toEqual(['buffer_capacity']);
 });
@@ -349,7 +359,7 @@ test('concurrent logging saturation skips copies and releases all capacity witho
   const reasons: string[] = [];
   const chunk = new Uint8Array(5 * 1024 * 1024);
   const captures = Array.from({ length: 8 }, () => captureBody(new ReadableStream<Uint8Array>({ start(c) { controllers.push(c); } }, { highWaterMark: 0 }),
-    chunk.length, '', async () => {}, reason => reasons.push(reason)));
+    chunk.length, '', parseLogText, async () => {}, reason => reasons.push(reason)));
   const readers = captures.map(capture => capture.body.getReader());
   try {
     for (let i = 0; i < captures.length; i++) {
@@ -361,10 +371,37 @@ test('concurrent logging saturation skips copies and releases all capacity witho
     await Promise.all(readers.map(reader => reader.read()));
     await Promise.all(captures.map(capture => capture.completion));
     let saved: unknown;
-    const after = captureBody(new Response('after').body!, 64, '', async value => { saved = value; }, reason => { throw new Error(reason); });
+    const after = captureBody(new Response('after').body!, 64, '', parseLogText, async value => { saved = value; }, reason => { throw new Error(reason); });
     expect(await new Response(after.body).text()).toBe('after'); await after.completion;
     expect(saved).toBe('after');
   } finally { await Promise.all(readers.map(reader => reader.cancel())); }
+});
+
+test('cancelled disk captures hold their slots until in-flight writes settle', async () => {
+  const { bodyResources } = await import('../../../src/gateway/body-resources');
+  const gate = Promise.withResolvers<void>();
+  const cancelled: string[] = [];
+  let writers = 0;
+  const parser = { async *stream() { yield '"body"'; } };
+  const capture = () => captureBody(new Response('wire').body!, 1024, '', parser,
+    async () => {}, reason => cancelled.push(reason), undefined, {}, async () => {
+      writers++;
+      await gate.promise;
+    });
+  const pending = Array.from({ length: bodyResources.loggerConsumers }, capture);
+  try {
+    pending.forEach(log => log.stop());
+    await Promise.all(pending.map(log => log.completion));
+    const extra = capture();
+    expect(await new Response(extra.body).text()).toBe('wire');
+    await extra.completion;
+    expect(cancelled.at(-1)).toBe('buffer_capacity');
+    expect(writers).toBe(bodyResources.loggerConsumers);
+  } finally {
+    gate.resolve();
+    await flushBodyCaptures();
+    await Promise.all(pending.map(log => log.body.cancel()));
+  }
 });
 
 test('Buffer views retain an independent log copy when the source buffer is reused', async () => {
@@ -373,7 +410,7 @@ test('Buffer views retain an independent log copy when the source buffer is reus
   let controller!: ReadableStreamDefaultController<Uint8Array>;
   let saved: unknown;
   const capture = captureBody(new ReadableStream<Uint8Array>({ start(c) { controller = c; } }, { highWaterMark: 0 }),
-    64, '', async value => { saved = value; }, reason => { throw new Error(reason); });
+    64, '', parseLogText, async value => { saved = value; }, reason => { throw new Error(reason); });
   const reader = capture.body.getReader();
   controller.enqueue(chunk);
   expect(new TextDecoder().decode((await reader.read()).value)).toBe('first');
@@ -393,8 +430,8 @@ test('file logs retain all late body references even when flushed before body st
   const dependencies = { ...logging, fileLogWriter: files, bodyStorage: {
     async save(...args: Parameters<typeof storage.save>) { await gate; return storage.save(...args); },
   } };
-  const original = new RequestLogger(new Request('http://gateway/test'), undefined, dependencies);
-  const attempt = new RequestLogger(new Request('http://gateway/test'), undefined, dependencies);
+  const original = new RequestLogger(new Request('http://gateway/test'), undefined, { ...dependencies, bodyParser: () => parseLogText });
+  const attempt = new RequestLogger(new Request('http://gateway/test'), undefined, { ...dependencies, bodyParser: () => parseLogText });
   const cfg = { enabled: true, max_size: 1024 };
   try {
     const input = original.observeBody('original', 'original-request', new Headers(), cfg);
@@ -428,7 +465,11 @@ test('locally generated upstream timeouts capture bodies before immutable file l
   let release!: () => void;
   let gate: Promise<void>;
   const dependencies = { ...logging, fileLogWriter: files, bodyStorage: {
-    async save(...args: Parameters<typeof storage.save>) { await gate; return storage.save(...args); },
+    save: storage.save.bind(storage),
+    async saveStream(...args: Parameters<typeof storage.saveStream>) {
+      const [id, chunks, type, max, completed, signal, format] = args;
+      return storage.saveStream(id, chunks, type, max, Promise.all([completed, gate]).then(() => {}), signal, format);
+    },
   } };
   const server = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch() { await Bun.sleep(100); return new Response('late'); } });
   try {

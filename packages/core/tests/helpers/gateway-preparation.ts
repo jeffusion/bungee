@@ -6,12 +6,14 @@ import {setWorkerAdmissionSession} from '../../src/data-admission/worker';
 import {generateWorkerTransportSecret,restoreWorkerTransportRequest} from '../../src/config-worker/private-transport';
 import {privateRequestHeaders} from '../../src/public-listener/headers';
 import {DataAdmissionError} from '../../src/data-admission/errors';
+import {registerRequestLogs} from './request-log';
 import type {RequestLoggerDependencies} from '../../src/logger/request-logger';
 import type {DispatchRequestPreparationInput,DispatchRequestPreparationResult} from '../../src/gateway/contracts';
 
 /** A real Gateway/HTTP fixture; admission RPC is deterministic and records all debits and settlements. */
 export function gatewayPreparationFixture(options:{prepare:(input:DispatchRequestPreparationInput)=>Promise<DispatchRequestPreparationResult>;deniedRoute?:string;wsBudget?:boolean;upstream?:(request:Request)=>Promise<Response>|Response;credential?:string;logging?:RequestLoggerDependencies;bodyLogging?:boolean;admissionHost?:import('../../src/data-admission/host').DataAdmissionHost;dispatchModel?:string;onAnnotations?:(context:MutableRequestContext)=>void;onInspection?:(target:import('../../src/plugin-extensions').AdmissionTarget)=>Promise<void>}) {
   const previous=getScopedPluginRegistry();const hooks=createGatewayHooks();
+  if (options.logging) registerRequestLogs(hooks);
   const calls:{path:string;body:any}[]=[];const operations:{operation:string;target:any}[]=[];
   const budgets:{requestId:string;attemptId:string}[]=[];const settlements:{requestId:string;sent:boolean;outcome:string}[]=[];
   let prepares=0;let dispatches=0;

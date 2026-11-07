@@ -10,7 +10,7 @@ test('default groups follow gateway, usage and access tasks independently of cat
   const catalog = [...BUILTIN_MENU_PAGES,
     pluginPage('user-auth', '/profile'), pluginPage('user-auth', '/users'), pluginPage('token-budget', '/settings'),
     pluginPage('token-stats', '/statistics'), pluginPage('key-access', '/settings'), pluginPage('chatgpt-oauth', '/accounts'),
-    pluginPage('extra', '/page')].reverse();
+    pluginPage('request-logs', '/logs'), pluginPage('extra', '/page')].reverse();
   const page = (pageId: string) => ({ kind: 'page', pageId, visible: true });
   const group = (id: string, pages: string[]) => ({ kind: 'group', id, title: null, visible: true, children: pages.map(page) });
   expect(createDefaultMenuLayout(catalog)).toEqual([
@@ -18,7 +18,7 @@ test('default groups follow gateway, usage and access tasks independently of cat
     group('group:gateway', ['builtin:routes', 'builtin:services']),
     group('group:usage', ['plugin:token-stats:%2Fstatistics', 'plugin:token-budget:%2Fsettings', 'plugin:chatgpt-oauth:%2Faccounts']),
     group('group:access', ['plugin:key-access:%2Fsettings', 'plugin:user-auth:%2Fusers']),
-    page('builtin:logs'),
+    page('plugin:request-logs:%2Flogs'),
     group('group:system', ['builtin:configuration', 'builtin:plugins', 'builtin:menus', 'plugin:user-auth:%2Fprofile']),
     page('plugin:extra:%2Fpage'),
   ]);
@@ -29,7 +29,7 @@ test('disabled known plugins and empty groups are absent, while partial groups r
     pluginPage('key-access', '/settings', false), pluginPage('user-auth', '/users', false),
     pluginPage('token-stats', '/statistics', false), pluginPage('token-budget', '/settings')]);
   expect(layout.map(node => node.kind === 'group' ? node.id : node.pageId)).toEqual([
-    'builtin:dashboard', 'group:gateway', 'group:usage', 'builtin:logs', 'group:system',
+    'builtin:dashboard', 'group:gateway', 'group:usage', 'group:system',
   ]);
   expect(layout.find(node => node.kind === 'group' && node.id === 'group:usage')).toMatchObject({
     children: [{kind: 'page', pageId: 'plugin:token-budget:%2Fsettings', visible: true}],
@@ -59,6 +59,6 @@ test('default layouts never add unavailable plugin pages', () => {
   const enabled = { ...disabled, id: 'plugin:enabled:%2Fpage', available: true };
   const layout = createDefaultMenuLayout([...BUILTIN_MENU_PAGES, disabled, enabled]);
   expect(layout.flatMap(node => node.kind === 'page' ? [node.pageId] : node.children.map(child => child.pageId))).toEqual([
-    'builtin:dashboard', 'builtin:routes', 'builtin:services', 'builtin:logs', 'builtin:configuration', 'builtin:plugins', 'builtin:menus', enabled.id,
+    'builtin:dashboard', 'builtin:routes', 'builtin:services', 'builtin:configuration', 'builtin:plugins', 'builtin:menus', enabled.id,
   ]);
 });

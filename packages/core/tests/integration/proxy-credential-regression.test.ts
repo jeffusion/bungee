@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import type { AppConfig } from '@jeffusion/bungee-types';
+import { parseLogSse, registerRequestLogs } from '../helpers/request-log';
 import type { RequestLoggerDependencies } from '../../src/logger/request-logger';
 const { compileRuntimeConfigSnapshot, parseNormalizeCompileAggregate } = await import('../../src/config-storage');
 const { createPluginHooks } = await import('../../src/hooks');
@@ -215,6 +216,7 @@ describe('proxy credential regressions', () => {
     const savedBodies: Record<string, unknown> = {};
     const { RequestLogger } = await import('../../src/logger/request-logger');
     const logger = new RequestLogger(new Request('http://proxy.test/v1/chat'), undefined, {
+      bodyParser: ({ stage }) => stage === 'client-response' ? parseLogSse : undefined,
       accessLogWriter: { write() {}, updateResponseBodyId() {}, updateBodyId() {}, updateProtocolOutcome() {} }, fileLogWriter: { write() {} },
       headerStorage: { async save(_id, headers, direction) { savedHeaders[direction] = structuredClone(headers); return direction; } },
       bodyStorage: { async save(_id, body, direction) { savedBodies[direction] = body; return direction; } },
@@ -460,7 +462,11 @@ describe('proxy credential regressions', () => {
         return true as T;
       },
     }));
+    const { createGatewayHooks } = await import('../../src/gateway/runtime');
+    const hooks = createGatewayHooks();
+    registerRequestLogs(hooks);
     setScopedPluginRegistry({
+      getGatewayHooks: () => hooks,
       runWithRequestLeases<T>(_leases: ReadonlyMap<string, () => void>, run: () => T): T { return run(); },
       async dispatchRequest() { return undefined; },
       getPrecompiledHooks: () => phaseHooks({

@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { kernelMonotonicNowNs } from '../../../src/master-runtime/kernel-monotonic-clock';
 import { expect, test } from 'bun:test';
 import type { ChildProcess } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DEFAULT_PUBLICATION_POLICY } from '@jeffusion/bungee-types';
@@ -1366,6 +1366,74 @@ test('debt-only pass leaves a legal admitted member alone', async () => {
     expect(result).toEqual({ released: [], fenced: [], unknown: [] });
     expect(repository.getWorkerLaunch(worker.identity.worker_instance_id))
       .toMatchObject({ admitted: true, exited: false, cleanup_released: false });
+  } finally { guard.closeAfterChildExit(); workers.disconnect(); repository.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('only exact failed cleanup and the free original guard reclaim an admitted, exited launch', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-reclaim-'));
+  const repository = ConfigRepository.open(join(directory, 'config.db'));
+  const fixture = configurationRepositoryFixture(repository);
+  const worker = await completedWorker(onlineWorker(randomUUID(), randomUUID(), 45106, 46106));
+  const guard = armProcessLifetimeGuard({ directory: join(directory, 'guards'), processInstanceId: worker.identity.worker_instance_id });
+  const workers = factory(directory, [], undefined, { ...fakeIdentityControl().control, probeInstance: async () => 'dead' },
+    async () => TEST_KERNEL_BOOT_ID, fixture, launchRepositoryFixture(repository));
+  const registry = { active: null, prepared: null, retired: [] };
+  const path = join(directory, `${worker.identity.worker_instance_id}.json`);
+  const publication = { mutation_id: 'historical-failed-cleanup', attempt_no: 1, drain_recovery_generation: 0 };
+  try {
+    repository.commit({ mutation_id: publication.mutation_id, expected_revision: 1, kind: 'config', created_at: 1,
+      target_worker_slots: [0],
+      aggregate: { logical_configuration: { services: [], routes: [], plugins: [] }, plugin_activations: [] } });
+    repository.claimPublicationTarget(CATALOG, 2);
+    repository.beginPublication(publication.mutation_id, 3);
+    repository.beginWorkerAttempt(publication.mutation_id, 0, 0, 'initial', 4);
+    repository.registerWorkerLaunch(worker.identity, guard.facts, { mutation_id: publication.mutation_id, worker_slot: 0, attempt_no: 1 }, 4);
+    const launch = () => repository.getWorkerLaunch(worker.identity.worker_instance_id)!;
+    const { descriptor_mac: _mac, ...descriptor } = worker.descriptor;
+    const terminal = descriptor.evidence.message;
+    if (terminal?.status !== 'worker-drained') throw new Error('expected drained worker fixture');
+    const contentHash = repository.getSnapshot().content_hash;
+    const body = { ...descriptor, revision: 2, content_hash: contentHash,
+      lifetime_guard: { ...guard.facts, held: true as const },
+      evidence: { kind: 'drained' as const, message: { ...terminal, revision: 2, content_hash: contentHash, publication } },
+      cleanup: { cleanup_state: 'failed' as const, revision: 2, content_hash: contentHash,
+        plugin_catalog_hash: CATALOG, publication: { ...publication } } };
+    const save = (value: WorkerDescriptorBody) => writeFile(path, JSON.stringify(signWorkerDescriptor(value, worker.credential.process_key)));
+    await save(body);
+    expect(await workers.reclaimExitedWorkerLaunchCapacity(launch())).toBeFalse();
+    repository.recordWorkerLaunchAdmitted(worker.identity.worker_instance_id, 5);
+    expect(await workers.reclaimExitedWorkerLaunchCapacity(launch())).toBeFalse();
+    repository.recordWorkerLaunchExit(worker.identity.worker_instance_id, { kind: 'exited', cleanup: 'unknown' }, 6);
+    expect(await workers.reclaimExitedWorkerLaunchCapacity(launch())).toBeFalse(); // The original lock is held.
+    guard.closeAfterChildExit();
+
+    await rm(path);
+    expect(await workers.reclaimExitedWorkerLaunchCapacity(launch())).toBeFalse();
+    await writeFile(path, JSON.stringify(signWorkerDescriptor(body, new Uint8Array(32))));
+    expect(await workers.reclaimExitedWorkerLaunchCapacity(launch())).toBeFalse();
+    await save({ ...body, cleanup: { ...body.cleanup, publication: { ...publication, attempt_no: 2 } } });
+    expect(await workers.reclaimExitedWorkerLaunchCapacity(launch())).toBeFalse();
+    await save({ ...body, cleanup: { ...body.cleanup, publication: { ...publication, drain_recovery_generation: 1 } } });
+    expect(await workers.reclaimExitedWorkerLaunchCapacity(launch())).toBeFalse();
+    await save({ ...body, lifetime_guard: { ...body.lifetime_guard, inode: `${guard.facts.inode}0` } });
+    expect(await workers.reclaimExitedWorkerLaunchCapacity(launch())).toBeFalse();
+    const { lifetime_guard: _guard, ...withoutGuard } = body;
+    await save(withoutGuard);
+    expect(await workers.reclaimExitedWorkerLaunchCapacity(launch())).toBeFalse();
+
+    await save(body);
+    await rename(guard.facts.path, `${guard.facts.path}.moved`);
+    expect(await workers.reclaimExitedWorkerLaunchCapacity(launch())).toBeFalse();
+    await rename(`${guard.facts.path}.moved`, guard.facts.path);
+    expect(await workers.reclaimExitedWorkerLaunchCapacity(launch())).toBeTrue();
+    expect((await workers.cleanupAuthenticatedOrphans(registry)).cleaned).toEqual([]);
+    expect(parseWorkerDescriptor(JSON.parse(await readFile(path, 'utf8')), worker.credential).cleanup?.cleanup_state).toBe('failed');
+    expect(await workers.reclaimExitedWorkerLaunchCapacity(launch())).toBeFalse();
+    expect((await workers.settleWorkerLaunchDebt(registry)).unknown).toEqual([launch()]);
+    expect(repository.getWorkerLaunchInventory()).toEqual([{ kind: 'launch', launch: expect.objectContaining({
+      admitted: true, exited: true, cleanup_released: false, capacity_reclaimed: true,
+    }) }]);
+    expect(repository.getWorkerLaunchAllocationFacts(launch().allocation!)?.settled).toBeFalse();
   } finally { guard.closeAfterChildExit(); workers.disconnect(); repository.close(); await rm(directory, { recursive: true, force: true }); }
 });
 

@@ -53,10 +53,12 @@ test('real master/ingress/worker enforces model policy and honors Authorization 
         throw new Error(`${error instanceof Error ? error.message : 'fixture readiness failed'}\n${output.slice(-16 * 1024)}`);
       }
     };
-    await waitReady(1, FIXTURE_STARTUP_WAIT_MS);
+    // Offline initialization has no plugin catalog. First startup activates the installed collector.
+    const startupRevision = 2;
+    await waitReady(startupRevision, FIXTURE_STARTUP_WAIT_MS);
     const serviceId=crypto.randomUUID(),routeId=crypto.randomUUID(),passthroughServiceId=crypto.randomUUID(),stripRouteId=crypto.randomUUID();
     const changed = await fetch(base+'/api/config',{method:'PUT',headers,body:JSON.stringify({
-      expected_revision:1,mutation_id:crypto.randomUUID(),aggregate:{
+      expected_revision:startupRevision,mutation_id:crypto.randomUUID(),aggregate:{
         logical_configuration:{publication:FIXTURE_PUBLICATION_POLICY,plugins:[],services:[{id:serviceId,name:'model-policy-upstream',position:1,plugins:[],
           endpoints:[{id:crypto.randomUUID(),position:1,target:`http://127.0.0.1:${upstream.port}`,weight:100,priority:1,is_disabled:false,plugins:[],
             request: { headers:{add:{Authorization:'Bearer upstream-service-secret','x-safe':'service-header'}} }}]},
@@ -69,7 +71,7 @@ test('real master/ingress/worker enforces model policy and honors Authorization 
       },
     })});
     if (changed.status !== 202) throw Error('configuration commit '+changed.status+' '+await changed.text()+' '+output);
-    await waitReady(2, FIXTURE_PUBLICATION_WAIT_MS);
+    await waitReady(startupRevision + 1, FIXTURE_PUBLICATION_WAIT_MS);
     for (const path of ['passthrough','strip']) {
       const response=await fetch(`http://127.0.0.1:${ports[0]}/${path}/chat/completions`,{method:'POST',
         headers:{'content-type':'application/json',Authorization:'Basic client-upstream-credential','x-safe':'client-header'},

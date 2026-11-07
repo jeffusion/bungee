@@ -3,7 +3,7 @@ import { test as browserTest } from 'bun:test';
 import { chromium, expect } from 'playwright/test';
 import {collectApiEvidence} from '../helpers/editors/api-evidence';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
-import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
+import { menuSnapshot, fulfillMenuIcons, requestLogsPlugin } from '../helpers/menus';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 
 browserTest('logs actions', async () => {
@@ -37,7 +37,7 @@ try {
         if (url.pathname === '/api/auth/verify') return route.fulfill({ json: { success: true, mode: 'anonymous', subject: { id: 'anonymous', provider: 'anonymous' } } });
         if (url.pathname === '/api/config/runtime') return route.fulfill({ json: config });
         if (url.pathname === '/api/config') return route.fulfill({ json: { revision: 1, content_hash: config.content_hash, config: config.config } });
-        if (url.pathname === '/api/plugins') return route.fulfill({ json: [] });
+        if (url.pathname === '/api/plugins') return route.fulfill({ json: [requestLogsPlugin] });
         if (route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/system/updates') return route.fulfill({ json: systemUpdateStatusFixture });
         if (url.pathname === '/api/ui/menus') {
           // Log panel bounds use a compact user layout, independently of header overflow.
@@ -54,7 +54,7 @@ try {
         errors.push(`Unexpected API GET ${url.pathname}`);
         return route.fulfill({ status: 500, json: {error: 'unexpected_request'} });
       });
-      await page.goto(baseUrl + '/#/logs');
+      await page.goto(baseUrl + '/#/extensions/request-logs/logs');
       await expect(page.getByTestId('logs-table-scroll')).toBeVisible();
       const trigger = page.getByRole('button', { name: mobile ? text.logs.actions : text.logs.moreFilters, exact: true });
       const triggerNode=await trigger.elementHandle();

@@ -737,23 +737,7 @@ export async function executeForward(
   }
 
 
-  // 7.2 Record headers and body after plugin transformation
-  if (reqLogger) {
-    // Record transformed headers
-    reqLogger.setRequestHeaders(headersForLog(hookHeaders));
-
-    // Record transformed body (只记录 JSON 类型)
-    if (config.logging?.body?.enabled && requestSnapshot.is_json_body && finalBody !== undefined) {
-      try {
-        reqLogger.setRequestBody(finalBody);
-      } catch (err) {
-        logger.warn(
-          { request: requestLog, error: err },
-          'Failed to record transformed request body'
-        );
-      }
-    }
-  }
+  reqLogger?.setRequestHeaders(headersForLog(hookHeaders));
 
   // ===== 7. Plugin onInterceptRequest (upstream phase, may short-circuit or failover) =====
   if (!requestOverride && upstreamPhase && upstreamPhase.hasInterceptCallbacks) {

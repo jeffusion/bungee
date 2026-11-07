@@ -18,11 +18,16 @@ function getSingleParam(url: URL, name: string): string | undefined | null {
   return values.length === 0 ? undefined : values.length === 1 && values[0] !== '' ? values[0] : null;
 }
 
-function getLogFilters(url: URL): Pick<LogQueryParams, 'status' | 'transportOutcome' | 'transportType'> | Response {
+function getLogFilters(url: URL): Pick<LogQueryParams,
+  'status' | 'transportOutcome' | 'transportType' | 'recordKind' | 'accessId' | 'operationId'
+> | Response {
   const values = url.searchParams.getAll('status');
   const statuses = values.map(value => /^\d{3}$/.test(value) ? Number(value) : NaN);
   const transport = getSingleParam(url, 'transportOutcome');
   const transportType = getSingleParam(url, 'transportType');
+  const recordKind = getSingleParam(url, 'recordKind');
+  const accessId = getSingleParam(url, 'accessId');
+  const operationId = getSingleParam(url, 'operationId');
   if (transportType !== undefined && transportType !== 'http' && transportType !== 'websocket') {
     return Response.json({ error: 'transportType must be http or websocket' }, { status: 400 });
   }
@@ -32,8 +37,14 @@ function getLogFilters(url: URL): Pick<LogQueryParams, 'status' | 'transportOutc
   if (transport === null || (transport !== undefined && !TRANSPORT_OUTCOMES.includes(transport as TransportOutcome))) {
     return Response.json({ error: 'transportOutcome must be one of pending, completed, failed, cancelled, unknown' }, { status: 400 });
   }
+  if (recordKind !== undefined && recordKind !== 'access' && recordKind !== 'operation' && recordKind !== 'attempt') {
+    return Response.json({ error: 'recordKind must be access, operation or attempt' }, { status: 400 });
+  }
+  if (accessId === null || operationId === null) {
+    return Response.json({ error: 'accessId and operationId must be nonempty single values' }, { status: 400 });
+  }
   return { status: statuses.length === 0 ? undefined : statuses.length === 1 ? statuses[0] : [...new Set(statuses)],
-    transportType, transportOutcome: transport as TransportOutcome | undefined };
+    transportType, transportOutcome: transport as TransportOutcome | undefined, recordKind, accessId, operationId };
 }
 
 function getPollInterval(url: URL): number | null {
@@ -62,7 +73,7 @@ function databaseFailure(error: unknown): Response | null {
 export interface LogsHandlerDependencies {
   readonly database?: Database;
   readonly logQueryService: LogQueryService;
-  readonly bodyStorage: Pick<BodyStorageManager, 'load' | 'cleanup'>;
+  readonly bodyStorage: Pick<BodyStorageManager, 'load' | 'cleanup'> & Partial<Pick<BodyStorageManager, 'openStream'>>;
   readonly headerStorage: Pick<HeaderStorageManager, 'load' | 'cleanup'>;
   readonly cleanupService: Pick<LogCleanupService, 'runCleanup' | 'getConfig' | 'isActive'>;
   readonly shutdownSignal?: AbortSignal;
@@ -188,6 +199,11 @@ export class LogsHandler {
    */
   async getBodyById(bodyId: string): Promise<Response> {
     try {
+      if (bodyId.endsWith('.stream') && this.dependencies.bodyStorage.openStream) {
+        const file = await this.dependencies.bodyStorage.openStream(bodyId);
+        if (file) return new Response(file, { headers: JSON_HEADERS });
+        return Response.json({ error: 'Body not found' }, { status: 404 });
+      }
       const body = await this.dependencies.bodyStorage.load(bodyId);
 
       if (body === null || body === undefined) {
@@ -256,8 +272,6 @@ export class LogsHandler {
     const stream = new ReadableStream({
       async start(controller) {
         const encoder = new TextEncoder();
-        let lastTimestamp = Date.now();
-        let lastId = 0;
         let lastHeartbeat = Date.now();
         let running = true;
         let controllerClosed = false;
@@ -325,13 +339,13 @@ export class LogsHandler {
         };
 
         try {
+          let lastId = logQueryService.getLatestLogId();
           while (running) {
-            const rows = await logQueryService.querySince(lastTimestamp, lastId);
+            const rows = await logQueryService.querySince(lastId);
             for (const entry of rows) {
               if (!running) break;
               await waitForCapacity();
               if (!running) break;
-              lastTimestamp = entry.timestamp;
               lastId = entry.id;
               if (!safeEnqueue(encoder.encode(`data: ${JSON.stringify(entry)}\n\n`))) break;
               lastHeartbeat = Date.now();

@@ -1,4 +1,4 @@
-import { createSignedWorkerRpcClient, DATA_ADMISSION_RPC_PATH } from '../data-admission/rpc';
+import { createSignedWorkerRpcClient, DATA_ADMISSION_RPC_PATH, REQUEST_LOG_RPC_PATH } from '../data-admission/rpc';
 import { setWorkerAdmissionSession } from '../data-admission/worker';
 import {
   createRateLimitCredential,
@@ -75,10 +75,13 @@ export function createWorkerRateLimitHttpProvider(options: {
   readonly observer?: RateLimitObserver;
 }): WorkerRateLimitHttpProvider {
   const credential = createRateLimitCredential(options.transportSecret, options.worker);
+  const admission = createSignedWorkerRpcClient({ ...options, expectedServer: options.expectedIngress,
+    url: `http://127.0.0.1:${options.supervisionPort}${DATA_ADMISSION_RPC_PATH}` });
+  const requestLog = createSignedWorkerRpcClient({ ...options, expectedServer: options.expectedIngress, retry: false,
+    url: `http://127.0.0.1:${options.supervisionPort}${REQUEST_LOG_RPC_PATH}` });
   setWorkerAdmissionSession({
-    admission: createSignedWorkerRpcClient({ ...options, expectedServer: options.expectedIngress,
-      url: `http://127.0.0.1:${options.supervisionPort}${DATA_ADMISSION_RPC_PATH}` }),
-
+    admission,
+    requestLogActive: async () => await requestLog('request-log-active', null, AbortSignal.timeout(150)) === true,
   });
   const domainKey = deriveRateLimitDomainKey(options.transportSecret);
   const client = createRateLimitHttpClient({

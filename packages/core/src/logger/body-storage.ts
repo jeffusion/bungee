@@ -1,6 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'fs';
 import path from 'path';
+import { DEFAULT_BODY_LOG_MAX_BYTES } from '@jeffusion/bungee-types';
 import { logger } from '../logger';
+import { BodyProcessingError } from '../gateway/body-service';
 
 export interface BodyStorageConfig {
   enabled: boolean;
@@ -13,7 +16,7 @@ type BodyType = typeof BODY_TYPES[number];
 
 const DEFAULT_CONFIG: BodyStorageConfig = {
   enabled: true,
-  maxSize: 5120,        // 5 KB
+  maxSize: DEFAULT_BODY_LOG_MAX_BYTES,
   retentionDays: 1,     // 1 天
 };
 
@@ -88,6 +91,75 @@ export class BodyStorageManager {
     }
   }
 
+  /** Persist an JSON or text value without retaining it in memory. */
+  async saveStream(requestId: string, chunks: AsyncIterable<string> | Iterable<string>, type: BodyType,
+    maxBytes: number, completed: Promise<void>, signal: AbortSignal, format?: 'text'): Promise<string | null> {
+    if (!this.config.enabled) return null;
+    const bodyId = `${this.getDateString()}/${type}-${requestId}.stream`;
+    const filePath = this.getBodyFilePath(bodyId);
+    if (!filePath) throw new Error('body_log_storage_failed');
+    const temporary = `${filePath}.${randomUUID()}.part`;
+    let file: fs.promises.FileHandle | undefined;
+    let created = false;
+    let renamed = false;
+    let committed = false;
+    let bytes = 0;
+    let buffered = '';
+    const write = async (chunk: string) => {
+      try { await file!.writeFile(chunk); }
+      catch { throw new Error('body_log_storage_failed'); }
+    };
+    try {
+      for await (const chunk of chunks) {
+        signal.throwIfAborted();
+        bytes += Buffer.byteLength(chunk);
+        if (bytes > maxBytes) throw new BodyProcessingError(413, 'body_log_too_large');
+        if (!file) {
+          if (!this.ensureSafeDirectory(path.dirname(filePath)) || !this.isSafeRegularFile(filePath)) {
+            throw new Error('body_log_storage_failed');
+          }
+          try { file = await fs.promises.open(temporary, 'wx', 0o600); }
+          catch { throw new Error('body_log_storage_failed'); }
+          created = true;
+          buffered = `{"bodyId":${JSON.stringify(bodyId)},"content":${format === 'text' ? '"' : ''}`;
+        }
+        buffered += format === 'text' ? JSON.stringify(chunk).slice(1, -1) : chunk;
+        if (buffered.length >= 64 * 1024) {
+          await write(buffered);
+          buffered = '';
+        }
+      }
+      if (!file) return null;
+      await completed;
+      signal.throwIfAborted();
+      await write(buffered + (format === 'text' ? '"}' : '}'));
+      try {
+        await file.close();
+        file = undefined;
+        signal.throwIfAborted();
+        await fs.promises.rename(temporary, filePath);
+        renamed = true;
+        signal.throwIfAborted();
+        committed = true;
+        return bodyId;
+      } catch (error) {
+        if (signal.aborted) throw error;
+        throw new Error('body_log_storage_failed');
+      }
+    } finally {
+      if (file) await file.close().catch(() => undefined);
+      if (created && !committed) await fs.promises.rm(renamed ? filePath : temporary, { force: true }).catch(() => undefined);
+    }
+  }
+
+  async openStream(bodyId: string): Promise<Blob | null> {
+    if (!bodyId.endsWith('.stream')) return null;
+    const filePath = this.getBodyFilePath(bodyId);
+    if (!filePath || !await this.isSafePath(filePath)) return null;
+    const file = Bun.file(filePath);
+    return await file.exists() ? file : null;
+  }
+
   /**
    * 读取 body 内容
    */
@@ -101,6 +173,7 @@ export class BodyStorageManager {
       }
 
       const content = await fs.promises.readFile(filePath, 'utf-8');
+      if (bodyId.endsWith('.stream')) return JSON.parse(content).content;
 
       // 尝试解析为 JSON
       try {

@@ -16,7 +16,7 @@ beforeAll(async () => {
 afterAll(async () => { try { await browser?.close(); } finally { await runtime?.close(); } });
 
 for (const count of [0, 1, 3]) {
-  test(`attempts=${count}: initialize last once; preserve manual collapse and switch`, async () => {
+  test(`attempts=${count}: collapse and expand the request or switch attempts`, async () => {
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     try {
       const page = await context.newPage();
@@ -28,8 +28,9 @@ for (const count of [0, 1, 3]) {
       await page.waitForSelector('[data-loading]');
       expect(await page.locator('[data-detail]').count()).toBe(0);
       await page.evaluate(count => {
-        const chain = { chainId: 'test-chain', chainStatus: 200, method: 'POST', chainAttempts: count,
-          chainDurationMs: 1234, chainStartTs: 0, path: '/test' };
+        const chain = { chainId: 'test-chain', requestId: 'client-request', chainStatus: count ? 200 : 101, method: count ? 'POST' : 'GET',
+          transportType: count ? 'http' : 'websocket', recordKind: count ? 'access' : 'operation',
+          chainAttempts: count, chainDurationMs: 1234, chainStartTs: 0, path: '/test' };
         // The final-typed success is deliberately NOT last: no status-based selection/sorting.
         const attempts = Array.from({ length: count }, (_, i) => ({ requestId: `attempt-${i}`,
           status: i === 0 ? 200 : 502, requestType: i === 0 ? 'final' : 'retry', duration: 1234 + i,
@@ -39,29 +40,26 @@ for (const count of [0, 1, 3]) {
       }, count);
       await page.waitForSelector('[data-loading]', { state: 'detached' });
       expect(await page.locator('[data-detail]').evaluateAll(nodes => nodes.map(node => node.getAttribute('data-detail'))))
-        .toEqual(count ? [`attempt-${count - 1}`] : []);
-      const buttons = page.locator('button').filter({ hasText: /^#/ });
-      expect(await buttons.count()).toBe(count);
-      if (count) {
-        const last = buttons.last();
-        expect(await last.getAttribute('aria-expanded')).toBe('true');
-        const controlled = await last.getAttribute('aria-controls');
-        expect(controlled).toBeTruthy();
-        expect(await page.locator(`[id="${controlled}"] [data-detail]`).count()).toBe(1);
+        .toEqual([count > 1 ? `attempt-${count - 1}` : 'client-request']);
+      const buttons = page.locator('button[id^="chain-attempt-trigger-"]');
+      expect(await buttons.count()).toBe(Math.max(1, count));
+      const last = buttons.last();
+      expect(await last.getAttribute('aria-expanded')).toBe('true');
+      const controlled = await last.getAttribute('aria-controls');
+      expect(controlled).toBeTruthy();
+      expect(await page.locator(`[id="${controlled}"] [data-detail]`).count()).toBe(1);
 
-        await last.focus();
-        await page.keyboard.press('Enter');
+      await last.focus();
+      await page.keyboard.press('Enter');
 
-        expect(await page.locator('[data-detail]').count()).toBe(0);
+      expect(await page.locator('[data-detail]').count()).toBe(0);
+      expect(await last.getAttribute('aria-expanded')).toBe('false');
+      await page.keyboard.press('Space');
+      expect(await last.getAttribute('aria-expanded')).toBe('true');
+      if (count > 1) {
+        await buttons.first().click();
+        expect(await page.locator('[data-detail]').getAttribute('data-detail')).toBe('attempt-0');
         expect(await last.getAttribute('aria-expanded')).toBe('false');
-        await page.keyboard.press('Space');
-        expect(await last.getAttribute('aria-expanded')).toBe('true');
-        if (count > 1) {
-          await buttons.first().click();
-
-          expect(await page.locator('[data-detail]').getAttribute('data-detail')).toBe('attempt-0');
-          expect(await last.getAttribute('aria-expanded')).toBe('false');
-        }
       }
       expect(errors).toEqual([]);
     } finally {

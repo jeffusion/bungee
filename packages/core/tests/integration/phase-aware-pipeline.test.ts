@@ -9,6 +9,7 @@ const { createPluginHooks } = await import('../../src/hooks');
 import type { RawResponseResult } from '../../src/plugin-control/contracts';
 const { logger } = await import('../../src/logger');
 import type { AccessLogEntry } from '../../src/logger/access-log-writer';
+import { registerRequestLogs } from '../helpers/request-log';
 import type { RequestLoggerDependencies } from '../../src/logger/request-logger';
 import type { PhaseAwareHooks, PrecompiledHooks, ScopedPluginRegistry } from '../../src/scoped-plugin-registry';
 const { setScopedPluginRegistry } = await import('../../src/scoped-plugin-registry');
@@ -16,7 +17,11 @@ const { setScopedPluginRegistry } = await import('../../src/scoped-plugin-regist
 
 const originalFetch = global.fetch;
 const originalWarn = logger.warn;
-let handleRequest: typeof import('../../src/worker/request/handler').handleRequest;
+const { handleRequest: requestHandler } = await import('../../src/worker/request/handler');
+const { createGatewayHooks, runWithGatewayHooks } = await import('../../src/gateway/runtime');
+const gatewayHooks = createGatewayHooks();
+registerRequestLogs(gatewayHooks);
+const handleRequest: typeof requestHandler = (...args) => runWithGatewayHooks(gatewayHooks, () => requestHandler(...args));
 let initializeRuntimeState: typeof import('../../src/worker/state/runtime-state').initializeRuntimeState;
 let runtimeState: typeof import('../../src/worker/state/runtime-state').runtimeState;
 let getActiveRequestCount: typeof import('../../src/worker/state/runtime-state').getActiveRequestCount;
@@ -184,7 +189,6 @@ function createFailoverConfig(): AppConfig {
 
 beforeAll(async () => {
 
-  ({ handleRequest } = await import('../../src/worker/request/handler'));
   ({ initializeRuntimeState, runtimeState, getActiveRequestCount } = await import('../../src/worker/state/runtime-state'));
   ({ accessLogWriter } = await import('../../src/logger/access-log-writer'));
 });
@@ -417,7 +421,7 @@ describe('phase-aware request pipeline', () => {
 
     let response!: Response;
     for (let attempt = 0; attempt < 3; attempt++) {
-      response = await handleRequest(new Request('http://localhost/explicit-400-retry'), config);
+      response = await handleRequest(new Request('http://localhost/explicit-400-retry'), config, { logging: { accessLogWriter } });
       expect(response.status).toBe(200);
       expect(await response.text()).toBe('sibling-ok');
     }

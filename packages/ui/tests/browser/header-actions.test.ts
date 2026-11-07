@@ -2,7 +2,7 @@ import { systemUpdateStatusFixture } from '../helpers/system-updates';
 import { test as browserTest } from 'bun:test';
 import { chromium, expect, type Route } from 'playwright/test';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
-import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
+import { menuSnapshot, fulfillMenuIcons, requestLogsMenuPage } from '../helpers/menus';
 import { startUiRuntime } from '../../../../tests/helpers/ui-runtime';
 
 browserTest('header navigation and confirmed session logout', async () => {
@@ -26,7 +26,7 @@ browserTest('header navigation and confirmed session logout', async () => {
       page.on('requestfailed', request => errors.push(`${request.method()} ${request.url()}: ${request.failure()?.errorText}`));
       await page.route('https://fonts.googleapis.com/**', route => route.fulfill({contentType:'text/css',body:''}));
       let authenticated = true, logoutCalls = 0;
-      const snapshot = menuSnapshot();
+      const snapshot = menuSnapshot([requestLogsMenuPage]);
       const pluginLinks = ['访问控制', 'TOKEN预算', 'TOKEN统计'].map((label, index) => ({
         id: `plugin:fixture:${index}`, label, href: `/#/extensions/fixture/${index}`, source: 'plugin' as const,
         pluginName: 'fixture', defaultIcon: 'lucide:puzzle', available: true,
@@ -67,7 +67,7 @@ browserTest('header navigation and confirmed session logout', async () => {
         await expect(page.locator('#header-menu-trigger')).toBeHidden();
         await expect(page.getByTestId('header-menu')).toHaveCount(0);
         const topKeys = await top.locator('li').evaluateAll(nodes => nodes.map(node => node.querySelector('a')?.getAttribute('href') ?? 'group'));
-        expect(topKeys).toEqual(['/#/', 'group', '/#/logs', 'group', ...pluginLinks.map(page => page.href)]);
+        expect(topKeys).toEqual(['/#/', 'group', requestLogsMenuPage.href, 'group', ...pluginLinks.map(page => page.href)]);
 
       }
 

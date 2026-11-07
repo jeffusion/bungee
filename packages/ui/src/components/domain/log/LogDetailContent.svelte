@@ -419,7 +419,7 @@
             </div>
             <div>
               <div class="text-xs opacity-60 mb-1">{$_('logs.detail.method')}</div>
-              <span class={chipClass()}>{log.method}</span>
+              <span class={chipClass()}>{log.method || '—'}</span>
             </div>
             <div>
               <div class="text-xs opacity-60 mb-1">{$_('logs.requestType')}</div>
@@ -599,6 +599,18 @@
               <div class="text-xs opacity-60 mb-1">{$_('logs.transportType')}</div>
               <span class={chipClass()} title={log.transportType === null ? $_('logs.transportTypeUnrecorded') : undefined}>{transportTypeLabel(log.transportType)}</span>
             </div>
+            {#if log.observationOutcome === 'incomplete' || log.protocolOutcome}
+              <div>
+                <div class="text-xs opacity-60 mb-1">{$_('logs.detail.protocolOutcome')}</div>
+                <span class={chipClass()}>{log.observationOutcome === 'incomplete' ? $_('logs.observationIncomplete') : $_(`logs.protocol.${log.protocolOutcome}`)}</span>
+              </div>
+            {/if}
+            {#if log.transportType === 'websocket' && log.closeCode !== undefined}
+              <div>
+                <div class="text-xs opacity-60 mb-1">{$_('logs.closeCode')}</div>
+                <span class={chipClass()}>{log.closeCode}</span>
+              </div>
+            {/if}
             {#if log.transformedPath && log.transformedPath !== log.path}
               <!-- 显示原始路径和转换后的路径 -->
               <div>

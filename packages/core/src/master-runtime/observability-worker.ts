@@ -3,11 +3,15 @@ import { Database } from 'bun:sqlite';
 import { createMasterStats, type MasterStatsApi } from './master-stats';
 import { initializeAccessDatabaseForMaster } from '../access-database';
 import { MigrationManager } from '../migrations';
+import { AccessLogWriter, type AccessLogEntry } from '../logger/access-log-writer';
+import { FileLogWriter } from '../logger/file-log-writer';
 
 function headerEntries(headers:Headers):[string,string][] {const values:[string,string][]=[];headers.forEach((value,key)=>values.push([key,value]));return values;}
 const scope = globalThis as unknown as DedicatedWorkerGlobalScope;
 let stats: MasterStatsApi | null = null;
 let database: Database | null = null;
+let accessLog: AccessLogWriter | undefined;
+let accessFile: FileLogWriter | undefined;
 const adapters = new Map<string, Readonly<Record<string, (...args: any[]) => unknown>>>();
 const bodies = new Map<number, {reader:ReadableStreamDefaultReader<Uint8Array>;lifetime:AbortController}>();
 let sequence = 0;
@@ -26,6 +30,30 @@ async function execute(method: string, args: readonly any[]): Promise<unknown> {
     database = new Database(args[0]);
     try { stats = createMasterStats({accessDbPath:args[0],database}); }
     catch (error) { database = null; throw error; }
+    return null;
+  }
+  if (method === 'openAccessLog') {
+    if (accessLog || accessFile) throw new Error('access_log_already_open');
+    try { accessLog = new AccessLogWriter(args[0], 4096); }
+    catch { console.error('Ingress request log database unavailable'); }
+    try { accessFile = new FileLogWriter(args[1], 4096); }
+    catch { console.error('Ingress request log file storage unavailable'); }
+    if (!accessLog && !accessFile) throw new Error('access_log_storage_unavailable');
+    return null;
+  }
+  if (method === 'writeAccessLog' && (accessLog || accessFile)) {
+    for (const entry of args[0] as AccessLogEntry[]) {
+      accessLog?.write(entry);
+      if (entry.transportOutcome !== 'pending') {
+        void accessFile?.write(entry).catch(() => console.error('Ingress file access log write failed'));
+      }
+    }
+    return null;
+  }
+  if (method === 'close' && (accessLog || accessFile)) {
+    const results = await Promise.allSettled([accessLog?.close(), accessFile?.close()]);
+    const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);
+    if (errors.length) throw new AggregateError(errors, 'Ingress access log close failed');
     return null;
   }
   if (!stats || !database) throw new Error('observability_unavailable');

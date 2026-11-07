@@ -25,6 +25,7 @@ export type WorkerLaunch = {
   readonly not_started: boolean;
   readonly exited: boolean;
   readonly cleanup_released: boolean;
+  readonly capacity_reclaimed: boolean;
 };
 
 export type WorkerLaunchExitEvidence =
@@ -56,6 +57,7 @@ type IntentRow = {
   readonly allocation_attempt_no: number | null;
   readonly guard_json: string;
   readonly registered_at: number;
+  readonly capacity_reclaimed: number;
 };
 
 type ReservationRow = {
@@ -74,7 +76,9 @@ type LaunchFacts = {
 };
 
 const INTENT_SELECT = `SELECT worker_instance_id,master_generation,worker_slot,
-  allocation_mutation_id,allocation_worker_slot,allocation_attempt_no,guard_json,registered_at
+  allocation_mutation_id,allocation_worker_slot,allocation_attempt_no,guard_json,registered_at,
+  EXISTS (SELECT 1 FROM configuration_worker_launch_capacity_reclaims reclaim
+    WHERE reclaim.worker_instance_id=configuration_worker_launch_intents.worker_instance_id) AS capacity_reclaimed
   FROM configuration_worker_launch_intents`;
 
 function invalid(message: string): never {
@@ -203,6 +207,10 @@ function launchFromRow(db: Database, row: IntentRow): WorkerLaunch {
     throw new ConfigRepositoryError('schema_corrupt', 'worker launch guard identity is invalid');
   }
   const facts = readFacts(db, row.worker_instance_id, allocation);
+  const capacityReclaimed = row.capacity_reclaimed === 1;
+  if (capacityReclaimed && (!facts.admitted || !facts.exited || facts.not_started)) {
+    throw new ConfigRepositoryError('schema_corrupt', 'worker launch capacity reclaim has no admitted exit');
+  }
   return Object.freeze({
     identity: Object.freeze({
       master_generation: row.master_generation,
@@ -216,6 +224,7 @@ function launchFromRow(db: Database, row: IntentRow): WorkerLaunch {
     not_started: facts.not_started,
     exited: facts.exited,
     cleanup_released: facts.cleanup_released,
+    capacity_reclaimed: capacityReclaimed,
   });
 }
 
@@ -473,6 +482,21 @@ export function readWorkerLaunch(db: Database, workerInstanceId: string): Worker
   }
   const row = sqliteGet<IntentRow, [string]>(db, `${INTENT_SELECT} WHERE worker_instance_id=?`, workerInstanceId);
   return row === null ? null : launchFromRow(db, row);
+}
+
+/** The trusted controller has authenticated failed cleanup and proved the exact original guard free. */
+export function recordWorkerLaunchCapacityReclaimed(
+  db: Database, workerInstanceId: string, guard: ProcessLifetimeGuardFacts, updatedAt: number,
+): void {
+  const row = requireIntentRow(db, workerInstanceId);
+  const launch = launchFromRow(db, row);
+  if (canonicalJson(parseInputGuard(guard, launch.identity)) !== canonicalJson(launch.guard)) invalidOperation('worker launch capacity guard does not match');
+  if (launch.capacity_reclaimed) return;
+  if (!launch.admitted || !launch.exited || launch.not_started || launch.cleanup_released) {
+    invalidOperation('worker launch capacity reclaim requires admitted exit without successful cleanup');
+  }
+  requireTimestamp(updatedAt, Math.max(launch.registered_at, readFacts(db, workerInstanceId, launch.allocation).last_recorded_at));
+  db.run('INSERT INTO configuration_worker_launch_capacity_reclaims (worker_instance_id,recorded_at) VALUES (?,?)', [workerInstanceId, updatedAt]);
 }
 
 /**

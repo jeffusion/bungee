@@ -1,7 +1,7 @@
 import type { DataAdmissionPublication } from '../data-admission/host';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { armProcessLifetimeGuard, parseProcessLifetimeHeldAck, PROCESS_LIFETIME_GUARD_ENV } from '../supervision/process-lifetime-guard';
 import { spawn as spawnChild, type ChildProcess } from 'node:child_process';
 import { clearDaemonBootstrapEnvironment, DAEMON_BOOTSTRAP_ENV_NAMES } from '../daemon-control/bootstrap';
@@ -44,6 +44,7 @@ export type MasterIngressControllerOptions = {
   readonly publicHost: string;
   readonly publicPort: number;
   readonly instanceLockPath: string;
+  readonly accessLogDbPath?: string;
   readonly transportSecret: string;
   readonly executable: string;
   readonly entry: string;
@@ -458,7 +459,8 @@ export class MasterIngressController implements WorkerAdmissionController {
     this.startLeaseRenewal();
   }
 
-  prepare(workers: readonly ServingConfigWorker[], signal?: AbortSignal, handoffTimeoutMs?: number, websocketMaxConnections: number | null = DEFAULT_WEBSOCKET_MAX_CONNECTIONS, websocketMaxMessageBytes = DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES): Promise<PreparedWorkerAdmission> {
+  prepare(workers: readonly ServingConfigWorker[], signal?: AbortSignal, handoffTimeoutMs?: number, websocketMaxConnections: number | null = DEFAULT_WEBSOCKET_MAX_CONNECTIONS,
+    websocketMaxMessageBytes = DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES, requestLogCollectorEntry?: string): Promise<PreparedWorkerAdmission> {
     this.requireMutation();
     throwIfAborted(signal);
     const handoffBudgetMs = handoffTimeoutMs ?? DEFAULT_PUBLICATION_POLICY.drain_timeout_ms;
@@ -466,7 +468,7 @@ export class MasterIngressController implements WorkerAdmissionController {
       throw new MasterIngressControllerError('invalid_options', 'handoff timeout is invalid');
     }
     const scope = this.captureAdmissionHandleScope();
-    const set = this.toAdmissionSet(workers, websocketMaxConnections, websocketMaxMessageBytes);
+    const set = this.toAdmissionSet(workers, websocketMaxConnections, websocketMaxMessageBytes, requestLogCollectorEntry);
     const fingerprint = canonicalJson({ admission: { ...set, admission_sequence: 0 }, handoff_timeout_ms: handoffBudgetMs });
     if (this.pendingAdmission?.fingerprint === fingerprint) return this.pendingAdmission.promise;
     this.beginPrepareRecovery(set);
@@ -835,6 +837,7 @@ export class MasterIngressController implements WorkerAdmissionController {
     for (const name of [
       'BUNGEE_PLUGIN_SECRETS_KEY', 'BUNGEE_ROLE', 'HOST', 'PORT', 'WORKER_ID', 'WORKER_COUNT',
       'BUNGEE_INGRESS_CREDENTIAL', 'BUNGEE_INGRESS_TRANSPORT_SECRET', 'BUNGEE_INGRESS_INSTANCE_LOCK_PATH',
+      'BUNGEE_INGRESS_ACCESS_DB_PATH',
       'BUNGEE_INGRESS_PUBLIC_HOST', 'BUNGEE_INGRESS_PUBLIC_PORT', 'BUNGEE_INGRESS_SUPERVISION_PORT',
       'BUNGEE_INGRESS_STARTUP_WATCHDOG_MS',
     ]) delete childEnvironment[name];
@@ -891,6 +894,9 @@ export class MasterIngressController implements WorkerAdmissionController {
         BUNGEE_INGRESS_CREDENTIAL: serializeSupervisionCredential(this.childCredential),
         BUNGEE_INGRESS_TRANSPORT_SECRET: this.options.transportSecret,
         BUNGEE_INGRESS_INSTANCE_LOCK_PATH: this.options.instanceLockPath,
+        ...(this.options.accessLogDbPath === undefined ? {} : {
+          BUNGEE_INGRESS_ACCESS_DB_PATH: resolve(this.options.cwd, this.options.accessLogDbPath),
+        }),
         BUNGEE_INGRESS_PUBLIC_HOST: this.options.publicHost,
         BUNGEE_INGRESS_PUBLIC_PORT: String(this.options.publicPort),
         BUNGEE_INGRESS_SUPERVISION_PORT: String(this.options.controlPort),
@@ -1809,7 +1815,8 @@ export class MasterIngressController implements WorkerAdmissionController {
     }
   }
 
-  private toAdmissionSet(workers: readonly ServingConfigWorker[], websocketMaxConnections: number | null, websocketMaxMessageBytes: number): AdmissionSet {
+  private toAdmissionSet(workers: readonly ServingConfigWorker[], websocketMaxConnections: number | null, websocketMaxMessageBytes: number,
+    requestLogCollectorEntry?: string): AdmissionSet {
     if (!Number.isSafeInteger(websocketMaxMessageBytes) || websocketMaxMessageBytes < 1
       || websocketMaxMessageBytes > MAX_WEBSOCKET_MAX_MESSAGE_BYTES) {
       throw new MasterIngressControllerError('invalid_options', 'WebSocket message limit is invalid');
@@ -1858,6 +1865,7 @@ export class MasterIngressController implements WorkerAdmissionController {
       plugin_catalog_hash: first.plugin_catalog_hash as Sha256Digest,
       websocket_max_connections: websocketMaxConnections,
       websocket_max_message_bytes: websocketMaxMessageBytes,
+      ...(requestLogCollectorEntry === undefined ? {} : { request_log_collector_entry: requestLogCollectorEntry }),
       workers: ordered,
     };
   }

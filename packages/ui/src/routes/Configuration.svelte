@@ -24,7 +24,6 @@
   import { Label } from '$components/ui/label';
   import { Download, Upload, RefreshCw, ChevronDown, ArrowUpRight } from 'lucide-svelte';
   import * as DropdownMenu from '$components/ui/dropdown-menu';
-  import LoggingEditor from '$components/domain/config/LoggingEditor.svelte';
   import ConfigurationDiff from '$components/domain/config/ConfigurationDiff.svelte';
   import { publicationFields, publicationInputs, parsePublicationInputs, publicationServerErrors, maxPublicationSeconds,
     type PublicationInputs, type PublicationErrors, type PublicationField } from '$components/domain/config/publication-policy';
@@ -51,7 +50,6 @@
     || !Number.isSafeInteger(websocketValue) || websocketValue < 1 || websocketValue > 2147483647));
   let publicationRaw = $state<PublicationInputs>(publicationInputs());
   // New object only in resetSettingsInputs; ordinary draft edits must not remount the editor.
-  let loggingResetKey = $state({});
   let publicationEdited = $state(false);
   let publicationBackendErrors = $state<PublicationErrors>({});
   const parsedPublication = $derived(parsePublicationInputs(publicationRaw));
@@ -448,7 +446,6 @@
     websocketMessageValue = String((draft?.websocket_max_message_bytes ?? DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES) / 1024 / 1024);
     publicationRaw = publicationInputs(draft?.publication);
     publicationEdited = false; publicationBackendErrors = {};
-    loggingResetKey = {};
   }
   function publicationField(field: PublicationField, value: string) {
     if (!draft || publicationRaw[field] === value) return;
@@ -575,7 +572,7 @@
       </PanelCard>
     {/if}
     <nav class="flex flex-wrap gap-x-4 gap-y-0" aria-label={t('sections')}>
-      {#each ['general', 'publication', 'logging'] as section, index}
+      {#each ['general', 'publication'] as section, index}
         <button type="button" style="transition-property: color" class="group inline-flex cursor-pointer items-center gap-1.5 border-0 bg-transparent px-0.5 text-left text-sm text-zinc-300 duration-150 hover:text-nexus-300 focus-visible:text-nexus-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-500" onclick={() => jumpTo(section)}>
           <span aria-hidden="true" class="nx-display text-sm text-zinc-500 transition-[color] duration-150 group-hover:text-nexus-400 group-focus-visible:text-nexus-400">0{index + 1}</span>
           <span aria-hidden="true" class="font-mono text-[10px] text-zinc-600 transition-[color] duration-150 group-hover:text-nexus-400 group-focus-visible:text-nexus-400">//</span>
@@ -686,13 +683,6 @@
           </fieldset>
           <SystemAlertBar tone="warn"><p class="text-sm text-zinc-300">{t('publication.resourceWarning')}</p></SystemAlertBar>
         </div>
-      </PanelCard>
-    </section>
-    <section id="settings-logging" tabindex="-1" aria-label={t('logging')} class="scroll-mt-20">
-      <PanelCard title={t('logging')} tag="LOG">
-        {#key loggingResetKey}
-          <LoggingEditor bind:value={draft.logging} disabled={editingLocked} />
-        {/key}
       </PanelCard>
     </section>
     {#if dirty || submitting || submissionLocked(phase)}

@@ -1,3 +1,5 @@
+import { DEFAULT_BODY_LOG_MAX_BYTES } from '@jeffusion/bungee-types';
+
 export type LoggingBody = {
   readonly enabled: boolean;
   readonly max_size?: number;
@@ -10,11 +12,11 @@ export type LoggingValue = {
 
 export const LOGGING_BODY_DEFAULTS = {
   enabled: false,
-  max_size: 5120,
+  max_size: DEFAULT_BODY_LOG_MAX_BYTES,
   retention_days: 1,
 } as const satisfies LoggingBody;
 
-export function resolveLoggingBody(value: LoggingValue): LoggingBody {
+export function resolveLoggingBody(value: LoggingValue): Required<LoggingBody> {
   return { enabled: value?.body?.enabled ?? LOGGING_BODY_DEFAULTS.enabled,
     max_size: value?.body?.max_size ?? LOGGING_BODY_DEFAULTS.max_size,
     retention_days: value?.body?.retention_days ?? LOGGING_BODY_DEFAULTS.retention_days };
@@ -30,6 +32,6 @@ export function withLoggingBody(value: LoggingValue, patch: Partial<LoggingBody>
 export const bytesToKiB = (bytes: number | undefined) => bytes === undefined ? undefined : bytes / 1024;
 export function kibToBytes(kib: number): number {
   const bytes = kib * 1024;
-  if (!Number.isSafeInteger(bytes) || bytes < 1024 || bytes > 5 * 1024 * 1024) throw new Error('invalid_body_size');
+  if (!Number.isSafeInteger(bytes) || bytes < 1024) throw new Error('invalid_body_size');
   return bytes;
 }

@@ -1,9 +1,11 @@
-import { accessLogWriter, type ProcessingStep } from './access-log-writer';
-import { fileLogWriter, type FileLogEntry } from './file-log-writer';
-import type { AccessLogWriter } from './access-log-writer';
+import { DEFAULT_BODY_LOG_MAX_BYTES } from '@jeffusion/bungee-types';
+import type { ProcessingStep } from './access-log-writer';
+import type { FileLogEntry } from './file-log-writer';
+import type { AccessLogEntry, AccessLogWriter } from './access-log-writer';
 import type { BodyStorageManager } from './body-storage';
 import type { HeaderStorageManager } from './header-storage';
 import type { RawResponseError } from '../plugin-control/contracts';
+import type { RequestLogBodyContext, RequestLogBodyHandler } from '../gateway/request-log-contracts';
 import type { TransportOutcome, TransportType } from './transport-outcome';
 import { captureBody, trackBodyLogTask, type BodyCapture, type BodyCaptureOptions } from './body-capture';
 
@@ -18,14 +20,16 @@ function diagnosticMessage(error?: RawResponseError): string | undefined {
 export type RequestLoggerDependencies = {
   /** Host restriction overrides configured body capture and explicit body setters. */
   readonly captureBody?: boolean;
+  readonly bodyParser?: (context: RequestLogBodyContext) => RequestLogBodyHandler | null | undefined;
   readonly accessLogWriter?: Pick<AccessLogWriter, 'write' | 'updateResponseBodyId' | 'updateProtocolOutcome'>
     & Partial<Pick<AccessLogWriter, 'updateTransportOutcome' | 'updateBodyId' | 'appendProcessingStep'>>;
   readonly fileLogWriter?: { write(entry:FileLogEntry):void|Promise<void> };
-  readonly bodyStorage?: Pick<BodyStorageManager, 'save'> & Partial<Pick<BodyStorageManager, 'getConfig'>>;
+  readonly bodyStorage?: Pick<BodyStorageManager, 'save'> & Partial<Pick<BodyStorageManager, 'getConfig' | 'saveStream'>>;
   readonly headerStorage?: Pick<HeaderStorageManager, 'save'>;
 };
 
 export interface FailoverAttemptOptions {
+  accessId?: string;
   transportType?: TransportType;
   isFailoverAttempt?: boolean;   // 是否是故障转移尝试
   parentRequestId?: string;      // 父请求 ID
@@ -61,7 +65,7 @@ export interface RequestLogCompletionOptions {
  *
  * 使用方式：
  * ```typescript
- * const reqLogger = new RequestLogger(req);
+ * const reqLogger = new RequestLogger(req, undefined, logging);
  * reqLogger.setRequestBody(requestBody);
  * reqLogger.addStep('auth', { success: true });
  * reqLogger.addStep('transformer', { name: 'openai-to-anthropic' });
@@ -74,6 +78,7 @@ export class RequestLogger {
   private startTime: number;
   private method: string;
   private readonly transportType: TransportType;
+  private readonly linkage: Pick<AccessLogEntry, 'recordKind' | 'accessId'>;
   private path: string;
   private query: string;
   private transformedPath: string | null = null;  // 转换后的路径（经过 pathRewrite）
@@ -110,30 +115,27 @@ export class RequestLogger {
   private readonly inheritedBodyCompletions = new Set<Promise<void>>();
   private fileLogTask?: Promise<void>;
   private fileLogReady?: Promise<void>;
-  private readonly dependencies: Required<Pick<RequestLoggerDependencies, 'accessLogWriter' | 'fileLogWriter'>>
-    & Omit<RequestLoggerDependencies, 'accessLogWriter' | 'fileLogWriter'>;
-  private requestAccept = '';
+  private readonly dependencies: RequestLoggerDependencies;
 
   constructor(
     req: Request,
-    failoverOptions?: FailoverAttemptOptions,
-    dependencies: RequestLoggerDependencies = {},
+    failoverOptions: FailoverAttemptOptions | undefined,
+    dependencies: RequestLoggerDependencies | null,
   ) {
-    this.dependencies = {
-      accessLogWriter: dependencies.accessLogWriter ?? accessLogWriter,
-      fileLogWriter: dependencies.fileLogWriter ?? fileLogWriter,
-      bodyStorage: dependencies.captureBody === false ? undefined : dependencies.bodyStorage,
-      captureBody: dependencies.captureBody,
-      headerStorage: dependencies.headerStorage,
-    };
+    this.dependencies = dependencies ?? { captureBody: false };
+    if (this.dependencies.captureBody === false && this.dependencies.bodyStorage) {
+      this.dependencies = { ...this.dependencies, bodyStorage: undefined };
+    }
     this.requestId = crypto.randomUUID();
     this.startTime = Date.now();
     const url = new URL(req.url);
     this.method = req.method;
     this.transportType = failoverOptions?.transportType ?? 'http';
+    this.linkage = failoverOptions?.accessId
+      ? { recordKind: 'attempt', accessId: failoverOptions.accessId }
+      : {};
     this.path = url.pathname;
     this.query = url.search;
-    this.requestAccept = req.headers.get('accept') ?? '';
 
     // 设置故障转移相关参数
     if (failoverOptions) {
@@ -157,7 +159,7 @@ export class RequestLogger {
       timestamp: Date.now(),
     };
     this.steps.push(entry);
-    if (this.completed) this.dependencies.accessLogWriter.appendProcessingStep?.(this.requestId, entry);
+    if (this.completed) this.dependencies.accessLogWriter?.appendProcessingStep?.(this.requestId, entry);
   }
 
   /** Record the actual representation independently of parsing, rewriting and plugin observers. */
@@ -165,30 +167,55 @@ export class RequestLogger {
     config?: { enabled: boolean; max_size?: number }, signal?: AbortSignal, status = 200, bodyOptions:BodyCaptureOptions = {}): BodyInit | null {
     const storage = this.dependencies.bodyStorage;
     if (!config?.enabled || !storage || body === null || this.capturedTypes.has(type)) return body;
+    const stage = type === 'response' ? 'client-response' : type === 'request' ? 'outbound-request' : 'original-request';
+    const contentType = headers.get('content-type') ?? '';
+    const contentEncoding = headers.get('content-encoding') ?? '';
+    let parse: RequestLogBodyHandler | null | undefined;
+    try {
+      parse = this.dependencies.bodyParser?.(Object.freeze({
+        method: this.method, path: this.path, transportType: this.transportType, stage, contentType,
+      }));
+    } catch {
+      this.addStep('body_logging_incomplete', { direction: type, reason: 'parser_selection_failed', observer_incomplete: true });
+    }
+    if (!parse) return body;
     // Preserve the existing larger diagnostic default; configured save limits remain independent.
     const isError = type === 'response' && status >= 400;
-    const maxBytes = isError ? Math.max(config.max_size ?? storage.getConfig?.().maxSize ?? 5120, 5 * 1024 * 1024) : config.max_size ?? storage.getConfig?.().maxSize ?? 5120;
+    const configuredMaxBytes = config.max_size ?? storage.getConfig?.().maxSize ?? DEFAULT_BODY_LOG_MAX_BYTES;
+    const maxBytes = isError ? Math.max(configuredMaxBytes, 5 * 1024 * 1024) : configuredMaxBytes;
     if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) return body;
     this.capturedTypes.add(type);
     const version = this.captureVersions.get(type) ?? 0;
     try {
       const source = body instanceof ReadableStream ? body : new Response(body).body!;
-      const capture = captureBody(source, maxBytes, headers.get('content-encoding') ?? '', async value => {
+      const storageId = version ? `${this.requestId}-${version}` : this.requestId;
+      const attach = (id: string) => {
+        if ((this.captureVersions.get(type) ?? 0) === version) this.recordCapturedId(type, id);
+      };
+      const capture = captureBody(source, maxBytes, contentEncoding, parse, async value => {
         const serialized = typeof value === 'string' ? value : JSON.stringify(value);
         if (Buffer.byteLength(serialized) > maxBytes) {
           this.addStep('body_logging_incomplete', { direction: type, reason: 'size_limit', observer_incomplete: true });
           return;
         }
         let id: string | null;
-        try { id = await storage.save(version ? `${this.requestId}-${version}` : this.requestId, value, type, isError); }
+        try { id = await storage.save(storageId, value, type, isError); }
         catch {
           this.addStep('body_logging_incomplete', { direction: type, reason: 'storage_failed', observer_incomplete: true });
           return;
         }
-        if (this.captureVersions.get(type) !== version && !(version === 0 && !this.captureVersions.has(type))) return;
-        if (id) this.recordCapturedId(type, id);
+        if (id) attach(id);
         else this.addStep('body_logging_incomplete', { direction: type, reason: 'storage_failed', observer_incomplete: true });
-      }, reason => this.addStep('body_logging_incomplete', { direction: type, reason, observer_incomplete: true }), signal, headers.get('content-type') ?? '', type === 'response' ? this.requestAccept : '', { ...bodyOptions, identity: bodyOptions.identity ?? { requestId:this.requestId, attemptId:this.requestId, direction:type==='response'?'response':'request', stage:type==='response'?'client-response':type==='request'?'outbound-request':'original-request', version, contentType:headers.get('content-type')??'', contentEncoding:headers.get('content-encoding')??'' } });
+      }, reason => this.addStep('body_logging_incomplete', { direction: type, reason, observer_incomplete: true }), signal, {
+        ...bodyOptions,
+        identity: bodyOptions.identity ?? {
+          requestId: this.requestId, attemptId: this.requestId, direction: type === 'response' ? 'response' : 'request',
+          stage, version, contentType, contentEncoding,
+        },
+      }, storage.saveStream && (async (chunks, completed, captureSignal, format) => {
+        const id = await storage.saveStream!(storageId, chunks, type, maxBytes, completed, captureSignal, format);
+        if (id && !captureSignal.aborted) attach(id);
+      }));
       this.bodyCaptures.set(type, capture);
       return capture.body;
     } catch {
@@ -206,8 +233,8 @@ export class RequestLogger {
     if (!this.completed) return;
     try {
       const writer = this.dependencies.accessLogWriter;
-      if (writer.updateBodyId) writer.updateBodyId(this.requestId, type, id);
-      else if (type === 'response') writer.updateResponseBodyId(this.requestId, id);
+      if (writer?.updateBodyId) writer.updateBodyId(this.requestId, type, id);
+      else if (type === 'response') writer?.updateResponseBodyId(this.requestId, id);
     } catch { this.addStep('body_logging_incomplete', { direction: type, reason: 'storage_failed', observer_incomplete: true }); }
   }
 
@@ -323,7 +350,7 @@ export class RequestLogger {
    * @param body 请求体内容
    */
   setRequestBody(body: any) {
-    if(this.dependencies.captureBody === false)return;
+    if (this.dependencies.captureBody === false || this.dependencies.bodyParser) return;
     this.requestBody = body;
   }
 
@@ -332,7 +359,7 @@ export class RequestLogger {
    * @param body 响应体内容
    */
   setResponseBody(body: any) {
-    if(this.dependencies.captureBody === false)return;
+    if (this.dependencies.captureBody === false || this.dependencies.bodyParser) return;
     this.responseBody = body;
   }
 
@@ -341,8 +368,8 @@ export class RequestLogger {
    * @param headers 请求头
    */
   setRequestHeaders(headers: Record<string, string>) {
+    if (!this.dependencies.headerStorage) return;
     this.requestHeaders = headers;
-    this.requestAccept = Object.entries(headers).find(([name]) => name.toLowerCase() === 'accept')?.[1] ?? '';
   }
 
   /**
@@ -350,6 +377,7 @@ export class RequestLogger {
    * @param headers 响应头
    */
   setResponseHeaders(headers: Record<string, string>) {
+    if (!this.dependencies.headerStorage) return;
     this.responseHeaders = headers;
   }
 
@@ -358,6 +386,7 @@ export class RequestLogger {
    * @param headers 原始请求头
    */
   setOriginalRequestHeaders(headers: Record<string, string>) {
+    if (!this.dependencies.headerStorage) return;
     this.originalRequestHeaders = headers;
   }
 
@@ -366,7 +395,7 @@ export class RequestLogger {
    * @param body 原始请求体
    */
   setOriginalRequestBody(body: any) {
-    if(this.dependencies.captureBody === false)return;
+    if (this.dependencies.captureBody === false || this.dependencies.bodyParser) return;
     this.originalRequestBody = body;
   }
 
@@ -395,13 +424,14 @@ export class RequestLogger {
   complete(
     status: number,
     options?: RequestLogCompletionOptions,
+    endedAt = Date.now(),
   ): Promise<void> {
     if (this.completionPromise) return this.completionPromise;
     if (this.completed) {
       return this.fileLogWritten ? Promise.resolve() : this.trackCompletion(this.writeFileLog());
     }
 
-    return this.trackCompletion(this.completeOnce(status, options));
+    return this.trackCompletion(this.completeOnce(status, options, endedAt));
   }
 
   private trackCompletion(completion: Promise<void>): Promise<void> {
@@ -415,9 +445,10 @@ export class RequestLogger {
 
   private async completeOnce(
     status: number,
-    options?: RequestLogCompletionOptions,
+    options: RequestLogCompletionOptions | undefined,
+    endedAt: number,
   ): Promise<void> {
-    const duration = Date.now() - this.startTime;
+    const duration = endedAt - this.startTime;
 
     // 保存 body（如果启用）
     let reqBodyId: string | null = null;
@@ -471,9 +502,11 @@ export class RequestLogger {
 
     // 构建日志条目
     const protocolError = options?.protocolError ?? this.protocolError;
+    const protocolOutcome = this.linkage.recordKind === 'attempt' ? undefined : options?.protocolOutcome;
     const errorMessage = diagnosticMessage(protocolError) ?? options?.errorMessage ?? this.protocolOutcomeErrorMessage;
     if (protocolError) this.addStep('response_error', protocolError);
     const logEntry = {
+      ...this.linkage,
       requestId: this.requestId,
       timestamp: this.startTime,
       method: this.method,
@@ -496,10 +529,10 @@ export class RequestLogger {
       attemptNumber: this.attemptNumber || undefined,
       attemptUpstream: this.attemptUpstream || undefined,
       requestType: this.requestType,
-      protocolOutcome: options?.protocolOutcome,
       protocolCode: options?.protocolCode,
       success: options?.success,
       ...options,
+      protocolOutcome,
       transportOutcome: this.transportOutcome,
       transportCode: this.transportCode,
       replacePendingTransport: this.transportStarted,
@@ -507,6 +540,7 @@ export class RequestLogger {
     };
 
     this.fileLogEntry = {
+      ...this.linkage,
       requestId: this.requestId,
       timestamp: this.startTime,
       method: this.method,
@@ -534,7 +568,7 @@ export class RequestLogger {
       attemptNumber: this.attemptNumber || undefined,
       attemptUpstream: this.attemptUpstream || undefined,
       requestType: this.requestType,
-      protocolOutcome: options?.protocolOutcome,
+      protocolOutcome,
       protocolCode: options?.protocolCode,
       success: options?.success,
       transportOutcome: this.transportOutcome,
@@ -542,7 +576,7 @@ export class RequestLogger {
     };
 
     // write() 返回即表示已入队；此后 complete 幂等，避免附属文件日志失败时重复入队。
-    this.dependencies.accessLogWriter.write(logEntry);
+    this.dependencies.accessLogWriter?.write(logEntry);
     this.completed = true;
     await this.writeFileLog();
   }
@@ -570,7 +604,8 @@ export class RequestLogger {
   }
 
   private async writeFileLog(): Promise<void> {
-    if (this.fileLogTask || this.fileLogWritten || !this.fileLogEntry) return;
+    const writer = this.dependencies.fileLogWriter;
+    if (!writer || this.fileLogTask || this.fileLogWritten || !this.fileLogEntry) return;
     // complete() may run before the returned response reaches EOF. Do not wait here:
     // that would prevent the very EOF needed to release this diagnostic record.
     if (this.deferTransportFileLog && (!this.clientTransportObserved || this.transportOutcome === 'pending')) return;
@@ -578,7 +613,7 @@ export class RequestLogger {
       // JSONL is immutable after flush: enqueue only when its body references are final.
       // The task is part of the logging shutdown flush, never the HTTP completion wait.
       this.fileLogTask = (this.fileLogReady ?? Promise.resolve()).then(() => this.bodyLoggingCompletion()).then(async () => {
-        await this.dependencies.fileLogWriter.write(this.fileLogEntry!);
+        await writer.write(this.fileLogEntry!);
         this.fileLogWritten = true;
       }).catch(error => {
         this.fileLogTask = undefined;
@@ -588,7 +623,7 @@ export class RequestLogger {
       return;
     }
     if (this.fileLogWritePromise) return this.fileLogWritePromise;
-    const write = Promise.resolve(this.dependencies.fileLogWriter.write(this.fileLogEntry)).then(() => { this.fileLogWritten = true; });
+    const write = Promise.resolve(writer.write(this.fileLogEntry)).then(() => { this.fileLogWritten = true; });
     this.fileLogWritePromise = write;
     try { await write; } finally { if (this.fileLogWritePromise === write) this.fileLogWritePromise = null; }
   }
@@ -614,9 +649,10 @@ export class RequestLogger {
   async persistRoot(
     status: number,
     options?: RequestLogCompletionOptions,
+    endedAt?: number,
   ): Promise<void> {
     if (this.rootPersisted) return;
-    await this.complete(status, options);
+    await this.complete(status, options, endedAt);
     this.rootPersisted = true;
   }
 
@@ -625,7 +661,7 @@ export class RequestLogger {
   }
 
   updateStreamResponseBodyId(bodyId: string): void {
-    this.dependencies.accessLogWriter.updateResponseBodyId(this.requestId, bodyId);
+    this.dependencies.accessLogWriter?.updateResponseBodyId(this.requestId, bodyId);
   }
 
   /** Publish in-progress metadata without saving bodies or finalizing plugin/accounting hooks. */
@@ -634,7 +670,8 @@ export class RequestLogger {
     this.updateTransportOutcome('pending');
     if (this.completed || this.transportStarted) return;
     this.transportStarted = true;
-    this.dependencies.accessLogWriter.write({
+    this.dependencies.accessLogWriter?.write({
+      ...this.linkage,
       requestId: this.requestId, timestamp: this.startTime, method: this.method, path: this.path,
       transportType: this.transportType,
       query: this.query || undefined, status, duration: Date.now() - this.startTime,
@@ -650,7 +687,9 @@ export class RequestLogger {
     this.transportOutcome = outcome;
     this.transportCode = code;
     if (this.fileLogEntry) { this.fileLogEntry.transportOutcome = outcome; this.fileLogEntry.transportCode = code; }
-    this.dependencies.accessLogWriter.updateTransportOutcome?.(this.requestId, outcome, code);
+    if (this.transportStarted || this.completed) {
+      this.dependencies.accessLogWriter?.updateTransportOutcome?.(this.requestId, outcome, code);
+    }
     if (this.clientTransportObserved && outcome !== 'pending') this.enqueueReadyFileLog();
   }
 
@@ -671,7 +710,9 @@ export class RequestLogger {
     else if (!this.protocolOutcomeErrorMessage && (outcome === 'failed' || outcome === 'incomplete')) {
       this.protocolOutcomeErrorMessage = `Response stream ${outcome}${code ? ` (${code})` : ''}`;
     }
-    this.dependencies.accessLogWriter.updateProtocolOutcome(this.requestId, outcome, success, code, diagnosticMessage(error));
+    if (this.linkage.recordKind !== 'attempt') {
+      this.dependencies.accessLogWriter?.updateProtocolOutcome(this.requestId, outcome, success, code, diagnosticMessage(error));
+    }
   }
 
   /**
