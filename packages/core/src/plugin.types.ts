@@ -241,6 +241,7 @@ export interface PluginManifest {
       icon?: string;
       target?: 'sidebar' | 'header';
       component?: string;
+      layout?: 'standalone';
     }>;
 
     /**
@@ -817,6 +818,7 @@ export interface PluginMetadata {
       target?: 'sidebar' | 'header'; // 默认 sidebar
       /** Optional statically registered native page component. */
       component?: string;
+      layout?: 'standalone';
     }>;
 
     /**

@@ -2,8 +2,10 @@
 export interface WebSocketMessageView {
   readonly kind: 'text' | 'binary';
   readonly byteLength: number;
-  /** Demand-driven, shared, deeply frozen JSON; undefined for binary/invalid JSON. */
-  json(): unknown;
+  /** Fast, conservative precheck for JSON string prefixes. Escaped text may match. */
+  mayContainJsonString?(...prefixes: readonly string[]): boolean;
+  /** Demand-driven, shared, deeply frozen JSON; binary is skipped unless explicitly requested. */
+  json(options?: { readonly binary?: boolean }): unknown;
 }
 
 export interface WebSocketSessionContext {
@@ -16,6 +18,7 @@ export interface WebSocketSessionContext {
 }
 
 export interface WebSocketSessionMetrics {
+  readonly clientDisconnected?: true;
   readonly durationMs: number;
   readonly clientMessages: number;
   readonly upstreamMessages: number;

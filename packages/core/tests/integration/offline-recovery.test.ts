@@ -177,7 +177,7 @@ test('offline recovery can reset inactive management identity without enabling a
   await initializeConfigurationDatabase({configDbPath:path});
   const result=await resetIdentity(path,'admin','inactive-recovery-password-2026','Prepare administrator for re-enable') as {username:string};
   expect(result.username).toBe('admin');
-  const repository=ConfigRepository.open(path);try{expect(repository.getSnapshot().aggregate.plugin_activations).toEqual([]);expect(repository.getDatabase().query("SELECT name FROM sqlite_master WHERE name IN ('api_keys','plugin_durable_records','secret_store_objects')").all()).toEqual([]);}finally{repository.close();}
+  const repository=ConfigRepository.open(path);try{expect(repository.getSnapshot().aggregate.plugin_activations).toEqual([{ plugin_name: 'request-logs' }]);expect(repository.getDatabase().query("SELECT name FROM sqlite_master WHERE name IN ('api_keys','plugin_durable_records','secret_store_objects')").all()).toEqual([]);}finally{repository.close();}
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 
@@ -211,7 +211,7 @@ test('plugin-declared add-user and reset-password actions preserve protection an
   expect(reset.result).toMatchObject({username:'second'});expect(reset.output).not.toContain('Changed password 123!');
   const unchanged=ConfigRepository.open(path);try{expect({snapshot:unchanged.getSnapshot(),guard:unchanged.getManagementProtection()}).toEqual(before);}finally{unchanged.close();}
   await withTerminal(()=>recoverOfflineAction(path,{plugin:'user-auth',action:'release-auth'}));
-  const released=ConfigRepository.open(path);try{expect(released.getManagementProtection()).toMatchObject({required:false,selectedProvider:null});expect(released.getSnapshot().aggregate.plugin_activations).toEqual([]);}finally{released.close();}
+  const released=ConfigRepository.open(path);try{expect(released.getManagementProtection()).toMatchObject({required:false,selectedProvider:null});expect(released.getSnapshot().aggregate.plugin_activations).toEqual([{ plugin_name: 'request-logs' }]);}finally{released.close();}
   const reopened=await PluginStateClient.open(join(dir,'plugin-state.db'));
   try{expect((await reopened.durableState('user-auth').get('recovery-anchor'))?.value).toEqual({schema:3,userId:identity.id});expect((await reopened.durableState('user-auth').get('user:'+identity.id))?.value).toMatchObject({schema:3,user:{id:identity.id,username:'owner'}});}finally{await reopened.close();}
  }finally{await rm(dir,{recursive:true,force:true});}

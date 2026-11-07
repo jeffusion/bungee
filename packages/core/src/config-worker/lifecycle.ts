@@ -1,7 +1,9 @@
 import { createWebSocketBridge, webSocketMessageLimits, isWebSocketUpgradeRequest, type WebSocketBridge, type WebSocketBridgeData } from '../websocket';
-import { runGatewayWebSocket } from '../gateway/runtime';
+import { gatewayHooks, runGatewayWebSocket } from '../gateway/runtime';
+import { hasRequestLogCollector } from '../gateway/request-log';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import type { Server } from 'bun';
+import { dirname, join } from 'node:path';
 import {
   ConfigWorkerLifecycleCleanupError,
   ConfigWorkerLifecycleReadinessError,
@@ -12,9 +14,10 @@ import { derivePluginReadiness, requiredPluginNames } from '../config-publicatio
 import type { StartWorkerCommand } from '../config-publication/types';
 import type { PluginRuntimeOrchestratorStatusReport } from '../plugin-runtime-orchestrator';
 import type { RequestLoggerDependencies } from '../logger/request-logger';
-import { parseWorkerTransportSecret, restoreWorkerTransportRequest } from './private-transport';
+import { getTrustedDataIdentity, parseWorkerTransportSecret, restoreWorkerTransportRequest } from './private-transport';
 import { getWorkerPluginStorageFactory } from './runtime-dependencies';
 import type { PluginServiceHost } from '../plugin-services';
+import { logger } from '../logger';
 
 type LifecycleServer = Pick<Server<unknown>, 'port' | 'stop'>;
 
@@ -36,6 +39,7 @@ type WebSocketFetch = (request:Request,server?:Bun.Server<WebSocketBridgeData>) 
 
 export type ServingRequestContext = {
   readonly servingRevision: number;
+  readonly accessId?: string;
   readonly logging?: RequestLoggerDependencies;
 };
 
@@ -151,18 +155,20 @@ export function createConfigWorkerLifecycle(
         if (readiness.failed.length > 0) {
           throw new ConfigWorkerLifecycleReadinessError(readiness.failed);
         }
+        const requestLogging = hasRequestLogCollector(gatewayHooks()) ? resources.requestLogging : undefined;
         const fetchHandler: WebSocketFetch = async (request, nativeServer) => {
           const restored = restoreWorkerTransportRequest(request, transportSecret);
           if (!restored.ok) return new Response(null, { status: restored.status });
           if (isWebSocketUpgradeRequest(request)) {
             if (!nativeServer) return Response.json({error:'websocket_unavailable'},{status:503});
             const result = await runGatewayWebSocket({request:restored.request,nativeRequest:request,server:nativeServer,bridge:websocket,
-              config,servingRevision:command.revision,logging:resources.requestLogging,retain:completion=>{sessions.add(completion);void completion.finally(()=>sessions.delete(completion));}});
+              config,servingRevision:command.revision,logging:requestLogging,retain:completion=>{sessions.add(completion);void completion.finally(()=>sessions.delete(completion));}});
             return result.response;
           }
           return resources.handleRequest(restored.request, config, {
+            accessId: getTrustedDataIdentity(restored.request)?.requestId,
             servingRevision: command.revision,
-            logging: resources.requestLogging,
+            logging: requestLogging,
           });
         };
         shutdownSignal.throwIfAborted();
@@ -277,14 +283,24 @@ export async function loadProductionResources(): Promise<ProductionResources> {
   const pluginContexts = await import('../plugin-context-manager');
   const pluginRuntime = await import('../worker/state/plugin-manager');
   const requestHandler = await import('../worker/request/handler');
-  const accessLogWriter = new AccessLogWriter(
-    process.env.BUNGEE_ACCESS_DB_PATH ?? `${process.cwd()}/logs/access.db`,
-  );
-  const bodyStorage = new BodyStorageManager({}, process.env.BUNGEE_BODY_LOG_DIR);
-  const headerStorage = new HeaderStorageManager({}, process.env.BUNGEE_HEADER_LOG_DIR);
-  const fileLogWriter = new FileLogWriter(process.env.BUNGEE_FILE_LOG_DIR);
+  let accessLogWriter: InstanceType<typeof AccessLogWriter> | undefined;
+  let fileLogWriter: InstanceType<typeof FileLogWriter> | undefined;
+  const accessLogPath = process.env.BUNGEE_ACCESS_DB_PATH ?? join(process.cwd(), 'logs', 'access.db');
+  const logDirectory = dirname(accessLogPath);
+  const bodyStorage = new BodyStorageManager({}, process.env.BUNGEE_BODY_LOG_DIR ?? join(logDirectory, 'bodies'));
+  const headerStorage = new HeaderStorageManager({}, process.env.BUNGEE_HEADER_LOG_DIR ?? join(logDirectory, 'headers'));
   return {
-    requestLogging: { accessLogWriter, fileLogWriter, bodyStorage, headerStorage },
+    get requestLogging() {
+      const plugins = pluginRuntime.getPluginRegistry()?.getAllPluginStateSnapshots();
+      if (!plugins || ![...plugins.values()].some(plugin => plugin.persistedEnabled === 'enabled'
+        && plugin.manifest?.capabilities?.includes('requestLogging'))) return undefined;
+      try { accessLogWriter ??= new AccessLogWriter(accessLogPath, 4096); }
+      catch { logger.warn('Worker request log database unavailable'); }
+      try { fileLogWriter ??= new FileLogWriter(process.env.BUNGEE_FILE_LOG_DIR ?? logDirectory, 4096); }
+      catch { logger.warn('Worker request log file storage unavailable'); }
+      if (!accessLogWriter && !fileLogWriter) return undefined;
+      return { accessLogWriter, fileLogWriter, bodyStorage, headerStorage };
+    },
     configureBodyStorage(config) {
       const body = config.logging?.body;
       const current = bodyStorage.getConfig();
@@ -339,8 +355,8 @@ export async function loadProductionResources(): Promise<ProductionResources> {
     closeAccessLog: async () => {
       const { flushBodyCaptures } = await import('../logger/body-capture');
       await flushBodyCaptures();
-      await accessLogWriter.close();
+      await accessLogWriter?.close();
     },
-    closeFileLog: () => fileLogWriter.close(),
+    closeFileLog: async () => { await fileLogWriter?.close(); },
   };
 }

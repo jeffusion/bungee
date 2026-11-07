@@ -14,6 +14,9 @@ export type TransportType = 'http' | 'websocket';
 export type ProtocolOutcome = 'completed' | 'failed' | 'incomplete' | 'cancelled';
 
 export interface LogEntry {
+  recordKind?: 'access' | 'operation' | 'attempt';
+  closeCode?: number;
+  observationOutcome?: 'complete' | 'incomplete';
   id: number;
   requestId: string;
   timestamp: number;

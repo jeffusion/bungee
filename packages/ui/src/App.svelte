@@ -24,7 +24,6 @@
   import ServicesIndex from './routes/ServicesIndex.svelte';
   const loadServiceEditor = () => import('./routes/ServiceEditor.svelte');
   const loadMenus = () => import('./routes/Menus.svelte');
-  const loadLogs = () => import('./routes/Logs.svelte');
   import Login from './routes/Login.svelte';
   import Setup from './routes/Setup.svelte';
   import NotFound from './routes/NotFound.svelte';
@@ -249,8 +248,6 @@
         <LazyPage load={loadServiceEditor} props={{ params: { name: $location.replace('/services/edit/', '') } }} />
       {:else if $location === '/services/new'}
         <LazyPage load={loadServiceEditor} props={{ params: {} }} />
-      {:else if $location === '/logs'}
-        <LazyPage load={loadLogs} props={{}} />
       {:else if $location === '/menus'}
         <LazyPage load={loadMenus} props={{}} />
       {:else if $location === '/config'}
@@ -267,7 +264,7 @@
         {@const pathParts = $location.replace('/extensions/', '').split('/')}
         {@const pluginName = pathParts[0]}
         {@const pluginPath = '/' + pathParts.slice(1).join('/')}
-        {#if $pluginList.some(plugin => plugin.enabled && plugin.name === pluginName && plugin.metadata?.contributes?.navigation?.some(page => page.path === pluginPath && page.component !== undefined))}
+        {#if $pluginList.some(plugin => plugin.name === pluginName && plugin.metadata?.contributes?.navigation?.some(page => page.path === pluginPath && page.component !== undefined))}
           <PluginDetailLayout params={{ name: pluginName, path: pluginPath }} />
         {:else}
           <div class="nx-page">

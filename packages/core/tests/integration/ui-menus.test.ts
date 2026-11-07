@@ -119,7 +119,7 @@ describe('protected menu production API dispatch', () => {
   test('GET/PUT integrate, return 409 on stale revision and never publish workers', async () => {
     const f=fixture();
     const initial=await (await f.send('/api/ui/menus'))!.json() as MenuSnapshot;
-    expect(initial.revision).toBe(0);expect(initial.catalog).toHaveLength(7);
+    expect(initial.revision).toBe(0);expect(initial.catalog).toHaveLength(BUILTIN_MENU_PAGES.length);
     const layout=initial.layout.map(node=>node.kind==='page'?{...node,visible:false}:node);
     const saved=await f.put(0,layout);expect(saved!.status).toBe(200);
     expect((await saved!.json()).revision).toBe(1);

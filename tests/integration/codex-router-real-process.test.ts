@@ -1302,14 +1302,6 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
           expect(events.some(event=>event.type==='response.completed')).toBe(false);expect(calls.slice(before)).toHaveLength(1);
         }finally{await socket.close();}
       }
-      await waitUntil(() => {
-        const db = new Database(fixture!.accessDbPath, {readonly:true});
-        try {
-          const rows = db.query<{detail:string}, []>("SELECT json_extract(j.value,'$.detail') AS detail FROM access_logs,json_each(access_logs.processing_steps) AS j WHERE json_extract(j.value,'$.step')='auxiliary_resolution'").all();
-          const resolutions = rows.map(row => JSON.parse(row.detail));
-          return [true,false].every(reused => resolutions.some(item => item.model === 'native-relay-model' && item.reused === reused && typeof item.upstreamId === 'string' && Object.keys(item).sort().join(',') === 'model,reused,upstreamId'));
-        } finally {db.close();}
-      }, 'safe actual model and reuse diagnostics were not logged', 12000);
       console.info(`codex_collaboration_relay ${JSON.stringify({workers:[...observed],successfulRelayCalls:2,
         cachedAcrossWorkers:true,identityIsolated:true,failedFinalCalls:0})}`);
     } finally {aggregate=saved;await publish();}

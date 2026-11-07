@@ -1,9 +1,11 @@
 import { holdInheritedProcessLifetimeGuard, writeProcessLifetimeHeldAck } from '../supervision/process-lifetime-guard';
 import { DataAdmissionHost } from '../data-admission/host';
-import { createDataAdmissionRpcServer, DATA_ADMISSION_RPC_PATH } from '../data-admission/rpc';
-import { resolve } from 'node:path';
+import { createDataAdmissionRpcServer, createSignedWorkerRpcServer, DATA_ADMISSION_RPC_PATH, REQUEST_LOG_RPC_PATH } from '../data-admission/rpc';
+import { dirname, isAbsolute, normalize, resolve } from 'node:path';
 import { acquireInstanceLock, type MasterInstanceLock } from '../instance-lock';
-import { createIngressPublicListener, type PublicListener } from '../public-listener';
+import { createIngressPublicListener, type IngressPublicListenerOptions, type PublicListener } from '../public-listener';
+import { createAsyncAccessLog } from '../master-runtime/observability-client';
+import { logger } from '../logger';
 import {
   RATE_LIMIT_HTTP_PATH,
   IngressTokenBucketStore,
@@ -24,6 +26,8 @@ const activeLocks = new Set<MasterInstanceLock>();
 
 export type IngressRuntimeOptions = {
   readonly instanceLockPath: string;
+  readonly accessLogDbPath?: string;
+  readonly fileLogDir?: string;
   readonly credential: SupervisionProcessCredential;
   readonly transportSecret: string;
   readonly publicHost: string;
@@ -53,6 +57,10 @@ export async function startIngressProcess(options: IngressRuntimeOptions): Promi
   port(options.publicPort, 'publicPort');
   port(options.supervisionPort, 'supervisionPort');
   if (options.publicHost.length === 0 || options.instanceLockPath.length === 0) throw new Error('ingress paths are invalid');
+  if (options.accessLogDbPath !== undefined && (!isAbsolute(options.accessLogDbPath)
+    || normalize(options.accessLogDbPath) !== options.accessLogDbPath)) {
+    throw new Error('ingress access log database path must be a normalized absolute path');
+  }
   const lifetimeGuard = holdInheritedProcessLifetimeGuard(process.env, options.credential.identity.process_instance_id);
   if (process.env.BUNGEE_ROLE === 'ingress' && lifetimeGuard === null && process.platform !== 'win32') throw new Error('ingress lifetime guard is required; offline conversion is required for older launch formats');
   if (lifetimeGuard !== null) writeProcessLifetimeHeldAck(`${options.instanceLockPath}.held`, lifetimeGuard, options.credential.identity.boot_nonce, options.credential.process_key);
@@ -60,6 +68,7 @@ export async function startIngressProcess(options: IngressRuntimeOptions): Promi
   activeLocks.add(lock);
   let control: ReturnType<typeof Bun.serve> | null = null;
   let publicListener: PublicListener | null = null;
+  let accessLog: Awaited<ReturnType<typeof createAsyncAccessLog>> | undefined;
   let supervision: IngressSupervisionHttpServer | null = null;
   let admissionHost: DataAdmissionHost | null = null;
   let rateLimitStore: IngressTokenBucketStore | null = null;
@@ -76,6 +85,9 @@ export async function startIngressProcess(options: IngressRuntimeOptions): Promi
     profileWritten = true;
     writeRateLimitProfileSummary('ingress', profile);
   };
+  const closeLogs = async (errors: unknown[]): Promise<void> => {
+    try { await accessLog?.close(); } catch (error) { errors.push(error); }
+  };
   try {
     const registry = new IngressAdmissionRegistry();
     const dataAdmission = admissionHost = new DataAdmissionHost({
@@ -86,9 +98,15 @@ export async function startIngressProcess(options: IngressRuntimeOptions): Promi
       },
       admissionSequence: () => registry.status().active?.admission_sequence ?? null,
     });
-    const admissionRpc = createDataAdmissionRpcServer({ host: dataAdmission, transportSecret: options.transportSecret,
-      identity: { role: 'ingress', process_instance_id: options.credential.identity.process_instance_id, boot_nonce: options.credential.identity.boot_nonce },
+    const rpcOptions = {
+      transportSecret: options.transportSecret,
+      identity: { role: 'ingress' as const, process_instance_id: options.credential.identity.process_instance_id, boot_nonce: options.credential.identity.boot_nonce },
       authorizeWorker: registry.authorizeRateLimitWorker.bind(registry),
+    };
+    const admissionRpc = createDataAdmissionRpcServer({ ...rpcOptions, host: dataAdmission });
+    const requestLogRpc = createSignedWorkerRpcServer({ ...rpcOptions,
+      handle: (operation, payload, worker) => operation === 'request-log-active' && payload === null
+        && !!registry.requestLogCollector && registry.authorizeRateLimitWorker(worker) === 'active',
     });
     rateLimitStore = new IngressTokenBucketStore({
       credential: createRateLimitCredential(options.transportSecret, {
@@ -112,17 +130,29 @@ export async function startIngressProcess(options: IngressRuntimeOptions): Promi
       port: options.supervisionPort,
       reusePort: false,
       fetch: (request) => {
-        if (new URL(request.url).pathname === DATA_ADMISSION_RPC_PATH) return admissionRpc(request);
-        if (new URL(request.url).pathname === RATE_LIMIT_HTTP_PATH) return rateLimit!.fetch(request);
+        const path = new URL(request.url).pathname;
+        if (path === DATA_ADMISSION_RPC_PATH) return admissionRpc(request);
+        if (path === REQUEST_LOG_RPC_PATH) return requestLogRpc(request);
+        if (path === RATE_LIMIT_HTTP_PATH) return rateLimit!.fetch(request);
         return supervision!.fetch(request);
       },
     });
+    let recordAccess: IngressPublicListenerOptions['recordAccess'];
+    if (options.accessLogDbPath !== undefined) {
+      try {
+        accessLog = await createAsyncAccessLog(options.accessLogDbPath, options.fileLogDir ?? dirname(options.accessLogDbPath));
+        recordAccess = accessLog.write;
+      } catch {
+        logger.warn('Ingress request log storage unavailable');
+      }
+    }
     publicListener = createIngressPublicListener({
       admission: registry,
       authenticate: dataAdmission.authenticate.bind(dataAdmission),
       transportSecret: options.transportSecret,
       hostname: options.publicHost,
       port: options.publicPort,
+      recordAccess,
     });
     publicListener.start();
     if (options.startupWatchdogMs !== undefined) {
@@ -150,6 +180,7 @@ export async function startIngressProcess(options: IngressRuntimeOptions): Promi
         try { rateLimitStore?.dispose(); } catch (error) { errors.push(error); }
         try { await currentPublic.stop(); } catch (error) { errors.push(error); }
         try { await currentControl.stop(false); } catch (error) { errors.push(error); }
+        await closeLogs(errors);
         try { await lock.release(); } catch (error) { errors.push(error); }
         activeLocks.delete(lock);
         process.off('SIGINT', onSignal);
@@ -176,6 +207,7 @@ export async function startIngressProcess(options: IngressRuntimeOptions): Promi
     try { rateLimitStore?.dispose(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
     try { if (publicListener !== null) await publicListener.stop(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
     try { if (control !== null) await control.stop(false); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
+    await closeLogs(cleanupErrors);
     try { await lock.release(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
     activeLocks.delete(lock);
     writeProfile();
@@ -214,6 +246,8 @@ export function ingressOptionsFromEnvironment(
     credential,
     transportSecret,
     instanceLockPath: resolve(process.cwd(), path),
+    accessLogDbPath: environment.BUNGEE_INGRESS_ACCESS_DB_PATH,
+    fileLogDir: environment.BUNGEE_FILE_LOG_DIR,
     publicHost: environment.BUNGEE_INGRESS_PUBLIC_HOST ?? '0.0.0.0',
     publicPort: productionPort('BUNGEE_INGRESS_PUBLIC_PORT', '3000'),
     supervisionPort: productionPort('BUNGEE_INGRESS_SUPERVISION_PORT', '3010'),

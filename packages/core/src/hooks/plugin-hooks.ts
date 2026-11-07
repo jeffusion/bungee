@@ -18,7 +18,7 @@ import type { PluginServices } from '../plugin-services';
 import type { PluginStorage, SSEEnvelope, PluginConfigValue } from '../plugin.types';
 import type { InterceptResult, PluginPhase } from '@jeffusion/bungee-types';
 import type { RawResponseResult } from '../plugin-control/contracts';
-import type { GatewayBodyArguments, GatewayRequestArguments, GatewayForwardArguments, GatewayResponseRuleArguments, GatewayBodyRuleArguments, GatewayQueryRuleArguments, GatewayHeaderRuleArguments, GatewayCorsArguments, GatewayRouteInput, GatewayRouteDecision, GatewayDispatchInput, GatewayDispatchDecision, DispatchRequestInput, DispatchRequestDecision, GatewayAdmissionInput, GatewayAdmissionDecision, GatewayAdmissionSessionInput, GatewayAdmissionPrepareInput, GatewaySelectInput, GatewaySelectDecision, GatewayFailoverInput, GatewayRetryInput, GatewayLogInput, GatewayLogResult } from '../gateway/contracts';
+import type { GatewayBodyArguments, GatewayRequestArguments, GatewayForwardArguments, GatewayResponseRuleArguments, GatewayBodyRuleArguments, GatewayQueryRuleArguments, GatewayHeaderRuleArguments, GatewayCorsArguments, GatewayRouteInput, GatewayRouteDecision, GatewayDispatchInput, GatewayDispatchDecision, DispatchRequestInput, DispatchRequestDecision, GatewayAdmissionInput, GatewayAdmissionDecision, GatewayAdmissionSessionInput, GatewayAdmissionPrepareInput, GatewaySelectInput, GatewaySelectDecision, GatewayFailoverInput, GatewayRetryInput } from '../gateway/contracts';
 import type { WorkerRequestAdmission, PreparedAdmissionAttempt } from '../data-admission/worker';
 import type { RuntimeCandidate } from '../worker/types';
 import type { FailoverCoordinator } from '../worker/upstream/failover-coordinator';
@@ -26,6 +26,7 @@ import type { ProxyRequestResult } from '../gateway/forward-plugin';
 import type { PrepareResponseResult } from '../gateway/response-plugin';
 import type { BodySource } from '../gateway/body-service';
 import type { BodyHandle, BodyViewIdentity } from '../gateway/body-contracts';
+import type { RequestLogBodyContext, RequestLogBodyHandler, RequestLogContext, RequestLogObserver } from '../gateway/request-log-contracts';
 
 // ============ 上下文类型定义 ============
 
@@ -279,6 +280,9 @@ export function createPluginHooks(): PluginHooks {
     onWebSocketSessionMode: new AsyncSeriesBailHook<[URL], 'responses'>('onWebSocketSessionMode'),
     onWebSocketHandshake: new AsyncSeriesWaterfallHook<WebSocketHandshakeContext>('onWebSocketHandshake'),
     onWebSocketObservation: new WebSocketObservationHook('onWebSocketObservation'),
+    onRequestLog: new SyncBailHook<[], true>('onRequestLog'),
+    onRequestLogBody: new SyncBailHook<[RequestLogBodyContext], RequestLogBodyHandler | null>('onRequestLogBody'),
+    onRequestLogApplication: new SyncBailHook<[RequestLogContext], RequestLogObserver>('onRequestLogApplication'),
     onGatewayBody: new SyncBailHook<GatewayBodyArguments, BodySource>('onGatewayBody'),
     onGatewayRequest: new AsyncSeriesBailHook<GatewayRequestArguments, Response>('onGatewayRequest'),
     onGatewayRoute: new AsyncSeriesBailHook<[GatewayRouteInput], GatewayRouteDecision>('onGatewayRoute'),
@@ -296,7 +300,6 @@ export function createPluginHooks(): PluginHooks {
     onGatewayBodyRules: new AsyncSeriesBailHook<GatewayBodyRuleArguments, Record<string, any>>('onGatewayBodyRules'),
     onGatewayQueryRules: new AsyncSeriesBailHook<GatewayQueryRuleArguments, URLSearchParams>('onGatewayQueryRules'),
     onGatewayResponseRules: new AsyncSeriesBailHook<GatewayResponseRuleArguments, PrepareResponseResult>('onGatewayResponseRules'),
-    onGatewayLog: new AsyncSeriesBailHook<[GatewayLogInput], GatewayLogResult>('onGatewayLog'),
     /**
      * 请求初始化
      *
@@ -395,6 +398,9 @@ export interface PluginHooks {
   onWebSocketSessionMode: AsyncSeriesBailHook<[URL], 'responses'>;
   onWebSocketHandshake: AsyncSeriesWaterfallHook<WebSocketHandshakeContext>;
   onWebSocketObservation: WebSocketObservationHook;
+  onRequestLog: SyncBailHook<[], true>;
+  onRequestLogBody: SyncBailHook<[RequestLogBodyContext], RequestLogBodyHandler | null>;
+  onRequestLogApplication: SyncBailHook<[RequestLogContext], RequestLogObserver>;
   onGatewayBody: SyncBailHook<GatewayBodyArguments, BodySource>;
   onGatewayHeaderRules: AsyncSeriesBailHook<GatewayHeaderRuleArguments, true>;
   onGatewayCors: AsyncSeriesBailHook<GatewayCorsArguments, Response>;
@@ -412,7 +418,6 @@ export interface PluginHooks {
   onGatewayBodyRules: AsyncSeriesBailHook<GatewayBodyRuleArguments, Record<string, any>>;
   onGatewayQueryRules: AsyncSeriesBailHook<GatewayQueryRuleArguments, URLSearchParams>;
   onGatewayResponseRules: AsyncSeriesBailHook<GatewayResponseRuleArguments, PrepareResponseResult>;
-  onGatewayLog: AsyncSeriesBailHook<[GatewayLogInput], GatewayLogResult>;
   onRequestInit: AsyncParallelHook<[RequestContext]>;
   onBeforeRequest: AsyncSeriesWaterfallHook<MutableRequestContext>;
   onValidateOutbound: AsyncSeriesWaterfallHook<OutboundValidationContext>;

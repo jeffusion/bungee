@@ -1,4 +1,5 @@
 import { mock } from 'bun:test';
+import { registerRequestLogs } from '../helpers/request-log';
 
 const accessDb = process.env.BUNGEE_ACCESS_DB_PATH;
 if (!accessDb) throw new Error('BUNGEE_ACCESS_DB_PATH is required');
@@ -32,6 +33,9 @@ async function main(): Promise<void> {
   const { fileLogWriter } = await import('../../src/logger/file-log-writer');
   const { LogQueryService } = await import('../../src/api/logs');
   const { handleRequest } = await import('../../src/worker/request/handler');
+  const { createGatewayHooks, runWithGatewayHooks } = await import('../../src/gateway/runtime');
+  const gatewayHooks = createGatewayHooks();
+  registerRequestLogs(gatewayHooks);
   const { initializeRuntimeState, runtimeState } = await import('../../src/worker/state/runtime-state');
 
   if (typeof RequestLogger !== 'function') throw new Error('real RequestLogger was not loaded');
@@ -49,7 +53,8 @@ async function main(): Promise<void> {
 
   try {
     initializeRuntimeState(config);
-    const response = await handleRequest(new Request('http://proxy.test/stats-cleanup-terminal'), config);
+    const response = await runWithGatewayHooks(gatewayHooks, () =>
+      handleRequest(new Request('http://proxy.test/stats-cleanup-terminal'), config, { logging: { accessLogWriter, fileLogWriter } }));
     await accessLogWriter.flush();
     const stats = await new LogQueryService(accessLogWriter.getDatabase()).getStats();
     console.log(`RESULT:${JSON.stringify({ status: response.status, proxyTargets, stats })}`);

@@ -1,9 +1,12 @@
-import type { ProcessingStep } from '../logger/access-log-writer';
+import type { AccessLogIdentity, ProcessingStep } from '../logger/access-log-writer';
 import type { TransportType } from '../logger/transport-outcome';
 import type { Database } from 'bun:sqlite';
 import { TRANSPORT_OUTCOMES, emptyHttpCounts, emptyTransportCounts, emptyRequestCounts, type RequestCounts, type HttpStatusCounts, type TransportCounts, type TransportOutcome } from '../logger/transport-outcome';
+import { ACCESS_LOG_CHAIN_ID_SQL } from '../migrations/access-log-record-identity';
 
-export interface LogQueryParams {
+type LogIdentityFilters = Pick<AccessLogIdentity, 'recordKind' | 'accessId' | 'operationId'>;
+
+export interface LogQueryParams extends LogIdentityFilters {
   groupBy?: 'chain';
   // Pagination
   page?: number;
@@ -36,7 +39,7 @@ export interface LogQueryParams {
   maxChainDurationMs?: number;
 }
 
-export interface LogEntry {
+export interface LogEntry extends AccessLogIdentity {
   id: number;
   requestId: string;
   timestamp: number;
@@ -75,10 +78,10 @@ export interface LogEntry {
 }
 
 export interface ChainEntry extends LogEntry {
-  chainId: string;                              // = COALESCE(parent_request_id, request_id)
-  chainAttempts: number;                         // COUNT(*) by chainId
+  chainId: string;
+  chainAttempts: number;
   chainDurationMs: number;                       // chainEndTs - chainStartTs
-  chainStatus: number;                           // 最后 request_type='final' 的 status，fallback 按 attempt_number DESC, timestamp DESC
+  chainStatus: number;                           // 访问或操作摘要的状态，其次按最终尝试选取
   chainTransportOutcome: TransportOutcome;
   chainTransportCode?: string;
   chainStartTs: number;                          // MIN(timestamp) of chain rows
@@ -150,12 +153,18 @@ function outcomeSql(status: string, success: string, protocol: string): string {
 function transportSql(column: string): string {
   return `CASE WHEN ${column} IN ('pending','completed','failed','cancelled') THEN ${column} ELSE 'unknown' END`;
 }
-function countSql(status: string, transport: string): string {
+function countSql(status: string, transport: string, acceptedDisconnect = '0', webSocketOperation?: string): string {
+  const successStatus = `(${status} >= 200 AND ${status} < 300 OR ${acceptedDisconnect} = 1)`;
+  const success = `${transport} = 'completed' AND ${successStatus}`;
+  const failed = `${transport} = 'failed' OR (${transport} = 'completed' AND NOT COALESCE(${successStatus}, 0))`;
+  const httpOnly = webSocketOperation ? `NOT ${webSocketOperation} AND ` : '';
+  const requestOutcome = (name: string, httpOutcome: string) => webSocketOperation
+    ? `CASE WHEN ${webSocketOperation} THEN chain_outcome = '${name}' ELSE ${httpOutcome} END` : httpOutcome;
   return [
-    ...[2, 3, 4, 5].map(n => `SUM(${status} >= ${n}00 AND ${status} < ${n + 1}00) AS status${n}xx`),
-    `SUM(${status} < 200 OR ${status} >= 600 OR ${status} IS NULL) AS statusOther`,
-    `SUM(${transport} = 'completed' AND ${status} >= 200 AND ${status} < 300) AS request_success`,
-    `SUM(${transport} = 'failed' OR (${transport} = 'completed' AND (${status} < 200 OR ${status} >= 300 OR ${status} IS NULL))) AS request_failed`,
+    ...[2, 3, 4, 5].map(n => `SUM(${httpOnly}${status} >= ${n}00 AND ${status} < ${n + 1}00) AS status${n}xx`),
+    `SUM(${httpOnly}(${status} < 200 OR ${status} >= 600 OR ${status} IS NULL)) AS statusOther`,
+    `SUM(${requestOutcome('success', success)}) AS request_success`,
+    `SUM(${requestOutcome('failed', failed)}) AS request_failed`,
     ...TRANSPORT_OUTCOMES.map(key => `SUM(${transportSql(transport)} = '${key}') AS transport_${key}`),
   ].join(', ');
 }
@@ -178,6 +187,9 @@ export class LogQueryService {
   private db: Database;
   private readonly transportColumn: string;
   private readonly transportCodeColumn: string;
+  private readonly hasTransportType: boolean;
+  private readonly recordKindColumn: 'record_kind' | 'NULL';
+  private readonly chainIdSql: string;
 
   // chain 模式 sortBy 白名单 → SQL alias 映射，禁止任何前端字符串直接拼 SQL ORDER BY
   private static readonly CHAIN_SORT_COLUMNS: Readonly<Record<'timestamp' | 'duration' | 'status', string>> = {
@@ -186,28 +198,104 @@ export class LogQueryService {
     status: 'chain_status',
   };
 
-  private static readonly CHAIN_STATS_CTES = `
+  constructor(db: Database) {
+    this.db = db;
+    const columns = db.query('PRAGMA table_info(access_logs)').all() as Array<{ name: string }>;
+    this.transportColumn = columns.some(c => c.name === 'transport_outcome') ? 'transport_outcome' : 'NULL';
+    this.transportCodeColumn = columns.some(c => c.name === 'transport_code') ? 'transport_code' : 'NULL';
+    this.hasTransportType = columns.some(c => c.name === 'transport_type');
+    this.recordKindColumn = columns.some(c => c.name === 'record_kind') ? 'record_kind' : 'NULL';
+    this.chainIdSql = this.recordKindColumn === 'NULL'
+      ? 'COALESCE(parent_request_id, request_id)' : ACCESS_LOG_CHAIN_ID_SQL;
+  }
+
+  private get recordRankSql(): string {
+    return `CASE ${this.recordKindColumn} WHEN 'access' THEN 0 WHEN 'operation' THEN 1 ELSE 2 END`;
+  }
+
+  private get statusOrderSql(): string {
+    return `${this.recordRankSql},
+      CASE WHEN request_type = 'final' THEN 0 ELSE 1 END,
+      COALESCE(attempt_number, -1) DESC, timestamp DESC, id DESC`;
+  }
+
+  private get representativeOrderSql(): string {
+    return `${this.recordRankSql},
+      attempt_number ASC, timestamp ASC, id ASC`;
+  }
+
+  private clientRequestSql(alias = 'access_logs'): string {
+    if (!this.hasTransportType) return '1';
+    if (this.recordKindColumn === 'NULL') return `${alias}.transport_type IS NOT 'websocket'`;
+    // Before record identities were added, only the hosted HTTP pipeline wrote WebSocket rows.
+    return `NOT (${alias}.transport_type IS 'websocket' AND (${alias}.record_kind IS NULL OR ${alias}.record_kind = 'access'))
+      AND NOT (${alias}.record_kind IS 'attempt' AND ${alias}.operation_id IS NOT NULL AND (
+        ${alias}.transport_type IS 'websocket' OR EXISTS (
+          SELECT 1 FROM access_logs op WHERE op.operation_id = ${alias}.operation_id
+            AND op.record_kind = 'operation' AND op.transport_type = 'websocket'
+        )
+      ))`;
+  }
+
+  /** Ingress and worker logs can arrive in either order. Resolve against their shared access ID. */
+  private acceptedDisconnectSql(alias = 'access_logs'): string {
+    if (this.recordKindColumn === 'NULL' || this.transportCodeColumn === 'NULL') return '0';
+    return `CASE WHEN ${alias}.record_kind = 'access' AND ${alias}.transport_type = 'http'
+      AND ${alias}.status BETWEEN 200 AND 299 AND ${alias}.transport_outcome = 'cancelled'
+      AND ${alias}.transport_code = 'client_cancelled' THEN COALESCE((
+      SELECT op.transport_code = 'terminal_before_client_disconnect'
+      FROM access_logs op WHERE op.access_id = ${alias}.access_id AND op.record_kind = 'operation'
+      ORDER BY op.timestamp DESC, op.id DESC LIMIT 1
+    ), 0) AND NOT EXISTS (
+      SELECT 1 FROM access_logs op WHERE op.access_id = ${alias}.access_id AND op.record_kind = 'operation'
+        AND op.observation_outcome IS NOT 'complete'
+    ) ELSE 0 END`;
+  }
+
+  private effectiveTransportSql(alias = 'access_logs'): string {
+    return `CASE WHEN ${this.acceptedDisconnectSql(alias)} THEN 'completed' ELSE ${this.transportColumn} END`;
+  }
+
+  private get webSocketOperationSql(): string {
+    return this.recordKindColumn === 'NULL' || !this.hasTransportType
+      ? '0' : "record_kind IS 'operation' AND transport_type IS 'websocket'";
+  }
+
+  private get requestStatusSql(): string {
+    return `CASE WHEN ${this.webSocketOperationSql} AND status = 0 THEN 101 ELSE status END`;
+  }
+
+  private get requestMethodSql(): string {
+    return `CASE WHEN ${this.webSocketOperationSql} AND status = 0 THEN 'GET' ELSE method END`;
+  }
+
+  private get chainStatsCtes(): string {
+    const webSocketOperation = this.webSocketOperationSql;
+    const observationOutcome = this.recordKindColumn === 'NULL' ? 'NULL' : 'observation_outcome';
+    return `
     chain_rows AS (
       SELECT
-        COALESCE(parent_request_id, request_id) AS chain_id,
+        ${this.chainIdSql} AS chain_id,
         id,
         timestamp,
         duration,
         status,
         success,
         protocol_outcome,
-        __TRANSPORT_COLUMN__ AS transport_outcome,
+        ${observationOutcome} AS observation_outcome,
+        (${webSocketOperation}) AS websocket_operation,
+        ${this.effectiveTransportSql()} AS transport_outcome,
+        ${this.acceptedDisconnectSql()} AS accepted_disconnect,
         request_type,
         attempt_number,
         ROW_NUMBER() OVER (
-          PARTITION BY COALESCE(parent_request_id, request_id)
-          ORDER BY
-            CASE WHEN request_type = 'final' THEN 0 ELSE 1 END,
-            CASE WHEN attempt_number IS NULL THEN -1 ELSE attempt_number END DESC,
-            timestamp DESC,
-            id DESC
+          PARTITION BY ${this.chainIdSql}
+          ORDER BY ${this.statusOrderSql}
         ) AS status_rank
       FROM access_logs
+      WHERE (${this.recordKindColumn} IS NULL OR ${this.recordKindColumn} = 'access' OR (${webSocketOperation})
+        OR (${this.recordKindColumn} = 'attempt' AND ${this.recordKindColumn === 'NULL' ? 'NULL' : 'transport_type'} = 'http'))
+        AND ${this.clientRequestSql()}
     ),
     chains AS (
       SELECT
@@ -215,28 +303,35 @@ export class LogQueryService {
         MIN(timestamp) AS chain_start_ts,
         MAX(timestamp + duration) AS chain_end_ts,
         MAX(CASE WHEN status_rank = 1 THEN status END) AS chain_status,
-        MAX(CASE WHEN status_rank = 1 THEN success END) AS final_success,
+        MAX(CASE WHEN status_rank = 1 THEN CASE WHEN accepted_disconnect THEN 1 ELSE success END END) AS final_success,
         MAX(CASE WHEN status_rank = 1 THEN protocol_outcome END) AS final_protocol_outcome,
         MAX(CASE WHEN status_rank = 1 THEN transport_outcome END) AS final_transport_outcome,
+        MAX(CASE WHEN status_rank = 1 THEN observation_outcome END) AS final_observation_outcome,
+        MAX(CASE WHEN status_rank = 1 THEN websocket_operation END) AS websocket_operation,
+        MAX(CASE WHEN status_rank = 1 THEN accepted_disconnect END) AS accepted_disconnect,
         MAX(timestamp + duration) - MIN(timestamp) AS chain_duration_ms
       FROM chain_rows
       GROUP BY chain_id
     ),
     classified_chains AS (
       SELECT *,
-        ${outcomeSql('chain_status', 'final_success', 'final_protocol_outcome')} AS chain_outcome
+        CASE WHEN websocket_operation THEN CASE
+          WHEN final_transport_outcome = 'completed' AND final_protocol_outcome = 'completed' AND final_success = 1 THEN 'success'
+          WHEN final_observation_outcome IS NOT NULL OR final_protocol_outcome IS NOT NULL
+            OR final_transport_outcome IN ('completed', 'failed', 'cancelled') THEN 'failed'
+        END ELSE ${outcomeSql('chain_status', 'final_success', 'final_protocol_outcome')} END AS chain_outcome
       FROM chains
     )`;
-
-  constructor(db: Database) {
-    this.db = db;
-    const columns = db.query('PRAGMA table_info(access_logs)').all() as Array<{ name: string }>;
-    this.transportColumn = columns.some(c => c.name === 'transport_outcome') ? 'transport_outcome' : 'NULL';
-    this.transportCodeColumn = columns.some(c => c.name === 'transport_code') ? 'transport_code' : 'NULL';
   }
 
-  private get chainStatsCtes(): string {
-    return LogQueryService.CHAIN_STATS_CTES.replace('__TRANSPORT_COLUMN__', this.transportColumn);
+  private addIdentityFilters(params: LogIdentityFilters, clauses: string[], bindings: unknown[]): void {
+    for (const [column, value] of [
+      ['record_kind', params.recordKind], ['access_id', params.accessId], ['operation_id', params.operationId],
+    ] as const) {
+      if (value === undefined) continue;
+      clauses.push(this.recordKindColumn === 'NULL' ? 'NULL = ?' : `${column} = ?`);
+      bindings.push(value);
+    }
   }
 
   /**
@@ -264,8 +359,9 @@ export class LogQueryService {
     } = params;
 
     // Build WHERE clause
-    const whereClauses: string[] = [];
+    const whereClauses = params.recordKind === undefined ? [this.clientRequestSql()] : [];
     const whereParams: any[] = [];
+    this.addIdentityFilters(params, whereClauses, whereParams);
 
     if (startTime !== undefined) {
       whereClauses.push('timestamp >= ?');
@@ -281,7 +377,7 @@ export class LogQueryService {
       whereParams.push(transportType);
     }
     if (method) {
-      whereClauses.push('method = ?');
+      whereClauses.push(`${this.requestMethodSql} = ?`);
       whereParams.push(method);
     }
     if (path) {
@@ -290,10 +386,10 @@ export class LogQueryService {
     }
     if (status !== undefined) {
       if (Array.isArray(status)) {
-        whereClauses.push(`status IN (${status.map(() => '?').join(', ')})`);
+        whereClauses.push(`${this.requestStatusSql} IN (${status.map(() => '?').join(', ')})`);
         whereParams.push(...status);
       } else {
-        whereClauses.push('status = ?');
+        whereClauses.push(`${this.requestStatusSql} = ?`);
         whereParams.push(status);
       }
     }
@@ -310,12 +406,12 @@ export class LogQueryService {
       whereParams.push(transformer);
     }
     if (success !== undefined) {
-      whereClauses.push('success = ?');
+      whereClauses.push(`CASE WHEN ${this.acceptedDisconnectSql()} THEN 1 ELSE success END = ?`);
       whereParams.push(success ? 1 : 0);
     }
     if (transportOutcome !== undefined) {
       if (!TRANSPORT_OUTCOMES.includes(transportOutcome)) throw new Error('Invalid transport outcome');
-      whereClauses.push(`${transportSql(this.transportColumn)} = ?`);
+      whereClauses.push(`${transportSql(this.effectiveTransportSql())} = ?`);
       whereParams.push(transportOutcome);
     }
     if (searchTerm) {
@@ -336,11 +432,11 @@ export class LogQueryService {
 
     // Get paginated data
     const offset = (page - 1) * limit;
-    const sortColumn = sortBy === 'timestamp' ? 'timestamp' : sortBy === 'duration' ? 'duration' : 'status';
+    const sortColumn = sortBy === 'timestamp' ? 'timestamp' : sortBy === 'duration' ? 'duration' : this.requestStatusSql;
     const order = sortOrder.toUpperCase();
 
     const dataQuery = `
-      SELECT * FROM access_logs
+      SELECT *, ${this.acceptedDisconnectSql()} AS accepted_disconnect FROM access_logs
       ${whereClause}
       ORDER BY ${sortColumn} ${order}
       LIMIT ? OFFSET ?
@@ -362,7 +458,7 @@ export class LogQueryService {
    * 根据 Request ID 获取单条日志
    */
   async getById(requestId: string): Promise<LogEntry | null> {
-    const query = 'SELECT * FROM access_logs WHERE request_id = ?';
+    const query = `SELECT *, ${this.acceptedDisconnectSql()} AS accepted_disconnect FROM access_logs WHERE request_id = ?`;
     const row = this.db.query(query).get(requestId) as any;
 
     if (!row) {
@@ -372,19 +468,24 @@ export class LogQueryService {
     return this.mapRowToLogEntry(row);
   }
 
-  /** Return entries newer than the cursor for a bounded SSE polling batch. */
-  async querySince(timestamp: number, id = 0): Promise<LogEntry[]> {
+  getLatestLogId(): number {
+    const row = this.db.query<{ id: number | null }, []>('SELECT MAX(id) AS id FROM access_logs').get();
+    return row?.id ?? 0;
+  }
+
+  /** WebSocket observation can start well before its row is persisted. */
+  async querySince(id: number): Promise<LogEntry[]> {
     const rows = this.db.query(`
       SELECT * FROM access_logs
-      WHERE timestamp > ? OR (timestamp = ? AND id > ?)
-      ORDER BY timestamp ASC, id ASC
+      WHERE id > ? AND ${this.clientRequestSql()}
+      ORDER BY id ASC
       LIMIT 256
-    `).all(timestamp, timestamp, id) as any[];
+    `).all(id) as any[];
     return rows.map(row => this.mapRowToLogEntry(row));
   }
 
   /**
-   * Chain 维度查询：按 COALESCE(parent_request_id, request_id) 聚合
+   * HTTP 访问与其尝试组成一条链，WebSocket 操作独立于连接聚合。
    * 两阶段 CTE：先找命中的 chainId，再对这些 chain 的完整 rows 聚合
    * chain-level filter（chainStatus/hasRetry/chainDurationMs）在 agg CTE 之后做
    */
@@ -415,8 +516,9 @@ export class LogQueryService {
     } = params;
 
     // row-level filters — 任一 attempt 命中即整 chain 命中
-    const rowWhereClauses: string[] = [];
+    const rowWhereClauses = params.recordKind === undefined ? [this.clientRequestSql()] : [];
     const rowWhereParams: any[] = [];
+    this.addIdentityFilters(params, rowWhereClauses, rowWhereParams);
 
     if (transportType !== undefined) {
       if (transportType !== 'http' && transportType !== 'websocket') throw new Error('Invalid transport type');
@@ -424,7 +526,7 @@ export class LogQueryService {
       rowWhereParams.push(transportType);
     }
     if (method) {
-      rowWhereClauses.push('method = ?');
+      rowWhereClauses.push(`${this.requestMethodSql} = ?`);
       rowWhereParams.push(method);
     }
     if (path) {
@@ -472,8 +574,8 @@ export class LogQueryService {
       }
     }
     if (success !== undefined) {
-      // chain 模式下 success 按 chainStatus < 400 派生
-      chainWhereClauses.push(success ? 'chain_status < 400' : 'chain_status >= 400');
+      chainWhereClauses.push('chain_success = ?');
+      chainWhereParams.push(success ? 1 : 0);
     }
     if (transportOutcome !== undefined) {
       if (!TRANSPORT_OUTCOMES.includes(transportOutcome)) throw new Error('Invalid transport outcome');
@@ -506,107 +608,68 @@ export class LogQueryService {
 
     const chainWhereClause = chainWhereClauses.length > 0 ? `WHERE ${chainWhereClauses.join(' AND ')}` : '';
 
-    const countQuery = `
+    const chainCtes = `
       WITH filtered_chain_ids AS (
-        SELECT DISTINCT COALESCE(parent_request_id, request_id) AS chain_id
+        SELECT DISTINCT ${this.chainIdSql} AS chain_id
         FROM access_logs
         ${rowWhereClause}
       ),
       chain_rows AS (
         SELECT
           al.*,
-          ${this.transportColumn} AS observed_transport_outcome,
+          ${this.requestStatusSql} AS observed_http_status,
+          ${this.recordKindColumn} AS observed_record_kind,
+          ${this.effectiveTransportSql('al')} AS observed_transport_outcome,
+          ${this.acceptedDisconnectSql('al')} AS accepted_disconnect,
           ${this.transportCodeColumn} AS observed_transport_code,
-          COALESCE(al.parent_request_id, al.request_id) AS chain_id,
+          ${this.chainIdSql} AS chain_id,
           al.timestamp + al.duration AS end_ts,
           ROW_NUMBER() OVER (
-            PARTITION BY COALESCE(al.parent_request_id, al.request_id)
-            ORDER BY
-              CASE WHEN al.attempt_number IS NULL THEN 0 ELSE 1 END,
-              al.attempt_number ASC,
-              al.timestamp ASC,
-              al.id ASC
+            PARTITION BY ${this.chainIdSql}
+            ORDER BY ${this.representativeOrderSql}
           ) AS rep_rank,
           ROW_NUMBER() OVER (
-            PARTITION BY COALESCE(al.parent_request_id, al.request_id)
-            ORDER BY
-              CASE WHEN al.request_type = 'final' THEN 0 ELSE 1 END,
-              CASE WHEN al.attempt_number IS NULL THEN -1 ELSE al.attempt_number END DESC,
-              al.timestamp DESC,
-              al.id DESC
+            PARTITION BY ${this.chainIdSql}
+            ORDER BY ${this.statusOrderSql}
           ) AS status_rank
         FROM access_logs al
-        JOIN filtered_chain_ids f ON f.chain_id = COALESCE(al.parent_request_id, al.request_id)
+        JOIN filtered_chain_ids f ON f.chain_id = ${this.chainIdSql}
+        ${params.recordKind === undefined ? `WHERE ${this.clientRequestSql('al')}` : ''}
       ),
       agg AS (
         SELECT
           chain_id,
           MIN(timestamp) AS chain_start_ts,
           MAX(end_ts) AS chain_end_ts,
-          COUNT(*) AS chain_attempts,
+          COUNT(CASE WHEN observed_record_kind IS NULL OR observed_record_kind = 'attempt' THEN 1 END) AS chain_attempts,
           MAX(CASE WHEN is_failover_attempt = 1 THEN 1 ELSE 0 END) AS has_retry,
-          MAX(CASE WHEN status_rank = 1 THEN status END) AS chain_status,
+          MAX(CASE WHEN status_rank = 1 THEN observed_http_status END) AS chain_status,
+          MAX(CASE WHEN status_rank = 1 THEN CASE WHEN accepted_disconnect THEN 1 WHEN observed_record_kind IS NULL THEN status < 400 ELSE success END END) AS chain_success,
           MAX(CASE WHEN status_rank = 1 THEN observed_transport_outcome END) AS final_transport_outcome,
           MAX(CASE WHEN status_rank = 1 THEN observed_transport_code END) AS final_transport_code,
           (MAX(end_ts) - MIN(timestamp)) AS chain_duration_ms
         FROM chain_rows
         GROUP BY chain_id
       )
-      SELECT COUNT(*) AS total FROM agg ${chainWhereClause}
     `;
     const countParams = [...rowWhereParams, ...chainWhereParams];
-    const countResult = this.db.query(countQuery).get(...countParams) as { total: number };
+    const countResult = this.db.query(`${chainCtes} SELECT COUNT(*) AS total FROM agg ${chainWhereClause}`)
+      .get(...countParams) as { total: number };
     const total = countResult.total;
 
     const offset = Math.max(0, (page - 1) * limit);
+    const protocolSummary = this.recordKindColumn === 'record_kind' ? {
+      columns: `app.protocol AS app_protocol, app.operation AS app_operation, app.operation_id AS app_operation_id,
+        app.protocol_outcome AS app_outcome, app.protocol_code AS app_code, app.observation_outcome AS app_observation,`,
+      join: `LEFT JOIN chain_rows app ON app.id = (
+        SELECT id FROM chain_rows WHERE chain_id = agg.chain_id AND observed_record_kind = 'operation' ORDER BY id LIMIT 1
+      )`,
+    } : { columns: '', join: '' };
     const dataQuery = `
-      WITH filtered_chain_ids AS (
-        SELECT DISTINCT COALESCE(parent_request_id, request_id) AS chain_id
-        FROM access_logs
-        ${rowWhereClause}
-      ),
-      chain_rows AS (
-        SELECT
-          al.*,
-          ${this.transportColumn} AS observed_transport_outcome,
-          ${this.transportCodeColumn} AS observed_transport_code,
-          COALESCE(al.parent_request_id, al.request_id) AS chain_id,
-          al.timestamp + al.duration AS end_ts,
-          ROW_NUMBER() OVER (
-            PARTITION BY COALESCE(al.parent_request_id, al.request_id)
-            ORDER BY
-              CASE WHEN al.attempt_number IS NULL THEN 0 ELSE 1 END,
-              al.attempt_number ASC,
-              al.timestamp ASC,
-              al.id ASC
-          ) AS rep_rank,
-          ROW_NUMBER() OVER (
-            PARTITION BY COALESCE(al.parent_request_id, al.request_id)
-            ORDER BY
-              CASE WHEN al.request_type = 'final' THEN 0 ELSE 1 END,
-              CASE WHEN al.attempt_number IS NULL THEN -1 ELSE al.attempt_number END DESC,
-              al.timestamp DESC,
-              al.id DESC
-          ) AS status_rank
-        FROM access_logs al
-        JOIN filtered_chain_ids f ON f.chain_id = COALESCE(al.parent_request_id, al.request_id)
-      ),
-      agg AS (
-        SELECT
-          chain_id,
-          MIN(timestamp) AS chain_start_ts,
-          MAX(end_ts) AS chain_end_ts,
-          COUNT(*) AS chain_attempts,
-          MAX(CASE WHEN is_failover_attempt = 1 THEN 1 ELSE 0 END) AS has_retry,
-          MAX(CASE WHEN status_rank = 1 THEN status END) AS chain_status,
-          MAX(CASE WHEN status_rank = 1 THEN observed_transport_outcome END) AS final_transport_outcome,
-          MAX(CASE WHEN status_rank = 1 THEN observed_transport_code END) AS final_transport_code,
-          (MAX(end_ts) - MIN(timestamp)) AS chain_duration_ms
-        FROM chain_rows
-        GROUP BY chain_id
-      )
+      ${chainCtes}
       SELECT
         rep.*,
+        ${protocolSummary.columns}
         agg.chain_start_ts,
         agg.chain_end_ts,
         agg.chain_attempts,
@@ -614,9 +677,20 @@ export class LogQueryService {
         agg.chain_status,
         agg.final_transport_outcome,
         agg.final_transport_code,
-        agg.chain_duration_ms
+        agg.chain_duration_ms,
+        CASE WHEN rep.observed_record_kind IN ('access', 'operation') AND rep.route_path IS NULL THEN (
+          SELECT route_path FROM chain_rows
+          WHERE chain_id = agg.chain_id AND route_path IS NOT NULL
+          ORDER BY rep_rank LIMIT 1
+        ) END AS inherited_route_path,
+        CASE WHEN rep.observed_record_kind IN ('access', 'operation') AND rep.upstream IS NULL THEN (
+          SELECT upstream FROM chain_rows
+          WHERE chain_id = agg.chain_id AND upstream IS NOT NULL
+          ORDER BY status_rank LIMIT 1
+        ) END AS inherited_upstream
       FROM agg
       JOIN chain_rows rep ON rep.chain_id = agg.chain_id AND rep.rep_rank = 1
+      ${protocolSummary.join}
       ${chainWhereClause}
       ORDER BY ${sortColumn} ${sortDirection}
       LIMIT ? OFFSET ?
@@ -626,6 +700,13 @@ export class LogQueryService {
 
     const data: ChainEntry[] = rows.map(row => ({
       ...this.mapRowToLogEntry(row),
+      routePath: row.route_path ?? row.inherited_route_path ?? undefined,
+      upstream: row.upstream ?? row.inherited_upstream ?? undefined,
+      ...(row.app_operation_id ? {
+        operationId: row.app_operation_id, protocol: row.app_protocol, operation: row.app_operation,
+        protocolOutcome: row.app_outcome ?? undefined, protocolCode: row.app_code ?? undefined,
+        observationOutcome: row.app_observation ?? undefined,
+      } : {}),
       chainId: row.chain_id,
       chainAttempts: row.chain_attempts,
       chainDurationMs: row.chain_duration_ms,
@@ -657,11 +738,14 @@ export class LogQueryService {
         MIN(timestamp) AS first_ts,
         COUNT(*) AS count
       FROM access_logs
-      WHERE parent_request_id = ? OR request_id = ?
+      WHERE ${this.chainIdSql} = ?
+        AND (${this.recordKindColumn} IS NULL OR ${this.recordKindColumn} = 'attempt')
+        AND ${this.clientRequestSql()}
       GROUP BY target
+      HAVING target IS NOT NULL
       ORDER BY first_attempt, first_ts
     `;
-    const rows = this.db.query(query).all(chainId, chainId) as any[];
+    const rows = this.db.query(query).all(chainId) as any[];
     return rows.map(row => ({
       target: row.target,
       firstAttempt: row.first_attempt,
@@ -675,63 +759,62 @@ export class LogQueryService {
    */
   async getChainDetail(chainId: string): Promise<ChainDetail | null> {
     const query = `
-      SELECT * FROM access_logs
-      WHERE parent_request_id = ? OR request_id = ?
-      ORDER BY
-        CASE WHEN attempt_number IS NULL THEN 0 ELSE 1 END,
-        attempt_number ASC,
-        timestamp ASC,
-        id ASC
+      SELECT *, ${this.acceptedDisconnectSql()} AS accepted_disconnect,
+        ROW_NUMBER() OVER (ORDER BY ${this.statusOrderSql}) AS status_rank
+      FROM access_logs
+      WHERE ${this.chainIdSql} = ? AND ${this.clientRequestSql()}
+      ORDER BY ${this.representativeOrderSql}
     `;
-    const rows = this.db.query(query).all(chainId, chainId) as any[];
+    const rows = this.db.query(query).all(chainId) as any[];
 
     if (rows.length === 0) {
       return null;
     }
 
-    const attempts = rows.map(row => this.mapRowToLogEntry(row));
-
-    const chainStartTs = Math.min(...attempts.map(a => a.timestamp));
-    const chainEndTs = Math.max(...attempts.map(a => a.timestamp + a.duration));
+    const records = rows.map(row => this.mapRowToLogEntry(row));
+    const attempts = records.filter(row => row.recordKind === undefined || row.recordKind === 'attempt');
+    const chainStartTs = Math.min(...records.map(a => a.timestamp));
+    const chainEndTs = Math.max(...records.map(a => a.timestamp + a.duration));
     const chainAttempts = attempts.length;
     const hasRetry = attempts.some(a => a.isFailoverAttempt);
-
-    // chainStatus：最后 request_type='final' 的 status，否则按 attempt_number DESC, timestamp DESC, id DESC 取最后一条
-    const finalRows = attempts.filter(a => a.requestType === 'final');
-    let chainStatus: number;
-    let finalRow: LogEntry;
-    if (finalRows.length > 0) {
-      const finalSorted = finalRows.sort((a, b) => {
-        const aNum = a.attemptNumber ?? -1;
-        const bNum = b.attemptNumber ?? -1;
-        if (bNum !== aNum) return bNum - aNum;
-        if (b.timestamp !== a.timestamp) return b.timestamp - a.timestamp;
-        return b.id - a.id;
-      });
-      finalRow = finalSorted[0];
-      chainStatus = finalRow.status;
-    } else {
-      const sorted = attempts.sort((a, b) => {
-        const aNum = a.attemptNumber ?? -1;
-        const bNum = b.attemptNumber ?? -1;
-        if (bNum !== aNum) return bNum - aNum;
-        if (b.timestamp !== a.timestamp) return b.timestamp - a.timestamp;
-        return b.id - a.id;
-      });
-      finalRow = sorted[0];
-      chainStatus = finalRow.status;
-    }
-
-    // 代表 row = attemptNumber 最小（或 NULL）的 row — attempts 已按 attempt_number NULLS FIRST 排序，attempts[0] 即代表 row
-    const repRow = attempts[0];
+    const finalRow = records[rows.findIndex(row => row.status_rank === 1)]!;
+    const repRow = records[0]!;
+    const routePath = repRow.recordKind === 'access' || repRow.recordKind === 'operation'
+      ? repRow.routePath ?? records.find(a => a.routePath !== undefined)?.routePath
+      : repRow.routePath;
     const upstreamsData = await this.getChainUpstreams(chainId);
+    const operation = records.find(row => row.recordKind === 'operation');
+    const finalAttempt = attempts.findLast(row => row.requestType === 'final') ?? attempts.at(-1);
 
     const chain: ChainEntry = {
       ...repRow,
+      status: finalRow.status,
+      duration: chainEndTs - chainStartTs,
+      transportOutcome: finalRow.transportOutcome,
+      transportCode: finalRow.transportCode,
+      success: finalRow.success,
+      routePath,
+      upstream: repRow.upstream ?? upstreamsData[0]?.target,
+      transformer: repRow.transformer ?? finalAttempt?.transformer,
+      transformedPath: repRow.transformedPath ?? finalAttempt?.transformedPath,
+      processingSteps: repRow.processingSteps ?? operation?.processingSteps ?? finalAttempt?.processingSteps,
+      errorMessage: repRow.errorMessage ?? operation?.errorMessage ?? finalAttempt?.errorMessage,
+      originalReqBodyId: repRow.originalReqBodyId ?? operation?.originalReqBodyId ?? finalAttempt?.originalReqBodyId,
+      originalReqHeaderId: repRow.originalReqHeaderId ?? operation?.originalReqHeaderId ?? finalAttempt?.originalReqHeaderId,
+      reqBodyId: repRow.reqBodyId ?? finalAttempt?.reqBodyId,
+      reqHeaderId: repRow.reqHeaderId ?? finalAttempt?.reqHeaderId,
+      respBodyId: repRow.respBodyId ?? operation?.respBodyId ?? finalAttempt?.respBodyId,
+      respHeaderId: repRow.respHeaderId ?? operation?.respHeaderId ?? finalAttempt?.respHeaderId,
+      authLevel: repRow.authLevel ?? finalAttempt?.authLevel,
+      authSuccess: repRow.authLevel ? repRow.authSuccess : finalAttempt?.authSuccess ?? repRow.authSuccess,
+      ...(operation ? {
+        operationId: operation.operationId, protocol: operation.protocol, operation: operation.operation,
+        protocolOutcome: operation.protocolOutcome, protocolCode: operation.protocolCode, observationOutcome: operation.observationOutcome,
+      } : {}),
       chainId,
       chainAttempts,
       chainDurationMs: chainEndTs - chainStartTs,
-      chainStatus,
+      chainStatus: finalRow.status,
       chainTransportOutcome: finalRow.transportOutcome,
       chainTransportCode: finalRow.transportCode,
       chainStartTs,
@@ -757,20 +840,11 @@ export class LogQueryService {
    * ```
    */
   async *streamLogs(pollInterval: number = 1000): AsyncGenerator<LogEntry> {
-    let lastTimestamp = Date.now();
+    let lastId = this.getLatestLogId();
 
     while (true) {
-      // Query new logs since last poll
-      const query = `
-        SELECT * FROM access_logs
-        WHERE timestamp > ?
-        ORDER BY timestamp ASC
-      `;
-      const rows = this.db.query(query).all(lastTimestamp) as any[];
-
-      for (const row of rows) {
-        const entry = this.mapRowToLogEntry(row);
-        lastTimestamp = entry.timestamp;
+      for (const entry of await this.querySince(lastId)) {
+        lastId = entry.id;
         yield entry;
       }
 
@@ -801,6 +875,7 @@ export class LogQueryService {
       'requestId', 'timestamp', 'transportType', 'method', 'path', 'query', 'status', 'duration',
       'routePath', 'upstream', 'transformer', 'authSuccess', 'authLevel',
       'errorMessage', 'success', 'requestType', 'transportOutcome', 'transportCode', 'protocolOutcome', 'protocolCode',
+      'recordKind', 'accessId', 'operationId', 'protocol', 'operation', 'closeCode', 'observationOutcome',
       ...(params.groupBy === 'chain' ? ['chainId', 'chainStatus', 'chainDurationMs', 'chainTransportOutcome', 'chainTransportCode'] : [])
     ];
 
@@ -829,6 +904,11 @@ export class LogQueryService {
           entry.transportCode || '',
           entry.protocolOutcome || '',
           entry.protocolCode || '',
+          entry.recordKind ?? '',
+          ...[entry.accessId, entry.operationId, entry.protocol, entry.operation].map(value =>
+            value === undefined ? '' : /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value),
+          entry.closeCode ?? '',
+          entry.observationOutcome ?? '',
           ...(chain ? [chain.chainId, chain.chainStatus, chain.chainDurationMs, chain.chainTransportOutcome, chain.chainTransportCode || ''] : []),
         ].join(',');
       })
@@ -864,7 +944,7 @@ export class LogQueryService {
         SUM(CASE WHEN chain_outcome = 'success' THEN 1 ELSE 0 END) AS success_requests,
         SUM(CASE WHEN chain_outcome = 'failed' THEN 1 ELSE 0 END) AS failed_requests,
         AVG(chain_duration_ms) AS avg_response_time,
-        ${countSql('chain_status', 'final_transport_outcome')}
+        ${countSql('chain_status', 'final_transport_outcome', 'accepted_disconnect', 'websocket_operation')}
       FROM classified_chains
       ${startTime !== undefined || endTime !== undefined ? `WHERE ${[
         startTime !== undefined ? 'chain_start_ts >= ?' : '',
@@ -1009,7 +1089,7 @@ export class LogQueryService {
         SUM(CASE WHEN chain_outcome = 'success' THEN 1 ELSE 0 END) AS success_requests,
         SUM(CASE WHEN chain_outcome = 'failed' THEN 1 ELSE 0 END) AS failed_requests,
         AVG(chain_duration_ms) AS avg_response_time,
-        ${countSql('chain_status', 'final_transport_outcome')}
+        ${countSql('chain_status', 'final_transport_outcome', 'accepted_disconnect', 'websocket_operation')}
       FROM classified_chains
       WHERE chain_start_ts >= ? AND chain_start_ts < ?
       GROUP BY bucket
@@ -1061,6 +1141,8 @@ export class LogQueryService {
         SELECT upstream, status, ${this.transportColumn} AS observed_transport_outcome, ${outcomeSql('status', 'success', 'protocol_outcome')} AS outcome
         FROM access_logs
         WHERE timestamp >= ? AND timestamp < ? AND upstream IS NOT NULL
+          AND (${this.recordKindColumn} IS NULL OR ${this.recordKindColumn} = 'attempt')
+          AND ${this.clientRequestSql()}
       )
       SELECT upstream, COUNT(*) AS total_requests,
         SUM(outcome = 'success') AS success_requests,
@@ -1161,15 +1243,23 @@ export class LogQueryService {
    * 将数据库行映射为 LogEntry 对象
    */
   private mapRowToLogEntry(row: any): LogEntry {
+    const missingUpgrade = row.record_kind === 'operation' && row.transport_type === 'websocket' && row.status === 0;
     return {
       id: row.id,
       requestId: row.request_id,
+      recordKind: row.record_kind ?? undefined,
+      accessId: row.access_id ?? undefined,
+      operationId: row.operation_id ?? undefined,
+      protocol: row.protocol ?? undefined,
+      operation: row.operation ?? undefined,
+      closeCode: row.close_code ?? undefined,
+      observationOutcome: row.observation_outcome ?? undefined,
       timestamp: row.timestamp,
-      method: row.method,
+      method: missingUpgrade ? 'GET' : row.method,
       transportType: row.transport_type,
       path: row.path,
       query: row.query || undefined,
-      status: row.status,
+      status: missingUpgrade ? 101 : row.status,
       duration: row.duration,
       routePath: row.route_path || undefined,
       upstream: row.upstream || undefined,
@@ -1178,8 +1268,8 @@ export class LogQueryService {
       authSuccess: row.auth_success === 1,
       authLevel: row.auth_level || undefined,
       errorMessage: row.error_message || undefined,
-      success: row.success === 1,
-      transportOutcome: TRANSPORT_OUTCOMES.includes(row.transport_outcome) ? row.transport_outcome : 'unknown',
+      success: row.accepted_disconnect === 1 || row.success === 1,
+      transportOutcome: row.accepted_disconnect === 1 ? 'completed' : TRANSPORT_OUTCOMES.includes(row.transport_outcome) ? row.transport_outcome : 'unknown',
       transportCode: row.transport_code ?? undefined,
       protocolOutcome: row.protocol_outcome ?? undefined,
       protocolCode: row.protocol_code ?? undefined,

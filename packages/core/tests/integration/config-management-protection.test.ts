@@ -57,9 +57,11 @@ describe('durable management protection', () => {
     db.run('DROP TABLE routes');
     db.run(CONFIG_SCHEMA_STATEMENTS.find(statement=>statement.startsWith('CREATE TABLE routes'))!);
     db.run('DROP TABLE management_protection');
+    db.run('DROP TABLE configuration_worker_launch_capacity_reclaims');
     db.run('DROP TABLE configuration_worker_launch_facts');
     db.run('DROP TABLE configuration_worker_launch_intents');
     db.run('DROP TABLE configuration_publication_candidate_evidence');
+    db.run('DROP TABLE configuration_request_logs_default');
     const operationColumns = 'mutation_id,request_hash,expected_revision,committed_revision,kind,target_worker_count,state,result_status,error_code,error_detail,drain_recovery_generation,last_drain_recovery_previous_generation,created_at,updated_at';
     db.run(`CREATE TABLE operations_v3 AS SELECT ${operationColumns} FROM configuration_operations`);
     db.run('DROP TABLE configuration_operations');

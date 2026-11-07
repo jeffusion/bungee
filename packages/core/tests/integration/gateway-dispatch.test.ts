@@ -2,6 +2,7 @@ import { afterAll as afterDataPlaneTests } from 'bun:test';
 import { createDataPlaneRuntime } from '../helpers/data-plane-runtime';
 const dataPlaneRuntime = await createDataPlaneRuntime();
 import {afterEach,expect,test} from 'bun:test';
+import { registerRequestLogs } from '../helpers/request-log';
 const { ScopedPluginRegistry, setScopedPluginRegistry, getScopedPluginRegistry } = await import('../../src/scoped-plugin-registry');
 const { handleRequest } = await import('../../src/worker/request/handler');
 const { createIngress } = await import('../../../../plugins/key-access/server/policy');
@@ -75,16 +76,17 @@ test.each(['HEALTHY','HALF_OPEN'] as const)('a failed child Endpoint keeps one p
   const config:any={routes:[{id:'entry',path:'/entry',service_references:references,failover:{enabled:true,retry_on:[503]}}],
     services:['first','second'].map(id=>({id,name:id,endpoints:[{id:`endpoint-${id}`,target:`http://${id}.test`}]}))};
   const registry=new ScopedPluginRegistry(import.meta.dir);await registry.initializeFromConfig(config);setScopedPluginRegistry(registry);initializeRuntimeState(config);
+  registerRequestLogs(registry.getGatewayHooks());
   runtimeState.get('first')!.upstreams[0].status=status;
   const rows:any[]=[];
   globalThis.fetch=Object.assign(async(input:any)=>{if(String(input).includes('first.test'))throw Object.assign(new Error('fixture refused'),{code:'ECONNREFUSED'});return Response.json({ok:true});},{preconnect(){}}) as any;
   try{
     let completion:Promise<unknown>|undefined;
-    const response=await handleRequest(new Request('http://local/entry'),config,{logTransportType:'websocket',logging:{...logging,accessLogWriter:{...logging.accessLogWriter,write(row:any){rows.push(row);}}},onCompletion:value=>{completion=value;}});
+    const response=await handleRequest(new Request('http://local/entry'),config,{logging:{...logging,accessLogWriter:{...logging.accessLogWriter,write(row:any){rows.push(row);}}},onCompletion:value=>{completion=value;}});
     expect(response.status).toBe(200);await response.text();await completion;
     const completed=rows.filter(row=>row.protocolOutcome!==undefined);
     expect(completed.map(row=>[row.status,row.requestType])).toEqual([[503,status==='HALF_OPEN'?'recovery':'retry'],[200,'final']]);
-    expect(rows.every(row=>row.transportType==='websocket')).toBe(true);
+    expect(rows.every(row=>row.transportType==='http')).toBe(true);
     expect(new Set(completed.map(row=>row.parentRequestId)).size).toBe(1);expect(completed.every(row=>row.isFailoverAttempt)).toBe(true);
   }finally{runtimeState.clear();await registry.destroy();}
 });

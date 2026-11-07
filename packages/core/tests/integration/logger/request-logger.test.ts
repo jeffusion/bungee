@@ -98,7 +98,7 @@ describe('RequestLogger.complete', () => {
     logger.beginTransport(200);
     logger.updateTransportOutcome('cancelled', 'client_cancelled');
     logger.updateUpstreamTransportOutcome('completed');
-    expect(updates).toEqual([['completed', undefined], ['pending', undefined], ['cancelled', 'client_cancelled']]);
+    expect(updates).toEqual([['cancelled', 'client_cancelled']]);
   });
   test('records why body storage skipped an oversized original request without affecting success', async () => {
     let entry: Record<string, any> | undefined;
@@ -124,7 +124,7 @@ describe('RequestLogger.complete', () => {
     const fileWrite = spyOn(fileLogWriter, 'write').mockImplementation(() => new Promise<void>((resolve) => {
       resolveFileWrite = resolve;
     }));
-    const logger = new RequestLogger(new Request('http://localhost/concurrent'));
+    const logger = new RequestLogger(new Request('http://localhost/concurrent'), undefined, { accessLogWriter, fileLogWriter });
 
     const first = logger.complete(200);
     const second = logger.complete(200);
@@ -143,7 +143,7 @@ describe('RequestLogger.complete', () => {
       attempts += 1;
       if (attempts === 1) throw new Error('temporary file write failure');
     });
-    const logger = new RequestLogger(new Request('http://localhost/file-retry'));
+    const logger = new RequestLogger(new Request('http://localhost/file-retry'), undefined, { accessLogWriter, fileLogWriter });
 
     await expect(logger.complete(200)).rejects.toThrow('temporary file write failure');
     await logger.complete(200);

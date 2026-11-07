@@ -94,6 +94,9 @@ describe('gateway architecture AST guard',()=>{
   test('allows public handles, Response assembly and business JSON fields',()=>{
     expect(rules(plugin,"import {definePlugin} from '@jeffusion/bungee-core/plugin'; const body=await ctx.bodyHandle.json(); const tool=JSON.parse(body.arguments); return Response.json(tool);")).toEqual([]);
     expect(rules(plugin,'// response.json();\nconst diagnostic="response.body.getReader()";')).toEqual([]);
+    expect(rules(plugin, 'const parse: RequestLogBodyParser = async (body, consumer) => new TextDecoder().decode(await body.decoded(consumer));')).toEqual([]);
+    expect(rules(plugin, 'async function parse(response: Response) { return new TextDecoder().decode(await response.arrayBuffer()); }'))
+      .toEqual(['central-body-text-parser', 'native-http-body-read']);
   });
   test('allows typed and hook-inferred WebSocket views without allowing arbitrary HTTP readers',()=>{
     expect(rules(plugin,'function observe(event:WebSocketObservationEvent){return event.message.json();}')).toEqual([]);

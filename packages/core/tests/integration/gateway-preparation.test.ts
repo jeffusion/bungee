@@ -165,11 +165,18 @@ test('native and managed credential scopes are stable across independently initi
   }
 });
 
-test.each([undefined,'websocket'] as const)('configured body logging preserves ingress type %s without auxiliary bodies or transport changes',async transport=>{
+test.each([undefined,'websocket'] as const)('only the client entry writes logs when dispatch uses transport %s',async transport=>{
   const {flushBodyCaptures}=await import('../../src/logger/body-capture');
   const saved:{requestId:string;value:unknown;type:string}[]=[];const access:any[]=[];const files:any[]=[];
   const cipher='fixture-private-cipher';const payload='fixture-private-tool-arguments';let parentId='';
-  const logging={bodyStorage:{async save(requestId:string,value:unknown,type:any){saved.push({requestId,value,type});return `body-${saved.length}`;}},
+  const logging={bodyStorage:{
+      async save(requestId:string,value:unknown,type:string){saved.push({requestId,value,type});return `body-${saved.length}`;},
+      async saveStream(requestId:string,chunks:AsyncIterable<string>,type:string){
+        let serialized='';
+        for await(const chunk of chunks) serialized+=chunk;
+        return serialized ? this.save(requestId,JSON.parse(serialized),type) : null;
+      },
+    },
     accessLogWriter:{write(value:any){access.push(structuredClone(value));},updateResponseBodyId(){},updateProtocolOutcome(){},updateTransportOutcome(){}},
     fileLogWriter:{write(value:any){files.push(structuredClone(value));}}};
   const env=gatewayPreparationFixture({bodyLogging:true,logging,upstream:()=>env.calls.at(-1)?.body.model==='relay-model'
@@ -180,14 +187,19 @@ test.each([undefined,'websocket'] as const)('configured body logging preserves i
     }});
   env.config.routes.find((route:any)=>route.id==='aux').websocket={enabled:true};
   try{const response=await env.send(transport);expect(response.status).toBe(200);await response.text();await flushBodyCaptures();
-    expect(saved.length).toBeGreaterThan(0);expect(saved.some(value=>JSON.stringify(value.value).includes('hello'))).toBe(true);
-    const auxiliaryAccess=access.filter(value=>value.parentRequestId===parentId);
-    const auxiliaryFiles=files.filter(value=>value.parentRequestId===parentId);
-    expect(auxiliaryAccess.length).toBeGreaterThan(0);expect(auxiliaryFiles.length).toBeGreaterThan(0);
-    expect(access.length).toBeGreaterThan(auxiliaryAccess.length);expect(files.length).toBeGreaterThan(auxiliaryFiles.length);
-    for(const entry of [...access,...files])expect(entry.transportType).toBe(transport??'http');
-    for(const entry of [...auxiliaryAccess,...auxiliaryFiles]){expect(entry.reqBodyId).toBeUndefined();expect(entry.originalReqBodyId).toBeUndefined();expect(entry.respBodyId).toBeUndefined();}
-    expect(auxiliaryAccess.some(value=>value.status===200&&value.protocolOutcome==='completed')).toBe(true);
+    if (transport === 'websocket') {
+      expect(saved).toEqual([]);
+      expect(access).toEqual([]);
+      expect(files).toEqual([]);
+    } else {
+      expect(saved.some(value => JSON.stringify(value.value).includes('hello'))).toBe(true);
+      expect(access.length).toBeGreaterThan(0);
+      expect(files.length).toBeGreaterThan(0);
+      for(const entry of [...access,...files]) {
+        expect(entry.transportType).toBe('http');
+        expect(entry.parentRequestId).not.toBe(parentId);
+      }
+    }
     for(const sink of [saved,access,files]){const serialized=JSON.stringify(sink);expect(serialized).not.toContain(cipher);expect(serialized).not.toContain(payload);}
     expect(env.budgets).toHaveLength(2);expect(env.settlements.every(value=>value.sent&&value.outcome==='completed')).toBe(true);
   }finally{await env.close();}

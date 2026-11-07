@@ -11,7 +11,7 @@ import type { BodySource } from '../worker/request/body-source';
 import type { ProxyAttemptOptions, ProxyRequestResult } from './forward-plugin';
 import type { StreamCompletionState } from './response-plugin';
 
-import type { RequestLogger, RequestLoggerDependencies, RequestLogCompletionOptions } from '../logger/request-logger';
+import type { RequestLogger } from '../logger/request-logger';
 import type { WorkerRequestAdmission, WorkerAdmissionPlugin } from '../data-admission/worker';
 import type { FailoverCoordinator } from '../worker/upstream/failover-coordinator';
 
@@ -114,14 +114,8 @@ export interface GatewayRetryInput {
 }
 /** Final outbound representation: a repair attempt skips already completed request conversions. */
 export interface GatewayRequestOverride {readonly url:string;readonly headers:Readonly<Record<string,string>>;readonly body:unknown;readonly annotations?:Readonly<Record<string,import('../plugin.types').PluginConfigValue>>}
-export type GatewayLogInput =
-  | { readonly phase: 'create'; readonly request: Request; readonly options?: ConstructorParameters<typeof RequestLogger>[1]; readonly dependencies?: RequestLoggerDependencies }
-  | { readonly phase: 'complete' | 'root'; readonly logger: RequestLogger; readonly status: number; readonly options: RequestLogCompletionOptions };
-export interface GatewayLogResult { readonly logger?: RequestLogger }
-
-/** Provider stages are fixed, required, and registered exactly once at startup. */
 export const GATEWAY_PROVIDER_STAGES = [
   'onGatewayWebSocket','onGatewayBody','onGatewayRequest', 'onGatewayRoute', 'onGatewayDispatch', 'onGatewayAdmission', 'onGatewayAdmissionSession',
   'onGatewayAdmissionPrepare', 'onGatewaySelect', 'onGatewayFailover', 'onGatewayRetry',
-  'onGatewayForward', 'onGatewayHeaderRules', 'onGatewayCors', 'onGatewayBodyRules', 'onGatewayQueryRules', 'onGatewayResponseRules', 'onGatewayLog',
+  'onGatewayForward', 'onGatewayHeaderRules', 'onGatewayCors', 'onGatewayBodyRules', 'onGatewayQueryRules', 'onGatewayResponseRules',
 ] as const;

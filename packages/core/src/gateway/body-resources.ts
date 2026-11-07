@@ -12,7 +12,7 @@ export const bodyResources = Object.freeze({
   // Eight 800 KiB mixed-content and 2 MiB compressed consumers passed calibration.
   mandatoryDecoders: positive('BUNGEE_BODY_MANDATORY_DECODERS', 8),
   optionalDecoders: positive('BUNGEE_BODY_OPTIONAL_DECODERS', 8),
-  loggerMemoryBytes: positive('BUNGEE_BODY_LOG_MEMORY_BYTES', 32 * 1024 * 1024),
+  loggerMemoryBytes: 32 * 1024 * 1024,
   loggerConsumers: positive('BUNGEE_BODY_LOG_CONSUMERS', 64),
   callbackMs: positive('BUNGEE_BODY_CALLBACK_MS', 250),
   optionalDecodeMs: positive('BUNGEE_BODY_OPTIONAL_DECODE_MS', 1000),

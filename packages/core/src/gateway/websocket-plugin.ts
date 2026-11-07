@@ -5,11 +5,11 @@ import type { EffectiveRouteConfig } from '../worker/types';
 import type { PrecompiledHooks } from '../scoped-plugin-registry';
 import { randomUUID } from 'node:crypto';
 import type { Plugin, PluginHooks } from '@jeffusion/bungee-core/plugin';
-import type { GatewayWebSocketInput, GatewayWebSocketResult, WebSocketHandshakeContext } from './websocket-contracts';
+import type { GatewayWebSocketInput, GatewayWebSocketResult, WebSocketHandshakeContext, WebSocketMessageView } from './websocket-contracts';
 import { gatewayHooks, requireGatewayResult } from './runtime';
 import { getScopedPluginRegistry } from '../scoped-plugin-registry';
 import { getTrustedDataIdentity, getTrustedWorkerPeer } from '../config-worker/private-transport';
-import { hasWorkerAdmissionSession, type WorkerRequestAdmission } from '../data-admission/worker';
+import { canStartRequestLogOperation, hasWorkerAdmissionSession, type WorkerRequestAdmission } from '../data-admission/worker';
 import { DataAdmissionError, normalizeAdmissionError } from '../data-admission/errors';
 import { isUpstreamNetworkError, isUpstreamTimeoutError } from '../worker/request/proxy';
 import { incrementActiveRequests, decrementActiveRequests, releaseHalfOpenSlot } from '../worker/state/runtime-state';
@@ -21,6 +21,10 @@ import { WebSocketObservers } from '../websocket/observation';
 import { validateWebSocketRequest } from '../websocket';
 import { websocketCredential } from './websocket-credential';
 import {ResponsesWebSocketSession} from './responses-websocket-session';
+import { createRequestLog, hasRequestLogCollector } from './request-log';
+import type { RequestLogWebSocketEvent } from './request-log-contracts';
+import { createWebSocketMessageView } from '../websocket/message';
+import { DEFAULT_BODY_LOG_MAX_BYTES } from '@jeffusion/bungee-types';
 
 function headerRecord(headers:Headers):Record<string,string> {const result:Record<string,string>={};headers.forEach((value,name)=>{result[name]=value;});return result;}
 const reject = (status:number,error:string):GatewayWebSocketResult=>({response:Response.json({error},{status})});
@@ -70,6 +74,7 @@ export class WebSocketGatewayPlugin implements Plugin {
       if (!route) return reject(404,'route_not_found');
       if (route.websocket?.enabled!==true) return reject(426,'websocket_disabled');
       if (decision.response) return {response:decision.response};
+      const routeHooks = registry?.getRoutePrecompiledHooks(route.path)?.hooks;
       const effective = requireGatewayResult(decision.effective,'onGatewayRoute');
       const headers = new Headers(request.headers);
       const url = new URL(request.url);
@@ -83,7 +88,37 @@ export class WebSocketGatewayPlugin implements Plugin {
       const rate = requireGatewayResult(await gatewayHooks().onGatewayAdmission.promise({route,trustedPeer:getTrustedWorkerPeer(request),context:expressionContext(),servingRevision,signal}),'onGatewayAdmission');
       if (!rate.allowed) return {response:Response.json({error:rate.retryAfterMs===undefined?'rate_limit_unavailable':'rate_limited'},{status:rate.retryAfterMs===undefined?503:429,
         headers:rate.retryAfterMs===undefined?{}:{'retry-after':String(Math.max(1,Math.ceil(rate.retryAfterMs/1000)))}})};
-      const sessionMode=await registry?.getRoutePrecompiledHooks(route.path)?.hooks.onWebSocketSessionMode.promise(new URL(request.url));
+      const sessionMode=await routeHooks?.onWebSocketSessionMode.promise(new URL(request.url));
+      const logging = input.logging && hasRequestLogCollector(gatewayHooks()) ? input.logging : undefined;
+      const bodyConfig = config.logging?.body;
+      const requestLogApplication = createRequestLog(registry?.getRequestLogHooks?.(route.path), gatewayHooks(),
+        request, route.path, 'websocket', connectionId, logging, {
+          acceptsOperations: async () => bridge.accepting && await canStartRequestLogOperation() && bridge.accepting,
+          webSocketMode: sessionMode,
+          maxBodyBytes: bodyConfig?.enabled ? bodyConfig.max_size ?? DEFAULT_BODY_LOG_MAX_BYTES : undefined,
+        });
+      const protocolObservers = requestLogApplication && new WebSocketObservers(
+        { connectionId, routeId: route.path, upstreamId: '', upstreamUrl: '', servingRevision },
+        [{
+          pluginName: 'request-log-application',
+          onIncomplete: () => requestLogApplication.close(),
+          hooks: {
+            hasCallbacks: () => true,
+            promise: async event => {
+              if (event.phase === 'message') await requestLogApplication.observeWebSocket(event.message, event.isActive);
+            },
+          },
+        }],
+      );
+      const observeProtocolMessage = (direction: 'client' | 'upstream', message: WebSocketMessageView,
+        relatedOperationId?: string, disposition?: Pick<RequestLogWebSocketEvent, 'hostedErrorOutcome' | 'settled'>) => {
+        const projection = requestLogApplication?.prepareWebSocket({ kind: 'websocket', direction, message, relatedOperationId, ...disposition });
+        if (projection) protocolObservers?.emit({ phase: 'message', direction, message: projection });
+      };
+      const closeRequestLog = async (code: number, reason: string, metrics: import('./websocket-contracts').WebSocketSessionMetrics) => {
+        await protocolObservers?.close({ phase: 'close', code, reason, metrics });
+        requestLogApplication?.close();
+      };
       if(sessionMode==='responses'){
         for(const owner of registry?.getRoutePluginOwners(route.path) ?? [])retain(owner.pluginName,owner.scopeKey);
         const handlers=registry?.getGlobalAdmissionHandlers() ?? [];
@@ -96,8 +131,25 @@ export class WebSocketGatewayPlugin implements Plugin {
           if(!endpoint)return reject(503,'upstream_unavailable');
           await admission.prepare({attemptId:connectionId,upstreamId:endpoint.id ?? '0',url:endpoint.target,model:null,body:undefined,transport:'websocket'},signal);
         }
-        const session=new ResponsesWebSocketSession(input,gatewayHooks());
-        const response=await bridge.upgradeSession(nativeRequest,server,{signal,onMessage:(transport,message)=>session.onMessage(transport,message),onClose:async()=>{session.dispose();await finish();}});
+        const session = new ResponsesWebSocketSession(input, gatewayHooks());
+        const response = await bridge.upgradeSession(nativeRequest, server, {
+          signal,
+          onMessage: (transport, message) => {
+            if (!protocolObservers) return session.onMessage(transport, message);
+            const operationId = randomUUID();
+            observeProtocolMessage('client', message, operationId);
+            const handling = session.onMessage(transport, message, (value, hostedErrorOutcome) => {
+              observeProtocolMessage('upstream', createWebSocketMessageView(value), operationId, { hostedErrorOutcome });
+            });
+            return handling?.finally(() => {
+              observeProtocolMessage('upstream', createWebSocketMessageView(''), operationId, { settled: true });
+            });
+          },
+          onClose: async (code, reason, metrics) => {
+            try { session.dispose(); await closeRequestLog(code, reason, metrics); }
+            finally { await finish(); }
+          },
+        });
         if(response){session.dispose();return {response};}
         committed=true;return {};
       }
@@ -163,8 +215,15 @@ export class WebSocketGatewayPlugin implements Plugin {
               budget.take();
               last=await bridge.upgrade(nativeRequest,server,{url:target,headers:outbound,signal,
                 onOpen:()=>attemptObservers.emit({phase:'open'}),
-                onMessage:(direction,message)=>attemptObservers.emit({phase:'message',direction,message}),
-                onClose:async(code,reason,metrics)=>{try{await attemptObservers.close({phase:'close',code,reason,metrics});}finally{await finish();}}});
+                onMessage:(direction,message)=>{
+                  attemptObservers.emit({phase:'message',direction,message});
+                  if (direction === 'client') observeProtocolMessage(direction, message);
+                },
+                onDownstreamMessage: protocolObservers && (message => observeProtocolMessage('upstream', message)),
+                onClose:async(code,reason,metrics)=>{
+                  try { await Promise.all([attemptObservers.close({phase:'close',code,reason,metrics}), closeRequestLog(code,reason,metrics)]); }
+                  finally { await finish(); }
+                }});
             }
             if(!last)return undefined;
             release();if(frame)await closeFrame(frame,false);

@@ -50,9 +50,11 @@ function isStreamingResponse(response: Response): boolean { return response.body
 
 import type { RawResponseCompletion } from '../plugin-control/contracts';
 import { observeTransportResponse } from './body-observation-stream';
-import type { TransportType } from '../logger/transport-outcome';
+import { createRequestLog, hasRequestLogCollector, observeRequestLogHttp, type RequestLogSession } from './request-log';
+import { parseBodyParserLimit } from '../config-storage/global-scalars';
 
 export interface HandleRequestRuntimeContext {
+  accessId?: string;
   servingRevision?: number;
   parentRequestId?:string;
   webSocketConnection?:{readonly id:string;readonly signal:AbortSignal};
@@ -61,8 +63,6 @@ export interface HandleRequestRuntimeContext {
   onCompletion?:(completion:Promise<RawResponseCompletion>)=>void;
   /** Host-only session context, never accepted from client fields. */
   transport?: 'websocket';
-  /** Inherited ingress protocol for logs; does not select the upstream transport. */
-  logTransportType?: TransportType;
   websocketBridge?: import('../websocket').WebSocketBridge;
   skipEntryRate?: boolean;
   /** Host session receives the codec's logical history without re-reading the request body. */
@@ -77,6 +77,7 @@ type UpstreamSelector = (
 ) => RuntimeUpstream | undefined;
 
 type RequestTransportContext = {
+  requestLogApplication?: RequestLogSession;
   logger?: RequestLogger;
   loggers?: RequestLogger[];
   routePath?: string;
@@ -350,6 +351,7 @@ export async function executeHttpRequest(
   let response: Response;
   try { response = await executeHttpRequestInternal(req, config, runtimeContextOrSelector, selectorOverride, transport); }
   catch (error) {
+    transport.requestLogApplication?.close();
     for (const requestLogger of transport.loggers ?? []) {
       try { requestLogger.releaseUnreturnedTransportFileLog(); } catch { /* diagnostic sink failure */ }
     }
@@ -360,10 +362,20 @@ export async function executeHttpRequest(
   for (const requestLogger of transport.loggers ?? []) {
     if (requestLogger !== transport.logger) requestLogger.releaseUnreturnedTransportFileLog();
   }
-  try { transport.logger?.beginTransport(response.status, { routePath: transport.routePath, upstream: transport.upstream }); }
-  catch { /* A diagnostic sink failure must not prevent forwarding. */ }
+  const requestLogger = transport.logger;
+  if (!requestLogger) return response;
+  const recordTransport = (write: () => void) => {
+    try { write(); } catch { /* A diagnostic sink failure must not prevent forwarding. */ }
+  };
+  const status = response.status;
+  recordTransport(() => requestLogger.beginTransport(status, { routePath: transport.routePath, upstream: transport.upstream }));
+  if (transport.requestLogApplication) {
+    const accessId = typeof runtimeContextOrSelector === 'function' ? undefined : runtimeContextOrSelector.accessId;
+    response = observeRequestLogHttp(response, transport.requestLogApplication, accessId ?? transport.logger!.getRequestId(),
+      req.signal, parseBodyParserLimit(config.body_parser_limit));
+  }
   return observeTransportResponse(response, req.signal,
-    (outcome, code) => transport.logger?.updateTransportOutcome(outcome, code),
+    (outcome, code) => recordTransport(() => requestLogger.updateTransportOutcome(outcome, code)),
     () => transport.failureCode?.());
 }
 
@@ -378,33 +390,39 @@ async function executeHttpRequestInternal(
   const upstreamSelector = typeof runtimeContextOrSelector === 'function'
     ? runtimeContextOrSelector
     : selectorOverride ?? selectUpstream;
+  const hooks = gatewayHooks();
+  const suppliedLogging = runtimeContext?.transport || runtimeContext?.auxiliary ? undefined : runtimeContext?.logging;
+  const logging = suppliedLogging && hasRequestLogCollector(hooks) ? suppliedLogging : undefined;
+  const requestRegistry = getScopedPluginRegistry();
+  let entryLogHooks: PluginHooks | undefined;
+  const bodyParser: RequestLoggerDependencies['bodyParser'] = context => {
+    const matched = entryLogHooks?.onRequestLogBody.call(context);
+    return matched === undefined ? hooks.onRequestLogBody.call(context) : matched;
+  };
+  const dependencies = logging ? { ...logging, bodyParser: logging.bodyParser ?? bodyParser } : null;
   const requestLoggers: RequestLogger[] = [];
-  transport.loggers = requestLoggers;
+  if (logging) transport.loggers = requestLoggers;
   const fileLogReleases: Array<() => void> = [];
-  const transportType: TransportType = runtimeContext?.logTransportType ?? runtimeContext?.transport ?? 'http';
-  const createRequestLogger = async (request: Request, options?: ConstructorParameters<typeof RequestLogger>[1]): Promise<RequestLogger> => {
-    const logOptions = {...options, transportType,
+  const createRequestLogger = (request: Request, options?: ConstructorParameters<typeof RequestLogger>[1]): RequestLogger => {
+    const logOptions = {...options, accessId: runtimeContext?.accessId,
       ...(runtimeContext?.auxiliary ? {parentRequestId:options?.parentRequestId ?? runtimeContext.auxiliary.parentRequestId} : {})};
-    const requestLogger = requireGatewayResult(requireGatewayResult(await gatewayHooks().onGatewayLog.promise({phase:'create',request,options:logOptions,dependencies:runtimeContext?.logging}), 'onGatewayLog').logger, 'onGatewayLog');
-    requestLogger.deferFileLogUntilTransportObserved();
-    transport.logger = requestLogger;
-    requestLoggers.push(requestLogger);
-    if (config.logging?.body?.enabled) fileLogReleases.push(requestLogger.deferFileLog());
+    const requestLogger = new RequestLogger(request, logOptions, dependencies);
+    if (logging) {
+      requestLogger.deferFileLogUntilTransportObserved();
+      transport.logger = requestLogger;
+      requestLoggers.push(requestLogger);
+      if (config.logging?.body?.enabled) fileLogReleases.push(requestLogger.deferFileLog());
+    }
     return requestLogger;
   };
   const url = new URL(req.url);
-  // Every request enters the normal pipeline and is logged before route matching.
-  const reqLogger = await createRequestLogger(req,runtimeContext?.auxiliary ? {parentRequestId:runtimeContext.auxiliary.parentRequestId} : undefined);
+  const reqLogger = createRequestLogger(req,runtimeContext?.auxiliary ? {parentRequestId:runtimeContext.auxiliary.parentRequestId} : undefined);
   const requestLog = reqLogger.getRequestInfo();
 
   const startTime = Date.now();
   const trustedIdentity = getTrustedDataIdentity(req);
   const requestId = trustedIdentity?.requestId ?? requestLog.requestId;
-  const originalBody = reqLogger.observeBody(req.body, 'original-request', req.headers, config.logging?.body, req.signal, undefined,
-    {identity:{requestId,attemptId:requestId,direction:'request',stage:'original-request',version:0,
-      contentType:req.headers.get('content-type') ?? '',contentEncoding:req.headers.get('content-encoding') ?? ''}});
   const keyId = trustedIdentity?.principal.domain === 'data' ? trustedIdentity.principal.keyId : null;
-  const requestRegistry = getScopedPluginRegistry();
   const leaseReleases: Array<() => void> = [];
   const leasedOwners = new Set<string>();
   const ownerLeases = new Map<string, () => void>();
@@ -446,6 +464,13 @@ async function executeHttpRequestInternal(
   let rootErrorMessage: string | undefined;
   let rootFailure:unknown;
   let rootProtocolCode: string | undefined;
+  const observeApplicationResponse = (response: Response): Response => {
+    const session = transport.requestLogApplication;
+    if (!session) return response;
+    transport.requestLogApplication = undefined;
+    return observeRequestLogHttp(response, session, runtimeContext?.accessId ?? requestId, req.signal,
+      parseBodyParserLimit(config.body_parser_limit));
+  };
   let rootPersisted = false;
   let rootPersisting: Promise<void> | undefined;
   const completedAttemptLoggers = new WeakSet<RequestLogger>();
@@ -549,30 +574,34 @@ async function executeHttpRequestInternal(
     status: number,
     options: RequestLogCompletionOptions,
   ): Promise<void> => {
-    if (completedAttemptLoggers.has(attemptLogger)) return;
+    if (!logging || completedAttemptLoggers.has(attemptLogger)) return;
     const inFlight = completingAttemptLoggers.get(attemptLogger);
     if (inFlight) return inFlight;
+    const endedAt = Date.now();
     attemptLogger.addSteps(reqLogger.getSteps());
-    const completion = gatewayHooks().onGatewayLog.promise({phase:'complete',logger:attemptLogger,status,options}).then(() => {
+    const complete = async () => {
+      await attemptLogger.complete(status, options, endedAt);
       completedAttemptLoggers.add(attemptLogger);
+    };
+    const completion = complete().finally(() => {
+      completingAttemptLoggers.delete(attemptLogger);
     });
     completingAttemptLoggers.set(attemptLogger, completion);
-    try {
-      await completion;
-    } finally {
-      completingAttemptLoggers.delete(attemptLogger);
-    }
+    await completion;
   };
 
   const persistRoot = (status: number, options: RequestLogCompletionOptions): Promise<void> => {
-    if (rootPersisted) return Promise.resolve();
+    if (!logging || rootPersisted) return Promise.resolve();
     if (rootPersisting) return rootPersisting;
-    rootPersisting = gatewayHooks().onGatewayLog.promise({phase:'root',logger:reqLogger,status,options}).then(() => {
+    const endedAt = Date.now();
+    const complete = async () => {
+      await reqLogger.persistRoot(status, options, endedAt);
       rootPersisted = true;
-    });
-    return rootPersisting.finally(() => {
+    };
+    rootPersisting = complete().finally(() => {
       rootPersisting = undefined;
     });
+    return rootPersisting;
   };
 
   const headersForRootError=()=>{const headers:Record<string,string>={};req.headers.forEach((value,key)=>{headers[key]=value;});return headers;};
@@ -706,13 +735,14 @@ async function executeHttpRequestInternal(
     attemptLogger: RequestLogger,
     onOutcome?: (outcome: ProtocolOutcome) => Promise<void> | void,
   ): Response => {
-    transport.logger = attemptLogger;
+    if (logging) transport.logger = attemptLogger;
     transport.failureCode = result.transportFailureCode;
     const responseHeaders: Record<string, string> = {};
     response.headers.forEach((value, key) => { responseHeaders[key] = value; });
     attemptLogger.setResponseHeaders(responseHeaders);
     const observed = attemptLogger.observeBody(response.body, 'response', response.headers, config.logging?.body, req.signal, response.status);
     if (observed !== response.body) response = cloneResponseWithBody(response, observed as ReadableStream<Uint8Array>);
+    response = observeApplicationResponse(response);
     if (!isStreamingResponse(response) || !response.body) {
       runtimeContext?.onCompletion?.(result.completion.then(async outcome=>{await finalizeRequest();return outcome;}));
       return response;
@@ -840,6 +870,7 @@ async function executeHttpRequestInternal(
     responseLogger.setResponseHeaders(responseHeaders);
     const observed = responseLogger.observeBody(response.body, 'response', response.headers, config.logging?.body, req.signal, response.status);
     if (observed !== response.body) response = cloneResponseWithBody(response, observed as ReadableStream<Uint8Array>);
+    response = observeApplicationResponse(response);
     if (!isStreamingResponse(response) || !response.body) return response;
 
     deferFinallyToStream = true;
@@ -884,7 +915,7 @@ async function executeHttpRequestInternal(
   };
 
   const finalizeLocalResponse = (response: Response): Response =>
-    config.logging?.body?.enabled ? finalizeRootStreamingResponse(response) : response;
+    logging && config.logging?.body?.enabled ? finalizeRootStreamingResponse(response) : response;
 
   const prepareProcessingErrorResponse = (error: DataAdmissionError | BodyProcessingError): Response => {
     if (error instanceof DataAdmissionError) return finalizeLocalResponse(Response.json({ error: error.code, ...error.details }, {
@@ -914,6 +945,11 @@ async function executeHttpRequestInternal(
     // 记录匹配的路由（带耗时）
     routePath = route.path;
     transport.routePath = route.path;
+    entryLogHooks = logging ? requestRegistry?.getRequestLogHooks?.(route.path) : undefined;
+    if (logging) {
+      transport.requestLogApplication = createRequestLog(entryLogHooks, gatewayHooks(), req,
+        route.path, 'http', runtimeContext?.accessId ?? requestId, logging);
+    }
     reqLogger.addStepWithDuration('route_matched', performance.now() - routeMatchStart, { path: route.path });
 
     // 记录原始请求头和请求体（转换前）
@@ -938,6 +974,9 @@ async function executeHttpRequestInternal(
     const snapshotStart = performance.now();
     const processingDeadline = AbortSignal.timeout(route.timeouts?.request_ms ?? 30_000);
     const processingSignal = AbortSignal.any([req.signal,processingDeadline]);
+    const originalBody = reqLogger.observeBody(req.body, 'original-request', req.headers, config.logging?.body, req.signal, undefined,
+      { identity: { requestId, attemptId: requestId, direction: 'request', stage: 'original-request', version: 0,
+        contentType: req.headers.get('content-type') ?? '', contentEncoding: req.headers.get('content-encoding') ?? '' } });
     const requestSnapshot = await createRequestSnapshot(req, config.body_parser_limit, processingSignal, originalBody as ReadableStream<Uint8Array> | null,{requestId,attemptId:requestId,direction:'request',stage:'original-request',version:0,contentType:req.headers.get('content-type') ?? '',contentEncoding:req.headers.get('content-encoding') ?? ''});
     requestBodySource = requestSnapshot.bodySource;
     const entryRoute = route;
@@ -1025,10 +1064,6 @@ async function executeHttpRequestInternal(
       hasBody: !!requestSnapshot.body,
       bodyType: requestSnapshot.is_json_body ? 'json' : 'binary'
     });
-
-    if (requestSnapshot.body !== undefined && requestSnapshot.is_json_body) {
-      reqLogger.setOriginalRequestBody(requestSnapshot.body);
-    }
 
     // 构建表达式上下文（用于 upstream 条件过滤）
     const expressionContext: ExpressionContext = {
@@ -1201,9 +1236,11 @@ async function executeHttpRequestInternal(
       if(requestSnapshot.bodySource?.replayable)await branchSnapshot.bodySource?.buffer('branch-replay');
       const attemptLoggers=new Map<ProxyRequestResult,RequestLogger>();
       const runAttempt = async (requestOverride?:import('./contracts').GatewayRequestOverride): Promise<ProxyRequestResult> => {
-        const currentLogger=requestOverride?await createRequestLogger(req,{isFailoverAttempt:true,parentRequestId:reqLogger.getRequestId(),attemptUpstream:selectedUpstream.target,requestType:'final'}):attemptLogger;
-        if(requestOverride){currentLogger.inheritOriginalBody(reqLogger);currentLogger.setOriginalRequestHeaders(redactRequestHeaders(originalHeaders));
-          if(requestSnapshot.is_json_body)currentLogger.setOriginalRequestBody(requestSnapshot.body);}
+        const currentLogger=requestOverride?createRequestLogger(req,{isFailoverAttempt:true,parentRequestId:reqLogger.getRequestId(),attemptUpstream:selectedUpstream.target,requestType:'final'}):attemptLogger;
+        if (requestOverride) {
+          currentLogger.inheritOriginalBody(reqLogger);
+          currentLogger.setOriginalRequestHeaders(redactRequestHeaders(originalHeaders));
+        }
         currentLogger.beginBodyLoggingAttempt();
         const attemptId = crypto.randomUUID();
         const ownerUrl=new URL(branchContext.url);rebaseToUpstream({url:ownerUrl} as MutableRequestContext,selectedUpstream);
@@ -1258,9 +1295,7 @@ async function executeHttpRequestInternal(
               attemptId,requestOverride,
               beforeReuse: runtimeContext?.auxiliary ? async (identity,target) => {
                 await dataAdmission?.inspect({...target,attemptId,upstreamId:selectedUpstream.upstream_id,serviceId:serviceIds.at(-1) ?? null},processingSignal);
-                const reused = await runtimeContext.auxiliary!.onIdentity(identity);
-                currentLogger.addStep('auxiliary_resolution', {model:identity.model,upstreamId:identity.upstreamId,reused});
-                return reused;
+                return runtimeContext.auxiliary!.onIdentity(identity);
               } : undefined,
               beforeSend: dataAdmission ? async (target) => {
                 preparedAdmission = requireGatewayResult(await gatewayHooks().onGatewayAdmissionPrepare.promise({session:dataAdmission!,target:{...target,transport:runtimeContext?.transport,attemptId,upstreamId:selectedUpstream.upstream_id,serviceId:serviceIds.at(-1) ?? null},signal:processingSignal,readBody:()=>requestOverride ? Promise.resolve(requestOverride.body):readSnapshotJson(branchSnapshot,'admission-body')}), 'onGatewayAdmissionPrepare');
@@ -1410,12 +1445,11 @@ async function executeHttpRequestInternal(
             attemptNumber++;upstream=endpoint.target;transport.upstream=endpoint.target;lastAttemptedUpstreamId=endpoint.upstream_id;
             const recoveryAttempt=endpoint.status==='HALF_OPEN';
             const isFailoverAttempt=!!effectiveRoute.failover?.enabled || serviceIds.some(id=>serviceById(config,id).failover?.enabled) || attemptNumber>1;
-            let attemptLogger=await createRequestLogger(req,{isFailoverAttempt,...(isFailoverAttempt ? {parentRequestId:reqLogger.getRequestId()}:{}),
+            let attemptLogger=createRequestLogger(req,{isFailoverAttempt,...(isFailoverAttempt ? {parentRequestId:reqLogger.getRequestId()}:{}),
               attemptNumber,attemptUpstream:endpoint.target,requestType:recoveryAttempt?'recovery':'final'});
             finalAttemptLogger=attemptLogger;
             attemptLogger.inheritOriginalBody(reqLogger);attemptLoggerCreated=true;
             attemptLogger.setOriginalRequestHeaders(redactRequestHeaders(originalHeaders));
-            if(requestSnapshot.is_json_body)attemptLogger.setOriginalRequestBody(requestSnapshot.body);
             reqLogger.addStep('upstream_selected',{target:endpoint.target,serviceIds});
             try{
               const result=await proxyWithRouteRetry(endpoint,attemptLogger,layer,context,serviceIds);
@@ -1494,7 +1528,6 @@ async function executeHttpRequestInternal(
         ...(error.limitBytes === undefined ? {} : {limit_bytes:error.limitBytes}),
         ...(error.receivedBytes === undefined ? {} : {received_bytes:error.receivedBytes})};
       reqLogger.addStep(error.status === 413 ? 'request_body_rejected' : 'body_processing_rejected',body);
-      (finalAttemptLogger ?? reqLogger).setResponseBody(body);
       (finalAttemptLogger ?? reqLogger).setResponseHeaders({'content-type':'application/json'});
       return localFailureResponse ?? finalizeLocalResponse(Response.json(body,{status:error.status}));
     }
@@ -1511,7 +1544,6 @@ async function executeHttpRequestInternal(
         received_bytes: error.receivedBytes,
       };
       reqLogger.addStep('request_body_rejected', body);
-      (finalAttemptLogger ?? reqLogger).setResponseBody(body);
       (finalAttemptLogger ?? reqLogger).setResponseHeaders({ 'content-type': 'application/json' });
       return finalizeLocalResponse(Response.json(body, { status: responseStatus }));
     }

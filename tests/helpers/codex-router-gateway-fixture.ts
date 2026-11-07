@@ -37,7 +37,7 @@ export async function createCodexRouterGatewayFixture(): Promise<GatewayFixture>
   try {
     const pluginsPath = join(root, 'data', 'plugins');
     for (const path of [pluginsPath, join(root, 'logs'), join(root, '.bungee', 'run')]) await mkdir(path, {recursive: true});
-    for (const name of ['codex-router', 'llm-protocol-adapter', 'models-dev', 'model-mapping', 'key-access', 'token-metering', 'token-stats']) {
+    for (const name of ['codex-router', 'llm-protocol-adapter', 'models-dev', 'model-mapping', 'key-access', 'token-metering', 'token-stats', 'request-logs']) {
       await cp(resolve(import.meta.dir, '../../packages/core/dist/plugins', name), join(pluginsPath, name), {recursive: true, errorOnExist: true});
     }
     const probePath = join(pluginsPath, CODEX_PROCESS_PROBE);

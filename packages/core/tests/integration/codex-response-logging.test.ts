@@ -1,3 +1,4 @@
+import { registerRequestLogs } from '../helpers/request-log';
 import { afterAll as afterDataPlaneTests } from 'bun:test';
 import { createDataPlaneRuntime } from '../helpers/data-plane-runtime';
 const dataPlaneRuntime = await createDataPlaneRuntime();
@@ -77,6 +78,7 @@ test('Codex large response and durable failure diagnostics survive with bounded 
       await registry.createInstance({ type: 'upstream', routeId, upstreamId: 'primary' }, {
         name: 'chatgpt-oauth', options: { accountRef: 'replay-account' },
       } as any);
+      registerRequestLogs(registry.getGatewayHooks(), { sse: true });
       setScopedPluginRegistry(registry);
       runtime.initializeRuntimeState(config);
       eventSize = limited ? SSE_FRAME_LIMIT_BYTES + 1 : 20 * 1024 * 1024;

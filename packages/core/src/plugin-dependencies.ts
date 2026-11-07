@@ -83,6 +83,9 @@ export class PluginDependencyGraph {
     return new Map(this.#declarations);
   }
   serviceDeclarations(): ReadonlyMap<string, PluginServiceDeclarations> { return new Map(this.#services); }
+  hasCapability(name: string, capability: string): boolean {
+    return this.#records.get(name)?.capabilities?.includes(capability) === true;
+  }
 
   /**
    * True when the provider declares the exact same-process contract for the

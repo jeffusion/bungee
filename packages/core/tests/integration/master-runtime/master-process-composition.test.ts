@@ -1343,12 +1343,16 @@ test('creation permit blocks an admitted candidate outside the fresh serving set
   }
 });
 
-test('creation permit refuses a new cohort when a partial retired generation remains', async () => {
+test.each(['retired', 'active'] as const)('creation permit still counts a reclaimed launch in the signed %s set', async (membership) => {
   const harness = recoveryDependencies({ withIngress: true });
   const workerOf = (slot: number, id: string): { master_generation: string; worker_instance_id: string; worker_slot: number } => ({
     master_generation: '10000000-0000-4000-8000-000000000001',
     worker_instance_id: id, worker_slot: slot,
   });
+  const reclaimed = workerOf(0, '20000000-0000-4000-8000-000000000013');
+  (harness.repository as unknown as { getWorkerLaunchInventory: () => Promise<readonly unknown[]> }).getWorkerLaunchInventory = async () => [
+    { kind: 'launch', launch: { identity: reclaimed, admitted: true, exited: true, capacity_reclaimed: true } },
+  ];
   const baseIngress = harness.dependencies.createIngressController!;
   let permit: (() => Promise<{ readonly allowed: boolean }>) | undefined;
   const dependencies = {
@@ -1358,10 +1362,10 @@ test('creation permit refuses a new cohort when a partial retired generation rem
       const ingress = baseIngress(options) as { status: () => Promise<unknown> };
       ingress.status = async () => ({ registry: {
         active: { revision: 1, content_hash: 'sha256:' + 'a'.repeat(64), workers: [
-          workerOf(0, '20000000-0000-4000-8000-000000000011'), workerOf(1, '20000000-0000-4000-8000-000000000012')] },
+          workerOf(0, '20000000-0000-4000-8000-000000000011'), workerOf(1, '20000000-0000-4000-8000-000000000012'),
+          ...(membership === 'active' ? [reclaimed] : [])] },
         prepared: null,
-        retired: [{ revision: 1, content_hash: 'sha256:' + 'a'.repeat(64),
-          workers: [workerOf(0, '20000000-0000-4000-8000-000000000013')] }],
+        retired: membership === 'retired' ? [{ revision: 1, content_hash: 'sha256:' + 'a'.repeat(64), workers: [reclaimed] }] : [],
       } });
       return ingress;
     },
@@ -1378,7 +1382,8 @@ test('creation permit refuses a new cohort when a partial retired generation rem
   try {
     handle = await startMasterComposition(dependencies);
     expect(permit).toBeDefined();
-    expect(await permit!()).toMatchObject({ allowed: false });
+    expect(await permit!()).toMatchObject({ allowed: false, error: { message: membership === 'retired'
+      ? 'the previous worker cohort has not been released' : 'legal worker occupancy exceeds one cohort' } });
   } finally {
     await handle?.shutdown().catch(() => undefined);
     if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
@@ -1418,22 +1423,26 @@ test('creation permit does not exempt in-memory admission when ingress status is
   }
 });
 
-test('creation permit re-checks trusted authority after debt settlement', async () => {
+test.each(['reservation settlement', 'failed cleanup proof', 'lost reclaim response'] as const)('creation permit re-checks durable facts and authority after %s', async (scenario) => {
   const harness = recoveryDependencies({ withIngress: true });
-  (harness.repository as unknown as { getWorkerLaunchInventory: () => Promise<readonly unknown[]> })
-    .getWorkerLaunchInventory = async () => [{
-      kind: 'reservation', allocation: { mutation_id: 'mutation-1', worker_slot: 0, attempt_no: 1 },
-    }];
+  const historical = { kind: 'launch', launch: { admitted: true, exited: true, identity: {
+    master_generation: '10000000-0000-4000-8000-000000000001', worker_instance_id: '20000000-0000-4000-8000-000000000099', worker_slot: 0,
+  } } };
+  let checking = false;
+  let proofSeen = false;
+  (harness.repository as unknown as { getWorkerLaunchInventory: () => Promise<readonly unknown[]> }).getWorkerLaunchInventory = async () => {
+    if (!checking) return [];
+    if (scenario !== 'reservation settlement') return [{ ...historical, launch: { ...historical.launch, capacity_reclaimed: proofSeen } }];
+    return proofSeen ? [] : [{ kind: 'reservation', allocation: { mutation_id: 'mutation-1', worker_slot: 0, attempt_no: 1 } }];
+  };
   const baseIngress = harness.dependencies.createIngressController!;
   let permit: (() => Promise<{ readonly allowed: boolean }>) | undefined;
-  let reads = 0;
   const dependencies = {
     ...harness.dependencies,
     createIngressController: (options: Parameters<typeof baseIngress>[0]) => {
       const ingress = baseIngress(options) as { status: () => Promise<unknown> };
       ingress.status = async () => {
-        reads += 1;
-        if (reads === 1) return { registry: { active: null, prepared: null, retired: [] } };
+        if (!proofSeen || scenario === 'lost reclaim response') return { registry: { active: null, prepared: null, retired: [] } };
         throw new Error('ingress status was lost after debt settlement');
       };
       return ingress;
@@ -1441,9 +1450,14 @@ test('creation permit re-checks trusted authority after debt settlement', async 
     createWorkerFactory: (options: Parameters<typeof harness.dependencies.createWorkerFactory>[0]) => ({
       ...harness.dependencies.createWorkerFactory(options),
       settleWorkerLaunchDebt: async () => {
-        (harness.repository as unknown as { getWorkerLaunchInventory: () => Promise<readonly unknown[]> })
-          .getWorkerLaunchInventory = async () => [];
+        if (scenario === 'reservation settlement') proofSeen = true;
         return { released: [], fenced: [], unknown: [] };
+      },
+      reclaimExitedWorkerLaunchCapacity: async () => {
+        if (scenario === 'reservation settlement') return false;
+        proofSeen = true;
+        if (scenario === 'lost reclaim response') throw new Error('fixture lost the committed write response');
+        return true;
       },
     }),
     createCoordinator: (options: { ensureCreationPermitted: () => Promise<{ readonly allowed: boolean }> }) => {
@@ -1459,7 +1473,10 @@ test('creation permit re-checks trusted authority after debt settlement', async 
   try {
     handle = await startMasterComposition(dependencies);
     expect(permit).toBeDefined();
-    expect(await permit!()).toMatchObject({ allowed: false });
+    checking = true;
+    expect(await permit!()).toMatchObject(scenario === 'lost reclaim response' ? { allowed: true }
+      : { allowed: false, error: { message: 'trusted ingress registry is unavailable for worker creation' } });
+    expect(proofSeen).toBeTrue();
   } finally {
     await handle?.shutdown().catch(() => undefined);
     if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;

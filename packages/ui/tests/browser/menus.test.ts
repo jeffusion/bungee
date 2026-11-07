@@ -2,7 +2,7 @@ import { systemUpdateStatusFixture } from '../helpers/system-updates';
 import { test } from 'bun:test';
 import { expect, type Page, type Route } from 'playwright/test';
 import { BUILTIN_MENU_PAGES, type MenuLayout, type MenuNode, type MenuPage, type MenuSnapshot } from '@jeffusion/bungee-types';
-import { menuSnapshot, fulfillMenuIcons } from '../helpers/menus';
+import { menuSnapshot, fulfillMenuIcons, requestLogsMenuPage } from '../helpers/menus';
 import { configurationRuntimeFixture, publicationFixture } from '../helpers/publication';
 import { observeNetwork } from '../helpers/dashboard/network';
 import { dashboardRuntime } from '../helpers/dashboard/runtime';
@@ -29,7 +29,7 @@ test('menu editor saves, reloads, preserves conflicted drafts, guards navigation
   const configuration = configurationRuntimeFixture(publicationFixture({ operation: null, recovery: null, retryable: false, serving_complete: true, serving_revision: 1, target_revision: 1 }));
     await page.addInitScript(() => localStorage.setItem('locale', 'en'));
     page.on('pageerror', error => errors.push(error.message));
-    let snapshot = menuSnapshot(), conflictFailures = 0, writes = 0, loseResponse = false;
+    let snapshot = menuSnapshot([requestLogsMenuPage]), conflictFailures = 0, writes = 0, loseResponse = false;
     let responseLoss: Promise<void> | undefined;
     let slowSearch: Route | null = null, failSearchOnce = true;
     let lastWrite: { expected_revision: number; layout: MenuLayout } | null = null;
@@ -194,7 +194,7 @@ test('flat and grouped menus follow configured navigation order', () => runtime.
     await page.addInitScript(() => localStorage.setItem('locale', 'en'));
     const catalog = [...BUILTIN_MENU_PAGES, ...Array.from({ length: 12 }, (_, index) => ({ id: `plugin:long:${index}`, label: `Plugin contribution with complete long label ${index}`, href: `/#/extensions/long/${index}`, source: 'plugin' as const, pluginName: 'long', available: true, defaultIcon: 'lucide:puzzle' }))];
     const flat: MenuLayout = catalog.map(page => ({ kind: 'page', pageId: page.id, visible: true }));
-    let snapshot: MenuSnapshot = { ...menuSnapshot(), catalog, layout: flat };
+    let snapshot: MenuSnapshot = { ...menuSnapshot([requestLogsMenuPage]), catalog, layout: flat };
     await page.route('**/api/**', route => {
       const path = new URL(route.request().url()).pathname, json = (value: unknown) => route.fulfill({ json: value });
       if (route.request().method() !== (path === '/api/ui/menus' && route.request().method() === 'PUT' ? 'PUT' : 'GET')) throw new Error(`Unexpected method: ${route.request().method()} ${path}`);
@@ -241,7 +241,7 @@ test('disabled plugins disappear when menu refresh fails and recover their saved
     let enabled = true, remainingMenuFailures = 0, failedReads = 0, writes = 0;
     const plugin: MenuPage = { id: 'plugin:test:%2Fpage', label: 'Test page', href: '/#/extensions/test/page',
       source: 'plugin', pluginName: 'test', defaultIcon: 'lucide:puzzle', available: true };
-    const snapshot = {...menuSnapshot()};
+    const snapshot = {...menuSnapshot([requestLogsMenuPage])};
     snapshot.catalog = [...snapshot.catalog, plugin];
     snapshot.layout = [{ kind: 'page', pageId: plugin.id, visible: true, icon: 'tabler:home' }, ...snapshot.layout];
     await page.route('**/api/**', route => {
@@ -302,7 +302,7 @@ test('menu actions support reordering, reparenting, validation and read-only pre
   await page.route('https://fonts.gstatic.com/**', route => route.fulfill({ body: '' }));
     await page.addInitScript(() => localStorage.setItem('locale', 'en'));
     const errors: string[] = []; const network = observeNetwork(page, errors); page.on('pageerror', error => errors.push(error.message));
-    const initial = {...menuSnapshot()};
+    const initial = {...menuSnapshot([requestLogsMenuPage])};
     // Exercise a saved arrangement with gateway pages at the top level.
     initial.layout = initial.layout.flatMap<MenuNode>(node => node.kind === 'group' && node.id === 'group:gateway' ? [...node.children] : [node]);
     initial.layout = initial.layout.map(node => node.kind === 'page' && node.pageId === 'builtin:services' ? { ...node, icon: 'tabler:home' } : node);
@@ -419,7 +419,7 @@ test('menu drag reorders groups and preserves disabled plugin preferences', () =
     const inactiveRoot = { kind: 'page', pageId: 'plugin:inactive:%2Froot', visible: false, icon: 'tabler:home' } as const;
     const inactiveChild = { ...inactiveRoot, pageId: 'plugin:inactive:%2Fchild' };
     const pluginPage = (id: string, available: boolean): MenuPage => ({ id, label: id, href: '/#/extensions/inactive/' + id.split('%2F')[1], source: 'plugin', pluginName: 'inactive', defaultIcon: 'lucide:puzzle', available });
-    let snapshot = {...menuSnapshot()};
+    let snapshot = {...menuSnapshot([requestLogsMenuPage])};
     snapshot.layout = snapshot.layout.flatMap<MenuNode>(node => node.kind === 'group' && node.id === 'group:gateway' ? [...node.children] : [node]);
     const captured: {layout: MenuLayout | null} = {layout: null};
     snapshot = { ...snapshot, catalog: [...snapshot.catalog, pluginPage(inactiveRoot.pageId, false), pluginPage(inactiveChild.pageId, false)],
@@ -470,12 +470,12 @@ test('menu drag reorders groups and preserves disabled plugin preferences', () =
     await page.getByRole('menuitem', { name: 'Page catalog', exact: true }).click();
     await expect(page.getByRole('dialog')).toBeVisible(); await expect(page.getByRole('dialog').getByText(/inactive/)).toHaveCount(0);
     await closeDialog(page);
-    await beginDrag('builtin:services'); await hoverRow('builtin:logs', .8);
-    expect((await rootOrder()).slice(0, 4)).toEqual(['builtin:dashboard', 'builtin:routes', 'builtin:logs', 'builtin:services']);
+    await beginDrag('builtin:services'); await hoverRow(requestLogsMenuPage.id, .8);
+    expect((await rootOrder()).slice(0, 4)).toEqual(['builtin:dashboard', 'builtin:routes', requestLogsMenuPage.id, 'builtin:services']);
      await expect(save).toBeDisabled();
 
      await finishDrag();
-    expect((await rootOrder()).slice(0, 4)).toEqual(['builtin:dashboard', 'builtin:routes', 'builtin:logs', 'builtin:services']);
+    expect((await rootOrder()).slice(0, 4)).toEqual(['builtin:dashboard', 'builtin:routes', requestLogsMenuPage.id, 'builtin:services']);
     await beginDrag('builtin:services'); await hoverRow('builtin:dashboard', .1); await finishDrag();
     expect((await rootOrder())[0]).toBe('builtin:services');
     await beginDrag('builtin:services'); await hoverRow('group:system', .5);

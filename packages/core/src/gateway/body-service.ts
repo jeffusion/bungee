@@ -10,6 +10,7 @@ import { BodyEventSession, BodySSEFramer } from './body-events';
 const handles = new WeakMap<BodyHandle, BodySource>();
 export function bodySourceForHandle(handle: BodyHandle): BodySource | undefined {return handles.get(handle);}
 const sources = new WeakMap<ReadableStream<Uint8Array>, BodySource>();
+const observationSources = new WeakMap<ReadableStream<Uint8Array>, BodySource>();
 const readerCancellations = new WeakMap<ReadableStreamDefaultReader<Uint8Array>, Promise<void>>();
 /** Cancellation belongs to the reader owner and remains observable until the source settles. */
 export function cancelBodyReader(reader:ReadableStreamDefaultReader<Uint8Array>, reason?:unknown):Promise<void> {
@@ -19,6 +20,12 @@ export function cancelBodyReader(reader:ReadableStreamDefaultReader<Uint8Array>,
 }
 export function bindBodySource(stream:ReadableStream<Uint8Array>,source:BodySource):void {sources.set(stream,source);}
 export function bodySourceFor(stream: ReadableStream<Uint8Array>): BodySource | undefined { return sources.get(stream); }
+export function bindBodyObservationSource(stream: ReadableStream<Uint8Array>, source: BodySource): void {
+  observationSources.set(stream, source);
+}
+export function bodyObservationSourceFor(stream: ReadableStream<Uint8Array>): BodySource | undefined {
+  return bodySourceFor(stream) ?? observationSources.get(stream);
+}
 function reserve(bytes: number, optional = false, logging=false): void {
   if(logging && bodyMetrics.loggerBytes+bytes>bodyResources.loggerMemoryBytes)throw new BodyProcessingError(503,'body_buffer_capacity');
   if (bodyMetrics.retainedBytes + bytes > bodyResources.workerMemoryBytes || (optional && bodyMetrics.optionalBytes + bytes > bodyResources.optionalMemoryBytes)) throw new BodyProcessingError(503, 'body_buffer_capacity');
@@ -67,7 +74,6 @@ export class BodySource {
   private decodedPromise?: Promise<Uint8Array>;
   private eventsPromise?: Promise<readonly BodyEvent[]>;
   private eventSession?: BodyEventSession;
-  private eventFrames:BodyEvent[]=[];private eventFrameReleases:(()=>void)[]=[];private eventFrameLogQuota=0;
   private eventDecoded:Uint8Array[]=[];private eventDecodedSize=0;private eventDecodedLease=new BodyBufferLease(true,true);
   private lease = new BodyBufferLease(true);
   private consumed = false;
@@ -83,6 +89,7 @@ export class BodySource {
   private optionalCache=false;private decodedOptional=false;private jsonOptional=false;
   private loggerWire=0;
   private captures = new Map<symbol, { max: number; logging:boolean; stop: (error: BodyProcessingError) => void }>();
+  private wireObservers = new Set<(chunk: Uint8Array) => void>();
   private chunks: Uint8Array[] = [];
   private size = 0;private collectedSize=0;
   private resolveEOF!: () => void;
@@ -116,7 +123,7 @@ export class BodySource {
       finally{try{reader?.releaseLock();}catch{}this.dispose();}
     })();
     void this.wireCancellation.catch(()=>undefined);
-    this.lifecycle.abort(reason);this.eventSession?.end(this.wireError);this.rejectEOF(this.wireError);
+    this.lifecycle.abort(reason);this.eventSession?.cancel(this.wireError);this.rejectEOF(this.wireError);
     try{this.wireController?.error(this.wireError);}catch{}
     return this.wireCancellation;
   }
@@ -145,24 +152,17 @@ export class BodySource {
     });
   }
   private hold(bytes: number): void { this.lease.add(bytes); }
-  private releaseEventFrames():void {for(const release of this.eventFrameReleases)release();this.eventFrameReleases=[];this.eventFrames=[];bodyMetrics.loggerBytes-=this.eventFrameLogQuota;this.eventFrameLogQuota=0;}
-  cachedLogMessages(): {event:string;data:unknown}[]|undefined {return this.eventFrames.length ? this.eventFrames.filter(event=>event.hasData!==false).map(event=>({event:event.event||'message',data:event.json===undefined?event.data:event.json})) : undefined;}
-  private captureEventFrame(event:BodyEvent,bytes:number,retain:()=>()=>void):void {
-    if(![...this.captures.values()].some(c=>c.logging))return;
-    const quota=128+bytes*4;
-    if(bodyMetrics.loggerBytes+quota>bodyResources.loggerMemoryBytes){for(const [key,c] of this.captures)if(c.logging){this.captures.delete(key);c.stop(new BodyProcessingError(503,'body_buffer_capacity'));}return;}
-    bodyMetrics.loggerBytes+=quota;this.eventFrameLogQuota+=quota;this.eventFrameReleases.push(retain());this.eventFrames.push(event);
-  }
-  private clear(): void {this.releaseEventFrames(); this.eventDecodedLease.dispose();this.eventDecoded=[];this.eventDecodedSize=0;this.lease.dispose();this.optionalCache=false;this.collectedSize=0;this.chunks=[];this.bytes=undefined;this.jsonPromise=undefined;this.mutableJSON=undefined;this.decodedPromise=undefined;this.eventsPromise=undefined; }
+  private clear(): void {this.eventDecodedLease.dispose();this.eventDecoded=[];this.eventDecodedSize=0;this.lease.dispose();this.optionalCache=false;this.collectedSize=0;this.chunks=[];this.bytes=undefined;this.jsonPromise=undefined;this.mutableJSON=undefined;this.decodedPromise=undefined;this.eventsPromise=undefined; }
   dispose(): void { this.disposed=true;if(!this.captures.size)this.clear(); }
   /** Optional retention follows actual pulls. Releasing a consumer never cancels the wire. */
   retain(max: number, stop: (error: BodyProcessingError) => void,logging=false): () => void {
     const key=Symbol();this.captures.set(key,{max,stop,logging});
     return ()=>{this.captures.delete(key);this.releaseLoggingWire();if(!this.captures.size && (!this.mandatory || this.disposed))this.clear();};
   }
-  private releaseLoggingWire():void {if(![...this.captures.values()].some(c=>c.logging)){bodyMetrics.loggerBytes-=this.loggerWire;this.loggerWire=0;this.releaseEventFrames();}}
+  private releaseLoggingWire():void {if(![...this.captures.values()].some(c=>c.logging)){bodyMetrics.loggerBytes-=this.loggerWire;this.loggerWire=0;}}
   private append(chunk: Uint8Array): void {
     this.eventSession?.push(chunk);this.size+=chunk.byteLength;
+    for (const observe of this.wireObservers) observe(chunk);
     for(const [key,consumer] of this.captures) if(this.size>consumer.max){this.captures.delete(key);consumer.stop(new BodyProcessingError(413,'request_body_too_large',consumer.max,this.size));}
     this.releaseLoggingWire();
     if([...this.captures.values()].some(c=>c.logging)){
@@ -172,6 +172,96 @@ export class BodySource {
     if(!this.mandatory && !this.optionalCache && !this.captures.size)return;
     try {this.hold(chunk.byteLength);this.chunks.push(new Uint8Array(chunk));this.collectedSize+=chunk.byteLength;}
     catch(error){if(this.mandatory)throw error;for(const c of this.captures.values())c.stop(error as BodyProcessingError);this.captures.clear();this.clear();}
+  }
+  /** An optional live copy with bounded backlog. It never pulls or cancels the transport. */
+  private logChunks(maxBytes: number, signal: AbortSignal): ReadableStream<Uint8Array> {
+    const queue: Uint8Array[] = [];
+    const lease = new BodyBufferLease(true, true);
+    let controller: ReadableStreamDefaultController<Uint8Array>;
+    let eof = false;
+    let stopped = false;
+    let count = 0;
+    let waiting = false;
+    let held = 0;
+    let replay = this.bytes;
+    let offset = 0;
+    const release = () => {
+      if (stopped) return;
+      stopped = true;
+      this.wireObservers.delete(push);
+      signal.removeEventListener('abort', abort);
+      lease.dispose();
+      queue.length = 0;
+      replay = undefined;
+    };
+    const fail = (error: unknown) => {
+      if (stopped) return;
+      release();
+      controller.error(error);
+    };
+    const abort = () => fail(signal.reason);
+    const push = (chunk: Uint8Array) => {
+      try {
+        count += chunk.byteLength;
+        if (count > maxBytes) throw new BodyProcessingError(413, 'body_log_too_large');
+        lease.add(chunk.byteLength + 128);
+        queue.push(new Uint8Array(chunk));
+        if (waiting) deliver();
+      } catch (error) { fail(error); }
+    };
+    const deliver = () => {
+      if (stopped) return;
+      lease.release(held);
+      held = 0;
+      if (replay && offset < replay.byteLength) {
+        const chunk = replay.subarray(offset, offset + 64 * 1024);
+        offset += chunk.byteLength;
+        waiting = false;
+        controller.enqueue(chunk);
+        return;
+      }
+      const chunk = queue.shift();
+      if (chunk) {
+        held = chunk.byteLength + 128;
+        waiting = false;
+        controller.enqueue(chunk);
+      } else if (eof) {
+        release();
+        controller.close();
+      } else waiting = true;
+    };
+    const input = new ReadableStream<Uint8Array>({
+      start: target => {
+        controller = target;
+        if (signal.aborted) { abort(); return; }
+        if (!replay && this.size > 0) { fail(new BodyProcessingError(503, 'body_not_replayable')); return; }
+        signal.addEventListener('abort', abort, { once: true });
+        if (!replay) this.wireObservers.add(push);
+        void this.completion.then(() => { eof = true; if (waiting) deliver(); }, fail);
+      },
+      pull: deliver,
+      cancel: release,
+    }, { highWaterMark: 0 });
+    return decodeStream(input, this.coding, maxBytes, signal, true);
+  }
+  async *logText(maxBytes: number, signal: AbortSignal): AsyncIterable<string> {
+    const stream = this.logChunks(maxBytes, signal);
+    const reader = stream.getReader();
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    try {
+      while (true) {
+        const part = await reader.read();
+        if (part.done) break;
+        for (let offset = 0; offset < part.value.byteLength; offset += 64 * 1024) {
+          signal.throwIfAborted();
+          yield decoder.decode(part.value.subarray(offset, offset + 64 * 1024), { stream: true });
+        }
+      }
+      yield decoder.decode();
+    } finally {
+      await reader.cancel().catch(() => undefined);
+      reader.releaseLock();
+    }
   }
   private finish(): void {
     this.endedAtMonotonicMs ??= performance.now();
@@ -249,7 +339,7 @@ export class BodySource {
     this.mutableJSON ??= this.canonicalJSON(emptyObject).then(async value=>{this.hold((await this.cachedDecoded()).byteLength*2);return structuredClone(value);});
     return this.mutableJSON;
   }
-  handle(identity: BodyViewIdentity = this.identity): BodyHandle {
+  handle(identity: BodyViewIdentity = this.identity, drainEventsOnCancel=false): BodyHandle {
     const source=this;const view=Object.freeze({...identity});
     const handle:BodyHandle=Object.freeze({identity:view,get maxBytes(){return source.maxBytes;},
       bytes(consumer?:BodyConsumer){return source.consumerWork(()=>source.bytes ? Promise.resolve(source.bytes) : source.buffer(consumer?.id??'body-handle',consumer?.mandatory===false),consumer);},
@@ -257,7 +347,23 @@ export class BodySource {
       json(consumer?:BodyConsumer,emptyObject=false){return source.consumerWork(()=>source.canonicalJSON(emptyObject,consumer?.mandatory===false),consumer);},
       events(consumer?:BodyConsumer):AsyncIterable<BodyEvent>{
         const owned=source.registerConsumer(consumer);
-        if(!source.bytes){source.eventSession??=new BodyEventSession(source.coding,source.maxBytes===Number.MAX_SAFE_INTEGER?DEFAULT_BODY_PARSER_BYTES:source.maxBytes,source.lifecycle.signal,chunk=>source.receiveEventDecoded(chunk),()=>source.finishEventDecoded(),(event,size,retain)=>source.captureEventFrame(event,size,retain));const events=source.eventSession.events(consumer);return {async *[Symbol.asyncIterator](){let finished=false;let failed=false;try{yield* events;finished=true;}catch(error){failed=!(error instanceof BodyProcessingError && error.code==='body_consumer_cancelled');throw error;}finally{const cleanup=owned.release(!finished || !!consumer?.signal?.aborted).catch(()=>undefined);if(failed)void cleanup;else await cleanup;}}};}
+        if(!source.bytes){
+          if(!source.eventSession){
+            source.eventSession=new BodyEventSession(source.coding,source.maxBytes===Number.MAX_SAFE_INTEGER?DEFAULT_BODY_PARSER_BYTES:source.maxBytes,
+              chunk=>source.receiveEventDecoded(chunk),()=>source.finishEventDecoded());
+            if(source.wireError)source.eventSession.cancel(source.wireError);
+          }
+          const events=source.eventSession.events(consumer,drainEventsOnCancel);
+          return {async *[Symbol.asyncIterator](){
+            let finished=false;let failed=false;
+            try{yield* events;finished=true;}
+            catch(error){failed=!(error instanceof BodyProcessingError && error.code==='body_consumer_cancelled');throw error;}
+            finally{
+              const cleanup=owned.release(!finished || !!consumer?.signal?.aborted).catch(()=>undefined);
+              if(failed)void cleanup;else await cleanup;
+            }
+          }};
+        }
         return {async *[Symbol.asyncIterator](){
           try{
           if(!source.eventsPromise)source.eventsPromise=(async()=>{const bytes=await source.cachedDecoded(consumer?.mandatory===false);const result:BodyEvent[]=[];bodyMetrics.sseParses++;

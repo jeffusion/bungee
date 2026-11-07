@@ -17,7 +17,8 @@
   let plugin = $state<Plugin | null>(null);
   let loading = $state(true);
   let activeTabPath = $state('');
-  let settings = $derived(plugin ? (resolveNativeNavigation(plugin, activeTabPath, generatedWidgetRegistry, componentSourceMap)
+  const navigation = $derived(plugin && resolveNativeNavigation(plugin, activeTabPath, generatedWidgetRegistry, componentSourceMap));
+  let settings = $derived(plugin ? (navigation
     ?? (params.path !== undefined ? { kind: 'sandbox' as const } : resolveNativeSettings(plugin, activeTabPath, generatedWidgetRegistry, componentSourceMap))) : null);
   let loadGeneration = 0;
 
@@ -75,7 +76,14 @@
   });
 </script>
 
-<div class="nx-page py-5 space-y-4">
+{#if !loading && plugin && params.path !== undefined && navigation?.kind === 'native' && navigation.layout === 'standalone'}
+  {@const PageComponent = navigation.component}
+  {#key `${plugin.name}:${activeTabPath}`}
+    <PageComponent pluginName={plugin.name} apiBase={`/api/plugins/${encodeURIComponent(plugin.name)}/control`} />
+  {/key}
+{:else}
+<div class="nx-page py-5">
+<div class="space-y-6">
   {#if loading}
     <PanelCard title={$_('common.loading')} tag="WAIT">
       <LoadingIndicator label={$_('common.loading')} height="sm" />
@@ -88,7 +96,7 @@
     </PanelCard>
   {:else}
     <!-- Plugin header -->
-    <div class="flex items-center gap-4">
+    <div class="flex items-center gap-4 border-b border-carbon-600 pb-5">
       <span class="flex h-14 w-14 items-center justify-center border border-carbon-500 bg-carbon-950 text-nexus-400 shrink-0">
         <PluginIcon icon={plugin.metadata?.icon} fallback={plugin.name} sizeClass="h-6 w-6" />
       </span>
@@ -122,7 +130,9 @@
         tag={activeTabPath ? activeTabPath.toUpperCase() : 'DETAIL'}
         flush
       >
-        {#if settings?.kind === 'error'}
+        {#if settings?.kind === 'disabled'}
+          <p role="status" class="p-4 text-sm text-zinc-400">{$_('plugins.disabled')}</p>
+        {:else if settings?.kind === 'error'}
           <p role="alert" class="p-4 text-sm text-red-300">{settings.message}</p>
         {:else if plugin.name === 'model-mapping' && activeTabPath === '/catalog'}
           <ModelMappingCatalogManager />
@@ -137,3 +147,5 @@
     {/if}
   {/if}
 </div>
+</div>
+{/if}

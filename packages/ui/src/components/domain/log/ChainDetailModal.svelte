@@ -61,7 +61,7 @@
   onMount(async () => {
     try {
       chainDetail = await getChainDetail(chain.chainId);
-      expandedAttempt = chainDetail.attempts.length ? chainDetail.attempts.length - 1 : null;
+      expandedAttempt = Math.max(0, chainDetail.attempts.length - 1);
     } catch (e: any) {
       error = e.message;
     } finally {
@@ -105,6 +105,7 @@
         </div>
       {:else if chainDetail}
         {@const c = chainDetail.chain}
+        {@const timeline = chainDetail.attempts.length ? chainDetail.attempts : [c]}
         <div class="nx-panel-sunken p-4">
           <h4 class="mb-3 font-mono text-xs font-bold uppercase tracking-command text-zinc-100">{$_('logs.chain.overview')}</h4>
           <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
@@ -118,7 +119,7 @@
             </div>
             <div>
               <div class="text-xs opacity-60 mb-1">{$_('logs.detail.method')}</div>
-              <span class={chipClass()}>{c.method}</span>
+              <span class={chipClass()}>{c.method || '—'}</span>
             </div>
             <div>
               <div class="text-xs opacity-60 mb-1">{$_('logs.chain.attemptsCount')}</div>
@@ -146,7 +147,7 @@
         <section aria-labelledby="chain-timeline-title">
           <h4 id="chain-timeline-title" class="mb-3 font-mono text-xs font-bold uppercase tracking-command text-zinc-100">{$_('logs.chain.timelineTitle')}</h4>
           <div class="space-y-2">
-            {#each chainDetail.attempts as attempt, index (attempt.requestId)}
+            {#each timeline as attempt, index (attempt.requestId)}
               {@const isExpanded = expandedAttempt === index}
               <div class="min-w-0 border bg-carbon-950 {isExpanded ? 'border-carbon-500' : 'border-carbon-600'}">
                 <button
@@ -157,7 +158,7 @@
                   class="w-full min-w-0 grid grid-cols-[1rem_minmax(0,1fr)_auto_0.75rem] sm:grid-cols-[1.25rem_auto_minmax(0,1fr)_4.5rem_0.75rem] items-center gap-x-2 sm:gap-x-3 gap-y-2 px-3 sm:px-4 py-3 text-left hover:bg-carbon-700/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-nexus-500"
                   onclick={() => toggleAttempt(index)}
                 >
-                  <span class="col-start-1 row-start-1 font-mono text-[11px] text-zinc-400 tabular-nums">#{index + 1}</span>
+                  <span class="col-start-1 row-start-1 font-mono text-[11px] text-zinc-400 tabular-nums">{chainDetail.attempts.length ? `#${index + 1}` : ''}</span>
                   <span class="col-start-2 col-span-2 sm:col-span-1 row-start-1 min-w-0 flex flex-nowrap items-center gap-1">
                     <span class={`${chipClass(getStatusToneClass(attempt.status))} shrink-0 whitespace-nowrap !px-1.5 !tracking-normal`}>{httpStatusLabel(attempt.status)}</span>
                     <span class={`${chipClass(transportTone(attempt.transportOutcome))} min-w-0 overflow-hidden !px-1.5 !tracking-normal`} title={$_(`logs.transport.${transportOutcome(attempt.transportOutcome)}`)}>
@@ -183,7 +184,7 @@
                 <div id={`chain-attempt-content-${index}`} role="region" aria-labelledby={`chain-attempt-trigger-${index}`} hidden={!isExpanded} class="min-w-0 border-t border-carbon-600 py-3 px-3 sm:px-4">
                   {#if isExpanded}
                     {#key attempt.requestId}
-                      <LogDetailContent log={attempt} showHeader={false} embedded={true} />
+                      <LogDetailContent log={timeline.length === 1 ? c : attempt} showHeader={false} embedded={true} />
                     {/key}
                   {/if}
                 </div>

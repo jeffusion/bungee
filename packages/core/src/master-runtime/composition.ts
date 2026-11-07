@@ -49,7 +49,7 @@ import {
 import { parseNormalizeCompileAggregate, type CommitConfigurationCommandV1,
   type ActiveConfigurationPublication,
   type CommitConfigurationResult, type ConfigurationOperationState,
-  type ConfigRepositoryOptions, type RepositorySnapshot, type ServingSnapshotKey,
+  type ConfigRepositoryOptions, type RepositorySnapshot, type ServingSnapshotKey, type UnsettledWorkerLaunch, type WorkerLaunch as DurableWorkerLaunch,
   } from '../config-storage';
 import type { CatalogPathResolver } from '../plugin-manifest-catalog/catalog';
 import type { ConfigurationRecovery, ConfigurationRecoveryReasonCode } from '../config-storage/repository-types';
@@ -134,10 +134,11 @@ export type MasterProcessRepository = Pick<AsyncConfigRepository,
   | 'getOutstandingPublicationCandidates'
   | 'registerWorkerLaunch' | 'fenceWorkerLaunchNotStarted' | 'recordWorkerLaunchAdmitted'
   | 'recordWorkerLaunchExit' | 'getWorkerLaunch' | 'getWorkerLaunchAllocationFacts'
+  | 'recordWorkerLaunchCapacityReclaimed'
   | 'getWorkerLaunchInventory' | 'getUnsettledWorkerLaunches'
   | 'freezePublicationRetirementDrainStart'
   | 'consumeRuntimeRecoveryRestartTicket' | 'observeRuntimeRecoveryHealth'>
-  & Partial<Pick<AsyncConfigRepository, 'getMenuLayout' | 'putMenuLayout'>>;
+  & Partial<Pick<AsyncConfigRepository, 'getMenuLayout' | 'putMenuLayout' | 'applyPendingRequestLogsDefault'>>;
 export type MasterProcessAdmission = WorkerAdmissionController
   & MasterRuntimeAdmission
   & AdmittedWorkerSelector;
@@ -157,6 +158,7 @@ export type MasterProcessWorkerFactory = ConfigPublicationWorkerFactory & Master
   cleanupAuthenticatedOrphans?(registry: import('../ingress').AdmissionRegistryStatus): Promise<AuthenticatedOrphanCleanupResult>;
   /** Debt-only pass in the serialized queue: settle launch facts, never fork or terminate. */
   settleWorkerLaunchDebt?(registry: import('../ingress').AdmissionRegistryStatus): Promise<import('./supervised-worker-factory').WorkerLaunchDebtSettlement>;
+  reclaimExitedWorkerLaunchCapacity?(launch: DurableWorkerLaunch): Promise<boolean>;
   confirmPreviousWorkersExited?(registry: import('../ingress').AdmissionRegistryStatus, replacements: readonly ServingConfigWorker[]): Promise<boolean>;
   recoverRetiredWorkers?(retirement: import('../config-storage/retirement-store').PublicationRetirement): Promise<readonly ServingConfigWorker[]>;
 };
@@ -1113,6 +1115,7 @@ export async function startMasterComposition(
         publicHost: options.host,
         publicPort: options.port,
         instanceLockPath: options.ingressInstanceLockPath ?? `${options.configDbPath}.ingress.instance.lock`,
+        accessLogDbPath: dependencies.context.accessLogDbPath,
         transportSecret,
         executable: dependencies.context.executable,
         entry: dependencies.context.entry,
@@ -1220,8 +1223,10 @@ export async function startMasterComposition(
     let startupRecoveryFailure: Error | null = null;
     const evidenceKey = (worker: Pick<ServingConfigWorker, 'revision' | 'content_hash' | 'plugin_catalog_hash'>): string =>
       `${worker.revision}:${worker.content_hash}:${worker.plugin_catalog_hash}`;
-    const claimPublication = (): Promise<ActiveConfigurationPublication | null> =>
-      resources.repository!.claimPublicationTarget(catalog.hash, dependencies.clock.now());
+    const claimPublication = async (): Promise<ActiveConfigurationPublication | null> => {
+      await resources.repository!.applyPendingRequestLogsDefault?.(Array.from({ length: options.workerCount }, (_, slot) => slot));
+      return resources.repository!.claimPublicationTarget(catalog.hash, dependencies.clock.now());
+    };
     const trackServing = (
       workers: readonly ServingConfigWorker[],
       snapshot: ReturnType<MasterProcessRepository['getSnapshot']>,
@@ -1281,6 +1286,7 @@ export async function startMasterComposition(
       }
     };
     const originalPrepare = resources.admission.prepare.bind(resources.admission);
+    const requestLogCollectors = (catalog.records?.() ?? []).filter(record => record.manifest.capabilities.includes('requestLogging'));
     let committedAdmission: readonly ServingConfigWorker[] = [];
     const trackedAdmission: MasterProcessAdmission = {
       prepare(workers, signal?: AbortSignal, handoffTimeoutMs?: number, websocketMaxConnections?: number | null, websocketMaxMessageBytes?: number) {
@@ -1366,12 +1372,21 @@ export async function startMasterComposition(
               throw admissionSignal.reason ?? new Error('worker admission was aborted');
             }
             if (resources.ingressController !== null && workers.length === options.workerCount) {
-              const remotePrepared = await resources.ingressController.prepare(workers, admissionSignal, handoffTimeoutMs, websocketMaxConnections, websocketMaxMessageBytes);
+              const source = requestLogCollectors.length > 0 && workers[0] ? await servingSnapshotFor(workers[0], admissionSignal) : null;
+              if (requestLogCollectors.length > 0 && !source) throw new Error('request_log_collector_snapshot_unavailable');
+              const activeCollectors = requestLogCollectors.filter(record =>
+                source?.aggregate.plugin_activations.some(activation => activation.plugin_name === record.name));
+              if (activeCollectors.length > 1) throw new Error('multiple_active_request_log_collectors');
+              const collector = activeCollectors[0];
+              if (collector && !collector.ingressPath) throw new Error('request_log_collector_entry_unavailable');
+              checkPrepare();
+              const remotePrepared = await resources.ingressController.prepare(workers, admissionSignal, handoffTimeoutMs,
+                websocketMaxConnections, websocketMaxMessageBytes, collector?.ingressPath);
               register(remote, remotePrepared);
               if (durableState) {
                 const prepared = resources.ingressController.trustedAdmissionRegistryIfFresh()?.prepared;
-                const source = workers[0] ? await servingSnapshotFor(workers[0], admissionSignal) : null;
-                if (!prepared || !source || !await publishDataState(source, prepared.admission_sequence)) throw new Error('admission_policy_publication_pending');
+                const policySource = source ?? (workers[0] ? await servingSnapshotFor(workers[0], admissionSignal) : null);
+                if (!prepared || !policySource || !await publishDataState(policySource, prepared.admission_sequence)) throw new Error('admission_policy_publication_pending');
               }
               checkPrepare();
               if (abortRequested) {
@@ -1515,6 +1530,8 @@ export async function startMasterComposition(
       clear() { committedAdmission = []; resources.admission!.clear(); syncPluginControlAdmission(); },
       acquire: resources.admission.acquire.bind(resources.admission),
     };
+    const launchIdentityKey = ({ master_generation, worker_instance_id, worker_slot }: ConfigProcessIdentity): string =>
+      `${master_generation}:${worker_instance_id}:${worker_slot}`;
     /**
      * Durable launch debt from the complete inventory (admitted, historical owners and
      * allocation-less startup launches included). Only fresh signed registry members are
@@ -1524,7 +1541,7 @@ export async function startMasterComposition(
       readonly trusted: boolean;
       readonly registry: import('../ingress').AdmissionRegistryStatus | null;
       readonly legal: number;
-      readonly debt: number;
+      readonly debt: readonly UnsettledWorkerLaunch[];
     }> => {
       const ingress = resources.ingressController;
       let registry: import('../ingress').AdmissionRegistryStatus | null = null;
@@ -1540,39 +1557,51 @@ export async function startMasterComposition(
       const legal = new Set<string>();
       if (registry !== null) for (const set of [registry.active, registry.prepared, ...registry.retired]) {
         for (const worker of set?.workers ?? []) {
-          legal.add(`${worker.master_generation}:${worker.worker_instance_id}:${worker.worker_slot}`);
+          legal.add(launchIdentityKey(worker));
         }
       }
-      let debt = 0;
-      for (const entry of await resources.repository!.getWorkerLaunchInventory()) {
-        if (entry.kind === 'reservation') { debt += 1; continue; }
-        const { master_generation, worker_instance_id, worker_slot } = entry.launch.identity;
-        if (!legal.has(`${master_generation}:${worker_instance_id}:${worker_slot}`)) debt += 1;
-      }
+      const debt = (await resources.repository!.getWorkerLaunchInventory()).filter(entry => {
+        if (entry.kind === 'reservation') return true;
+        const key = launchIdentityKey(entry.launch.identity);
+        return !legal.has(key) && !(trusted && entry.launch.capacity_reclaimed);
+      });
       return { trusted, registry, legal: legal.size, debt };
+    };
+    const reclaimExitedCapacity = async (facts: Awaited<ReturnType<typeof readCreationFacts>>) => {
+      const factory = resources.workerFactory;
+      if (!facts.trusted || factory?.reclaimExitedWorkerLaunchCapacity === undefined) return facts;
+      let attempted = false;
+      for (const entry of facts.debt) {
+        if (entry.kind !== 'launch' || !entry.launch.admitted || !entry.launch.exited) continue;
+        attempted = true;
+        try { await factory.reclaimExitedWorkerLaunchCapacity(entry.launch); }
+        catch { /* A lost write response only counts if the next read confirms it. */ }
+      }
+      // Re-check membership and budget even if a previously absent worker becomes protected.
+      return attempted ? readCreationFacts() : facts;
     };
     /**
      * The single creation permit for both real forks. It runs in the existing
      * serialized queue: debt-only settlement first, then a fresh authority read.
      * Retained active/prepared/retired members count against the 2N budget, and
-     * unknown/historical debt always blocks. It never forks or terminates.
+     * unproven debt always blocks. It never forks or terminates.
      */
     const ensureCreationPermitted = async (): Promise<CreationPermit> => {
       let facts: Awaited<ReturnType<typeof readCreationFacts>>;
-      try { facts = await readCreationFacts(); }
+      try { facts = await reclaimExitedCapacity(await readCreationFacts()); }
       catch (error) { return { allowed: false, error }; }
-      if (facts.trusted && facts.debt > 0 && resources.workerFactory?.settleWorkerLaunchDebt !== undefined) {
+      if (facts.trusted && facts.debt.length > 0 && resources.workerFactory?.settleWorkerLaunchDebt !== undefined) {
         try {
           await resources.workerFactory.settleWorkerLaunchDebt(facts.registry!);
         } catch { /* unproven debt remains blocking below */ }
-        try { facts = await readCreationFacts(); }
+        try { facts = await reclaimExitedCapacity(await readCreationFacts()); }
         catch (error) { return { allowed: false, error }; }
       }
       // Every final check runs on the same facts, including after debt settlement.
       if (!facts.trusted || facts.registry === null) {
         return { allowed: false, error: new Error('trusted ingress registry is unavailable for worker creation') };
       }
-      if (facts.debt > 0) {
+      if (facts.debt.length > 0) {
         return { allowed: false, error: new Error('durable worker launch debt is unsettled') };
       }
       // A new cohort starts only from one released serving generation: an in-flight
@@ -1588,8 +1617,8 @@ export async function startMasterComposition(
     /** Re-reads durable facts; a failed read stays blocking. */
     const refreshCandidateOccupancy = async (): Promise<boolean> => {
       try {
-        const facts = await readCreationFacts();
-        const denied = (resources.ingressController !== null && !facts.trusted) || facts.debt > 0;
+        const facts = await reclaimExitedCapacity(await readCreationFacts());
+        const denied = (resources.ingressController !== null && !facts.trusted) || facts.debt.length > 0;
         candidateOccupancyUnconfirmed = orphanCleanupExitUnknown || denied;
       } catch {
         candidateOccupancyUnconfirmed = true;
@@ -2629,6 +2658,7 @@ export async function startMasterComposition(
       throw new ComponentRecoveryStopped(dependencies.runtimeRecovery.reason ?? 'startup_failure');
     }
     runtimePublicationEligible = true;
+    publicationTasks.wake();
     await resources.workerFactory.markCommitted(trackedAdmission.snapshot().map(({ process }) => process));
     syncPluginControlAdmission();
     runtimeReady = true;

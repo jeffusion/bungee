@@ -83,7 +83,6 @@ export const BUILTIN_MENU_PAGES: readonly MenuPage[] = [
   { id: 'builtin:dashboard', label: 'nav.dashboard', href: '/#/', source: 'builtin', defaultIcon: 'lucide:layout-dashboard', available: true },
   { id: 'builtin:routes', label: 'nav.routes', href: '/#/routes', source: 'builtin', defaultIcon: 'lucide:route', available: true },
   { id: 'builtin:services', label: 'nav.services', href: '/#/services', source: 'builtin', defaultIcon: 'lucide:server', available: true },
-  { id: 'builtin:logs', label: 'nav.logs', href: '/#/logs', source: 'builtin', defaultIcon: 'lucide:file-text', available: true },
   { id: 'builtin:configuration', label: 'nav.configuration', href: '/#/config', source: 'builtin', defaultIcon: 'lucide:sliders-horizontal', available: true },
   { id: 'builtin:plugins', label: 'nav.plugins', href: '/#/plugins', source: 'builtin', defaultIcon: 'lucide:blocks', available: true },
   { id: MENU_MANAGEMENT_ID, label: 'nav.menus', href: '/#/menus', source: 'builtin', defaultIcon: 'lucide:list-tree', available: true },
@@ -99,7 +98,7 @@ export function createDefaultMenuLayout(catalog: readonly MenuPage[]): MenuLayou
     group('group:gateway'),
     group('group:usage'),
     group('group:access'),
-    page('builtin:logs'),
+    page('plugin:request-logs:%2Flogs'),
     group(SYSTEM_MENU_GROUP_ID),
   ];
   const seen = new Set(layout.flatMap(node => node.kind === 'page' ? [node.pageId] : node.children.map(child => child.pageId)));

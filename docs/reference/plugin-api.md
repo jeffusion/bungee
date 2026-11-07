@@ -86,6 +86,9 @@ worker 初始化的 `PluginInitContext.signal?` 传递宿主关闭／候选取�
 | `onError`, `onFinally` | 并行通知 | 错误观察、清理与完成通知 |
 | `onWebSocketHandshake` | 握手瀑布 | 握手上下文，不处理 HTTP body |
 | `onWebSocketObservation` | 独立有界只读观察 | 遵守 isActive 租约 |
+| `onRequestLog` | 全局同步 Bail | 声明 `requestLogging` 的采集插件返回 `true` |
+| `onRequestLogBody` | 入口路由优先的同步 Bail | 返回正文解析函数或流式解析器，`null` 跳过，`undefined` 继续匹配 |
+| `onRequestLogApplication` | 入口路由级同步 Bail | 返回本次访问的应用协议观察器 |
 
 网关阶段 Hook（`onGateway*`）、准入与 attempt 观察的全部签名见 Hook 定义。平台装配要求必需网关阶段恰好一个 provider；普通 scoped 插件不应重复注册核心阶段提供者。
 
@@ -135,6 +138,26 @@ hooks.onStreamChunk.tap('example', envelope => {
 
 可选消费者独立取消、积压与超时；观察失败标记 incomplete，不将 unknown 记成零。安全准入、可靠预算等强制能力不能通过吞异常放行。
 
+## 请求日志扩展
+
+`requestLogging` 能力要求全局 worker Hook 和 ingress 入口。宿主每个生效修订装配至多一个采集插件。Ingress 入口导出 `createIngressRequestLogCollector`，从客户端 HTTP 访问事实生成记录。Worker 注册 `onRequestLog` 启用本修订的客户端请求观察和入口 HTTP 尝试采集。历史查询与采集启停独立。
+
+启用正文记录时，`onRequestLogBody` 依据入口方法、路径、传输类型、正文阶段和媒体类型选取解析函数。入口 Route 扩展先匹配，未匹配再调用全局默认解析器。解析函数取得有界共享 `BodyHandle` 和可选消费者租约，返回可序列化值或 `undefined`。流式解析器从 `textChunks()` 或 `events()` 选择一种共享视图，逐块输出一个合法 JSON 值。返回 `format: "text"` 时逐块输出原始文本，由宿主负责 JSON 转义。未输出内容时跳过存储。解析失败、超限或不识别时保留访问和执行元数据。普通 HTTP 的默认解析见[请求日志插件](../../plugins/request-logs/README.md)。
+
+`onRequestLogApplication` 先从入口 Route 选取第一个匹配的观察器，再尝试全局观察器，可以与正文解析同时运行。HTTP 观察器读取最终响应的共享 `BodyHandle`。WebSocket 观察器接收客户端侧的只读消息，直通和托管会话使用同一接口。会话上下文可提供托管模式，托管消息可附带宿主关联 ID 和取消标记。需读取二进制 UTF-8 JSON 时，显式调用 `message.json({ binary: true })`。
+
+WebSocket 观察器可提供同步的 `shouldObserveWebSocket(direction, message)`。仅当确定消息无需参与日志识别或结算时返回 `false`，宿主在日志入队前跳过该消息。回调需快速完成，且不能依赖队列中尚未处理的消息。未提供回调、回调抛错或消息超过 64 KiB 时，宿主按正常观察流程入队。
+
+需要按操作采集 WebSocket 正文的观察器使用同步的 `prepareWebSocket(event, bodies)`。该方法按客户端侧的消息顺序执行，代替 WebSocket 的 `shouldObserveWebSocket` 和 `observe`。只有返回的结算函数进入观察队列。结算函数只保留所需的小型元数据，原始消息和解析结果在回调中处理。单条消息超过 Worker 日志内存预算时标记为 `oversized`，此时消息视图不提供 JSON。观察器可据此停止受影响的正文采集或放弃无法确认的归属。转发继续按传输限额处理。消息携带入口观察时间，托管响应还可通过 `hostedErrorOutcome` 标记网关发出的最终拒绝。
+
+正文开启且宿主有流式存储时提供 `bodies`。用 `bodies.start(message)` 暂存客户端 JSON 请求，再通过 `records.start({ protocol, operation, body })` 认领。未接纳的候选用 `body.discard()` 释放。对明确属于该操作的客户端可见 JSON 响应逐条调用 `body.append(message)`。归属不明确时调用 `body.discardRequest()` 或 `body.discardResponse()`，由宿主记录原因。宿主使用有界缓冲分块存储原始请求与有序响应数组，并对常见凭据字段和值脱敏。容量、消息解析、文件写入失败和缺少终态可各自使正文缺失，应用操作结果仍按观察结果结算。
+
+插件通过 `await records.start({ protocol, operation })` 登记应用请求，未接纳时返回 `undefined`。HTTP 每次访问最多登记一次。WebSocket 以客户端业务请求为记录单位，可在后续消息确认归属时传入首帧的 `startedAt`。返回的操作 ID 由宿主分配，`records.finish(id, { outcome, code })` 只能结算当前观察器内已经登记的操作。连接关闭时仍缺少可确认终态的操作标记为观察不完整。
+
+HTTP 流式协议允许客户端在收到成功终态后直接断开时，观察器可在 `records.finish` 的成功结果中设置 `acceptClientDisconnect: true`。日志查询按访问 ID 关联操作与入口传输事实，符合条件的客户端断开显示并计为成功。WebSocket 操作在确认客户端侧终态后结算。实时日志流和 JSONL 提供各写入方的原始观察记录。
+
+解析、观察限额和写入异常均按诊断收尾。日志观察器的结果只进入日志，转发校验、准入和重试各自使用原有契约。协议扩展可通过已声明的插件服务依赖复用解析能力。见[公开类型](../../packages/core/src/gateway/request-log-contracts.ts)和 [请求日志插件](../../plugins/request-logs/README.md)。
+
 ## 内部调度与准备
 
 `onDispatchRequest` 只解析编译配置声明的 `gateway_target`，返回最终 target/protocol 及可选一次性 `prepareRequest`。宿主先执行入口和最终目标的只读访问授权，再调用准备回调，随后转换正文并进入正常上游链路。Ingress 插件通过 `authorize(target, policy)` 返回拒绝或 null；此阶段不调用 plan、生成准入票据或提交预算。实际发送前仍执行正式准入，每次最终模型映射和尝试都检查适用权限。
@@ -172,6 +195,8 @@ Stream 的读信用 `creditBytes` 和 duplex 的 `readCreditBytes` 均以字节�
 插件 API 声明 path、methods、handler、execution 和 capability；Host 按当前 management subject 授权后调用。不得从请求 JSON 自行信任 principal。资源 collection／extension reader 只取得 get/list，不启动停用插件，不授予写能力。
 
 `native-static` 组件随 UI 构建注册，不能运行时任意注入 Svelte 模块；iframe 扩展使用沙箱协议，不能当作原生组件访问宿主。导航是业务页入口，设置和 widget 使用对应 contributes 字段，不使用旧 handler/settingsPage 示范。
+
+原生导航项可通过 `contributes.navigation[].layout: "standalone"` 让菜单入口直接渲染声明的 `component`。组件自行提供页面标题和容器。宿主仍检查插件启用状态和组件归属，插件设置页继续使用详情布局。
 
 插件 UI 遵循[UI 指引](../../packages/ui/AGENTS.md)和[工业规范](../../packages/ui/docs/INDUSTRIAL_DESIGN_SYSTEM.md)。宿主提供 widget 外框，组件不重复绘制卡片。类型和示例见 [UI SDK](../../packages/ui/src/plugin-sdk)及[user-auth manifest](../../plugins/user-auth/manifest.json)。
 

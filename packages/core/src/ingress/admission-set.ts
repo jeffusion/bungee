@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isAbsolute, normalize } from 'node:path';
 import { MAX_WEBSOCKET_MAX_MESSAGE_BYTES, type Sha256Digest } from '@jeffusion/bungee-types';
 import { canonicalJson } from '../config-storage/content-hash';
 import { snapshotJsonGraph } from '../config-storage/json-preflight';
@@ -23,6 +24,7 @@ export type AdmissionSet = {
   readonly revision: number;
   readonly content_hash: Sha256Digest;
   readonly plugin_catalog_hash: Sha256Digest;
+  readonly request_log_collector_entry?: string;
   readonly workers: readonly AdmissionWorker[];
 };
 
@@ -51,8 +53,8 @@ function plainObject(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function exact(value: Record<string, unknown>, fields: Set<string>): void {
-  const keys = Object.keys(value);
+function exact(value: Record<string, unknown>, fields: Set<string>, optional?: string): void {
+  const keys = Object.keys(value).filter((key) => key !== optional);
   if (keys.length !== fields.size || keys.some((key) => !fields.has(key))) fail('admission set has extra or missing fields');
 }
 
@@ -80,7 +82,10 @@ export function parseAdmissionSet(input: unknown): AdmissionSet {
     fail('admission set is not a strict JSON graph');
   }
   const root = plainObject(snapshot);
-  exact(root, SET_FIELDS);
+  exact(root, SET_FIELDS, 'request_log_collector_entry');
+  const collectorEntry = root.request_log_collector_entry;
+  if (collectorEntry !== undefined && (typeof collectorEntry !== 'string' || collectorEntry.includes('\0')
+    || !isAbsolute(collectorEntry) || normalize(collectorEntry) !== collectorEntry)) fail('request log collector entry is invalid');
   const maxConnections = root.websocket_max_connections;
   if (maxConnections !== null && (!Number.isSafeInteger(maxConnections)
     || (maxConnections as number) < 1 || (maxConnections as number) > 0x7fffffff)) fail('WebSocket connection limit is invalid');
@@ -128,6 +133,7 @@ export function parseAdmissionSet(input: unknown): AdmissionSet {
     revision: integer(root.revision, 1),
     content_hash: digest(root.content_hash),
     plugin_catalog_hash: digest(root.plugin_catalog_hash),
+    ...(collectorEntry === undefined ? {} : { request_log_collector_entry: collectorEntry }),
     workers: Object.freeze(workers),
   });
 }

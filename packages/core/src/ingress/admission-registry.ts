@@ -1,6 +1,7 @@
 import { DEFAULT_PUBLICATION_POLICY, DEFAULT_WEBSOCKET_MAX_CONNECTIONS, DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES } from '@jeffusion/bungee-types';
 import { admissionSetIdentity, admissionSetRetiredId, parseAdmissionSet, type AdmissionSet, type AdmissionWorker } from './admission-set';
 import type { RateLimitWorkerAuthorization, RateLimitWorkerIdentity } from '../rate-limit';
+import type { IngressRequestLogCollector } from '../public-listener/request-log-observation';
 
 export type AdmissionRegistryStatus = {
   readonly active: AdmissionSet | null;
@@ -22,7 +23,9 @@ export class IngressAdmissionRegistry {
   private readonly messagePolicyListeners = new Set<(maxMessageBytes: number) => void>();
   private active: AdmissionSet | null = null;
   private activeRetiredId: string | null = null;
-  private prepared: { readonly identity: string; readonly set: AdmissionSet; readonly handoffTimeoutMs: number } | null = null;
+  private activeRequestLogCollector: IngressRequestLogCollector | undefined;
+  private prepared: { readonly identity: string; readonly set: AdmissionSet; readonly handoffTimeoutMs: number;
+    readonly requestLogCollector?: IngressRequestLogCollector } | null = null;
   private retired: readonly AdmissionSet[] = EMPTY;
   private nextIndex = 0;
   private frozen = false;
@@ -39,12 +42,16 @@ export class IngressAdmissionRegistry {
     if (frozen) this.prepared = null;
   }
 
-  prepare(input: unknown, handoffTimeoutMs = DEFAULT_PUBLICATION_POLICY.drain_timeout_ms): AdmissionSet {
+  prepare(input: unknown, handoffTimeoutMs = DEFAULT_PUBLICATION_POLICY.drain_timeout_ms,
+    requestLogCollector?: IngressRequestLogCollector): AdmissionSet {
     if (this.frozen) throw new AdmissionRegistryError('frozen', 'admission registry is frozen');
     if (!Number.isSafeInteger(handoffTimeoutMs) || handoffTimeoutMs <= 0 || handoffTimeoutMs > 2_147_483_000) {
       throw new AdmissionRegistryError('conflict', 'handoff timeout is invalid');
     }
     const set = parseAdmissionSet(input);
+    if ((set.request_log_collector_entry !== undefined) !== (typeof requestLogCollector === 'function')) {
+      throw new AdmissionRegistryError('conflict', 'request log collector does not match prepared admission');
+    }
     const identity = admissionSetIdentity(set);
     const activeSequence = this.active?.admission_sequence ?? 0;
     if (set.admission_sequence <= activeSequence) {
@@ -61,7 +68,7 @@ export class IngressAdmissionRegistry {
         throw new AdmissionRegistryError('conflict', 'prepared admission is newer or conflicts');
       }
     }
-    this.prepared = Object.freeze({ identity, set, handoffTimeoutMs });
+    this.prepared = Object.freeze({ identity, set, handoffTimeoutMs, requestLogCollector });
     return set;
   }
 
@@ -84,6 +91,7 @@ export class IngressAdmissionRegistry {
     // Native parser policy must be ready before this admission becomes observable.
     for (const listener of this.messagePolicyListeners) listener(set.websocket_max_message_bytes);
     this.active = this.prepared.set;
+    this.activeRequestLogCollector = this.prepared.requestLogCollector;
     this.activeRetiredId = admissionSetRetiredId(this.active);
     this.handoff = old === null ? null : {
       retiredId: retiredId ?? admissionSetRetiredId(old),
@@ -137,6 +145,10 @@ export class IngressAdmissionRegistry {
 
   get websocketMaxMessageBytes(): number {
     return this.active?.websocket_max_message_bytes ?? DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES;
+  }
+
+  get requestLogCollector(): IngressRequestLogCollector | undefined {
+    return this.activeRequestLogCollector;
   }
 
   select(): Pick<AdmissionWorker, 'private_port'> | null {

@@ -4,6 +4,7 @@ const dataPlaneRuntime = await createDataPlaneRuntime();
 import { afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 const { setPluginRegistry } = await import('../../src/worker/state/plugin-manager');
 const { setBoundControlClientProvider } = await import('../../src/config-worker/runtime-dependencies');
+import { registerRequestLogs } from '../helpers/request-log';
 import type { PluginRegistry } from '../../src/plugin-registry';
 
 
@@ -376,7 +377,11 @@ describe('data-plane final regressions', () => {
       routes: [{ path, service_references:[{id:'ref-'+('unread'),service_id:'unread',position:0,weight:100,priority:1,is_disabled:false}] }],
     } as any;
     initializeRuntimeState(config);
-    const response = await handleRequest(new Request(`http://proxy.test${path}`), config);
+    const { createGatewayHooks, runWithGatewayHooks } = await import('../../src/gateway/runtime');
+    const gatewayHooks = createGatewayHooks();
+    registerRequestLogs(gatewayHooks);
+    const response = await runWithGatewayHooks(gatewayHooks, () =>
+      handleRequest(new Request(`http://proxy.test${path}`), config, { logging: { accessLogWriter } }));
     await response.body?.cancel('closed without reading');
     await accessLogWriter.flush();
     const db = accessLogWriter.getDatabase();

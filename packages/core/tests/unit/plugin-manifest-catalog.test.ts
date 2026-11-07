@@ -67,11 +67,15 @@ describe('PluginManifestCatalog filesystem snapshot', () => {
       'llm-tps',
       'model-mapping',
       'models-dev',
+      'request-logs',
       'signature-repair',
       'token-budget',
       'token-metering',
       'token-stats',
       'user-auth',
+    ]);
+    expect(first.get('request-logs')?.manifest.contributes?.navigation).toEqual([
+      expect.objectContaining({ path: '/logs', component: 'RequestLogsPage', layout: 'standalone' }),
     ]);
     expect(second.names()).toEqual(first.names());
     expect(second.hash).toBe(first.hash);

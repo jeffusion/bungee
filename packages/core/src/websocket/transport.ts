@@ -43,6 +43,7 @@ export interface WebSocketUpgradeOptions {
   readonly signal?: AbortSignal;
   readonly onOpen?: () => unknown;
   readonly onMessage?: (direction: 'client' | 'upstream', message: WebSocketMessageView) => unknown;
+  readonly onDownstreamMessage?: (message: WebSocketMessageView) => unknown;
   /** Runs once after both native close callbacks, for committed sessions only. */
   readonly onClose?: (code: number, reason: string, metrics: WebSocketSessionMetrics) => unknown;
 }
@@ -51,7 +52,7 @@ export interface WebSocketUpgradeOptions {
 export interface ManagedWebSocketSession {
   readonly signal: AbortSignal;
   /** Resolves after native drain when Bun has queued the frame. Never resends it. */
-  send(message: string): Promise<void>;
+  send(message: string, onSent?: () => void): Promise<void>;
   close(code: number, reason: string): void;
 }
 
@@ -702,7 +703,7 @@ class ManagedSession implements TransportSession {
     this.#bridge = bridge; this.#limits = bridge.sessionLimits(); this.#options = options;
     this.#session = Object.freeze({
       signal: this.#controller.signal,
-      send: (message: string) => this.#send(message),
+      send: (message: string, onSent?: () => void) => this.#send(message, onSent),
       close: (code: number, reason: string) => this.close(code, reason),
     });
   }
@@ -778,7 +779,7 @@ class ManagedSession implements TransportSession {
     } catch { this.close(1011, 'WebSocket message handler failed'); finish(); }
   }
 
-  async #send(message: string): Promise<void> {
+  async #send(message: string, onSent?: () => void): Promise<void> {
     if (this.#closing || !this.#socket || this.#socket.readyState !== 1) throw new Error('WebSocket session closed');
     if (typeof message !== 'string') throw new TypeError('Managed WebSocket messages must be strings');
     const bytes = Buffer.byteLength(message);
@@ -801,6 +802,7 @@ class ManagedSession implements TransportSession {
       this.refreshBuffered();
       if (status === 0 && bytes !== 0) throw new Error('WebSocket downstream send failed');
       this.#sentMessages++; this.#sentBytes += bytes;
+      observe(onSent);
       if (!this.#canBuffer(0)) {
         this.close(1013, 'WebSocket send budget exceeded'); throw new Error('WebSocket send budget exceeded');
       }
@@ -911,6 +913,7 @@ class BridgeSession {
   #openedAt: number | undefined;
   #handshakeFinished = false;
   #closing = false;
+  #clientDisconnected = false;
   #finished = false;
   #blocked = false;
   #responseHeaders = new Headers();
@@ -1108,10 +1111,10 @@ class BridgeSession {
     }
     const view = createWebSocketMessageView(message);
     observe(this.#options.onMessage ? () => this.#options.onMessage!('upstream', view) : undefined);
-    this.#sendDownstream(message);
+    this.#sendDownstream(message, view);
   }
 
-  #sendDownstream(message: Message): void {
+  #sendDownstream(message: Message, view?: WebSocketMessageView): void {
     const socket = this.#downstream;
     if (!socket || socket.readyState !== 1) { this.close(1011, 'Downstream unavailable'); return; }
     if (!this.#canBuffer(this.#messageBytes(message) + 14)) { this.close(1013, 'WebSocket send budget exceeded'); return; }
@@ -1125,7 +1128,11 @@ class BridgeSession {
         // Bun 1.4.2 returns the payload length for an immediately sent frame;
         // zero is therefore also the successful status of an empty message.
         this.close(1011, 'WebSocket downstream send failed');
+        return;
       }
+      observe(this.#options.onDownstreamMessage
+        ? () => this.#options.onDownstreamMessage!(view ?? createWebSocketMessageView(message))
+        : undefined);
     } catch { this.close(1011, 'WebSocket downstream send failed'); }
   }
 
@@ -1192,7 +1199,10 @@ class BridgeSession {
   }
 
   downstreamClose(code: number, reason: string): void {
-    if (code === 1006 && !this.#closing) transportDiagnostic('websocket_abnormal_close', 'client', this.#limits.maxMessageBytes);
+    if (code === 1006 && !this.#closing) {
+      this.#clientDisconnected = true;
+      transportDiagnostic('websocket_abnormal_close', 'client', this.#limits.maxMessageBytes);
+    }
     this.#downstreamGone = true;
     this.close(code, reason);
     // Report the actual downstream native close, including 1006 after a forced
@@ -1210,6 +1220,7 @@ class BridgeSession {
     this.#bridge.confirmGone(this);
     if (this.#committed) {
       const metrics = Object.freeze({
+        ...(this.#clientDisconnected ? { clientDisconnected: true as const } : {}),
         durationMs: this.#openedAt === undefined ? 0 : Math.max(0, performance.now() - this.#openedAt),
         clientMessages: this.#clientMessages, upstreamMessages: this.#upstreamMessages,
         clientBytes: this.#clientBytes, upstreamBytes: this.#upstreamBytes,

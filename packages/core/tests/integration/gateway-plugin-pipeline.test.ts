@@ -2,6 +2,7 @@ import { afterAll as afterDataPlaneTests } from 'bun:test';
 import { createDataPlaneRuntime } from '../helpers/data-plane-runtime';
 const dataPlaneRuntime = await createDataPlaneRuntime();
 import { afterEach, describe, expect, test } from 'bun:test';
+import { registerRequestLogs } from '../helpers/request-log';
 import type { AppConfig } from '@jeffusion/bungee-types';
 import type { AttemptObservationEvent } from '../../src/hooks';
 const { createPluginHooks, SyncBailHook } = await import('../../src/hooks');
@@ -27,6 +28,7 @@ function fixtures(responseJson = false, observers: Array<{name:string;scope?:str
   const phase={handlers:[handler],hooks,hasStreamCallbacks:false,hasRawResponseCallbacks:false,hasResponseCallbacks:responseJson,hasInterceptCallbacks:false,
     metadata:{createdAt:0,pluginCount:1,pluginNames:['test'],scope:'route'}};
   const providers=createGatewayHooks();
+  registerRequestLogs(providers);
   const owners=observers.map(({name,scope,callback})=>{const isolated=createPluginHooks();isolated.onAttemptObservation.tapPromise(name,callback);
     return {pluginName:name,scopeKey:scope??'route:/gateway-test',hooks:isolated.onAttemptObservation,observe:{request:true,response:true,sse:true}};});
   const inbound={async onResponse(res:Response,ctx:any){return hooks.onResponse.promise(res,ctx);},async onRawResponse(result:any,ctx:any){return hooks.onRawResponse.promise(result,ctx);},async onError(){},async onStreamChunk(chunk:unknown){return [chunk];},async onFlushStream(chunks:unknown[]){return chunks;}};
@@ -100,7 +102,7 @@ describe('registered gateway pipeline',()=>{
     const {providers,config}=fixtures();
     const response=await handleRequest(new Request('http://local/gateway-test',{method:'POST',body:'{"value":1}',headers:{'content-type':'application/json'}}),config,{logging});
     expect((await response.json() as any).value).toBe(1);
-    for(const name of ['onGatewayBody','onGatewayRequest','onGatewayRoute','onGatewayAdmission','onGatewaySelect','onGatewayRetry','onGatewayForward','onGatewayResponseRules','onGatewayLog'] as const)
+    for(const name of ['onGatewayBody','onGatewayRequest','onGatewayRoute','onGatewayAdmission','onGatewaySelect','onGatewayRetry','onGatewayForward','onGatewayResponseRules','onRequestLog'] as const)
       expect(providers[name].getStats().callCount).toBeGreaterThan(0);
   });
   test('successful local responses require current authorization without opening an upstream or reserving a budget', async () => {

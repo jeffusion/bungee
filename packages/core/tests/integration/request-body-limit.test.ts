@@ -2,6 +2,7 @@ import { afterAll as afterDataPlaneTests } from 'bun:test';
 import { createDataPlaneRuntime } from '../helpers/data-plane-runtime';
 const dataPlaneRuntime = await createDataPlaneRuntime();
 const { dataPlaneTestRoot } = dataPlaneRuntime;
+import { registerRequestLogs } from '../helpers/request-log';
 import {startAnonymousAdmission} from '../helpers/anonymous-admission';
 import { afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import type { AppConfig } from '@jeffusion/bungee-types';
@@ -11,6 +12,7 @@ import { request as httpRequest } from 'node:http';
 const { BodyStorageManager } = await import('../../src/logger/body-storage');
 const { HeaderStorageManager } = await import('../../src/logger/header-storage');
 import type { RequestLoggerDependencies } from '../../src/logger/request-logger';
+const { flushBodyCaptures } = await import('../../src/logger/body-capture');
 const { loadProductionResources } = await import('../../src/config-worker/lifecycle');
 import type { PublicListener } from '../../src/public-listener';
 const { createIngressPublicListener } = await import('../../src/public-listener');
@@ -19,7 +21,11 @@ import { TEST_WORKER_TRANSPORT_SECRET } from '../fixtures/config-worker-private-
 import { localAdmissionSelector } from '../fixtures/public-listener';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 
-let handleRequest: typeof import('../../src/worker/request/handler').handleRequest;
+const { handleRequest: requestHandler } = await import('../../src/worker/request/handler');
+const { createGatewayHooks, runWithGatewayHooks } = await import('../../src/gateway/runtime');
+const gatewayHooks = createGatewayHooks();
+registerRequestLogs(gatewayHooks);
+const handleRequest: typeof requestHandler = (...args) => runWithGatewayHooks(gatewayHooks, () => requestHandler(...args));
 let accessLogWriter: typeof import('../../src/logger/access-log-writer').accessLogWriter;
 let fileLogWriter: typeof import('../../src/logger/file-log-writer').fileLogWriter;
 const servers: Array<{ stop(force?: boolean): Promise<void> | void }> = [];
@@ -29,7 +35,6 @@ const headerStorage = new HeaderStorageManager({}, join(dataPlaneTestRoot, 'limi
 
 beforeAll(async () => {
 
-  ({ handleRequest } = await import('../../src/worker/request/handler'));
   ({ accessLogWriter } = await import('../../src/logger/access-log-writer'));
   ({ fileLogWriter } = await import('../../src/logger/file-log-writer'));
 }, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
@@ -50,12 +55,32 @@ function uniquePath(): string {
   return path;
 }
 
+test('a hosted WebSocket internal POST enforces the body limit without logging', async () => {
+  const path = uniquePath();
+  const body = JSON.stringify({ data: 'x'.repeat(1024) });
+  const response = await handleRequest(new Request(`http://localhost${path}`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'content-length': String(body.length) }, body,
+  }), {
+    body_parser_limit: '1kb',
+    routes: [{ path, endpoints: [], request: { headers: { add: { 'x-check': '{{body.checked}}' } } } }],
+  }, { transport: 'websocket', logging: logging() });
+  expect(response.status).toBe(413);
+  expect(await response.json()).toMatchObject({ code: 'request_body_too_large' });
+  await flushBodyCaptures();
+  await accessLogWriter.flush();
+  expect(accessLogWriter.getDatabase().query('SELECT 1 FROM access_logs WHERE path=?').all(path)).toEqual([]);
+}, STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
+
 describe('request body limits and error records', () => {
   test('returns one logged 413 with a saved response for declared and chunked oversized bodies', async () => {
     for (const declared of [true, false]) {
       const path = uniquePath();
       // A necessary rule reads the chunked body before upstream selection.
-      const config: AppConfig = { body_parser_limit: '1kb', routes: [{ path, endpoints: [], request:{headers:{add:{'x-check':'{{body.checked}}'}}} }] };
+      const config: AppConfig = {
+        body_parser_limit: '1kb',
+        logging: { body: { enabled: true, max_size: 16, retention_days: 1 } },
+        routes: [{ path, endpoints: [], request: { headers: { add: { 'x-check': '{{body.checked}}' } } } }],
+      };
       const body = JSON.stringify({ data: 'x'.repeat(1024) });
       const req = new Request(`http://localhost${path}`, {
         method: 'POST', headers: { 'content-type': 'application/json', ...(declared ? { 'content-length': String(body.length) } : {}) },
@@ -67,6 +92,7 @@ describe('request body limits and error records', () => {
       expect(response.status).toBe(413);
       const responseBody = await response.json();
       expect(responseBody).toMatchObject({ code: 'request_body_too_large', limit_bytes: 1024, received_bytes: body.length });
+      await flushBodyCaptures();
       await accessLogWriter.flush();
       const rows = accessLogWriter.getDatabase().query('SELECT * FROM access_logs WHERE path=?').all(path) as Record<string, any>[];
       expect(rows).toHaveLength(1);
@@ -74,7 +100,7 @@ describe('request body limits and error records', () => {
       expect(row).toMatchObject({ status: 413, success: 0, upstream: null, request_type: 'final',
         protocol_outcome: 'failed', protocol_code: 'request_body_too_large', error_message: responseBody.message,
         original_req_body_id: null, req_body_id: null });
-      expect(JSON.parse(row.processing_steps).at(-1).step).toBe('request_body_rejected');
+      expect(JSON.parse(row.processing_steps)).toContainEqual(expect.objectContaining({ step: 'request_body_rejected' }));
       // Error responses are saved even when the independent log size limit is smaller.
       expect(await bodyStorage.load(row.resp_body_id)).toEqual(responseBody);
       const responseHeaders = await headerStorage.load(row.resp_header_id);
@@ -157,7 +183,6 @@ describe('request body limits and error records', () => {
       // Declared oversize is rejected before dispatch; chunked oversize can
       // reach the upstream before the streaming counter rejects its body.
       expect(upstreamCalls).toBe(2);
-      const { flushBodyCaptures } = await import('../../src/logger/body-capture');
       await flushBodyCaptures();
       await accessLogWriter.flush();
       const failures = accessLogWriter.getDatabase().query('SELECT resp_body_id,error_message FROM access_logs WHERE path=? AND status=413').all(path) as Record<string, any>[];

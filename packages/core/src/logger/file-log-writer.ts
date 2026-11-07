@@ -1,8 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 import type { TransportOutcome, TransportType } from './transport-outcome';
+import type { AccessLogIdentity } from './access-log-writer';
 
-export interface FileLogEntry {
+export interface FileLogEntry extends AccessLogIdentity {
   requestId: string;
   timestamp: number;
   method: string;
@@ -52,13 +53,14 @@ export interface FileLogEntry {
  */
 export class FileLogWriter {
   private writeQueue: FileLogEntry[] = [];
-  private isProcessing = false;
+  private inFlightFlush: Promise<void> | null = null;
   private flushInterval: Timer | null = null;
   private currentDate: string;
   private currentStream: fs.WriteStream | null = null;
   private readonly logsDir: string;
+  private droppedEntries = 0;
 
-  constructor(logsDir: string = path.resolve(process.cwd(), 'logs')) {
+  constructor(logsDir: string = path.resolve(process.cwd(), 'logs'), private readonly maxQueuedEntries = Infinity) {
     this.logsDir = logsDir;
     this.currentDate = this.getDateString();
     this.ensureLogsDir();
@@ -70,6 +72,7 @@ export class FileLogWriter {
    * 异步写入日志（入队）
    */
   async write(entry: FileLogEntry): Promise<void> {
+    if (this.writeQueue.length >= this.maxQueuedEntries) { this.droppedEntries++; return; }
     this.writeQueue.push(entry);
 
     // 队列超过 100 条立即刷新
@@ -82,13 +85,17 @@ export class FileLogWriter {
    * 批量刷新到文件
    */
   async flush(): Promise<void> {
-    if (this.isProcessing || this.writeQueue.length === 0) {
-      return;
+    if (this.inFlightFlush) return this.inFlightFlush;
+    if (this.writeQueue.length === 0) return;
+    this.inFlightFlush = this.flushBatch(this.writeQueue.splice(0));
+    try {
+      await this.inFlightFlush;
+    } finally {
+      this.inFlightFlush = null;
     }
+  }
 
-    this.isProcessing = true;
-    const batch = this.writeQueue.splice(0);
-
+  private async flushBatch(batch: FileLogEntry[]): Promise<void> {
     try {
       // 检查是否需要 rotate
       const currentDate = this.getDateString();
@@ -99,20 +106,19 @@ export class FileLogWriter {
       // 批量写入
       const lines = batch.map(entry => JSON.stringify(entry)).join('\n') + '\n';
 
-      if (this.currentStream) {
-        await new Promise<void>((resolve, reject) => {
-          this.currentStream!.write(lines, (err) => {
-            if (err) reject(err);
-            else resolve();
-          });
+      const stream = this.currentStream ?? this.openLogFile();
+      await new Promise<void>((resolve, reject) => {
+        stream.write(lines, (err) => {
+          if (err) reject(err);
+          else resolve();
         });
-      }
+      });
     } catch (error) {
       console.error('Failed to write file logs:', error);
       // 失败的日志重新入队
-      this.writeQueue.unshift(...batch);
-    } finally {
-      this.isProcessing = false;
+      const pending = batch.concat(this.writeQueue);
+      this.droppedEntries += Math.max(0, pending.length - this.maxQueuedEntries);
+      this.writeQueue = pending.slice(0, this.maxQueuedEntries);
     }
   }
 
@@ -121,6 +127,10 @@ export class FileLogWriter {
    */
   private startFlushInterval() {
     this.flushInterval = setInterval(() => {
+      if (this.droppedEntries) {
+        console.error('File access log queue lost entries:', this.droppedEntries);
+        this.droppedEntries = 0;
+      }
       this.flush().catch((error) => console.error('Background file log flush failed:', error));
     }, 5000);
   }
@@ -145,9 +155,14 @@ export class FileLogWriter {
   /**
    * 打开日志文件
    */
-  private openLogFile(): void {
+  private openLogFile(): fs.WriteStream {
     const logFilePath = path.join(this.logsDir, `access-${this.currentDate}.log`);
-    this.currentStream = fs.createWriteStream(logFilePath, { flags: 'a' });
+    const stream = fs.createWriteStream(logFilePath, { flags: 'a' });
+    stream.once('error', () => {
+      if (this.currentStream === stream) this.currentStream = null;
+      console.error('File access log stream unavailable');
+    });
+    return this.currentStream = stream;
   }
 
   /**
@@ -176,6 +191,7 @@ export class FileLogWriter {
       this.flushInterval = null;
     }
 
+    await this.inFlightFlush;
     await this.flush();
 
     if (this.currentStream) {

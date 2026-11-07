@@ -55,17 +55,18 @@ failover 关键词检测只保留有界 wire 前缀，命中立即取消唯一�
 | --- | --- |
 | HTTP `body_parser_limit` | 必要 wire/decoded 读取的内容上限，默认 50 MiB；SSE 按完整单帧计算，不按连接累计量 |
 | worker 资源预算 | 所有并发请求实际保留分配、可选计算、解码器及消费者积压，容量不足返回固定 503 或使可选消费者 incomplete |
-| 日志保存配额 | 单份保存内容和日志内存，超限仅停止日志，不截断 HTTP 正文或 Token 观察 |
+| 日志保存配额 | 单份保存大小与待写队列内存独立，超限仅停止日志，不截断 HTTP 正文或 Token 观察 |
 
 Content-Length 提前超限在发送上游前返回 413；chunked 超限取消上传，已有前缀可能到达上游。读取与必要解码遵循请求 deadline。日志和观察拥有可选资源预算，不能占满必要解码槽位或把各自失败传播成主流成功/失败判定。
 
 [中央资源配置](../../packages/core/src/gateway/body-resources.ts)在 Worker 启动时读取。环境值必须为正安全整数，无效值使用默认。字节预算和解码槽位是资源配额，不替代 body_parser_limit。可重复测量见[性能指南](../guides/performance.md#测量正文共享资源)。
 
+每个 Worker 的日志内存预算固定为 32 MiB，用于待写队列和有界解析结果。单份正文的保存上限独立设置。
+
 | 环境变量 | 默认 | 用途 |
 | --- | --- | --- |
 | `BUNGEE_BODY_WORKER_MEMORY_BYTES` | 512 MiB | 所有共享正文实际保留分配与保守 JSON/文本估算 |
 | `BUNGEE_BODY_OPTIONAL_MEMORY_BYTES` | 256 MiB | 所有可选计算的独立 worker 预算 |
-| `BUNGEE_BODY_LOG_MEMORY_BYTES` | 32 MiB | 日志 wire 保留及保存表示的独立配额；共享 wire 只计一次 |
 | `BUNGEE_BODY_OBSERVER_BACKLOG_BYTES` | 32 MiB | 单消费者 SSE 引用积压 |
 | `BUNGEE_BODY_OBSERVER_BACKLOG_EVENTS` | 1024 | 单消费者事件引用积压 |
 | `BUNGEE_BODY_MANDATORY_DECODERS` | 8 | 必要解码并发 |
@@ -84,9 +85,9 @@ Content-Length 提前超限在发送上游前返回 413；chunked 超限取消�
 
 原始响应观察先于 inbound 转换，用于真实上游 usage；最终响应日志绑定 client-response。JSON、二进制和 SSE 都沿用 pull/backpressure/cancel/completion 收尾，不靠媒体类型决定 drain，也不因错误伪造成功正文。显式 raw 插件可提供已验证 protocolCompletion；默认 opaque SSE 不推断业务终态。
 
-日志启用后在实际输入读取、最终请求发送及最终响应输出时附着消费者，不提前 pump。原始请求与最终请求分别保存；EOF 后后台保存，访问日志回填引用，文件日志等待最终正文引用后后台入队，HTTP 不等待保存。重试使用独立版本，防止旧 attempt 覆盖最终记录。保存配额、可选解码、UTF-8/base64 展示及 incomplete 仅作用于日志。
+日志启用后在实际输入读取、最终请求发送及最终响应输出时附着消费者，不提前 pump。原始请求与最终请求分别保存。内置日志解析器在传输期间分块写入同目录临时文件，完整解析并收到 EOF 后原子重命名，访问日志再回填引用。文件日志等待最终正文引用后后台入队，HTTP 不等待磁盘。队列预算耗尽、写入失败或取消时丢弃未完成文件。重试使用独立版本，防止旧 attempt 覆盖最终记录。保存配额、可选解码及 incomplete 仅作用于日志。
 
-SSE 日志保存为 `[{event,data}, ...]`：多行 data 合并，合法 JSON 使用公共解析结果，其余保留字符串，[DONE] 保持文本；注释、id、retry 不进入展示数组。历史正文只作读取时投影，复制和下载使用同一展示值，不改历史文件。缺 Content-Type 时，只在最终 Accept 明确接受 SSE 且原文符合字段格式时展示数组，普通错误文本保持原样。
+内置日志插件将识别到的 Responses 和 Gemini SSE 数据保存为 `[{event,data}, ...]`。它只保留符合该协议识别规则的完整事件。普通 SSE 保留访问及传输结果。
 
 ## 配置整理与约束检查
 

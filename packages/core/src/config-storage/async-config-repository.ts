@@ -128,6 +128,11 @@ export class AsyncConfigRepository {
     return result.kind === 'committed' ? { ...result, snapshot: freezeSnapshot(result.snapshot) } : result;
   }
 
+  async applyPendingRequestLogsDefault(targetWorkerSlots: readonly number[]): Promise<void> {
+    const projection = await this.rpc('applyPendingRequestLogsDefault', targetWorkerSlots);
+    if (projection) this.installControlProjection(projection);
+  }
+
   async claimControllerWithCapability(
     capability: ControllerClaimCapability, controllerId: string, updatedAt: number,
   ): Promise<SupervisionState> {
@@ -255,6 +260,9 @@ export class AsyncConfigRepository {
   }
   recordWorkerLaunchExit(...args: Parameters<ConfigRepository['recordWorkerLaunchExit']>): Promise<ReturnType<ConfigRepository['recordWorkerLaunchExit']>> {
     return this.rpc('recordWorkerLaunchExit', ...args);
+  }
+  recordWorkerLaunchCapacityReclaimed(...args: Parameters<ConfigRepository['recordWorkerLaunchCapacityReclaimed']>): Promise<void> {
+    return this.rpc('recordWorkerLaunchCapacityReclaimed', ...args);
   }
   getWorkerLaunch(...args: Parameters<ConfigRepository['getWorkerLaunch']>): Promise<ReturnType<ConfigRepository['getWorkerLaunch']>> {
     return this.rpc('getWorkerLaunch', ...args);

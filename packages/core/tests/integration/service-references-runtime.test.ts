@@ -1,6 +1,7 @@
 import {afterAll,afterEach,describe,expect,test,spyOn} from 'bun:test';
 import {createDataPlaneRuntime} from '../helpers/data-plane-runtime';
 const runtime=await createDataPlaneRuntime();
+import { registerRequestLogs } from '../helpers/request-log';
 const {ScopedPluginRegistry,getScopedPluginRegistry,setScopedPluginRegistry}=await import('../../src/scoped-plugin-registry');
 const {handleRequest}=await import('../../src/worker/request/handler');
 const {initializeRuntimeState,cleanupRuntimeState,runtimeState,getActiveRequestCount}=await import('../../src/worker/state/runtime-state');
@@ -55,6 +56,7 @@ describe('layered Service execution',()=>{
     const transport=new Request(source.url,{method:'POST',headers:privateRequestHeaders(source,secret,'127.0.0.1',{requestId:crypto.randomUUID(),principal:{domain:'data',keyId:'fixture-key',credentialVersion:1}}),body:source.body});
     const restored=restoreWorkerTransportRequest(transport,secret);if(!restored.ok)throw Error('trusted fixture request rejected');
     let writes=0;
+    registerRequestLogs(registry!.getGatewayHooks());
     const failingLogging={...logging,accessLogWriter:{...logging.accessLogWriter,write(){writes++;throw Error('controlled access log failure');}}};
     let completion:Promise<unknown>|undefined;
     const response=await handleRequest(restored.request,config,{logging:failingLogging,onCompletion:value=>{completion=value;}});

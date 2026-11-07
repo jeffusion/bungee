@@ -4,10 +4,12 @@ import { ANONYMOUS_PRINCIPAL, type DataPrincipal } from '../plugin-extensions';
 import type { ServingConfigWorker } from '../config-publication/coordinator-types';
 import { parseWorkerTransportSecret } from '../config-worker/private-transport';
 import { privateRequestHeaders, publicResponseHeaders, requestsUpgrade } from './headers';
+import type { IngressRequestLogCollector } from './request-log-observation';
 
 export interface AdmittedWorkerSelector {
   readonly websocketMaxConnections?: number | null;
   readonly websocketMaxMessageBytes?: number;
+  readonly requestLogCollector?: IngressRequestLogCollector;
   subscribeWebSocketMessagePolicy?(listener: (maxMessageBytes: number) => void): () => void;
   acquire(): {
     readonly worker: Pick<ServingConfigWorker, 'private_port'> | null;
@@ -44,6 +46,7 @@ function responseBodyAllowed(method: string, status: number): boolean {
 async function forwardToSelectedWorker(
   request: Request,
   options: ForwardPublicRequestOptions,
+  requestId: string,
   trustedPeer?: string,
 ): Promise<Response> {
   if (request.method.toUpperCase() === 'CONNECT') {
@@ -57,7 +60,7 @@ async function forwardToSelectedWorker(
   }
 
   const principal = options.authenticate?.(request) ?? ANONYMOUS_PRINCIPAL;
-  const identity = { requestId: randomUUID(), principal };
+  const identity = { requestId, principal };
   const lease = options.admission.acquire();
   const worker = lease.worker;
   if (worker === null) {
@@ -91,7 +94,7 @@ async function forwardToSelectedWorker(
     try {
       logger.warn({ ingressForwarding: {
         phase: 'private_response_headers',
-        correlation_id: randomUUID(),
+        correlation_id: requestId,
         error_code: errorCode,
         elapsed_ms: Math.max(0, Math.round(performance.now() - startedAt)),
       } }, 'Ingress private request forwarding failed');
@@ -106,13 +109,13 @@ async function forwardToSelectedWorker(
 
 export function createPublicRequestForwarder(
   options: ForwardPublicRequestOptions,
-): (request: Request, trustedPeer?: string) => Promise<Response> {
+): (request: Request, trustedPeer?: string, requestId?: string) => Promise<Response> {
   const forwardingOptions = {
     admission: options.admission,
     authenticate: options.authenticate,
     transportSecret: parseWorkerTransportSecret(options.transportSecret),
   } satisfies ForwardPublicRequestOptions;
-  return (request, trustedPeer) => forwardToSelectedWorker(
-    request, forwardingOptions, trustedPeer,
+  return (request, trustedPeer, requestId = randomUUID()) => forwardToSelectedWorker(
+    request, forwardingOptions, requestId, trustedPeer,
   );
 }

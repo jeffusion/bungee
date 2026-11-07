@@ -1,8 +1,23 @@
-import { BUILTIN_MENU_PAGES, createDefaultMenuLayout, type MenuSnapshot } from '@jeffusion/bungee-types';
+import { BUILTIN_MENU_PAGES, createDefaultMenuLayout, type MenuPage, type MenuSnapshot } from '@jeffusion/bungee-types';
 import type { Route } from 'playwright/test';
 import { menuIcons } from '../../../core/src/ui/menu-icons';
-export function menuSnapshot(): MenuSnapshot {
-  return { revision: 1, catalog: [...BUILTIN_MENU_PAGES], layout: createDefaultMenuLayout(BUILTIN_MENU_PAGES), iconRevision: 'icons:test' };
+import requestLogsManifest from '../../../../plugins/request-logs/manifest.json';
+import type { Plugin } from '../../src/api/plugins';
+
+export const requestLogsPlugin: Plugin = { name: requestLogsManifest.name, enabled: true,
+  metadata: { ...requestLogsManifest.metadata, contributes: {
+    ...requestLogsManifest.contributes,
+    navigation: requestLogsManifest.contributes.navigation.map(page => ({ ...page, target: 'header',
+      layout: page.layout === 'standalone' ? 'standalone' : undefined })),
+  } } };
+const logsNavigation = requestLogsManifest.contributes.navigation[0]!;
+export const requestLogsMenuPage: MenuPage = { id: `plugin:request-logs:${encodeURIComponent(logsNavigation.path)}`,
+  label: logsNavigation.label, href: '/#/extensions/request-logs/logs', source: 'plugin', pluginName: 'request-logs',
+  defaultIcon: logsNavigation.icon, available: true };
+
+export function menuSnapshot(contributions: readonly MenuPage[] = []): MenuSnapshot {
+  const catalog = [...BUILTIN_MENU_PAGES, ...contributions];
+  return { revision: 1, catalog, layout: createDefaultMenuLayout(catalog), iconRevision: 'icons:test' };
 }
 export function fulfillMenuIcons(route: Route) {
   const ids = (new URL(route.request().url()).searchParams.get('ids') ?? '').split(',').filter(Boolean);

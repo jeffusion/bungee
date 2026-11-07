@@ -48,7 +48,7 @@ function modules(node: ts.Node): string[] {
 const gatewayStages:Record<string,string>={
   'websocket-plugin.ts':'onGatewayWebSocket','request-plugin.ts':'onGatewayRequest','forward-plugin.ts':'onGatewayForward','routing-plugin.ts':'onGatewayRoute',
   'admission-plugin.ts':'onGatewayAdmission','selection-plugin.ts':'onGatewaySelect','retry-plugin.ts':'onGatewayRetry',
-  'request-rules-plugin.ts':'onGatewayBodyRules','response-plugin.ts':'onGatewayResponseRules','logging-plugin.ts':'onGatewayLog',
+  'request-rules-plugin.ts':'onGatewayBodyRules','response-plugin.ts':'onGatewayResponseRules',
 };
 const gatewayImplementations=new Set(['executeHttpRequest','executeForward','executeResponseRules','executeBodyRules','executeQueryRules','applyHeaderRules']);
 /** Validate call edges rather than the presence of architecture-related words. */
@@ -86,6 +86,11 @@ export function checkArchitectureSource(file:string, source:string, root=process
     if(ts.isIdentifier(n)&&!seen.has(n.text)){
       seen.add(n.text);const declaration=declarations.get(n.text);
       if(declaration?.type&&/\b(BodyHandle|BodySource)\b/.test(declaration.type.getText()))return true;
+      if(declaration&&ts.isParameter(declaration)) {
+        const callback=declaration.parent;
+        if((ts.isArrowFunction(callback)||ts.isFunctionExpression(callback))&&callback.parameters[0]===declaration
+          &&ts.isVariableDeclaration(callback.parent)&&callback.parent.type?.getText()==='RequestLogBodyParser')return true;
+      }
       if(declaration&&ts.isParameter(declaration)&&n.text==='bodyHandle'&&declaration.type&&ts.isTypeLiteralNode(declaration.type)&&declaration.type.members.every(m=>m.name&&['json','decoded','bytes','events'].includes(m.name.getText())))return true;
       if(declaration?.initializer)return bodyView(declaration.initializer,seen);
     }
@@ -183,8 +188,14 @@ export function checkArchitectureSource(file:string, source:string, root=process
     }
     if(http&&!exempt&&ts.isNewExpression(node)&&node.expression.getText()==='TextDecoder') {
       // Presentation and keyword prefix text are UTF-8 views, never codecs/JSON parsers.
-      const textView=file===core+'logger/body-capture.ts'||file===core+'worker/request/response-detector.ts'||file===core+'worker/response/sse-terminal-outcome.ts';
-      if(!textView)add(node,'central-body-text-parser');
+      const textView=file===core+'worker/request/response-detector.ts'||file===core+'worker/response/sse-terminal-outcome.ts';
+      const access=node.parent;
+      const call=access.parent;
+      const decoded=ts.isCallExpression(call)&&call.expression===access&&ts.isPropertyAccessExpression(access)
+        &&access.name.text==='decode'&&call.arguments[0]&&ts.isAwaitExpression(call.arguments[0])
+        ? call.arguments[0].expression : undefined;
+      const body=decoded&&ts.isCallExpression(decoded)&&member(decoded.expression)==='decoded'&&receiver(decoded.expression);
+      if(!textView&&!(body&&bodyView(body)))add(node,'central-body-text-parser');
     }
     ts.forEachChild(node,visit);
   }

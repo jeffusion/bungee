@@ -34,7 +34,7 @@ describe('logging body model (render-time defaults, copy-on-edit)', () => {
     const body = resolveLoggingBody(value);
 
     // Then
-    expect(body).toEqual({ enabled: true, max_size: 5120, retention_days: 1 });
+    expect(body).toEqual({ enabled: true, max_size: 64 * 1024, retention_days: 1 });
   });
 });
 

@@ -20,6 +20,7 @@ import { isSqliteBusyError } from '../../src/config-storage/sqlite-errors';
 import { canonicalJson } from '../../src/config-storage/content-hash';
 import { replaceActiveMaterialization } from '../../src/config-storage/materialize';
 import { readRepositorySnapshot, verifyRepositoryIntegrity } from '../../src/config-storage/repository-snapshot';
+import { appendServingSnapshot } from '../../src/config-storage/serving-snapshot';
 import { CONFIG_MIGRATIONS, migrateConfigurationDatabase } from '../../src/config-storage/migrations';
 import { verifySchemaFingerprint } from '../../src/config-storage/schema-fingerprint';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
@@ -419,6 +420,85 @@ describe('configuration schema migration definition', () => {
 });
 
 describe('ConfigRepository initialization and migration', () => {
+  const requestLogsOptions = { compileOptions: {
+    availablePlugins: new Set(['request-logs']), pluginSchemas: new Map([['request-logs', []]]),
+  } };
+
+  test('upgrades a catalog-eligible database atomically and preserves its serving history and explicit activations', () => {
+    const root = mkdtempSync(join(tmpdir(), 'bungee-request-logs-upgrade-'));
+    tempRoots.push(root);
+    const dbPath = join(root, 'config.db');
+    const original = { revision: 1, content_hash: hashConfigurationContent(EMPTY_AGGREGATE), aggregate: EMPTY_AGGREGATE };
+    const catalogHash = `sha256:${'c'.repeat(64)}` as const;
+    const old = new Database(dbPath, { create: true, strict: true });
+    try {
+      migrateConfigurationDatabase(old, CONFIG_MIGRATIONS.slice(0, 8));
+      appendServingSnapshot(old, original, catalogHash);
+      expect(() => ConfigRepository.open(dbPath, { ...requestLogsOptions,
+        faultInjection(stage) { if (stage === 'after_targets') throw new Error('activation interrupted'); },
+      })).toThrow('configuration migration failed');
+      expect(old.query('SELECT max(version) AS version FROM schema_migrations').get()).toEqual({ version: 8 });
+      expect(old.query('SELECT active_revision FROM configuration_state').get()).toEqual({ active_revision: 1 });
+      expect(old.query('SELECT plugin_name FROM plugin_activations').all()).toEqual([]);
+    } finally { old.close(); }
+
+    for (const options of [{}, { compileOptions: { availablePlugins: new Set<string>(), pluginSchemas: new Map() } }]) {
+      const bootstrap = ConfigRepository.open(dbPath, options);
+      try { expect(bootstrap.getSnapshot()).toEqual(original); } finally { bootstrap.close(); }
+    }
+    const upgraded = ConfigRepository.open(dbPath, requestLogsOptions);
+    try {
+      expect(upgraded.getSnapshot()).toMatchObject({ revision: 2, aggregate: { plugin_activations: [{ plugin_name: 'request-logs' }] } });
+      expect(upgraded.getCurrentOperationState()?.operation).toMatchObject({ committed_revision: 2, state: 'converged' });
+      expect(upgraded.getServingSnapshot({ revision: 1, content_hash: original.content_hash, plugin_catalog_hash: catalogHash })).toEqual(original);
+      expect(upgraded.commit(command('explicit-activations', 2, EMPTY_AGGREGATE)).kind).toBe('committed');
+    } finally { upgraded.close(); }
+
+    const restarted = ConfigRepository.open(dbPath, requestLogsOptions);
+    try {
+      expect(restarted.getSnapshot()).toEqual({ ...original, revision: 3 });
+      restarted.verify();
+    } finally { restarted.close(); }
+  });
+
+  test.each([false, true])('defers the request logs default during publication (explicit save: %p)', (explicitSave) => {
+    const { dbPath, repository } = openRepository();
+    const catalogHash = `sha256:${'d'.repeat(64)}` as const;
+    const result = repository.commit(command('publishing-before-default', 1, EMPTY_AGGREGATE, 'config', 1, []));
+    if (result.kind !== 'committed') throw new Error('expected configuration commit');
+    const publication = repository.claimPublicationTarget(catalogHash, 2);
+    const deferred = ConfigRepository.open(dbPath, requestLogsOptions);
+    try {
+      expect(deferred.getSnapshot()).toEqual(result.snapshot);
+      expect(deferred.getActivePublication()).toEqual(publication);
+      expect(deferred.applyPendingRequestLogsDefault([0, 1])).toBeNull();
+      if (explicitSave) {
+        expect(deferred.commit(command('explicit-while-deferred', 2, EMPTY_AGGREGATE, 'config', 2, [])).kind).toBe('committed');
+      }
+
+      deferred.beginPublication('publishing-before-default', 2);
+      deferred.markDraining('publishing-before-default', 3);
+      deferred.finalizePublication('publishing-before-default', { outcome: 'converged', old_workers_exited: true }, 4);
+      if (explicitSave) {
+        expect(deferred.applyPendingRequestLogsDefault([0, 1])).toBeNull();
+        deferred.claimPublicationTarget(catalogHash, 5);
+        deferred.beginPublication('explicit-while-deferred', 6);
+        deferred.markDraining('explicit-while-deferred', 7);
+        deferred.finalizePublication('explicit-while-deferred', { outcome: 'converged', old_workers_exited: true }, 8);
+      } else {
+        expect(deferred.applyPendingRequestLogsDefault([0, 1])).not.toBeNull();
+        expect(deferred.getCurrentOperationState()?.operation).toMatchObject({ committed_revision: 3, state: 'pending' });
+        expect(deferred.claimPublicationTarget(catalogHash, Date.now())).not.toBeNull();
+        expect(deferred.applyPendingRequestLogsDefault([0, 1])).toBeNull();
+      }
+    } finally { deferred.close(); }
+    const settled = ConfigRepository.open(dbPath, requestLogsOptions);
+    try {
+      expect(settled.getSnapshot().revision).toBe(3);
+      expect(settled.getSnapshot().aggregate.plugin_activations).toEqual(explicitSave ? [] : [{ plugin_name: 'request-logs' }]);
+    } finally { settled.close(); }
+  });
+
   test.each([1, 16 * 1024 * 1024, 100 * 1024 * 1024])('persists WS message bytes %p through export snapshots and reopening', (limit) => {
     const { repository, dbPath } = openRepository();
     const aggregate = { ...EMPTY_AGGREGATE, logical_configuration: {
@@ -1140,12 +1220,13 @@ describe('ConfigRepository schema enforcement and corruption handling', () => {
       WHERE type='table' AND name NOT LIKE 'sqlite_%'`).all();
 
     // When / Then
-    expect(definitions).toHaveLength(26);
+    expect(definitions).toHaveLength(28);
     expect(definitions.every(({ sql }) => sql.includes('STRICT'))).toBe(true);
     expect(() => inspector.run(`INSERT INTO services (id,position,name,policy_json)
       VALUES ('10000000-0000-4000-8000-000000000099','wrong','bad','{}')`)).toThrow();
     expect(() => inspector.run(`INSERT INTO configuration_revisions
       (revision,content_hash,kind,created_at) VALUES (2,'sha256:ABC','config',1)`)).toThrow();
+    expect(() => inspector.run('INSERT INTO configuration_request_logs_default (id,settled_revision) VALUES (1,2)')).toThrow();
     expect(() => inspector.run(`INSERT INTO service_references
       (id,owner_kind,owner_service_id,route_id,position,service_id,weight,priority,is_disabled)
       VALUES ('50000000-0000-4000-8000-000000000099','route',NULL,'20000000-0000-4000-8000-000000000099',0,

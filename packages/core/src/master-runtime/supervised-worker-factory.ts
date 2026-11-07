@@ -37,6 +37,7 @@ export type WorkerLaunchRepository = {
     updatedAt: number,
   ): Promise<DurableWorkerLaunch>;
   recordWorkerLaunchExit(workerInstanceId: string, evidence: WorkerLaunchExitEvidence, updatedAt: number): Promise<DurableWorkerLaunch>;
+  recordWorkerLaunchCapacityReclaimed(workerInstanceId: string, guard: ProcessLifetimeGuardFacts, updatedAt: number): Promise<void>;
   recordWorkerLaunchAdmitted(workerInstanceId: string, updatedAt: number): Promise<DurableWorkerLaunch>;
   fenceWorkerLaunchNotStarted(mutationId: string, workerSlot: number, attemptNo: number, updatedAt: number): Promise<void>;
   getWorkerLaunch(workerInstanceId: string): Promise<DurableWorkerLaunch | null>;
@@ -678,19 +679,24 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
       const { launch } = entry;
       if (legal.has(identityKey(launch.identity))) continue;
       if (launch.not_started || (launch.exited && launch.cleanup_released)) continue;
-      if (await this.proveStandaloneWorkerLaunchExit(launch)) released.push(launch.identity);
-      else unknown.push(launch);
+      if (await this.proveStandaloneWorkerLaunchExit(launch, 'success')) {
+        await repository.recordWorkerLaunchExit(launch.identity.worker_instance_id,
+          { kind: 'exited', cleanup: 'released' }, Date.now());
+        this.retiredInstanceIds.add(launch.identity.worker_instance_id);
+        released.push(launch.identity);
+      } else unknown.push(launch);
     }
     return { released, fenced, unknown };
   }
 
-  /**
-   * Proves a historical or startup launch exited with signed cleanup and a free original
-   * guard. Unlike publication-attempt proof this does not need a live active snapshot.
-   */
-  private async proveStandaloneWorkerLaunchExit(launch: DurableWorkerLaunch): Promise<boolean> {
-    const repository = this.options.launchRepository;
-    if (repository === undefined) return false;
+  /** Physical capacity only; a terminal cleanup failure remains a failure. */
+  async reclaimExitedWorkerLaunchCapacity(launch: DurableWorkerLaunch): Promise<boolean> {
+    return launch.admitted && launch.exited && !launch.cleanup_released && !launch.capacity_reclaimed
+      && await this.proveStandaloneWorkerLaunchExit(launch, 'failed');
+  }
+
+  /** Unlike publication-attempt proof this does not need a live active snapshot. */
+  private async proveStandaloneWorkerLaunchExit(launch: DurableWorkerLaunch, cleanupState: 'success' | 'failed'): Promise<boolean> {
     let descriptor: ReturnType<typeof parseWorkerDescriptor>;
     try {
       const raw: unknown = JSON.parse(await readFile(join(this.options.runtimeWorkersDirectory,
@@ -704,7 +710,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
       descriptor = parseWorkerDescriptor(raw, deriveWorkerSupervisionCredential(seed, hint.boot_nonce));
     } catch { return false; }
     const cleanup = descriptor.cleanup;
-    if (descriptor.phase !== 'stopped' || cleanup === undefined || cleanup.cleanup_state !== 'success') return false;
+    if (descriptor.phase !== 'stopped' || cleanup === undefined || cleanup.cleanup_state !== cleanupState) return false;
     if (launch.allocation === null) {
       // A startup launch has no publication; any signed publication in cleanup means
       // this intent was not the process that performed that start.
@@ -715,25 +721,33 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
         || cleanup.publication.mutation_id !== launch.allocation.mutation_id
         || cleanup.publication.attempt_no !== launch.allocation.attempt_no) return false;
     }
-    let guardProven = false;
+    if (cleanupState === 'failed') {
+      const message = descriptor.evidence.message;
+      if (message === undefined || !('revision' in message) || identityKey(message) !== identityKey(launch.identity)
+        || message.pid !== descriptor.pid || message.boot_nonce !== descriptor.boot_nonce
+        || message.revision !== cleanup.revision || descriptor.revision !== cleanup.revision
+        || message.content_hash !== cleanup.content_hash || descriptor.content_hash !== cleanup.content_hash
+        || message.plugin_catalog_hash !== cleanup.plugin_catalog_hash || descriptor.plugin_catalog_hash !== cleanup.plugin_catalog_hash
+        || canonicalJson(message.publication) !== canonicalJson(cleanup.publication)) return false;
+    }
     if (descriptor.lifetime_guard !== undefined) {
       const { held: _held, ...facts } = descriptor.lifetime_guard;
       if (canonicalJson(facts) !== canonicalJson(launch.guard)) return false;
       const proof = probeExistingProcessLifetimeGuard(launch.guard);
       if (proof.kind !== 'confirmed') return false;
-      proof.fence.close();
-      guardProven = true;
+      try {
+        if (cleanupState === 'failed') {
+          const repository = this.options.launchRepository;
+          if (repository === undefined || !proof.fence.isCurrent()) return false;
+          await repository.recordWorkerLaunchCapacityReclaimed(launch.identity.worker_instance_id, proof.fence.facts, Date.now());
+        }
+        return true;
+      } finally { proof.fence.close(); }
     }
-    if (!guardProven) {
-      if (process.platform !== 'win32') return false;
-      const proof = await (this.options.processIdentity?.probeInstance ?? probeProcessInstance)(
-        descriptor.pid, launch.identity.worker_instance_id);
-      if (proof !== 'dead' && proof !== 'mismatch') return false;
-    }
-    await repository.recordWorkerLaunchExit(launch.identity.worker_instance_id,
-      { kind: 'exited', cleanup: 'released' }, Date.now());
-    this.retiredInstanceIds.add(launch.identity.worker_instance_id);
-    return true;
+    if (cleanupState === 'failed' || process.platform !== 'win32') return false;
+    const proof = await (this.options.processIdentity?.probeInstance ?? probeProcessInstance)(
+      descriptor.pid, launch.identity.worker_instance_id);
+    return proof === 'dead' || proof === 'mismatch';
   }
 
   /**
@@ -1265,6 +1279,11 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
         const latest = parseWorkerDescriptor(latestRaw, deriveWorkerSupervisionCredential(latestSeed, latestHint.boot_nonce));
         if (latest.pid !== descriptor.pid || latest.evidence.kind !== descriptor.evidence.kind
           || JSON.stringify(latest.evidence.message) !== JSON.stringify(terminal)) continue;
+        if (latest.phase === 'stopped' && latest.cleanup?.cleanup_state === 'failed') {
+          // Future masters need this signed result to distinguish failed cleanup from unknown cleanup.
+          const launch = await this.options.launchRepository?.getWorkerLaunch(identity.worker_instance_id);
+          if (launch?.admitted && !launch.cleanup_released) continue;
+        }
         await removeWorkerDescriptor(path);
         try {
           await readFile(path);

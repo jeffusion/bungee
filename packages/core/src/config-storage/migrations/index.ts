@@ -4,6 +4,7 @@ import type { Database } from 'bun:sqlite';
 import { ConfigRepositoryError } from '../repository-types';
 import { verifySchemaFingerprint } from '../schema-fingerprint';
 import { isSqliteBusyError, repositoryFailure } from '../sqlite-errors';
+import { applyRequestLogsDefault } from '../request-logs-default';
 import { CONFIG_MIGRATIONS, type ConfigMigration } from './plan';
 export { CONFIG_MIGRATIONS, CONFIG_SCHEMA_VERSION } from './plan';
 export { CONFIG_BASELINE_VERSION, CONFIG_BASELINE_NAME } from './baseline';
@@ -36,6 +37,7 @@ export function migrateConfigurationDatabase(db: Database, plan: readonly Config
       if (plan === CONFIG_MIGRATIONS && applied.length > 0 && applied.at(-1)!.version < 5) {
         convertServiceReferenceRevision(db, options);
       }
+      if (plan === CONFIG_MIGRATIONS) applyRequestLogsDefault(db, options);
       // Only a schema change can invalidate references; untouched databases are audited later.
       if (plan.length > applied.length && db.query('PRAGMA foreign_key_check').all().length > 0) {
         throw new ConfigRepositoryError('schema_corrupt', 'configuration migration left invalid references');

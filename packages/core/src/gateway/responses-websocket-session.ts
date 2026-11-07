@@ -11,7 +11,11 @@ import type {BodyHandle} from './body-contracts';
 import {DataAdmissionError, type DataAdmissionErrorDetails} from '../data-admission/errors';
 
 interface History {model:string;items:unknown[];bytes:number;expires:number}
-const TERMINALS = new Set(['response.completed','response.incomplete','response.failed']);
+type HostedErrorOutcome = 'failed' | 'cancelled';
+type ObserveResponse = (message: string, failure?: HostedErrorOutcome) => void;
+type SendResponse = (message: unknown, failure?: HostedErrorOutcome) => Promise<void>;
+const TERMINALS = new Set(['response.completed','response.incomplete','response.failed','response.cancelled']);
+const RESPONSE_CANCELLED = new Error('response.cancel');
 function generationError(payload: unknown): {code: string; type: string; details?: DataAdmissionErrorDetails} {
   const fallback = {code: 'codex_router_generation_rejected', type: 'invalid_request_error'};
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return fallback;
@@ -45,24 +49,28 @@ export class ResponsesWebSocketSession {
     while(this.history.size>=32 || this.historyBytes+bytes>8*1024*1024){const oldest=this.history.keys().next().value!;const item=this.history.get(oldest)!;this.history.delete(oldest);this.historyBytes-=item.bytes;this.historyLease.release(item.bytes);}
     this.historyLease.add(bytes);this.historyBytes+=bytes;this.history.set(id,{model,items:structuredClone(items),bytes,expires:Date.now()+600_000});
   }
-  private error(session:ManagedWebSocketSession,code:string,status=422,details?:DataAdmissionErrorDetails,type='invalid_request_error'):Promise<void> {
+  private error(send:SendResponse,code:string,status=422,details?:DataAdmissionErrorDetails,type='invalid_request_error',outcome:HostedErrorOutcome='failed'):Promise<void> {
     const safe=new DataAdmissionError(status,code,undefined,details).details;
-    return session.send(JSON.stringify({type:'error',status,error:{type,code,message:safe?.message ?? code,...(safe?.param ? {param:safe.param}:{})}}));
+    return send({type:'error',status,error:{type,code,message:safe?.message ?? code,...(safe?.param ? {param:safe.param}:{})}},outcome);
   }
-  onMessage(session:ManagedWebSocketSession,message:WebSocketMessageView):void|Promise<void> {
+  onMessage(session:ManagedWebSocketSession,message:WebSocketMessageView,observe?:ObserveResponse):void|Promise<void> {
+    const send: SendResponse = (payload, failure) => {
+      const wire = JSON.stringify(payload);
+      return session.send(wire, observe && (() => observe(wire, failure)));
+    };
     const value=message.json() as Record<string,any>|undefined;
-    if(message.kind!=='text' || !value || typeof value!=='object' || Array.isArray(value))return this.error(session,'codex_router_invalid_websocket_event');
+    if(message.kind!=='text' || !value || typeof value!=='object' || Array.isArray(value))return this.error(send,'codex_router_invalid_websocket_event');
     if(value.type==='response.cancel'){
-      if(!this.active)return this.error(session,'codex_router_no_active_response');
-      this.active.abort(new Error('response.cancel'));return;
+      if(!this.active)return this.error(send,'codex_router_no_active_response');
+      this.active.abort(RESPONSE_CANCELLED);return;
     }
-    if(value.type!=='response.create')return this.error(session,'codex_router_unsupported_websocket_event');
-    if(this.active)return this.error(session,'codex_router_response_busy',409);
+    if(value.type!=='response.create')return this.error(send,'codex_router_unsupported_websocket_event');
+    if(this.active)return this.error(send,'codex_router_response_busy',409);
     const controller=new AbortController();this.active=controller;
     // Reserve the generation synchronously before starting any asynchronous work.
-    return this.generate(session,value,AbortSignal.any([session.signal,controller.signal])).finally(()=>{if(this.active===controller)this.active=undefined;});
+    return this.generate(session,send,value,AbortSignal.any([session.signal,controller.signal])).finally(()=>{if(this.active===controller)this.active=undefined;});
   }
-  private async generate(session:ManagedWebSocketSession,value:Record<string,any>,signal:AbortSignal):Promise<void> {
+  private async generate(session:ManagedWebSocketSession,send:SendResponse,value:Record<string,any>,signal:AbortSignal):Promise<void> {
     let source:ReturnType<typeof createBodySource>|undefined;
     try {
       const body=structuredClone(value);delete body.type;delete body.generate;delete body.client_metadata;
@@ -91,8 +99,8 @@ export class ResponsesWebSocketSession {
         const id=`resp_bungee_prewarm_${randomUUID()}`;
         const response={id,object:'response',model:body.model,status:'completed',output:[],usage:null};
         this.remember(id,body.model,logicalInput);
-        await session.send(JSON.stringify({type:'response.created',sequence_number:0,response:{...response,status:'in_progress'}}));
-        await session.send(JSON.stringify({type:'response.completed',sequence_number:1,response}));return;
+        await send({type:'response.created',sequence_number:0,response:{...response,status:'in_progress'}});
+        await send({type:'response.completed',sequence_number:1,response});return;
       }
       body.stream=true;
       const headers=new Headers(this.input.request.headers);
@@ -101,14 +109,15 @@ export class ResponsesWebSocketSession {
       const id=randomUUID();
       const request=new Request(this.input.request.url,{method:'POST',headers,body:JSON.stringify(body),signal});
       deriveWorkerRequestIdentity(this.input.request,request,id);
-      const response=await runWithGatewayHooks(this.hooks,()=>runGatewayRequest(request,this.input.config,{servingRevision:this.input.servingRevision,webSocketConnection:{id:this.connectionId,signal:session.signal},transport:'websocket',websocketBridge:this.input.bridge,skipEntryRate:true,logging:this.input.logging,onCanonicalInput(input){logicalInput=[...input];}}));
+      const response=await runWithGatewayHooks(this.hooks,()=>runGatewayRequest(request,this.input.config,{servingRevision:this.input.servingRevision,webSocketConnection:{id:this.connectionId,signal:session.signal},transport:'websocket',websocketBridge:this.input.bridge,skipEntryRate:true,onCanonicalInput(input){logicalInput=[...input];}}));
       source=createBodySource(response.body,this.input.bridge.limits.maxMessageBytes,response.headers.get('content-encoding')??'',signal,{requestId:id,attemptId:id,direction:'response',stage:'client-response',version:1,contentType:response.headers.get('content-type')??'',contentEncoding:response.headers.get('content-encoding')??''});
       const wire=response.body && bodySourceFor(response.body)===source ? response.body : source.take() as ReadableStream<Uint8Array>|null;
       const handle:BodyHandle=controlledBodyHandle(source,wire,source.handle(),signal);
       if(!response.ok){
         let error=generationError(undefined);
         try{error=generationError(await handle.json({id:'websocket.error',mandatory:true,signal}));}catch{}
-        await this.error(session,error.code,response.status,error.details,error.type);return;
+        signal.throwIfAborted();
+        await this.error(send,error.code,response.status,error.details,error.type);return;
       }
       let terminal=false;
       const deliver=async(event:any)=>{
@@ -118,7 +127,7 @@ export class ResponsesWebSocketSession {
           terminal=true;
           if(completeHistory && event.type==='response.completed' && typeof event.response?.id==='string' && Array.isArray(event.response.output))this.remember(event.response.id,body.model,[...logicalInput,...event.response.output]);
         }
-        await session.send(JSON.stringify(event));
+        await send(event);
       };
       if(response.headers.get('content-type')?.includes('text/event-stream')){
         for await(const event of handle.events({id:'websocket.responses',mandatory:true,signal,backlogEvents:16,backlogBytes:this.input.bridge.limits.maxBufferedBytes})){
@@ -129,11 +138,12 @@ export class ResponsesWebSocketSession {
         const result:any=await handle.json({id:'websocket.responses',mandatory:true,signal});
         if(result?.object!=='response')throw new Error('Invalid Responses JSON');
         await deliver({type:'response.created',response:{...result,status:'in_progress',output:[]}});
-        await deliver({type:result.status==='incomplete'?'response.incomplete':result.status==='failed'?'response.failed':'response.completed',response:result});
+        const eventType = typeof result.status === 'string' ? `response.${result.status}` : '';
+        await deliver({type:TERMINALS.has(eventType) ? eventType : 'response.completed',response:result});
       }
       if(!terminal)throw new Error('Responses stream ended without terminal');
     }catch(error){
-      if(!session.signal.aborted)await this.error(session,signal.aborted?'codex_router_generation_cancelled':error instanceof DataAdmissionError?error.code:'codex_router_generation_failed',error instanceof DataAdmissionError?error.status:signal.aborted?499:502,error instanceof DataAdmissionError?error.details:undefined);
+      if(!session.signal.aborted)await this.error(send,signal.aborted?'codex_router_generation_cancelled':error instanceof DataAdmissionError?error.code:'codex_router_generation_failed',error instanceof DataAdmissionError?error.status:signal.aborted?499:502,error instanceof DataAdmissionError?error.details:undefined,undefined,signal.reason === RESPONSE_CANCELLED ? 'cancelled' : 'failed');
     }finally {source?.dispose();}
   }
 }

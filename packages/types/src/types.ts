@@ -283,6 +283,8 @@ export interface RouteConfig extends DirectionalModificationRules {
   retry?: RetryConfig;
 }
 
+export const DEFAULT_BODY_LOG_MAX_BYTES = 64 * 1024;
+
 export interface LoggingConfig {
   body?: {
     enabled: boolean;
