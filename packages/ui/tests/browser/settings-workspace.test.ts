@@ -525,9 +525,17 @@ test('a missing unacknowledged operation stays unknown on active query and reloa
     expect(id).toBeTruthy();
     expect(await marker()).toEqual({ version: 1, mutationId: id, accepted: false });
     expect(model.writes).toHaveLength(1);
+    const operationUrl = `${runtime.origin}/api/config/operations/${id}`;
+    const waitForOperationQuery = async () => {
+      const request = await page.waitForEvent('requestfinished', request => request.method() === 'GET' && request.url() === operationUrl);
+      return (await request.response())?.status();
+    };
 
     // A readable snapshot and runtime do not prove the original write was not committed.
+    const activeQuery = waitForOperationQuery();
     await page.getByRole('button', { name: 'Check this save', exact: true }).click();
+    // The phase is already unknown, so wait for the lookup before navigating away.
+    expect(await activeQuery).toBe(404);
     await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase', 'unknown');
     await expect(page.getByTestId('config-save-button')).toBeDisabled();
     await expect(page.locator('#config-websocket-max-message')).toBeEnabled();
@@ -536,7 +544,9 @@ test('a missing unacknowledged operation stays unknown on active query and reloa
 
     // Reload restores the same identity; it must not turn into a new submission.
     model.runtimeUnavailable = false;
+    const restoredQuery = waitForOperationQuery();
     await reloadSettings(page);
+    expect(await restoredQuery).toBe(404);
     await expect(page.getByTestId('page-config')).toHaveAttribute('data-submission-phase', 'unknown');
     await expect(page.getByTestId('config-save-button')).toBeDisabled();
     await expect(page.locator('#config-websocket-max-message')).toBeEnabled();

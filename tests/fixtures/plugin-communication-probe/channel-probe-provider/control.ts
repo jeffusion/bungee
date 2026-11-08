@@ -148,6 +148,7 @@ export function createControl(context: any) {
     snapshotBumps: 0,
     objectSize: 0,
     objectDigest: '',
+    objectReads: [] as Array<{ openedAt: number; lastReadAt: number | null; chunks: number; servedThrough: number }>,
     uploadDigest: '',
     uploadFrames: 0,
     uploadBytes: 0,
@@ -229,6 +230,7 @@ export function createControl(context: any) {
         snapshotBumps: state.snapshotBumps,
         objectSize: state.objectSize,
         objectDigest: state.objectDigest,
+        objectReads: state.objectReads,
         uploadDigest: state.uploadDigest,
         uploadFrames: state.uploadFrames,
         uploadBytes: state.uploadBytes,
@@ -307,7 +309,20 @@ export function createControl(context: any) {
       context.services.stream.provide(CHANNEL_OBJECT_CONTRACT, {
         open: ({ object }: any) => {
           if (object?.objectId !== CHANNEL_OBJECT_ID || object?.version !== 1) return null;
-          return { size: objectBytes.byteLength, digest: state.objectDigest, read: async (offset: number, length: number) => objectBytes.slice(offset, offset + length) };
+          // The source sees neither the worker PID nor the host's transfer ID.
+          const progress = { openedAt: Date.now(), lastReadAt: null as number | null, chunks: 0, servedThrough: 0 };
+          state.objectReads.push(progress);
+          return {
+            size: objectBytes.byteLength,
+            digest: state.objectDigest,
+            read: async (offset: number, length: number) => {
+              const bytes = objectBytes.slice(offset, offset + length);
+              progress.lastReadAt = Date.now();
+              progress.chunks += 1;
+              progress.servedThrough = offset + bytes.byteLength;
+              return bytes;
+            },
+          };
         },
       });
 

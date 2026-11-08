@@ -230,16 +230,24 @@ export class ChannelProbeConsumer {
   }
 
   async #probeStream(handshake: any): Promise<void> {
+    const startedAt = Date.now();
+    let transferId: string | null = null;
     try {
       const stream = this.#services.stream.open('channel-probe-provider', OBJECT_CONTRACT, { objectId: handshake.objectId, version: 1 }, {
         offset: 0, size: handshake.objectSize, digest: handshake.objectDigest, timeoutMs: 60_000,
       });
+      transferId = stream.transferId;
       const collected = await stream.collect();
       await this.#report({
         phase: 'stream', ok: true, bytes: collected.bytes,
         digestMatch: collected.digest === handshake.objectDigest, expectedBytes: handshake.objectSize,
+        transferId, startedAt, elapsedMs: Date.now() - startedAt,
       });
-    } catch (error) { await this.#report({ phase: 'stream', ok: false, code: codeOf(error) }); }
+    } catch (error) {
+      const facts = { transferId, startedAt, elapsedMs: Date.now() - startedAt, error: errorFacts(error) };
+      trace('stream-failed', facts);
+      await this.#report({ phase: 'stream', ok: false, code: codeOf(error), ...facts });
+    }
     try {
       const missing = this.#services.stream.open('channel-probe-provider', OBJECT_CONTRACT, { objectId: 'missing-object', version: 1 }, { timeoutMs: 15_000 });
       await missing.collect();
