@@ -14,6 +14,7 @@ import { WorkerAdmissionRegistry } from '../../../src/public-listener/admission-
 import { runtimePluginState } from '../../helpers/runtime-plugin-state';
 import type { ControlProjection, RepositorySnapshot } from '../../../src/config-storage';
 import { throwIfPublicationCancelled } from '../../../src/config-publication/publication-runner';
+import * as processIdentity from '../../../src/master-runtime/process-identity';
 
 const HASH: Sha256Digest = `sha256:${'a'.repeat(64)}`;
 const ANONYMOUS_MANAGEMENT_PROTECTION = Object.freeze({required:false,selectedProvider:null,generation:0});
@@ -381,7 +382,9 @@ describe('master process composition', () => {
         return client;
       },
     };
-    const handle = await startMasterComposition(dependencies);
+    // The storage lifecycle fixture has no real processes to identify.
+    const bootId = spyOn(processIdentity, 'readKernelBootId').mockResolvedValue('test:master-storage');
+    const handle = await startMasterComposition(dependencies).finally(() => bootId.mockRestore());
     expect(harness.managementOptions()!.health().management).toBe(true);
     failure!();
     expect(harness.managementOptions()!.health()).toMatchObject({live:true,management:false,data:false,degraded:true});
