@@ -1,3 +1,17 @@
+# [6.13.0](https://github.com/jeffusion/bungee/compare/v6.12.0...v6.13.0) (2026-11-08)
+
+
+### Bug Fixes
+
+* **ci:** 修复请求日志回归和异步竞态 ([a047817](https://github.com/jeffusion/bungee/commit/a0478174ea7bc1610ae8b29a080df67b2c70cfad))
+* **ci:** 等待配置查询完成并记录双 Worker 读流进度 ([c2dcbc0](https://github.com/jeffusion/bungee/commit/c2dcbc0c09f7d08b96d353cbecbc4f4f09615d5c))
+* **ci:** 隔离存储故障测试中的系统启动探测 ([a3a81bd](https://github.com/jeffusion/bungee/commit/a3a81bd5ef96fcffbe0bfedf0d82ec7cef4b2588))
+
+
+### Features
+
+* **logs:** 将请求日志迁移到可扩展插件 ([0cdb76f](https://github.com/jeffusion/bungee/commit/0cdb76fe8f1aa711d64fc3eca52730914d603945))
+
 # [6.12.0](https://github.com/jeffusion/bungee/compare/v6.11.3...v6.12.0) (2026-11-05)
 
 
