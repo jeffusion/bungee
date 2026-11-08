@@ -421,7 +421,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     const endpoint = (n: number) => ({id: uuid(n), position: 1, target: `http://127.0.0.1:${upstream!.port}${[11,12,15].includes(n)?'/v1/':'/'}`, weight: 100, priority: 1, is_disabled: false, plugins: []});
     const binding = (name: string, n: number, options?: any) => ({id: uuid(n), position: n, name, enabled: true, ...(options ? {options} : {})});
     aggregate = {
-      plugin_activations: ['models-dev', 'llm-protocol-adapter', 'codex-router', 'key-access', 'token-metering', 'token-stats', CODEX_PROCESS_PROBE].map(plugin_name => ({plugin_name})),
+      plugin_activations: ['models-dev', 'llm-protocol-adapter', 'codex-router', 'key-access', 'token-metering', 'token-stats', 'request-logs', CODEX_PROCESS_PROBE].map(plugin_name => ({plugin_name})),
       logical_configuration: {
         plugins: [binding(CODEX_PROCESS_PROBE, 22)],
         services: [{id: CHAT, position: 1, name: 'Chat fixture', plugins: [], endpoints: [endpoint(13)]}],
@@ -515,6 +515,17 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     expect(new Set(selected.map(call => call.requestId)).size).toBe(selected.length);
     expect(new Set(rows.map(row => row.attempt_id)).size).toBe(selected.length);
     if (completed) for (const row of rows) expect(row).toMatchObject({input_tokens: 4, output_tokens: 2, outcome: 'completed'});
+  }
+  async function assertHttpConversionDiagnostic(requestId: string, matches: (item: { param: string; reason?: string; action?: string }) => boolean) {
+    await waitUntil(() => {
+      const db = new Database(fixture!.accessDbPath, {readonly: true});
+      try {
+        const rows = db.query<{value: string}, [string]>(`SELECT j.value FROM access_logs, json_each(access_logs.processing_steps) AS j
+          WHERE method='POST' AND transport_type='http' AND json_extract(j.value,'$.step')='dispatch_conversion'
+          AND json_extract(j.value,'$.detail.requestId')=?`).all(requestId);
+        return rows.some(row => JSON.parse(row.value).detail.diagnostics.some(matches));
+      } finally {db.close();}
+    }, 'conversion diagnostic did not reach the HTTP request log', 12000);
   }
 
   test('publication rejects a missing binding protocol without changing the revision', async () => {
@@ -999,6 +1010,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       {type: 'web_search', external_web_access: false}];
     const socket = await openSocket();
     try {
+      let httpRequestId = '';
       for (const model of ['org/chat', 'org/anthropic']) {
         const raw = {model, input: smallHistory, tools: declarations, tool_choice: 'auto', stream: true, store: false, include: ['reasoning.encrypted_content']};
         const result = await fetch(`${proxy}/codex/responses`, {method: 'POST', headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'}, body: JSON.stringify(raw), signal: AbortSignal.timeout(20000)});
@@ -1006,6 +1018,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         expect(calls.at(-1)!.body.tools).toHaveLength(28);
         expect(JSON.stringify(calls.at(-1)!.body)).not.toContain('web_search');
         expect(JSON.stringify(calls.at(-1)!.body.messages)).toContain('custom result');
+        httpRequestId = calls.at(-1)!.requestId;
         const events = await socket.create(raw); expect(events.at(-1).type).toBe('response.completed');
         expect(calls.at(-1)!.body.tools).toHaveLength(28);
         expect(JSON.stringify(calls.at(-1)!.body.messages)).toContain('file result');
@@ -1013,14 +1026,8 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
         const denied = await post({...raw, stream: false, tool_choice: {type: 'web_search'}});
         expect(denied.status).toBe(422); expect(denied.body.param).toBe('tools[28].type'); expect(calls).toHaveLength(before);
       }
-      const requestId = calls.at(-1)!.requestId;
-      await waitUntil(() => {
-        const db = new Database(fixture!.accessDbPath, {readonly: true});
-        try {
-          const row: any = db.query("SELECT j.value FROM access_logs, json_each(access_logs.processing_steps) AS j WHERE json_extract(j.value,'$.step')='dispatch_conversion' AND json_extract(j.value,'$.detail.requestId')=?").get(requestId);
-          return row && JSON.parse(row.value).detail.diagnostics.some((item: any) => item.param === 'tools[28]' && item.reason === 'optional_hosted_web_search_unavailable' && item.action === 'omitted');
-        } finally { db.close(); }
-      }, 'optional hosted search diagnostic was not logged', 12000);
+      await assertHttpConversionDiagnostic(httpRequestId, item => item.param === 'tools[28]'
+        && item.reason === 'optional_hosted_web_search_unavailable' && item.action === 'omitted');
       await assertMetered(calls.slice(start));
     } finally { await socket.close(); }
   }, 60000);
@@ -1028,21 +1035,15 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     const start=calls.length;
     const socket=await openSocket();
     try{
+      let httpRequestId = '';
       for(const [captured,count] of [[capturedBase,11],[capturedPreferences,13]] as const){
         const raw=await fetch(`${proxy}/codex/responses`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:JSON.stringify({...captured,model:'org/chat'}),signal:AbortSignal.timeout(20000)});
         expect(raw.status).toBe(200);const text=await raw.text();expect(text).toContain('response.completed');
         expect(calls.at(-1)!.body.tools).toHaveLength(count);expect(calls.at(-1)!.path).toBe('/v1/chat/completions');
+        httpRequestId = calls.at(-1)!.requestId;
         const result=await socket.create({...captured,model:'org/chat'});expect(result.at(-1).type).toBe('response.completed');expect(calls.at(-1)!.body.tools).toHaveLength(count);
       }
-      const conversionId=calls.at(-1)!.requestId;
-      await waitUntil(()=>{
-        const db=new Database(fixture!.accessDbPath,{readonly:true});
-        try{
-          const row:any=db.query("SELECT j.value FROM access_logs, json_each(access_logs.processing_steps) AS j WHERE json_extract(j.value,'$.step')='dispatch_conversion' AND json_extract(j.value,'$.detail.requestId')=?").get(conversionId);
-          const step=row?.value && JSON.parse(row.value);
-          return step?.detail?.diagnostics?.some((item:any)=>item.param==='stream_options.reasoning_summary_delivery');
-        }finally{db.close();}
-      },'conversion diagnostic did not reach the existing request log',12000);
+      await assertHttpConversionDiagnostic(httpRequestId, item => item.param==='stream_options.reasoning_summary_delivery');
       const carrier={type:'additional_tools',role:'developer',tools};
       const first=await post({model:'org/chat',input:[carrier,...smallHistory]});expect(first.status).toBe(200);
       const origin=calls.at(-1)!.pid;

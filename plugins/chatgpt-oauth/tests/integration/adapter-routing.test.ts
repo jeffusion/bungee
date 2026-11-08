@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createDataPlaneRuntime } from '../../../../packages/core/tests/helpers/data-plane-runtime';
+import { registerRequestLogs } from '../../../../packages/core/tests/helpers/request-log';
 const dataPlane = await createDataPlaneRuntime();
 const { ScopedPluginRegistry, setScopedPluginRegistry } = await import('../../../../packages/core/src/scoped-plugin-registry');
 const { setBoundControlClientProvider } = await import('../../../../packages/core/src/config-worker/runtime-dependencies');
@@ -163,6 +164,7 @@ describe('ChatGPT OAuth request handler integration', () => {
         await registry.createInstance(binding === 'upstream' ? { type: binding, routeId, upstreamId: 'primary' } : binding === 'service' ? { type: binding, routeId, serviceName: 'terminal' } : { type: binding, routeId },
           { name: 'chatgpt-oauth', options: { accountRef: 'integration-account' } } as any);
         }
+        registerRequestLogs(registry.getGatewayHooks());
         setScopedPluginRegistry(registry);
         const terminalFrame = terminal === 'cancelled' ? 'data: {"type":"response.created","response":{"status":"in_progress"}}\n\n'
           : `data: ${JSON.stringify({ type: `response.${terminal}`, response: {
@@ -186,7 +188,7 @@ describe('ChatGPT OAuth request handler integration', () => {
             body: JSON.stringify({ model: 'codex', stream: true,
               ...(!chat ? { input: 'hi' } : { messages: [{ role: 'user', content: 'hi' }] }) }),
             headers: { 'content-type': 'application/json' },
-          }), config);
+          }), config, { logging: { accessLogWriter } });
           const reader = response.body!.getReader();
           let received = '';
           const decoder = new TextDecoder();
@@ -200,7 +202,7 @@ describe('ChatGPT OAuth request handler integration', () => {
           await reader.cancel('closed after terminal');
           await accessLogWriter.flush();
           const row = accessLogWriter.getDatabase().query(
-            'SELECT status, success, protocol_outcome, transport_outcome, transport_code FROM access_logs WHERE path = ? ORDER BY id DESC LIMIT 1',
+            'SELECT status, success, protocol_outcome, transport_outcome, transport_code FROM access_logs WHERE path = ? AND record_kind IS NULL ORDER BY id DESC LIMIT 1',
           ).get(routeId);
           expect(row).toEqual({ status: 200, success: terminal === 'completed' ? 1 : 0, protocol_outcome: terminal,
             transport_outcome: 'cancelled', transport_code: 'client_cancelled' });
@@ -230,6 +232,7 @@ describe('ChatGPT OAuth request handler integration', () => {
       await registry.createInstance(scope === 'upstream' ? { type: scope, routeId, upstreamId: 'primary' } : scope === 'service' ? { type: scope, routeId, serviceName: 'terminal' } : { type: scope, routeId },
         { name: 'chatgpt-oauth', options: { accountRef: 'integration-account' } } as any);
     }
+    registerRequestLogs(registry.getGatewayHooks());
     setScopedPluginRegistry(registry);
     global.fetch = (async () => new Response('data: {"type":"response.completed","response":{"id":"resp_combined","status":"completed","output":[]}}\n\n',
       { headers: { 'content-type': 'text/event-stream' } })) as unknown as typeof fetch;
@@ -239,13 +242,13 @@ describe('ChatGPT OAuth request handler integration', () => {
     try {
       const response = await handleRequest(new Request(`http://localhost${routeId}`, { method: 'POST',
         headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'codex', stream: false,
-          ...(routeId === RESPONSES_PATH ? { input: 'hi' } : { messages: [{ role: 'user', content: 'hi' }] }) }) }), config);
+          ...(routeId === RESPONSES_PATH ? { input: 'hi' } : { messages: [{ role: 'user', content: 'hi' }] }) }) }), config, { logging: { accessLogWriter } });
       expect(response.status).toBe(200);
       expect(response.headers.get('content-type')).toContain('application/json');
       const payload = await response.json() as any;
       expect(routeId === RESPONSES_PATH ? payload.status : payload.object).toBe(routeId === RESPONSES_PATH ? 'completed' : 'chat.completion');
       await accessLogWriter.flush();
-      expect(accessLogWriter.getDatabase().query('SELECT protocol_outcome, transport_outcome FROM access_logs WHERE path = ? ORDER BY id DESC LIMIT 1').get(routeId))
+      expect(accessLogWriter.getDatabase().query('SELECT protocol_outcome, transport_outcome FROM access_logs WHERE path = ? AND record_kind IS NULL ORDER BY id DESC LIMIT 1').get(routeId))
         .toEqual({ protocol_outcome: 'completed', transport_outcome: 'completed' });
     } finally {
       accessLogWriter.getDatabase().query('DELETE FROM access_logs WHERE path = ?').run(routeId);
@@ -267,6 +270,7 @@ describe('ChatGPT OAuth request handler integration', () => {
       { type: 'upstream', routeId, upstreamId: 'primary' },
       { name: 'chatgpt-oauth', options: { accountRef: 'integration-account' } } as any,
     );
+    registerRequestLogs(registry.getGatewayHooks());
     setScopedPluginRegistry(registry);
     let fetchCount = 0;
     let originalUpstreamResponse: Response | undefined;
@@ -294,11 +298,11 @@ describe('ChatGPT OAuth request handler integration', () => {
         method: 'POST',
         body: JSON.stringify({ model: 'codex', messages: [{ role: 'user', content: 'hello' }] }),
         headers: { 'content-type': 'application/json' },
-      }), config);
+      }), config, { logging: { accessLogWriter } });
       const body = await response.text();
       await accessLogWriter.flush();
       const row = accessLogWriter.getDatabase().prepare(
-        'SELECT status, success, protocol_outcome, protocol_code FROM access_logs WHERE path = ? ORDER BY timestamp DESC LIMIT 1',
+        'SELECT status, success, protocol_outcome, protocol_code FROM access_logs WHERE path = ? AND record_kind IS NULL ORDER BY timestamp DESC LIMIT 1',
       ).get(routeId) as { status: number; success: number; protocol_outcome: string; protocol_code: string } | null;
 
       expect(response.status).toBe(400);
@@ -356,6 +360,7 @@ describe('ChatGPT OAuth request handler integration', () => {
         return true as T;
       },
     }));
+    registerRequestLogs(registry.getGatewayHooks());
     setScopedPluginRegistry(registry);
     let originalUpstreamResponse: Response | undefined;
     let fetchCount = 0;
@@ -390,11 +395,11 @@ describe('ChatGPT OAuth request handler integration', () => {
         method: 'POST',
         body: JSON.stringify({ model: 'codex', messages: [{ role: 'user', content: 'hello' }] }),
         headers: { 'content-type': 'application/json' },
-      }), config, { servingRevision: 26 });
+      }), config, { servingRevision: 26, logging: { accessLogWriter } });
       const body = await response.text();
       await accessLogWriter.flush();
       const row = accessLogWriter.getDatabase().prepare(
-        'SELECT status, success, protocol_outcome, protocol_code FROM access_logs WHERE path = ? ORDER BY timestamp DESC LIMIT 1',
+        'SELECT status, success, protocol_outcome, protocol_code FROM access_logs WHERE path = ? AND record_kind IS NULL ORDER BY timestamp DESC LIMIT 1',
       ).get(routeId) as { status: number; success: number; protocol_outcome: string; protocol_code: string } | null;
       const selected = runtime.runtimeState.get('managed-chatgpt-401')?.upstreams[0];
 

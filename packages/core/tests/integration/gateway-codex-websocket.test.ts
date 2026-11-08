@@ -2,6 +2,8 @@ import { registerRequestLogs } from '../helpers/request-log';
 import {afterEach,expect,test} from 'bun:test';
 import {ScopedPluginRegistry,setScopedPluginRegistry,getScopedPluginRegistry} from '../../src/scoped-plugin-registry';
 import {runGatewayRequest,runGatewayWebSocket} from '../../src/gateway/runtime';
+import type {AccessLogEntry} from '../../src/logger/access-log-writer';
+import type {FileLogEntry} from '../../src/logger/file-log-writer';
 import type {RequestLoggerDependencies} from '../../src/logger/request-logger';
 import {createWebSocketBridge,isWebSocketUpgradeRequest} from '../../src/websocket';
 import capturedBase from '../../../../tests/fixtures/codex-requests/captured-app-base.json';
@@ -10,7 +12,7 @@ const path=new URL('../fixtures/codex-dispatch-plugin.ts',import.meta.url).pathn
 const previous=getScopedPluginRegistry();afterEach(()=>setScopedPluginRegistry(previous));
 async function waitUntil(predicate:()=>boolean){for(let i=0;i<200;i++){if(predicate())return;await Bun.sleep(10);}throw new Error('Timeout');}
 async function setup(endpoints:any[], bindModels=true, logging?:RequestLoggerDependencies){
-  const config:any={logging:{enabled:false},routes:[{id:'e',path:'/codex',websocket:{enabled:true},path_rewrite:{'^/codex':''},plugins:[{name:'codex-router',path,options:{models:!bindModels?[]:endpoints.map((endpoint,index)=>({source:`m${index}`,provider:endpoint.provider??'p',model:endpoint.model ?? `m${index}`,target:{type:'route',id:`t${index}`,protocol:endpoint.protocol}}))}}],endpoints:[{target:endpoints[0].target}]},...endpoints.map((endpoint,index)=>({id:`t${index}`,path:`/target${index}`,plugins:endpoint.plugins??[],path_rewrite:{[`^/target${index}`]:''},websocket:{enabled:endpoint.ws===true},endpoints:[{id:`u${index}`,target:endpoint.target}]}))]};
+  const config:any={logging:{body:{enabled:!!logging?.bodyStorage}},routes:[{id:'e',path:'/codex',websocket:{enabled:true},path_rewrite:{'^/codex':''},plugins:[{name:'codex-router',path,options:{models:!bindModels?[]:endpoints.map((endpoint,index)=>({source:`m${index}`,provider:endpoint.provider??'p',model:endpoint.model ?? `m${index}`,target:{type:'route',id:`t${index}`,protocol:endpoint.protocol}}))}}],endpoints:[{target:endpoints[0].target}]},...endpoints.map((endpoint,index)=>({id:`t${index}`,path:`/target${index}`,plugins:endpoint.plugins??[],path_rewrite:{[`^/target${index}`]:''},websocket:{enabled:endpoint.ws===true},endpoints:[{id:`u${index}`,target:endpoint.target}]}))]};
   const registry=new ScopedPluginRegistry(import.meta.dir);expect((await registry.initializeFromConfig(config)).failed).toBe(0);if(logging)registerRequestLogs(registry.getGatewayHooks());setScopedPluginRegistry(registry);
   const bridge=createWebSocketBridge({closeTimeoutMs:200});const completions=new Set<Promise<void>>();
   const server=Bun.serve({hostname:'127.0.0.1',port:0,websocket:bridge.websocket,async fetch(request,server){if(!isWebSocketUpgradeRequest(request))return runGatewayRequest(request,config,{logging});const result=await runGatewayWebSocket({request,nativeRequest:request,server,config,bridge,servingRevision:1,logging,retain(promise){completions.add(promise);void promise.finally(()=>completions.delete(promise));}});return result.response;}});
@@ -58,24 +60,41 @@ test('provider extensions survive HTTP JSON and WS SSE while invalid upstream ou
   expect(calls).toBe(6);
  }finally{await env.close();upstream.stop(true);}
 });
-test('identical Responses POST paths log client HTTP or WS regardless of HTTP upstream and client headers',async()=>{
-  const access:any[]=[],files:any[]=[],calls:any[]=[];
+test('Responses logs distinguish client HTTP POST from a WebSocket operation on the same path',async()=>{
+  const access=new Map<string,AccessLogEntry>(),files:FileLogEntry[]=[],calls:any[]=[];
+  const bodies=new Map<string,unknown>();
   const upstream=Bun.serve({hostname:'127.0.0.1',port:0,async fetch(request){calls.push({method:request.method,upgrade:request.headers.get('upgrade')});return sse(chat('answer'));}});
   const env=await setup([{protocol:'chat_completions',target:`http://127.0.0.1:${upstream.port}`,ws:true}],true,{
-    accessLogWriter:{write(entry){access.push(structuredClone(entry));},updateResponseBodyId(){},updateProtocolOutcome(){},updateTransportOutcome(){}},
+    accessLogWriter:{write(entry){access.set(entry.requestId,structuredClone(entry));},updateResponseBodyId(){},updateProtocolOutcome(){},updateTransportOutcome(){}},
     fileLogWriter:{write(entry){files.push(structuredClone(entry));}},
+    bodyStorage:{async save(){return null;},async saveStream(id,chunks,type){
+      let text='';for await(const chunk of chunks)text+=chunk;
+      const key=`${type}-${id}`;bodies.set(key,JSON.parse(text));return key;
+    }},
   });
   try {
     const body={model:'m0',input:'hello',stream:true};
     const response=await fetch(env.url,{method:'POST',headers:{'content-type':'application/json','x-transport-type':'websocket'},body:JSON.stringify(body)});
     expect(response.status).toBe(200);expect(await response.text()).toContain('response.completed');
-    env.client.send(JSON.stringify({...body,type:'response.create'}));expect((await env.terminal()).at(-1).type).toBe('response.completed');
-    const attempts = () => files.filter(entry => entry.recordKind !== 'operation');
-    await waitUntil(()=>attempts().length===2);
-    expect(attempts().map(entry=>({method:entry.method,path:entry.path,type:entry.transportType}))).toEqual([
-      {method:'POST',path:'/codex/responses',type:'http'}, {method:'POST',path:'/codex/responses',type:'websocket'},
+    const create={...body,type:'response.create',client_metadata:{trace:'fixture'}};
+    env.client.send(JSON.stringify(create));
+    const frames=await env.terminal();expect(frames.at(-1).type).toBe('response.completed');
+    const attempts=()=>files.filter(entry=>entry.recordKind!=='operation');
+    const operations=()=>files.filter(entry=>entry.transportType==='websocket');
+    await waitUntil(()=>attempts().some(entry=>entry.transportType==='http') && operations().length>0);
+    const path='/codex/responses';
+    const operation={recordKind:'operation',method:'GET',path,status:101,transportType:'websocket',protocol:'responses',operation:'response.create',protocolOutcome:'completed'};
+    expect(attempts()).toEqual([
+      expect.objectContaining({method:'POST',path,status:200,transportType:'http'}),
     ]);
-    for(const file of attempts())expect(access.filter(entry=>entry.requestId===file.requestId).every(entry=>entry.transportType===file.transportType)).toBe(true);
+    expect(operations()).toEqual([expect.objectContaining(operation)]);
+    const [file]=operations();
+    expect([...access.values()].filter(entry=>entry.transportType==='websocket')).toEqual([
+      expect.objectContaining({...operation,requestId:file!.requestId}),
+    ]);
+    expect(access.get(attempts()[0]!.requestId)).toMatchObject({method:'POST',path,transportType:'http'});
+    expect(bodies.get(file!.originalReqBodyId!)).toEqual(create);
+    expect(bodies.get(file!.respBodyId!)).toEqual(frames);
     expect(calls).toEqual([{method:'POST',upgrade:null},{method:'POST',upgrade:null}]);
   }finally{await env.close();upstream.stop(true);}
 });
