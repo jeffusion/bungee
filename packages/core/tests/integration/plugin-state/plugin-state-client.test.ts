@@ -557,10 +557,13 @@ describe('IPC physical progress and orphan resources',()=>{
     const client=await fault('normal',{requestTimeoutMs:250,progressTimeoutMs:30,onWorkerFailure:()=>{failures++;}});
     const journal=client.journal({namespace:'rpc.long-reconcile',privateStateNamespace:'owner',resolveExternal:()=>({reconcile:()=>{started.resolve();return finish.promise;}})});
     await journal.status();const command=execution('long-reconcile','external-contract',async()=>{throw new Error('unconfirmed');});
-    expect(await failure(journal.execute(command))).toMatchObject({code:'unknown'});
+    // Seed a journal-level unknown result using a business deadline, independent of the ordinary IPC timeout.
+    expect(await failure(journal.execute({...command,context:{...command.context,deadlineAt:Date.now()+1000}}))).toMatchObject({code:'unknown'});
     const {executeBusiness,...request}=command;
-    const pending=journal.reconcile({...request,context:{...request.context,deadlineAt:Date.now()+1000}});
+    const deadlineAt=Date.now()+1000;
+    const pending=journal.reconcile({...request,context:{...request.context,deadlineAt}});
     await started.promise;await new Promise(resolve=>setTimeout(resolve,280));expect(failures).toBe(0);
+    expect(client.health()).toMatchObject({physicalCallbackCount:1,requests:[{phase:'sent',deadlineAt}]});
     finish.resolve({status:'committed',result:{confirmed:true}});expect(await pending).toEqual({confirmed:true});
   });
   test('journal response does not free late physical callback capacity or its token',async()=>{

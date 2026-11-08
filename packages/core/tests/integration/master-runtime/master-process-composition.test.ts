@@ -90,6 +90,7 @@ function fixture(
     fenceWorkerLaunchNotStarted: unused,
     recordWorkerLaunchAdmitted: unused,
     recordWorkerLaunchExit: unused,
+    recordWorkerLaunchCapacityReclaimed: unused,
     getWorkerLaunch: async () => null,
     getWorkerLaunchAllocationFacts: async () => null,
     getWorkerLaunchInventory: async () => [],
@@ -1085,7 +1086,8 @@ function recoveryDependencies(input: {
     refreshControlProjection: async (): Promise<ControlProjection> => ({snapshot:repository.getSnapshot(),managementProtection:ANONYMOUS_MANAGEMENT_PROTECTION}),
     getSnapshot: () => input.getSnapshot?.() ?? snapshot,
     getActivePublication: async () => input.getActivePublication?.() ?? null,
-    claimPublicationTarget: async () => input.getActivePublication?.() ?? null,
+    // Recovery fixtures inject an owner independently of the background publication queue.
+    claimPublicationTarget: async (): Promise<unknown> => null,
     requestPublicationCancellation: async () => { throw new Error('unused fake method'); },
     enterPublicationPrepare: async () => ({ kind: 'granted' as const, operation: {} as never }),
     recordPublicationCandidateExit: async () => undefined,
@@ -1095,6 +1097,7 @@ function recoveryDependencies(input: {
     fenceWorkerLaunchNotStarted: async () => { throw new Error('unused fake method'); },
     recordWorkerLaunchAdmitted: async () => { throw new Error('unused fake method'); },
     recordWorkerLaunchExit: async () => { throw new Error('unused fake method'); },
+    recordWorkerLaunchCapacityReclaimed: async () => { throw new Error('unused fake method'); },
     getWorkerLaunch: async () => null,
     getWorkerLaunchAllocationFacts: async () => null,
     getWorkerLaunchInventory: async () => [],
@@ -1507,15 +1510,11 @@ test('creation permit refuses without a trusted ingress registry even with empty
 
 test('does not recover before the active snapshot is durably remembered after a transient pre-read failure', async () => {
   const active = { snapshot: recoverySnapshot(), operation: { mutation_id: 'mutation-1' } };
-  let reads = 0;
+  const initialClaim = deferred<void>();
+  let claims = 0;
   const harness = recoveryDependencies({
     withIngress: true,
-    primeRuntime: true,
-    getActivePublication: () => {
-      reads += 1;
-      if (reads === 1) throw Object.assign(new Error('repository read failed'), { code: 'repository_failure' });
-      return reads === 2 ? active : null;
-    },
+    getActivePublication: () => active,
     recoverAndPublish: async (options) => {
       harness.events.push('base-recover');
       await harness.workerFactory.spawn(harness.serving.process.identity);
@@ -1524,21 +1523,27 @@ test('does not recover before the active snapshot is durably remembered after a 
       return { kind: 'converged', http_status: 200, operation: {} as never, serving: [harness.serving] };
     },
   });
+  harness.repository.claimPublicationTarget = async () => {
+    claims += 1;
+    if (claims === 1) initialClaim.resolve();
+    if (claims === 2) throw Object.assign(new Error('repository read failed'), { code: 'repository_failure' });
+    return claims === 3 ? active : null;
+  };
   const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
   process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 1).toString('base64');
   let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
   try {
     handle = await startMasterComposition(harness.dependencies);
-    await harness.recover!().catch((error) => { throw error; });
+    await initialClaim.promise;
+    expect(await harness.recover()).toMatchObject({ kind: 'outcome_unknown', code: 'recovery_replacements_failed' });
+    expect(harness.events).not.toContain('append');
+    expect(harness.events).not.toContain('base-recover');
     await harness.recover!().catch((error) => { throw error; });
     expect(harness.events.indexOf('append')).toBeGreaterThanOrEqual(0);
     expect(harness.events.filter((event) => event === 'append')).toHaveLength(1);
     expect(harness.events.indexOf('append')).toBeLessThan(harness.events.indexOf('base-recover'));
     expect(harness.events.indexOf('append')).toBeLessThan(harness.events.indexOf('worker-spawn'));
     expect(harness.events.indexOf('append')).toBeLessThan(harness.events.indexOf('ingress-prepare'));
-    // The owner snapshot is also read for control reconciliation, so only the
-    // pre-append retry count is fixed.
-    expect(reads).toBeGreaterThanOrEqual(2);
   } finally {
     await handle?.shutdown().catch(() => undefined);
     if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
@@ -1556,7 +1561,7 @@ test('does not revive non-durable ingress recovery work', async () => {
     realRuntime: true,
     getActivePublication: () => {
       reads += 1;
-      if (reads === 2) throw Object.assign(new Error('serving snapshot is corrupt'), { code: 'serving_snapshot_corrupt' });
+      if (reads === 1) throw Object.assign(new Error('serving snapshot is corrupt'), { code: 'serving_snapshot_corrupt' });
       return null;
     },
   });
@@ -1566,6 +1571,7 @@ test('does not revive non-durable ingress recovery work', async () => {
   try {
     handle = await startMasterComposition(harness.dependencies);
     const readsBeforeRecovered = reads;
+    expect(readsBeforeRecovered).toBe(1);
     await harness.ingressOptions()!.onRecovered!({ kind: 'same_boot' }).catch((error) => { throw error; });
     await handle.shutdown().catch(() => undefined);
     expect(harness.counts().reports).toBe(0);
@@ -1748,6 +1754,9 @@ test('new-boot gate aborts an in-flight admission before cleanup and retries rep
 });
 
 test('a queued new-boot task does not discard a new admission after recovery stops', async () => {
+  const initialClaim = deferred<void>();
+  const active = { snapshot: recoverySnapshot(), operation: { mutation_id: 'mutation-1' } };
+  let claimActive = false;
   let release!: () => void;
   const blocker = new Promise<void>((resolve) => { release = resolve; });
   let observeEntry!: () => void;
@@ -1756,18 +1765,21 @@ test('a queued new-boot task does not discard a new admission after recovery sto
   const harness = recoveryDependencies({
     withIngress: true,
     primeRuntime: true,
-    getActivePublication: () => ({ snapshot: recoverySnapshot(), operation: { mutation_id: 'mutation-1' } }),
+    getActivePublication: () => active,
     recoverAndPublish: async () => {
       observeEntry();
       await blocker;
       return null;
     },
   });
+  harness.repository.claimPublicationTarget = async () => { initialClaim.resolve(); return claimActive ? active : null; };
   const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
   process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 1).toString('base64');
   let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
   try {
     handle = await startMasterComposition(harness.dependencies);
+    await initialClaim.promise;
+    claimActive = true;
     const firstRecovery = harness.recover!();
     // Observe the actual recovery entry, not an implementation-dependent number
     // of microtasks before it. A missing entry must still fail within a bound.
@@ -1795,6 +1807,10 @@ test('a queued new-boot task does not discard a new admission after recovery sto
 });
 
 test('stops reconciliation without ingress and never revives repository work after shutdown', async () => {
+  const publicationPreparing = deferred<void>();
+  const finishPreparation = deferred<void>();
+  let preparations = 0;
+  let claims = 0;
   let activeReads = 0;
   let appends = 0;
   let starts = 0;
@@ -1818,17 +1834,30 @@ test('stops reconciliation without ingress and never revives repository work aft
       return { kind: 'startup_failed', failures: [], serving: [] };
     },
   });
+  Object.assign(harness.repository, {
+    async applyPendingRequestLogsDefault() {
+      preparations += 1;
+      if (preparations === 1) return;
+      publicationPreparing.resolve();
+      await finishPreparation.promise;
+    },
+  });
+  harness.repository.claimPublicationTarget = async () => { claims += 1; return null; };
   harness.repository.appendServingSnapshot = async () => { appends += 1; };
   harness.workerFactory.spawn = () => { spawns += 1; return harness.serving.process; };
   let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
   try {
     handle = await startMasterComposition({ ...harness.dependencies, configurationRecoveryScheduler });
+    await publicationPreparing.promise;
     expect(timers.size).toBe(0);
-    const before = { activeReads, appends, starts, spawns };
-    await handle.shutdown().catch((error) => { throw error; });
-    await Promise.resolve();
-    expect({ activeReads, appends, starts, spawns }).toEqual(before);
+    expect(claims).toBe(1);
+    const before = { claims, activeReads, appends, starts, spawns };
+    const shuttingDown = handle.shutdown();
+    finishPreparation.resolve();
+    await shuttingDown;
+    expect({ claims, activeReads, appends, starts, spawns }).toEqual(before);
   } finally {
+    finishPreparation.resolve();
     for (const callback of timers.values()) callback();
     await handle?.shutdown().catch(() => undefined);
   }
@@ -2310,6 +2339,7 @@ const stoppedSnapshotRecovery = { state: 'stopped', final_reason_code: 'safety_o
 
 test.each(['failed', 'throw', 'cancel'] as const)(
   'bounds cached revisions after repeated %s publications and recovery, retaining the old admission', async mode => {
+    const initialClaim = deferred<void>();
     let current = changedSnapshot(1);
     let active: any = null;
     const cancelled = new AbortController();
@@ -2333,11 +2363,13 @@ test.each(['failed', 'throw', 'cancel'] as const)(
         return { kind: 'startup_ready', serving: [serving] };
       },
     });
+    harness.repository.claimPublicationTarget = async () => { initialClaim.resolve(); return active; };
     const admission = new WorkerAdmissionRegistry();
     const observer = observeAdmissionCache(current);
     let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
     try {
       handle = await startMasterComposition({ ...harness.dependencies, createAdmission: () => admission });
+      await initialClaim.promise;
       observer.restore();
       const cache = observer.cache();
       for (let revision = 2; revision <= 65; revision++) {

@@ -1224,7 +1224,9 @@ export async function startMasterComposition(
     const evidenceKey = (worker: Pick<ServingConfigWorker, 'revision' | 'content_hash' | 'plugin_catalog_hash'>): string =>
       `${worker.revision}:${worker.content_hash}:${worker.plugin_catalog_hash}`;
     const claimPublication = async (): Promise<ActiveConfigurationPublication | null> => {
+      if (runtimeStopping) return null;
       await resources.repository!.applyPendingRequestLogsDefault?.(Array.from({ length: options.workerCount }, (_, slot) => slot));
+      if (runtimeStopping) return null;
       return resources.repository!.claimPublicationTarget(catalog.hash, dependencies.clock.now());
     };
     const trackServing = (
@@ -1959,6 +1961,7 @@ export async function startMasterComposition(
             }
             return { kind: 'outcome_unknown', fatal: false, code: 'recovery_replacements_failed', error, serving: [], pending: [] };
           }
+          if (runtimeStopping) return null;
           if (active === null) {
             const current = await resources.repository!.getCurrentOperationState();
             const failed = currentControlReadinessFailure(current);
@@ -2096,7 +2099,7 @@ export async function startMasterComposition(
           return { kind: 'outcome_unknown', fatal: false, code: 'recovery_replacements_failed',
             error, serving: trackedAdmission.snapshot(), pending: [] };
         }
-        if (active === null || ingressBootRecoveryGate.isActive()) return null;
+        if (active === null || runtimeStopping || ingressBootRecoveryGate.isActive()) return null;
         const update = new AbortController();
         activeUpdate = update;
         try {

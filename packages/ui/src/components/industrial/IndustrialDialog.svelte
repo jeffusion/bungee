@@ -17,13 +17,17 @@
   // Programmatic openers do not register a Dialog.Trigger in Bits UI 0.22.
   // Supply its supported focus destination; the primitive still owns focus handling.
   $effect.pre(() => { if (open) opener = document.activeElement instanceof HTMLElement ? document.activeElement : null; });
+  // Bits UI moves focus asynchronously; a control may already have received it.
+  function openingFocus() {
+    if (open && content && !content.contains(document.activeElement)) return content;
+  }
   function closed() {
     const destination = returnFocus ?? opener;
     if (!open && destination?.isConnected) destination.focus({ preventScroll: true });
   }
 </script>
 
-<Dialog.Root bind:open closeOnEscape={!busy} closeOnOutsideClick={!busy} openFocus={() => content} closeFocus={() => returnFocus ?? opener}
+<Dialog.Root bind:open closeOnEscape={!busy} closeOnOutsideClick={!busy} openFocus={openingFocus} closeFocus={() => returnFocus ?? opener}
   onOutsideClick={(event) => { if (busy) event.preventDefault(); }} {onOpenChange}>
   <Dialog.Content bind:el={content} onClosed={closed} class="nx-panel-raised nx-bracketed flex max-h-[calc(100dvh-2rem)] flex-col gap-0 rounded-none border-carbon-600 bg-carbon-800 p-0 shadow-industrial overflow-visible"
     style={`width: min(${width}, calc(100vw - 2rem)); max-width: calc(100vw - 2rem)`}

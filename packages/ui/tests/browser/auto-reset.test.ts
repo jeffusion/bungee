@@ -125,11 +125,17 @@ try {
   await dialog.waitFor({ state: 'hidden' });
   assert.deepEqual(settings, [{ accountRef: 'simulation-account', enabled: false, leadMinutes: 45, lowBalanceEnabled: true, remainingPercent: 20 }]);
 
-  await configure.click();
+  // Reproduce focus entering the switch before the dialog's delayed autofocus runs.
+  await page.clock.install({ time: new Date('2026-01-01T00:00:00Z') });
+  await page.clock.pauseAt(new Date('2026-01-01T00:01:00Z'));
+  await configure.press('Enter');
   await dialog.waitFor();
   assert.equal(await nearExpiry.getAttribute('aria-checked'), 'false', 'the near-expiry strategy remains independent');
   assert.equal(await lowBalance.getAttribute('aria-checked'), 'true');
-  await nearExpiry.press('Space');
+  await nearExpiry.focus();
+  await page.clock.runFor(1);
+  await page.keyboard.press('Space');
+  await page.clock.resume();
   await expect(nearExpiry).toHaveAttribute('aria-checked', 'true');
   assert.equal(settings.length, 1, 'changing the other strategy must also wait for explicit save');
   await dialog.getByRole('button', { name: 'Save strategies', exact: true }).click();

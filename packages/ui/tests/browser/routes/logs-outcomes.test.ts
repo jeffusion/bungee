@@ -102,46 +102,49 @@ test('browser filters and CSV exports match the real SQLite chain API', async ()
     const dbPath = resolve(root, 'access.db');
     expect((await new MigrationManager(dbPath).migrate()).success).toBeTrue();
     db = new Database(dbPath);
-    const insert = db.query(`INSERT INTO access_logs (request_id,timestamp,method,path,status,duration,created_at,request_type,parent_request_id,attempt_number,transport_outcome,transport_type)
-      VALUES (?,?, 'POST', ?, ?, 10, ?, ?, ?, ?, ?, ?)`);
+    const insert = db.query(`INSERT INTO access_logs (request_id,timestamp,method,path,status,duration,created_at,request_type,access_id,attempt_number,transport_outcome,transport_type,record_kind,operation_id)
+      VALUES (?,?,?,?,?,10,?,?,?,?,?,?,?,?)`);
     const now = Date.now() - 1000;
-    insert.run('actual-retry', now, '/actual/retry', 503, now / 1000, 'retry', 'actual-chain', 1, 'failed', 'websocket');
-    insert.run('actual-final', now + 10, '/actual/final', 200, now / 1000, 'final', 'actual-chain', 2, 'completed', 'websocket');
-    insert.run('actual-cancel', now, '/actual/cancel', 200, now / 1000, 'final', null, null, 'cancelled', 'http');
-    insert.run('actual-http500', now, '/actual/http500', 500, now / 1000, 'final', null, null, 'completed', 'http');
-    insert.run('actual-history', now, '/actual/history', 200, now / 1000, 'final', null, null, 'completed', null);
+    insert.run('actual-ws', now, 'GET', '/actual/ws', 101, now / 1000, 'final', 'actual-ws-access', null, 'completed', 'websocket', 'operation', 'actual-ws');
+    insert.run('actual-retry', now, 'POST', '/actual/retry', 503, now / 1000, 'retry', 'actual-chain', 1, 'failed', 'http', 'attempt', null);
+    insert.run('actual-final', now + 10, 'POST', '/actual/retry', 200, now / 1000, 'final', 'actual-chain', 2, 'completed', 'http', 'attempt', null);
+    insert.run('actual-chain', now, 'POST', '/actual/retry', 200, now / 1000, 'final', 'actual-chain', null, 'completed', 'http', 'access', null);
+    insert.run('actual-cancel', now, 'POST', '/actual/cancel', 200, now / 1000, 'final', 'actual-cancel', null, 'cancelled', 'http', 'access', null);
+    insert.run('actual-http500', now, 'POST', '/actual/http500', 500, now / 1000, 'final', 'actual-http500', null, 'completed', 'http', 'access', null);
+    insert.run('actual-history', now, 'POST', '/actual/history', 200, now / 1000, 'final', null, null, 'completed', null, null, null);
     const handler = new LogsHandler({ logQueryService: new LogQueryService(db), bodyStorage: {} as any,
       headerStorage: {} as any, cleanupService: {} as any });
 
     await withLogs(request => new URL(request.url).pathname.endsWith('/export') ? handler.export(request) : handler.query(request),async(page)=>{
-      await rendered(page.locator('table tbody tr')).toHaveCount(4);
+      await rendered(page.locator('table tbody tr')).toHaveCount(5);
       const retry = page.getByRole('row').filter({ hasText: '/actual/retry' });
       await rendered(retry.getByText('200', { exact: true })).toBeVisible();
+      await rendered(retry.getByText(/^2 attempts\b/)).toBeVisible();
       await rendered(retry.getByText('Transport failed', { exact: true })).toHaveCount(0);
       await typeFilter(page, 'WS');
       await rendered(page.locator('table tbody tr')).toHaveCount(1);
-      await rendered(page.locator('table tbody')).toContainText('/actual/retry');
+      await rendered(page.locator('table tbody')).toContainText('/actual/ws');
       await page.getByRole('button', {name:'Export',exact:true}).click();
       const [wsDownload] = await Promise.all([page.waitForEvent('download'), page.getByRole('menuitem',{name:'JSON',exact:true}).click()]);
       const wsRows = JSON.parse(await Bun.file((await wsDownload.path())!).text());
       expect(wsRows).toHaveLength(1);
-      expect(wsRows[0]).toMatchObject({ transportType:'websocket', chainAttempts:2, chainStatus:200 });
+      expect(wsRows[0]).toMatchObject({ recordKind:'operation', transportType:'websocket', method:'GET', chainStatus:101 });
       await page.getByRole('button', {name:'Clear type filter',exact:true}).click();
-      await rendered(page.locator('table tbody tr')).toHaveCount(4);
+      await rendered(page.locator('table tbody tr')).toHaveCount(5);
       await typeFilter(page, 'HTTP');
-      await rendered(page.locator('table tbody tr')).toHaveCount(2);
-      await transport(page,'Completed');await rendered(page.locator('table tbody tr')).toHaveCount(1);
+      await rendered(page.locator('table tbody tr')).toHaveCount(3);
+      await transport(page,'Completed');await rendered(page.locator('table tbody tr')).toHaveCount(2);
       await status(page,'500');await rendered(page.locator('table tbody tr')).toHaveCount(1);
       await rendered(page.locator('table tbody')).toContainText('/actual/http500');
       await page.getByRole('button',{name:'Export',exact:true}).click();
       const [download]=await Promise.all([page.waitForEvent('download'),page.getByRole('menuitem',{name:'CSV',exact:true}).click()]);
       const csv=await Bun.file((await download.path())!).text();
       expect(csv).toContain('actual-http500');expect(csv).toContain(',completed,');
-      expect(csv).not.toContain('actual-retry');expect(csv).not.toContain('actual-cancel');expect(csv).not.toContain('actual-history');
+      expect(csv).not.toContain('actual-retry');expect(csv).not.toContain('actual-cancel');expect(csv).not.toContain('actual-history');expect(csv).not.toContain('actual-ws');
       await typeFilter(page, 'WS');
       await rendered(page.getByTestId('logs-empty-state')).toBeVisible();
       await page.getByRole('button', {name:'Reset filters',exact:true}).click();
-      await rendered(page.locator('table tbody tr')).toHaveCount(4);
+      await rendered(page.locator('table tbody tr')).toHaveCount(5);
     });
   } finally {try {db?.close();} finally {rmSync(root,{recursive:true,force:true});}}
 },60_000);
