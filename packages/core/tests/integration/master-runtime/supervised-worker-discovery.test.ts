@@ -6,10 +6,13 @@ import {
   deriveWorkerSupervisionCredential,
   deriveWorkerSupervisionSeed,
   signWorkerDescriptor,
+  WorkerSupervisionHttpServer,
   type WorkerDescriptorBody,
 } from '../../../src/supervision';
 import { discoverSupervisedWorkers } from '../../../src/master-runtime/supervised-worker-discovery';
-import type { WorkerControllerClient, WorkerStatusPayload } from '../../../src/master-runtime/supervised-worker-client';
+import { WorkerControllerClient, type WorkerStatusPayload } from '../../../src/master-runtime/supervised-worker-client';
+import type { ConfigWorkerRuntimeController } from '../../../src/config-publication';
+import { startCurrentMessage } from '../../helpers/config-publication-worker-runtime';
 
 const ROOT = new Uint8Array(32).fill(8);
 const AUTHORITY = { controller_epoch: 3, controller_id: '80000000-0000-4000-8000-000000000001' } as const;
@@ -108,6 +111,50 @@ test('orphan-inventory reports tampered descriptors without authenticating or re
     expect(result.issues[0]?.kind).toBe('tampered');
     expect(attaches).toBe(0);
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('discovery preserves a leased worker authority and reattaches only a frozen session', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-discovery-authority-'));
+  const value = worker('40000000-0000-4000-8000-000000000004', '50000000-0000-4000-8000-000000000004', 43104, process.pid, 44104);
+  const identity = { master_generation: GENERATION, worker_instance_id: value.status.worker_instance_id, worker_slot: 0 };
+  let now = Date.now();
+  const server = new WorkerSupervisionHttpServer({
+    credential: value.credential, identity, controlPort: 43104, masterControlPort: 3011,
+    descriptorPath: join(directory, 'worker.json'), clock: () => now,
+    runtime: { async apply() { return { ok: true, message: value.status.evidence.message! }; }, async failClosed() {} } as ConfigWorkerRuntimeController,
+  });
+  const client = new WorkerControllerClient({
+    baseUrl: 'http://127.0.0.1:43104', credential: value.credential, authority: AUTHORITY,
+    fetch: (async (input, init) => server.fetch(new Request(String(input), init))) as typeof globalThis.fetch,
+  });
+  const authorities: Array<WorkerStatusPayload['authority'] | null> = [];
+  try {
+    await client.attach();
+    await client.start({ ...startCurrentMessage(1), ...identity });
+    server.subscribeControllerAuthority(authority => { authorities.push(authority); });
+    const discover = () => discoverSupervisedWorkers({
+      runtimeWorkersDirectory: directory, rootKey: ROOT, authority: AUTHORITY, masterControlPort: 3011,
+      mode: 'orphan-inventory', clientFor: () => client,
+    });
+    const active = await discover();
+    expect(active.issues).toEqual([]);
+    expect(active.workers).toHaveLength(1);
+    expect(authorities).toEqual([]);
+    expect(server.currentControllerAuthorityIfLeased()).toEqual(AUTHORITY);
+
+    now += 20_000;
+    expect(server.currentControllerAuthorityIfLeased()).toBeNull();
+    now = Date.now();
+    const frozen = await discover();
+    expect(frozen.issues).toEqual([]);
+    expect(frozen.workers).toHaveLength(1);
+    expect(frozen.workers[0]!.status.frozen).toBe(false);
+    expect(authorities).toEqual([null, AUTHORITY]);
+  } finally {
+    client.disconnect(false);
+    await server.stop();
     await rm(directory, { recursive: true, force: true });
   }
 });

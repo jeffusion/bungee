@@ -1280,6 +1280,66 @@ function recoveryDependencies(input: {
   };
 }
 
+test.each(['confirmed', 'unproven', 'failed'] as const)('bootstrap settles launch debt before publication claim with %s evidence', async (evidence) => {
+  const harness = recoveryDependencies({ withIngress: true, realRuntime: true });
+  let settled = false;
+  const debt = { kind: 'launch', launch: { admitted: false, exited: false, cleanup_released: false, identity: {
+    master_generation: '10000000-0000-4000-8000-000000000001', worker_instance_id: '20000000-0000-4000-8000-000000000099', worker_slot: 0,
+  } } };
+  (harness.repository as unknown as { getWorkerLaunchInventory: () => Promise<readonly unknown[]> }).getWorkerLaunchInventory = async () => {
+    harness.events.push('inventory');
+    return settled ? [] : [debt];
+  };
+  harness.repository.claimPublicationTarget = async () => {
+    harness.events.push('claim-publication');
+    if (!settled) throw Object.assign(new Error('durable launch debt blocks claim'), { code: 'invalid_operation' });
+    return null;
+  };
+  let permit: (() => Promise<{ readonly allowed: boolean }>) | undefined;
+  const dependencies = {
+    ...harness.dependencies,
+    createWorkerFactory: (options: Parameters<typeof harness.dependencies.createWorkerFactory>[0]) => ({
+      ...harness.dependencies.createWorkerFactory(options),
+      cleanupAuthenticatedOrphans: async () => {
+        harness.events.push('orphan-cleanup');
+        return { cleaned: [], exitUnknown: [], issues: [] };
+      },
+      settleWorkerLaunchDebt: async () => {
+        harness.events.push('settle-debt');
+        if (evidence === 'failed') throw new Error('settlement failed');
+        settled = evidence === 'confirmed';
+        return { released: [], fenced: [], unknown: [] };
+      },
+    }),
+    createCoordinator: (options: Parameters<typeof harness.dependencies.createCoordinator>[0] & {
+      ensureCreationPermitted: () => Promise<{ readonly allowed: boolean }>;
+    }) => {
+      permit = options.ensureCreationPermitted;
+      return harness.dependencies.createCoordinator(options);
+    },
+  } as unknown as typeof harness.dependencies;
+  const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+  process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 1).toString('base64');
+  let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
+  try {
+    handle = await startMasterComposition(dependencies);
+    const cleanup = harness.events.indexOf('orphan-cleanup');
+    const settlement = harness.events.indexOf('settle-debt');
+    const claim = harness.events.indexOf('claim-publication');
+    expect(cleanup).toBeGreaterThanOrEqual(0);
+    expect(settlement).toBeGreaterThan(cleanup);
+    expect(claim).toBeGreaterThan(settlement);
+    expect(harness.events.slice(settlement + 1, claim)).toContain('inventory');
+    expect(harness.events.includes('startCurrent')).toBe(evidence === 'confirmed');
+    expect(await permit!()).toMatchObject({ allowed: evidence === 'confirmed' });
+    expect(harness.events).not.toContain('worker-spawn');
+  } finally {
+    await handle?.shutdown().catch(() => undefined);
+    if (previousSecret === undefined) delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+    else process.env.BUNGEE_PLUGIN_SECRETS_KEY = previousSecret;
+  }
+});
+
 test('creation permit refuses while a durable launch reservation is unsettled', async () => {
   const harness = recoveryDependencies({ withIngress: true });
   (harness.repository as unknown as { getWorkerLaunchInventory: () => Promise<readonly unknown[]> })
@@ -1429,16 +1489,19 @@ test('creation permit does not exempt in-memory admission when ingress status is
   }
 });
 
-test.each(['reservation settlement', 'failed cleanup proof', 'lost reclaim response'] as const)('creation permit re-checks durable facts and authority after %s', async (scenario) => {
+test.each(['reservation settlement', 'failed cleanup proof', 'lost reclaim response', 'startup guard proof'] as const)('creation permit re-checks durable facts and authority after %s', async (scenario) => {
   const harness = recoveryDependencies({ withIngress: true });
-  const historical = { kind: 'launch', launch: { admitted: true, exited: true, identity: {
+  const historical = { kind: 'launch', launch: { admitted: true, exited: scenario !== 'startup guard proof',
+    allocation: null, cleanup_released: false, identity: {
     master_generation: '10000000-0000-4000-8000-000000000001', worker_instance_id: '20000000-0000-4000-8000-000000000099', worker_slot: 0,
   } } };
   let checking = false;
   let proofSeen = false;
   (harness.repository as unknown as { getWorkerLaunchInventory: () => Promise<readonly unknown[]> }).getWorkerLaunchInventory = async () => {
     if (!checking) return [];
-    if (scenario !== 'reservation settlement') return [{ ...historical, launch: { ...historical.launch, capacity_reclaimed: proofSeen } }];
+    if (scenario !== 'reservation settlement') return [{ ...historical, launch: {
+      ...historical.launch, exited: proofSeen || historical.launch.exited, capacity_reclaimed: proofSeen,
+    } }];
     return proofSeen ? [] : [{ kind: 'reservation', allocation: { mutation_id: 'mutation-1', worker_slot: 0, attempt_no: 1 } }];
   };
   const baseIngress = harness.dependencies.createIngressController!;
@@ -1448,7 +1511,7 @@ test.each(['reservation settlement', 'failed cleanup proof', 'lost reclaim respo
     createIngressController: (options: Parameters<typeof baseIngress>[0]) => {
       const ingress = baseIngress(options) as { status: () => Promise<unknown> };
       ingress.status = async () => {
-        if (!proofSeen || scenario === 'lost reclaim response') return { registry: { active: null, prepared: null, retired: [] } };
+        if (!proofSeen || scenario === 'lost reclaim response' || scenario === 'startup guard proof') return { registry: { active: null, prepared: null, retired: [] } };
         throw new Error('ingress status was lost after debt settlement');
       };
       return ingress;
@@ -1456,11 +1519,11 @@ test.each(['reservation settlement', 'failed cleanup proof', 'lost reclaim respo
     createWorkerFactory: (options: Parameters<typeof harness.dependencies.createWorkerFactory>[0]) => ({
       ...harness.dependencies.createWorkerFactory(options),
       settleWorkerLaunchDebt: async () => {
-        if (scenario === 'reservation settlement') proofSeen = true;
+        if (scenario === 'reservation settlement' || scenario === 'startup guard proof') proofSeen = true;
         return { released: [], fenced: [], unknown: [] };
       },
       reclaimExitedWorkerLaunchCapacity: async () => {
-        if (scenario === 'reservation settlement') return false;
+        if (scenario === 'reservation settlement' || scenario === 'startup guard proof') return false;
         proofSeen = true;
         if (scenario === 'lost reclaim response') throw new Error('fixture lost the committed write response');
         return true;
@@ -1480,7 +1543,7 @@ test.each(['reservation settlement', 'failed cleanup proof', 'lost reclaim respo
     handle = await startMasterComposition(dependencies);
     expect(permit).toBeDefined();
     checking = true;
-    expect(await permit!()).toMatchObject(scenario === 'lost reclaim response' ? { allowed: true }
+    expect(await permit!()).toMatchObject(scenario === 'lost reclaim response' || scenario === 'startup guard proof' ? { allowed: true }
       : { allowed: false, error: { message: 'trusted ingress registry is unavailable for worker creation' } });
     expect(proofSeen).toBeTrue();
   } finally {
@@ -1574,7 +1637,7 @@ test('does not revive non-durable ingress recovery work', async () => {
   try {
     handle = await startMasterComposition(harness.dependencies);
     const readsBeforeRecovered = reads;
-    expect(readsBeforeRecovered).toBe(1);
+    expect(readsBeforeRecovered).toBe(0);
     await harness.ingressOptions()!.onRecovered!({ kind: 'same_boot' }).catch((error) => { throw error; });
     await handle.shutdown().catch(() => undefined);
     expect(harness.counts().reports).toBe(0);

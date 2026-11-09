@@ -181,3 +181,37 @@ test('production async client keeps the Host closed when its ACK projection refr
   expect(client.getSnapshot().revision).toBe(2);expect(auth.selected()).toBe('user-auth');
  }finally{await client.close();}
 });
+
+test('host lifecycle work waits for authentication preflight and observes the settled current projection', async () => {
+ const f=fixture(),entered=deferred<void>(),release=deferred<void>();
+ const events:string[]=[];
+ const api=createConfigControlApi({...f.options,
+  pluginControlPreflight:{...f.options.pluginControlPreflight!,activate:async()=>{f.ready();events.push('preflight');entered.resolve();await release.promise;}},
+  onConfigurationCommitted:async snapshot=>{events.push('committed:'+snapshot.revision);},
+ });
+ f.commit(async()=>({kind:'committed',operation:{} as any,snapshot:f.persist()}));
+ const saving=api.handle(put());await entered.promise;
+ const lifecycle=api.synchronizeControl(async()=>{events.push('lifecycle:'+f.current().revision);});
+ expect(events).toEqual(['preflight']);release.resolve();
+ expect((await saving)!.status).toBe(202);await lifecycle;
+ expect(events).toEqual(['preflight','committed:2','lifecycle:2']);
+});
+
+test('host lifecycle cannot remove preflight instances while the exact commit result is unknown', async () => {
+ const f=fixture();let unknown=true,runs=0;
+ f.commit(async()=>{f.persist();if(unknown)throw new ConfigRepositoryError('result_unknown','unknown');return{kind:'duplicate',operation:{mutation_id:mutationId,committed_revision:2} as any};});
+ expect((await f.api.handle(put()))!.status).toBe(503);
+ await expect(f.api.synchronizeControl(async()=>{runs++;})).rejects.toThrow();
+ expect(runs).toBe(0);expect(f.deactivations()).toBe(0);expect(f.auth.available()).toBe(false);
+ unknown=false;
+ await f.api.synchronizeControl(async()=>{runs++;expect(f.auth.selected()).toBe('user-auth');});
+ expect(runs).toBe(1);expect(f.committedRevisions).toEqual([2]);expect(f.wakes()).toBe(1);
+});
+
+test('a failing post-commit observer preserves the durable save acknowledgement and publisher wake', async () => {
+ const f=fixture();f.commit(async()=>({kind:'committed',operation:{} as any,snapshot:f.persist()}));
+ const api=createConfigControlApi({...f.options,onConfigurationCommitted:async()=>{throw new Error('fixture control unavailable');}});
+ expect((await api.handle(put()))!.status).toBe(202);
+ expect(f.current().revision).toBe(2);expect(f.auth.selected()).toBe('user-auth');expect(f.wakes()).toBe(1);
+ await api.synchronizeControl(async()=>{});
+});

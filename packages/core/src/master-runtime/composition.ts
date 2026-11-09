@@ -11,6 +11,9 @@ import { PLUGIN_STORAGE_OPERATIONS, type PluginStorageOperation } from '../plugi
 import { createSignedWorkerRpcServer, PLUGIN_STORAGE_RPC_PATH } from '../data-admission/rpc';
 import { resolveStorageWorkerUrls } from './process-options';
 import { PluginDependencyGraph } from '../plugin-dependencies';
+import { createRuntimeEligibleConfig, collectDeclaredPluginConfigs } from '../plugin-runtime-config';
+import { resolveReachableEndpoints } from '../utils/endpoint-resolver';
+import { normalizePluginConfig } from '../utils/plugin-helpers';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { type PluginDurableState } from '../plugin-durable-state';
 import { ManagementAuthentication, parseManagementOrigin, validateManagementTransition } from './management-auth';
@@ -46,7 +49,7 @@ import {
   type MasterIngressRecoveryResult,
   type MasterIngressStartupFailureDisposition,
 } from '../ingress/master-controller';
-import { parseNormalizeCompileAggregate, type CommitConfigurationCommandV1,
+import { ConfigRepositoryError, compileRuntimeConfigSnapshot, parseNormalizeCompileAggregate, type CommitConfigurationCommandV1,
   type ActiveConfigurationPublication,
   type CommitConfigurationResult, type ConfigurationOperationState,
   type ConfigRepositoryOptions, type RepositorySnapshot, type ServingSnapshotKey, type UnsettledWorkerLaunch, type WorkerLaunch as DurableWorkerLaunch,
@@ -81,7 +84,7 @@ import { serializeErrorChain } from './error-chain';
 import { PublicationTaskManager } from './publication-task-manager';
 import { ConfigurationRecoveryRunner, type ConfigurationRecoveryScheduler } from './configuration-recovery';
 import { exactExitProof, isExactServingTarget } from './runtime-evidence';
-import { classifyControlError } from '../config-publication/recovery-disposition';
+import { classifyControlError, classifyRecoveryError } from '../config-publication/recovery-disposition';
 import type { ControllerClaimCapability } from './instance-lock';
 import {
   createPluginControlHost,
@@ -356,6 +359,21 @@ function errorCode(error: unknown): string | undefined {
     ? error.code : undefined;
 }
 
+function isDataRepairFailure(error: unknown): boolean {
+  if (!(error instanceof MasterRuntimeError) || error.code !== 'repair_failed') return false;
+  const pending: unknown[] = [error];
+  const seen = new Set<object>();
+  while (pending.length > 0 && seen.size < 16) {
+    const current = pending.pop();
+    if (typeof current !== 'object' || current === null || seen.has(current)) continue;
+    seen.add(current);
+    if (current instanceof ConfigRepositoryError && classifyRecoveryError(current) === 'fatal') return false;
+    if (current instanceof MasterRuntimeError) pending.push(current.evidence);
+    if ('cause' in current) pending.push(current.cause);
+  }
+  return pending.length === 0;
+}
+
 function terminalRecoveryCode(code: string | undefined): boolean {
   return code === 'invalid_options' || code === 'target_set_mismatch'
     || code === 'schema_corrupt' || code === 'connection_invariant'
@@ -590,6 +608,13 @@ export async function startMasterComposition(
     });
     const catalog = await dependencies.buildPluginCatalog(resolver);
     const compileOptions = catalog.toCompileOptions();
+    const hasControlPlugins = (catalog.records?.() ?? []).some(({ manifest }) => manifest.control !== undefined);
+    const pluginDependencies = compileOptions.pluginDependencies ?? new PluginDependencyGraph((catalog.records?.() ?? []).map(record => record.manifest));
+    const runtimePluginMetadata = {
+      getAllPluginManifests: () => new Map((catalog.records?.() ?? []).map(record =>
+        [record.name, {...record.manifest, mainPath: record.mainPath}])),
+      getPluginStateSnapshot: () => undefined,
+    };
     resources.repository = await dependencies.openRepository(options.configDbPath, {
       compileOptions,
       onWorkerFailure: configurationStorageFailed,
@@ -656,6 +681,17 @@ export async function startMasterComposition(
     // Only validated snapshots already fetched through storage IPC are consulted
     // by synchronous peer/capability authorization callbacks.
     const admissionSnapshots = new Map<string, RepositorySnapshot>();
+    const servingSnapshots = new Map<ConfigPublicationWorkerProcess, RepositorySnapshot>();
+    const inflightSnapshots = new Map<RepositorySnapshot, number>();
+    const retainedIngressSnapshots = new Set<string>();
+    const retainIngressSnapshots = (): void => {
+      const registry = resources.ingressController?.trustedAdmissionRegistryIfFresh?.();
+      if (!registry) return;
+      retainedIngressSnapshots.clear();
+      for (const admission of [registry.active, registry.prepared, ...registry.retired]) {
+        if (admission) retainedIngressSnapshots.add(snapshotKey(admission));
+      }
+    };
     const snapshotKey = (key: ServingSnapshotKey): string => `${key.revision}:${key.content_hash}:${key.plugin_catalog_hash}`;
     const cachedSnapshot = (key: ServingSnapshotKey): RepositorySnapshot | null => admissionSnapshots.get(snapshotKey(key)) ?? null;
     const loadSnapshot = async (key: ServingSnapshotKey): Promise<RepositorySnapshot | null> => {
@@ -893,6 +929,10 @@ export async function startMasterComposition(
         const source = snapshot ?? (active ? cachedSnapshot({revision:active.revision,content_hash:active.content_hash,plugin_catalog_hash:active.plugin_catalog_hash}) : null);
         if (!source) return false;
         const names = new Set(source.aggregate.plugin_activations.map(value => value.plugin_name));
+        for (const record of catalog.records?.() ?? []) {
+          if (names.has(record.name) && record.ingressPath && record.controlPath
+            && resources.pluginControl!.status(record.name) !== 'ready') throw new Error(`Ingress policy control is unavailable: ${record.name}`);
+        }
         const plugins = (catalog.records?.() ?? []).flatMap(record => {
           const handle = resources.pluginControl!.get(record.name);
           return names.has(record.name) && record.ingressPath && handle?.control.policy
@@ -919,19 +959,87 @@ export async function startMasterComposition(
       await leaseState?.transact([{key:id,expectedVersion:previous?.version ?? 0,value:lease ? {...lease} : null}]);
       if (lease) stateLeases.set(id,lease); else stateLeases.delete(id);
     };
-    const retainedControlNames = async (snapshot?: RepositorySnapshot): Promise<readonly string[]> => {
-      const names = new Set<string>([...[...stateLeases.values()].map(value=>value.plugin)]);
-      if (snapshot !== undefined) for (const name of activeControlNames(snapshot,catalog)) names.add(name);
+    const retainedControlNames = async (): Promise<readonly string[]> => {
+      const names = new Set<string>([...stateLeases.values()].map(value => value.plugin));
+      const retain = (snapshot: RepositorySnapshot): void => {
+        for (const name of activeControlNames(snapshot, catalog)) names.add(name);
+      };
+      retain(resources.repository!.getSnapshot());
       const owner = await resources.repository!.getActivePublication();
-      if (owner !== null) for (const name of activeControlNames(owner.snapshot, catalog)) names.add(name);
-      try { const management = managementAuth.selected(); if (management !== null) names.add(management); } catch { /* invalid management state is reported by the control API */ }
-      const registry = resources.ingressController?.trustedAdmissionRegistryIfFresh?.();
-      for (const serving of [registry?.active,...(registry?.retired ?? [])]) {
-        if (!serving) continue;
-        const old = cachedSnapshot({revision:serving.revision,content_hash:serving.content_hash,plugin_catalog_hash:serving.plugin_catalog_hash});
-        if (old) for (const name of activeControlNames(old,catalog)) names.add(name);
+      if (owner !== null) retain(owner.snapshot);
+      for (const snapshot of inflightSnapshots.keys()) retain(snapshot);
+      for (const [process, snapshot] of servingSnapshots) {
+        if (resources.workerFactory?.owns(process)) retain(snapshot);
       }
-      return [...names];
+      retainIngressSnapshots();
+      for (const key of retainedIngressSnapshots) {
+        const snapshot = admissionSnapshots.get(key);
+        if (snapshot) retain(snapshot);
+      }
+      try { const management = managementAuth.selected(); if (management !== null) names.add(management); } catch { /* invalid management state is reported by the control API */ }
+      // Re-read after storage IPC, so a queued task never restores a stale desired set.
+      retain(resources.repository!.getSnapshot());
+      return pluginDependencies.closure(names);
+    };
+    let controlReconciliationStopped = false;
+    const controlReconciliationTasks = new Set<Promise<void>>();
+    const reconcileControl = async (): Promise<void> => {
+      if (controlReconciliationStopped || !hasControlPlugins) return;
+      const names = await retainedControlNames();
+      if (controlReconciliationStopped) return;
+      try { await resources.pluginControl!.reconcile(names); }
+      catch (error) {
+        logger.warn({error:serializeErrorChain(error)}, 'Plugin control reconciliation degraded');
+      }
+    };
+    const synchronizeControl = (): Promise<void> => controlApi === null
+      ? reconcileControl() : controlApi.synchronizeControl(reconcileControl);
+    const scheduleControlReconciliation = (): void => {
+      if (controlReconciliationStopped || !hasControlPlugins || controlPeerFacts.masterGeneration === null) return;
+      // Invocation and ingress callbacks must return before their own teardown can wait for them.
+      const task = Promise.resolve().then(synchronizeControl).catch(error => {
+        logger.warn({error:serializeErrorChain(error)}, 'Plugin control reconciliation deferred');
+      }).finally(() => { controlReconciliationTasks.delete(task); });
+      controlReconciliationTasks.add(task);
+    };
+    const stopControlReconciliation = async (): Promise<void> => {
+      controlReconciliationStopped = true;
+      await Promise.all([...controlReconciliationTasks]);
+    };
+    resources.stopBackgroundTasks = stopControlReconciliation;
+    const requireDataControlReady = async (snapshot: RepositorySnapshot): Promise<void> => {
+      if (!hasControlPlugins) return;
+      await synchronizeControl();
+      const required = new Set<string>();
+      const declarations = pluginDependencies.serviceDeclarations();
+      const active = new Set(snapshot.aggregate.plugin_activations.map(activation => activation.plugin_name));
+      const runtimeConfig = createRuntimeEligibleConfig(compileRuntimeConfigSnapshot(snapshot).config, runtimePluginMetadata, active);
+      // Workers declare dispatch targets during initialization, so retain every configured service root.
+      const dispatchBindings = (runtimeConfig.services ?? [])
+        .flatMap(service => resolveReachableEndpoints(service, runtimeConfig.services))
+        .flatMap(endpoint => endpoint.plugins ?? []).map(normalizePluginConfig);
+      const workerNames = new Set([...collectDeclaredPluginConfigs(runtimeConfig), ...dispatchBindings]
+        .filter(binding => binding.enabled !== false).map(binding => binding.name));
+      for (const {plugin_name: name} of snapshot.aggregate.plugin_activations) {
+        const record = catalog.records?.().find(record => record.name === name);
+        // Ingress policies are published from the same component's control handle.
+        if (record?.ingressPath && record.controlPath) required.add(name);
+        for (const consumption of declarations.get(name)?.consumes ?? []) {
+          if (consumption.process === 'control'
+            || (consumption.process === 'worker' && !workerNames.has(name))
+            || (consumption.process === 'ingress' && !record?.ingressPath)) continue;
+          const publications = declarations.get(consumption.plugin)?.provides ?? [];
+          if (publications.some(publication => publication.process === 'control'
+            && publication.id === consumption.id && publication.version === consumption.version
+            && (publication.kind ?? 'local') === (consumption.kind ?? 'local'))) required.add(consumption.plugin);
+        }
+      }
+      for (const name of required) {
+        const record = catalog.records?.().find(record => record.name === name);
+        if (record?.controlPath && resources.pluginControl!.status(name) !== 'ready') {
+          throw new Error(`Required data-plane control is unavailable: ${name}`);
+        }
+      }
     };
     resources.admission = dependencies.createAdmission();
     const transportSecret = dependencies.createIngressController !== undefined
@@ -989,7 +1097,7 @@ export async function startMasterComposition(
         if (call.method === 'settle' || call.method === 'cancel') {
           if (!await publishDataState(undefined,undefined,[{plugin:call.plugin,keyId:call.target.principal.keyId}])) throw new Error('state_publication_pending');
           await saveStateLease(id,null);
-          await resources.pluginControl!.reconcile(await retainedControlNames());
+          scheduleControlReconciliation();
         }
         return result;
         };
@@ -1000,7 +1108,6 @@ export async function startMasterComposition(
         try { return await settlementTask; } finally { if (scopeSettlements.get(scope) === settlementTask) scopeSettlements.delete(scope); }
     };
     let storageRpc: ((request: Request) => Promise<Response>) | null = null;
-    const hasControlPlugins = (catalog.records?.() ?? []).some(({ manifest }) => manifest.control !== undefined);
     resources.controlListener = dependencies.createManagementListener({
       profile: 'master-control',
       hostname: '127.0.0.1',
@@ -1150,14 +1257,7 @@ export async function startMasterComposition(
             const current = resources.repository!.getSnapshot();
             admissionRecovering = !snapshotsReady || target.revision !== current.revision
               || target.content_hash !== current.content_hash || target.plugin_catalog_hash !== catalog.hash;
-            const servingSnapshot = target.revision === current.revision
-              && target.content_hash === current.content_hash && target.plugin_catalog_hash === catalog.hash
-              ? current
-              : cachedSnapshot({ revision: target.revision, content_hash: target.content_hash,
-                plugin_catalog_hash: target.plugin_catalog_hash });
-            if (servingSnapshot !== null) {
-              await resources.pluginControl?.reconcile(await retainedControlNames(servingSnapshot)).catch(error => logger.warn({error:serializeErrorChain(error)},'Control reconciliation degraded; serving admission retained'));
-            }
+            scheduleControlReconciliation();
           }
           resources.pluginControlBridge?.syncActiveAdmission();
         },
@@ -1213,9 +1313,9 @@ export async function startMasterComposition(
       configDbPath: options.configDbPath,
       shutdownTimeoutMs: options.shutdownTimeoutMs,
     };
-    const servingSnapshots = new Map<ConfigPublicationWorkerProcess, ReturnType<MasterProcessRepository['getSnapshot']>>();
     const syncPluginControlAdmission = (): void => {
       resources.pluginControlBridge?.syncActiveAdmission();
+      scheduleControlReconciliation();
     };
     let runtimeReady = false;
     let runtimeStarted = false;
@@ -1582,6 +1682,16 @@ export async function startMasterComposition(
       // Re-check membership and budget even if a previously absent worker becomes protected.
       return attempted ? readCreationFacts() : facts;
     };
+    const settleCreationDebt = async (): Promise<Awaited<ReturnType<typeof readCreationFacts>>> => {
+      let facts = await reclaimExitedCapacity(await readCreationFacts());
+      if (facts.trusted && facts.debt.length > 0 && resources.workerFactory?.settleWorkerLaunchDebt !== undefined) {
+        try {
+          await resources.workerFactory.settleWorkerLaunchDebt(facts.registry!);
+        } catch { /* unproven debt remains blocking below */ }
+        facts = await reclaimExitedCapacity(await readCreationFacts());
+      }
+      return facts;
+    };
     /**
      * The single creation permit for both real forks. It runs in the existing
      * serialized queue: debt-only settlement first, then a fresh authority read.
@@ -1590,15 +1700,8 @@ export async function startMasterComposition(
      */
     const ensureCreationPermitted = async (): Promise<CreationPermit> => {
       let facts: Awaited<ReturnType<typeof readCreationFacts>>;
-      try { facts = await reclaimExitedCapacity(await readCreationFacts()); }
+      try { facts = await settleCreationDebt(); }
       catch (error) { return { allowed: false, error }; }
-      if (facts.trusted && facts.debt.length > 0 && resources.workerFactory?.settleWorkerLaunchDebt !== undefined) {
-        try {
-          await resources.workerFactory.settleWorkerLaunchDebt(facts.registry!);
-        } catch { /* unproven debt remains blocking below */ }
-        try { facts = await reclaimExitedCapacity(await readCreationFacts()); }
-        catch (error) { return { allowed: false, error }; }
-      }
       // Every final check runs on the same facts, including after debt settlement.
       if (!facts.trusted || facts.registry === null) {
         return { allowed: false, error: new Error('trusted ingress registry is unavailable for worker creation') };
@@ -1628,7 +1731,6 @@ export async function startMasterComposition(
       if (candidateOccupancyUnconfirmed) admissionRecovering = true;
       return candidateOccupancyUnconfirmed;
     };
-    const inflightSnapshots = new Map<string, number>();
     const pruneServing = (): void => {
       for (const process of servingSnapshots.keys()) {
         if (!resources.workerFactory?.owns(process)) servingSnapshots.delete(process);
@@ -1636,16 +1738,14 @@ export async function startMasterComposition(
       const current = resources.repository!.getSnapshot();
       const retained = new Set([
         `${current.revision}:${current.content_hash}:${catalog.hash}`,
-        ...inflightSnapshots.keys(),
+        ...[...inflightSnapshots.keys()].map(snapshot => `${snapshot.revision}:${snapshot.content_hash}:${catalog.hash}`),
         ...[...servingSnapshots.values()].map((snapshot) =>
           `${snapshot.revision}:${snapshot.content_hash}:${catalog.hash}`),
       ]);
       // An uncertain handoff can still be prepared or retired at ingress even
       // after its caller returns. Its exact catalog is part of the cache key.
-      const registry = resources.ingressController?.trustedAdmissionRegistryIfFresh();
-      if (registry) for (const admission of [registry.active, registry.prepared, ...registry.retired]) {
-        if (admission !== null) retained.add(snapshotKey(admission));
-      }
+      retainIngressSnapshots();
+      for (const key of retainedIngressSnapshots) retained.add(key);
       for (const key of admissionSnapshots.keys()) {
         if (!retained.has(key)) admissionSnapshots.delete(key);
       }
@@ -1654,11 +1754,10 @@ export async function startMasterComposition(
       operation: (pin: (snapshot: RepositorySnapshot) => void) => Promise<Result>,
       snapshot?: RepositorySnapshot,
     ): Promise<Result> => {
-      const pinned: string[] = [];
+      const pinned: RepositorySnapshot[] = [];
       const pin = (value: RepositorySnapshot): void => {
-        const key = `${value.revision}:${value.content_hash}:${catalog.hash}`;
-        pinned.push(key);
-        inflightSnapshots.set(key, (inflightSnapshots.get(key) ?? 0) + 1);
+        pinned.push(value);
+        inflightSnapshots.set(value, (inflightSnapshots.get(value) ?? 0) + 1);
       };
       if (snapshot) pin(snapshot);
       try { return await operation(pin); }
@@ -1669,6 +1768,7 @@ export async function startMasterComposition(
           else inflightSnapshots.set(key, count);
         }
         pruneServing();
+        scheduleControlReconciliation();
       }
     };
     const workerFactoryOptions = {
@@ -1736,9 +1836,10 @@ export async function startMasterComposition(
       try {
         const registry = (await resources.ingressController.status()).registry;
         const cleanup = await resources.workerFactory.cleanupAuthenticatedOrphans(registry);
-        // Descriptor discovery alone is not inventory proof: an attempt may exist
-        // without any surviving descriptor, so the durable ledger is always read.
+        // Settle before the first publication claim, which itself rejects launch debt.
+        // Descriptor discovery alone is not inventory proof; re-read the durable ledger.
         orphanCleanupExitUnknown = cleanup.exitUnknown.length > 0;
+        await settleCreationDebt();
         await refreshCandidateOccupancy();
         if (candidateOccupancyUnconfirmed) admissionRecovering = true;
       } catch (error) {
@@ -1772,15 +1873,11 @@ export async function startMasterComposition(
     const masterGeneration = remoteAdmission?.master_generation ?? dependencies.createMasterGeneration();
     controlPeerFacts.masterGeneration = masterGeneration;
     installStorageRpc(masterGeneration);
-    const selectedManagement = managementAuth.selected();
-    if (selectedManagement) {
-      try { await resources.pluginControl.activate(selectedManagement); }
-      catch (error) { logger.error({plugin:selectedManagement,error:serializeErrorChain(error)},'Selected management provider failed to initialize'); }
-    }
     const executorMarker = process.argv.find(argument => argument.startsWith('--bungee-process-identity='))?.split('=')[1];
     if (executorMarker && journalRecovery) {
       await journalRecovery.register(controlIdentityFacts(), dependencies.context.pid, executorMarker, dependencies.executorLifetimeGuard ?? null);
     } else logger.warn('Durable plugin commands unavailable: exact executor identity marker is missing');
+    await synchronizeControl();
     if (remoteAdmission !== null) {
       const current = resources.repository.getSnapshot();
       const adoption = await resources.workerFactory.discoverAndAdopt(remoteAdmission);
@@ -1797,7 +1894,7 @@ export async function startMasterComposition(
         const exactCurrent = isExactServingTarget(adoption.serving, adoption.serving, current,
           catalog.hash, options.workerCount, resources.workerFactory);
         if (recovery === null || recovery.state === 'succeeded' || exactCurrent) {
-          await resources.pluginControl?.reconcile(await retainedControlNames()).catch(error => logger.warn({error:serializeErrorChain(error)},'Control reconciliation degraded; serving admission retained'));
+          await synchronizeControl();
         } else {
           const first = adoption.serving[0];
           const oldSnapshot = first === undefined || adoption.serving.some((worker) =>
@@ -1809,7 +1906,7 @@ export async function startMasterComposition(
           if (oldSnapshot === null) {
             throw new MasterRuntimeError('startup_incomplete', 'adopted admission has no verified historical snapshot');
           }
-          await resources.pluginControl?.reconcile(await retainedControlNames(oldSnapshot)).catch(error => logger.warn({error:serializeErrorChain(error)},'Control reconciliation degraded; serving admission retained'));
+          await synchronizeControl();
         }
         syncPluginControlAdmission();
         admissionRecovering = !snapshotsReady || !(remoteAdmission.revision === current.revision
@@ -1980,7 +2077,7 @@ export async function startMasterComposition(
             await rememberSnapshot(active.snapshot, signal);
             try {
               throwIfPublicationCancelled(signal);
-              await resources.pluginControl?.reconcile(await retainedControlNames(active.snapshot));
+              await requireDataControlReady(active.snapshot);
               throwIfPublicationCancelled(signal);
             } catch (error) {
               if (isPublicationCancelled(error)) throw error;
@@ -2038,7 +2135,7 @@ export async function startMasterComposition(
           await rememberSnapshot(snapshot, signal);
           try {
             throwIfPublicationCancelled(signal);
-            await resources.pluginControl?.reconcile(await retainedControlNames(snapshot));
+            await requireDataControlReady(snapshot);
             throwIfPublicationCancelled(signal);
           } catch (error) {
             if (isPublicationCancelled(error)) throw error;
@@ -2071,7 +2168,7 @@ export async function startMasterComposition(
         return withSnapshotRetention(async () => {
           await rememberSnapshot(active.snapshot);
           try {
-            await resources.pluginControl?.reconcile(await retainedControlNames(active.snapshot));
+            await requireDataControlReady(active.snapshot);
           } catch (error) {
             admissionRecovering = true;
             const failure = await controlReadinessFailure(resources.repository!, active, oldWorkers, error, dependencies.clock.now(), 'publish');
@@ -2161,6 +2258,7 @@ export async function startMasterComposition(
       backgroundStopPromise = (async () => {
         const errors: unknown[] = [];
         communicationStopped = true;
+        try { await stopControlReconciliation(); } catch (error) { errors.push(error); }
         clearInterval(communicationTimer);
         clearInterval(healthTimer);
         await communicationWork;
@@ -2217,12 +2315,16 @@ export async function startMasterComposition(
       runtimePublicationEligible = false;
       runtimePublicationAbort.abort('master runtime stopping');
     };
-    const stopAcceptingRecovery = (): void => {
-      runtimeStopping = true;
-      ingressBootRecoveryGate.cancel();
+    const stopDataRecovery = (): void => {
       recoveryRunner?.stopAccepting();
       resources.ingressController?.stopRecovery?.();
       revokeRuntimePublication();
+    };
+    const stopAcceptingRecovery = (): void => {
+      runtimeStopping = true;
+      controlReconciliationStopped = true;
+      ingressBootRecoveryGate.cancel();
+      stopDataRecovery();
     };
     freezeForRecovery = () => {
       stopAcceptingRecovery();
@@ -2293,7 +2395,7 @@ export async function startMasterComposition(
           fresh:!!resources.ingressController?.trustedAdmissionRegistryIfFresh(),observed_at:dependencies.clock.now()},
       ]}),
       managementAuth,
-      pluginDependencies: new PluginDependencyGraph(catalogRecords.map(value=>value.manifest)),
+      pluginDependencies,
       managementProviderMetadata: name => ({name,...(catalog.records?.() ?? []).find(value=>value.name===name)?.manifest.management}),
       resourceCollection: readKeyCollection,
       resourceExtensions: readKeyExtensions,
@@ -2357,7 +2459,10 @@ export async function startMasterComposition(
           .map(({ name }) => name)),
         status: (name) => resources.pluginControl!.status(name),
         activate: (name) => resources.pluginControl!.activate(name),
-        deactivate: (name) => resources.pluginControl!.deactivate(name),
+        deactivate: async (name) => {
+          await resources.pluginControl!.deactivate(name);
+          await reconcileControl();
+        },
       },
       isMutationReady: mutationReadiness,
       requestManualRecovery: (recoveryId, sourceMutationId, expectedRevision) => {
@@ -2409,6 +2514,7 @@ export async function startMasterComposition(
       statsApi: resources.stats ?? undefined,
       onConfigurationCommitted: async (snapshot) => {
         resources.stats?.configureLogging?.(snapshot.aggregate.logical_configuration.logging);
+        await reconcileControl();
       },
       runtimeUpstreams: () => runtimeUpstreams({
         activeAdmission: () => resources.ingressController?.trustedActiveAdmissionIfFresh() ?? null,
@@ -2432,10 +2538,28 @@ export async function startMasterComposition(
       onShutdownError: (error) => logger.error({ error: serializeErrorChain(error) }, 'Daemon shutdown failed'),
     });
     const instanceLocks = [...resources.locks];
+    const handleRuntimeFailure = (error: Error): void => {
+      logger.error({error:serializeErrorChain(error)}, 'Master runtime failed');
+      if (isDataRepairFailure(error) && configurationStorageHealthy && pluginStorageHealthy
+        && resources.stats?.healthy?.() !== false) {
+        publicationFatalReported = true;
+        publicationBlocked = true;
+        admissionRecovering = true;
+        ingressBootRecoveryGate.activate();
+        stopDataRecovery();
+        void publicationTasks.stop().catch(failure => logger.error({error:serializeErrorChain(failure)}, 'Data publication stop failed'));
+        return;
+      }
+      if (dependencies.runtimeRecovery !== undefined) {
+        void requestComponentRecovery('runtime_failure').catch(failure => logger.error({error:serializeErrorChain(failure)}, 'Runtime recovery stopped'));
+        return;
+      }
+      stopAcceptingRecovery();
+      startupRecoveryFailure ??= error;
+      if (runtimeStarted) void publicShutdown().catch(() => undefined);
+    };
     const baseRuntime = dependencies.createRuntime({
-      ...(dependencies.runtimeRecovery === undefined ? {} : {onFailure: (error: Error) => {
-        void requestComponentRecovery('runtime_failure').catch(failure => logger.error({error:serializeErrorChain(failure)},'Runtime recovery stopped'));
-      }}),
+      onFailure: handleRuntimeFailure,
       workerCount: options.workerCount,
       expectedPluginCatalogHash: catalog.hash,
             repository: resources.repository,
@@ -2503,13 +2627,7 @@ export async function startMasterComposition(
     runtimeLifecycle = {
       async start() { await baseRuntime.start(); },
       reportAsynchronousFailure(error) {
-        if (dependencies.runtimeRecovery !== undefined) {
-          void requestComponentRecovery('runtime_failure').catch(failure => logger.error({error:serializeErrorChain(failure)},'Runtime recovery stopped'));
-          return;
-        }
-        stopAcceptingRecovery();
         baseRuntime.reportAsynchronousFailure(error);
-        if (runtimeStarted) void publicShutdown().catch(() => undefined);
       },
       async shutdown() {
         stopAcceptingRecovery();
@@ -2656,7 +2774,7 @@ export async function startMasterComposition(
     runtimeStarted = true;
     await recoveryRunner.start();
     if (startupRecoveryFailure !== null) throw startupRecoveryFailure;
-    await publishDataState();
+    await publishDataState().catch(error => logger.warn({error:serializeErrorChain(error)}, 'Runtime policy publication degraded'));
     if (dependencies.runtimeRecovery !== undefined && dependencies.runtimeRecovery.state !== 'healthy') {
       throw new ComponentRecoveryStopped(dependencies.runtimeRecovery.reason ?? 'startup_failure');
     }
