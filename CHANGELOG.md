@@ -1,3 +1,11 @@
+## [6.13.1](https://github.com/jeffusion/bungee/compare/v6.13.0...v6.13.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* **runtime:** 解耦控制生命周期并修复 worker 恢复 ([89043ed](https://github.com/jeffusion/bungee/commit/89043edcdf6f5ecbb64c8a9c8aecd78df1054499))
+* **test:** 受控触发配置存储读取超时 ([356d0e6](https://github.com/jeffusion/bungee/commit/356d0e648d6fe8d10af7e10c48d0e9cf86439d0c))
+
 # [6.13.0](https://github.com/jeffusion/bungee/compare/v6.12.0...v6.13.0) (2026-11-08)
 
 
