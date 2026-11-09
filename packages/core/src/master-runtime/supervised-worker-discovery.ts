@@ -174,7 +174,9 @@ export async function discoverSupervisedWorkers(options: WorkerDiscoveryOptions)
         ...options.client, fetch: options.fetch ?? options.client?.fetch,
         baseUrl: `http://127.0.0.1:${candidate.descriptor.control_port}`, credential, authority: options.authority,
       });
-      const status = await client.attach();
+      // A discovery read must not freeze an already leased peer by reattaching it.
+      let status = client.state === 'attached' ? await client.status() : await client.attach();
+      if (status.frozen) status = await client.attach();
       let liveDescriptor: WorkerDescriptor;
       try {
         const liveRaw = JSON.parse(await readFile(file, 'utf8')) as unknown;

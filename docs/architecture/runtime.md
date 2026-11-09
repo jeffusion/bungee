@@ -38,6 +38,10 @@ On Linux and macOS, process-lifetime locks bind authenticated descriptors to an 
 
 For worker creation, a previously admitted worker with a durable exit record no longer occupies capacity once the master confirms it is absent from the fresh signed ingress registry, authenticates its stopped descriptor with failed cleanup for the same launch, and verifies its original lifetime lock is free. The master records that capacity decision before creating workers and reuses it after restarts, including after a host reboot. The master still requires a fresh signed ingress registry and counts every protected member. Failed cleanup remains recorded and does not satisfy publication attempt or retirement cleanup requirements.
 
+Startup performs debt-only settlement after authenticated orphan cleanup and before the first publication claim, then re-reads the signed ingress registry and durable inventory. Publication claims and serialized creation permits continue to reject unproven launch debt.
+
+For previously admitted startup launches without a publication allocation, recovery can establish missing exit and capacity facts directly from the original lifetime lock after signed cleanup proof is unavailable. The launch must be absent from the signed active, prepared and retired ingress sets. Recovery verifies the same host boot, file identity and free lock, retires the guard while holding it, then persists exit with unknown cleanup before reclaiming capacity. Missing, replaced, foreign-boot or held guards remain blocking. This proof preserves cleanup debt; it does not settle the launch or release publication cleanup requirements. An interruption between the two writes can resume from the durable exit fact and the retired original guard.
+
 For a cancelled owner that has not begun admission preparation, the existing serial recovery scheduler rechecks late exit and cleanup evidence with capped backoff, including after master restart. These observations do not initialize workers or consume initialization-recovery attempts. Stopped safety-unknown barriers remain closed.
 
 Failure before the admission switch keeps the previous admitted set. After a switch may have been sent, recovery must establish the actual serving identity rather than assume rollback. Missing exit or release evidence blocks another publication, not an otherwise authorized configuration save. If an admitted worker later exits, supervision republishes using validated survivors and spawns only missing slots.
@@ -52,7 +56,13 @@ Shutdown stops background supervision, drains or kills owned workers with exact 
 
 ## Control and data readiness
 
-The master starts control plugins in local dependency order before data-plane publication. The selected management provider and its control dependencies can remain ready when worker publication fails or recovery stops. Unrelated plugin failure affects its consumers rather than disabling every control capability.
+The master starts control components in local dependency order before its first publication claim or worker fork. Their desired set follows the committed configuration together with unreleased publication, owned serving, ingress admission and state-lease references. Dependency closure retains providers until their consumers release the last reference. A temporarily stale ingress registry retains the last authenticated admission references.
+
+Configuration commits advance control lifecycle independently of data-plane publication. Control reconciliation shares the management mutation queue with authentication preflight and settles an uncertain commit before stopping instances. A failed control component remains degraded, while durable save acknowledgements and unrelated control capabilities remain available. Data publication requires the control services actually consumed by its worker or ingress components and the control producers for declared ingress policies. The selected authentication provider continues to fail closed when unavailable.
+
+A worker repair failure closes the data-plane recovery gate and stops further publication. Healthy configuration, plugin-state and observation components continue serving management and control APIs. Fatal configuration storage errors in the repair evidence or cause chain retain whole-instance failure handling.
+
+Reference-release callbacks schedule reconciliation after returning, so a control invocation can finish before its own instance drains. Shutdown stops queued control reconciliation before disposing the host.
 
 `/health` distinguishes process liveness, management readiness, data readiness and degradation. `/health/management` and `/health/data` check the corresponding capability. A live master without confirmed serving workers is not a ready data plane. See [storage and lifecycle](storage.md) for state ownership and failure handling.
 

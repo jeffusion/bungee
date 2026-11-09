@@ -1,4 +1,4 @@
-import { PluginDependencyGraph } from './plugin-dependencies';
+import { PluginDependencyGraph, type PluginDependencyManifest } from './plugin-dependencies';
 import type { AppConfig, PluginConfig } from '@jeffusion/bungee-types';
 import type { PluginRegistry } from './plugin-registry';
 import { resolveReachableEndpoints } from './utils/endpoint-resolver';
@@ -11,7 +11,9 @@ export function isAutomaticGlobalProvider(config: PluginConfig): boolean {
 
 export function createRuntimeEligibleConfig(
   config: AppConfig,
-  registry: PluginRegistry,
+  registry: Pick<PluginRegistry, 'getPluginStateSnapshot'> & {
+    getAllPluginManifests(): ReadonlyMap<string, PluginDependencyManifest & { readonly mainPath?: string }>;
+  },
   activatedPluginNames: ReadonlySet<string>,
 ): AppConfig {
   const dependencies = new PluginDependencyGraph(registry.getAllPluginManifests().values());

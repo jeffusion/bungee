@@ -684,7 +684,23 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
           { kind: 'exited', cleanup: 'released' }, Date.now());
         this.retiredInstanceIds.add(launch.identity.worker_instance_id);
         released.push(launch.identity);
-      } else unknown.push(launch);
+      } else {
+        if (launch.admitted && launch.allocation === null && !launch.capacity_reclaimed) {
+          const proof = probeExistingProcessLifetimeGuard(launch.guard);
+          if (proof.kind === 'confirmed') {
+            try {
+              if (proof.fence.isCurrent()) {
+                await repository.recordWorkerLaunchExit(launch.identity.worker_instance_id,
+                  { kind: 'exited', cleanup: 'unknown' }, Date.now());
+                await repository.recordWorkerLaunchCapacityReclaimed(launch.identity.worker_instance_id,
+                  proof.fence.facts, Date.now());
+              }
+            } finally { proof.fence.close(); }
+          }
+        }
+        // Capacity proof does not settle cleanup debt or release a publication attempt.
+        unknown.push(launch);
+      }
     }
     return { released, fenced, unknown };
   }

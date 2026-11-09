@@ -106,6 +106,8 @@ export type ConfigControlApiOptions = {
 
 export interface ConfigControlApi {
   handle(request: Request): Promise<Response | null>;
+  /** Serialize host lifecycle work with preflight and uncertain commit settlement. */
+  synchronizeControl<T>(operation: () => Promise<T>): Promise<T>;
 }
 
 export type ConfigControlMutationReadiness =
@@ -884,7 +886,12 @@ async function settleProtectedCommit(pending: PendingCommit, result: CommitConfi
   if (rollbackErrors.length) throw new AggregateError(rollbackErrors, 'control preflight rollback failed');
   if (pending.transition) options.managementAuth!.completeTransition(pending.transition);
   options.mutationSettlement!.pending = null;
-  if (result.kind === 'committed' || result.kind === 'duplicate') await options.onConfigurationCommitted?.(current);
+  if (result.kind === 'committed' || result.kind === 'duplicate') {
+    try { await options.onConfigurationCommitted?.(current); }
+    catch (error) {
+      logger.error({error:serializeErrorChain(error),revision:current.revision}, 'Committed configuration observer failed');
+    }
+  }
 }
 
 async function commitProtectedMutation(request: Request, mutation: ConfigurationMutation, activated: readonly string[], options: ConfigControlApiOptions): Promise<CommitConfigurationResult> {
@@ -1047,14 +1054,17 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
     ...options,
     mutationSettlement: {pending:null,ownedRequests:new WeakSet()},
     serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
-      const current = mutationTail.then(operation);
+      const current = mutationTail.then(async () => {
+        await reconcilePendingCommit(serializedOptions);
+        return operation();
+      });
       mutationTail = current.then(() => undefined, () => undefined);
       return current;
     },
   };
   const admitted = new WeakSet<Request>();
   const loginEvidence = new WeakMap<Request, () => boolean>();
-  const api: ConfigControlApi = {
+  const api: Pick<ConfigControlApi, 'handle'> = {
     async handle(request: Request): Promise<Response | null> {
       const path = new URL(request.url).pathname;
       if (serializedOptions.mutationSettlement!.pending) {
@@ -1271,7 +1281,11 @@ export function createConfigControlApi(options: ConfigControlApiOptions): Config
       }
     },
   };
-  return Object.freeze({async handle(request: Request): Promise<Response | null> {
+  return Object.freeze({
+    synchronizeControl<T>(operation: () => Promise<T>): Promise<T> {
+      return serializeMutation(serializedOptions, operation);
+    },
+    async handle(request: Request): Promise<Response | null> {
     const response = await api.handle(request);
     const currentLogin = loginEvidence.get(request);
     if (currentLogin) {

@@ -72,8 +72,12 @@ function onlineWorker(workerInstanceId: string, bootNonce: string, controlPort: 
   };
   let responseSequence = 0;
   let shutdowns = 0;
+  let attaches = 0;
+  let statusReads = 0;
   const fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const path = new URL(String(input)).pathname;
+    if (path === '/__supervision/attach') attaches += 1;
+    if (path === '/__supervision/status') statusReads += 1;
     const request = JSON.parse(String(init?.body ?? '{}')) as { message?: { request_id: string; path?: string } };
     const message = request.message ?? request as unknown as { request_id: string; path?: string };
     if (path === '/__supervision/challenge') {
@@ -94,7 +98,8 @@ function onlineWorker(workerInstanceId: string, bootNonce: string, controlPort: 
       ...credential.identity, ...AUTHORITY, sequence: replay.sequence, request_id: requestId, status: 'serving', body_hash: hashSupervisionBody(body) }, credential);
     return Response.json({ message: status, body });
   };
-  return { identity, credential, descriptor: signWorkerDescriptor(body, credential.process_key), fetch, get shutdowns() { return shutdowns; } };
+  return { identity, credential, descriptor: signWorkerDescriptor(body, credential.process_key), fetch, get shutdowns() { return shutdowns; },
+    get attaches() { return attaches; }, get statusReads() { return statusReads; } };
 }
 
 async function completedWorker(worker: OnlineWorker): Promise<OnlineWorker> {
@@ -491,13 +496,18 @@ test('orphan cleanup inventories overlapping slot workers and shuts down only th
   await writeWorkers(directory, workers);
   const workerFactory = factory(directory, workers, async () => registry());
   try {
+    expect((await workerFactory.discoverAndAdopt(activeA)).kind).toBe('adopted');
+    expect(a.attaches).toBe(1);
     const result = await workerFactory.cleanupAuthenticatedOrphans(registry());
+    expect(a.attaches).toBe(1);
+    expect(a.statusReads).toBe(1);
+    expect(b.attaches).toBe(1);
     expect(result.exitUnknown).toEqual([b.identity]);
     expect(result.cleaned).toEqual([]);
     expect(a.shutdowns).toBe(0);
     expect(b.shutdowns).toBe(1);
     // No exit proof: the unprotected adopted worker stays owned — nothing is forgotten.
-    expect(workerFactory.snapshot()).toHaveLength(1);
+    expect(workerFactory.snapshot()).toHaveLength(2);
   } finally { workerFactory.disconnect(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -1328,6 +1338,7 @@ test('a startup launch stays unknown until signed cleanup arrives, then releases
   try {
     repository.registerWorkerLaunch(worker.identity, guard.facts, null, 1);
     repository.recordWorkerLaunchExit(worker.identity.worker_instance_id, { kind: 'exited', cleanup: 'unknown' }, 2);
+    guard.closeAfterChildExit();
     const first = await workers.settleWorkerLaunchDebt({ active: null, prepared: null, retired: [] });
     expect(first.released).toEqual([]);
     expect(first.unknown).toHaveLength(1);
@@ -1344,7 +1355,7 @@ test('a startup launch stays unknown until signed cleanup arrives, then releases
   } finally { guard.closeAfterChildExit(); workers.disconnect(); repository.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
-test('debt-only pass leaves a legal admitted member alone', async () => {
+test('debt-only pass leaves every legal admitted member alone even with a free guard', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-debt-legal-'));
   const repository = ConfigRepository.open(join(directory, 'config.db'));
   const fixture = configurationRepositoryFixture(repository);
@@ -1362,10 +1373,87 @@ test('debt-only pass leaves a legal admitted member alone', async () => {
   try {
     repository.registerWorkerLaunch(worker.identity, guard.facts, null, 1);
     repository.recordWorkerLaunchAdmitted(worker.identity.worker_instance_id, 2);
-    const result = await workers.settleWorkerLaunchDebt({ active: admission(worker), prepared: null, retired: [] });
-    expect(result).toEqual({ released: [], fenced: [], unknown: [] });
+    guard.closeAfterChildExit();
+    for (const registry of [
+      { active: admission(worker), prepared: null, retired: [] },
+      { active: null, prepared: admission(worker), retired: [] },
+      { active: null, prepared: null, retired: [admission(worker)] },
+    ]) {
+      expect(await workers.settleWorkerLaunchDebt(registry)).toEqual({ released: [], fenced: [], unknown: [] });
+    }
+    expect((await readFile(guard.facts.path, 'utf8')).startsWith('armed  \n')).toBeTrue();
     expect(repository.getWorkerLaunch(worker.identity.worker_instance_id))
-      .toMatchObject({ admitted: true, exited: false, cleanup_released: false });
+      .toMatchObject({ admitted: true, exited: false, cleanup_released: false, capacity_reclaimed: false });
+  } finally { guard.closeAfterChildExit(); workers.disconnect(); repository.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test.each([false, true])('an admitted startup with frozen=%s reclaims only capacity from its free original guard', async (frozen) => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-startup-capacity-'));
+  const repository = ConfigRepository.open(join(directory, 'config.db'));
+  const worker = onlineWorker(randomUUID(), randomUUID(), 45107, 46107);
+  const guard = armProcessLifetimeGuard({ directory: join(directory, 'guards'), processInstanceId: worker.identity.worker_instance_id });
+  const workers = factory(directory, [], undefined, fakeIdentityControl().control,
+    async () => TEST_KERNEL_BOOT_ID, configurationRepositoryFixture(repository), launchRepositoryFixture(repository));
+  const registry = { active: null, prepared: null, retired: [] };
+  const path = join(directory, `${worker.identity.worker_instance_id}.json`);
+  const { descriptor_mac: _mac, ...body } = worker.descriptor;
+  try {
+    await writeFile(path, JSON.stringify(signWorkerDescriptor({ ...body, frozen,
+      lifetime_guard: { ...guard.facts, held: true } }, worker.credential.process_key)));
+    const descriptor = await readFile(path, 'utf8');
+    repository.registerWorkerLaunch(worker.identity, guard.facts, null, 1);
+    repository.recordWorkerLaunchAdmitted(worker.identity.worker_instance_id, 2);
+    expect((await workers.settleWorkerLaunchDebt(registry)).released).toEqual([]);
+    expect(repository.getWorkerLaunch(worker.identity.worker_instance_id))
+      .toMatchObject({ exited: false, cleanup_released: false, capacity_reclaimed: false });
+
+    guard.closeAfterChildExit();
+    await rename(guard.facts.path, `${guard.facts.path}.moved`);
+    expect((await workers.settleWorkerLaunchDebt(registry)).unknown).toHaveLength(1);
+    expect(repository.getWorkerLaunch(worker.identity.worker_instance_id))
+      .toMatchObject({ exited: false, cleanup_released: false, capacity_reclaimed: false });
+    await rename(`${guard.facts.path}.moved`, guard.facts.path);
+
+    const result = await workers.settleWorkerLaunchDebt(registry);
+    expect(result).toMatchObject({ released: [], fenced: [], unknown: [expect.anything()] });
+    expect(repository.getWorkerLaunch(worker.identity.worker_instance_id))
+      .toMatchObject({ admitted: true, exited: true, cleanup_released: false, capacity_reclaimed: true });
+    expect(await readFile(path, 'utf8')).toBe(descriptor);
+    expect((await readFile(guard.facts.path, 'utf8')).startsWith('retired\n')).toBeTrue();
+    expect(await workers.settleWorkerLaunchDebt(registry)).toMatchObject({ released: [], unknown: [expect.anything()] });
+    expect(repository.getWorkerLaunchInventory()).toEqual([{ kind: 'launch', launch: expect.objectContaining({
+      exited: true, cleanup_released: false, capacity_reclaimed: true,
+    }) }]);
+  } finally { guard.closeAfterChildExit(); workers.disconnect(); repository.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('startup capacity recovery resumes after an interruption between durable exit and capacity writes', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bungee-factory-startup-capacity-interrupted-'));
+  const dbPath = join(directory, 'config.db');
+  let repository = ConfigRepository.open(dbPath);
+  const worker = onlineWorker(randomUUID(), randomUUID(), 45108, 46108);
+  const guard = armProcessLifetimeGuard({ directory: join(directory, 'guards'), processInstanceId: worker.identity.worker_instance_id });
+  let workers = factory(directory, [], undefined, fakeIdentityControl().control,
+    async () => TEST_KERNEL_BOOT_ID, configurationRepositoryFixture(repository), {
+      ...launchRepositoryFixture(repository),
+      recordWorkerLaunchCapacityReclaimed: async () => { throw new Error('fixture interrupted capacity write'); },
+    });
+  const registry = { active: null, prepared: null, retired: [] };
+  try {
+    repository.registerWorkerLaunch(worker.identity, guard.facts, null, 1);
+    repository.recordWorkerLaunchAdmitted(worker.identity.worker_instance_id, 2);
+    guard.closeAfterChildExit();
+    await expect(workers.settleWorkerLaunchDebt(registry)).rejects.toThrow('fixture interrupted capacity write');
+    expect(repository.getWorkerLaunch(worker.identity.worker_instance_id))
+      .toMatchObject({ exited: true, cleanup_released: false, capacity_reclaimed: false });
+    workers.disconnect();
+    repository.close();
+    repository = ConfigRepository.open(dbPath);
+    workers = factory(directory, [], undefined, fakeIdentityControl().control,
+      async () => TEST_KERNEL_BOOT_ID, configurationRepositoryFixture(repository), launchRepositoryFixture(repository));
+    expect(await workers.settleWorkerLaunchDebt(registry)).toMatchObject({ released: [], unknown: [expect.anything()] });
+    expect(repository.getWorkerLaunch(worker.identity.worker_instance_id))
+      .toMatchObject({ exited: true, cleanup_released: false, capacity_reclaimed: true });
   } finally { guard.closeAfterChildExit(); workers.disconnect(); repository.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -1406,6 +1494,8 @@ test('only exact failed cleanup and the free original guard reclaim an admitted,
     repository.recordWorkerLaunchExit(worker.identity.worker_instance_id, { kind: 'exited', cleanup: 'unknown' }, 6);
     expect(await workers.reclaimExitedWorkerLaunchCapacity(launch())).toBeFalse(); // The original lock is held.
     guard.closeAfterChildExit();
+    expect((await workers.settleWorkerLaunchDebt(registry)).unknown).toEqual([launch()]);
+    expect(launch().capacity_reclaimed).toBeFalse(); // Publication launches still need their exact failed-cleanup proof.
 
     await rm(path);
     expect(await workers.reclaimExitedWorkerLaunchCapacity(launch())).toBeFalse();

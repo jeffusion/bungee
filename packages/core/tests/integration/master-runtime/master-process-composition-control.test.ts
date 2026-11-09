@@ -1,3 +1,6 @@
+import {ComponentRecovery} from '../../../src/master-runtime/component-recovery';
+import {MasterRuntimeError} from '../../../src/master-runtime/runtime-contracts';
+import {createHash} from 'node:crypto';
 import {createRemotePluginStorageFactory} from '../../../src/plugin-state/storage-rpc';
 import { expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
@@ -13,7 +16,7 @@ import { PluginManifestCatalog } from '../../../src/plugin-manifest-catalog';
 import { startMasterComposition, type MasterProcessDependencies, type MasterProcessCoordinator } from '../../../src/master-runtime/composition';
 import { serializeErrorChain } from '../../../src/master-runtime/error-chain';
 import { createAsyncMasterStats, migrateAccessDatabaseAsync } from '../../../src/master-runtime/observability-client';
-import { ConfigRepository, type ConfigurationRecovery, type RepositorySnapshot } from '../../../src/config-storage';
+import { ConfigRepository, ConfigRepositoryError, type ConfigurationRecovery, type RepositorySnapshot } from '../../../src/config-storage';
 import type { ConfigPublicationWorkerProcess, ServingConfigWorker, WorkerAdmissionController } from '../../../src/config-publication';
 import type { ConfigMasterMessage, ConfigProcessIdentity } from '../../../src/config-publication/types';
 import { deriveWorkerSupervisionCredential, deriveWorkerSupervisionSeed, WorkerSupervisionHttpServer } from '../../../src/supervision';
@@ -62,7 +65,7 @@ function snapshot(revision: number, disabled = false, accountRef = 'serving'): R
     content_hash: HASH,
     aggregate: {
       logical_configuration: {
-        services: [{ id: 'service-1', position: 1, name: 'service', endpoints: [{
+        services: [{ id: 'service-1', position: 1, name: 'service', plugins: [], endpoints: [{
           id: 'endpoint-1', position: 1, target: 'http://127.0.0.1:1', is_disabled: disabled,
           managedBy: { plugin: 'fake-control', contributionId: 'source', bindingId: 'binding-1' },
           plugins: [{ id: 'binding-1', name: 'fake-control', enabled: true, options: { accountRef } }],
@@ -541,47 +544,55 @@ test('serializes a bounded error chain as a useful structured object without sec
   expect(JSON.stringify(serialized)).not.toContain('aggregate-secret');
 });
 
-test.each(['stopped', 'publication-failure'] as const)('selected generic authentication and its dependency remain ready during %s', async mode => {
+test.each(['stopped', 'publication-failure', 'ingress-policy-failure', 'claim-blocked', 'unrelated-failure', 'data-repair-failure', 'data-repair-without-component-recovery', 'repair-with-storage-failure', 'repair-with-repository-failure', 'repair-with-observation-failure', 'preflight-rejection'] as const)('selected generic authentication and its dependency remain ready during %s', async mode => {
   const root = await mkdtemp(join(tmpdir(),'bungee-management-isolated-'));
   const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
   process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32,1).toString('base64');
   let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
   let configuration: ConfigRepository | undefined;
-  const provider = 'fixture-identity', dependency = 'fixture-identity-state', broken = 'fixture-broken';
+  const provider = 'fixture-identity', dependency = 'fixture-identity-state', broken = 'fixture-broken', ordinary = 'fixture-ordinary';
   const order: string[] = [];
   (globalThis as any).__isolatedManagementOrder = order;
   const stores = new Map<string, any>();
   (globalThis as any).__isolatedManagementStores = stores;
   try {
-    for (const name of [provider,dependency,broken]) {
+    for (const name of [provider,dependency,broken,ordinary]) {
       const directory = join(root,name); await mkdir(directory);
       await writeFile(join(directory,'manifest.json'),JSON.stringify({name,version:'1.0.0',schemaVersion:3,artifactKind:'runtime-plugin',main:'main.ts',
-        control:{entry:'control.ts',rpc:[]},capabilities:['hooks','controlPlane','dynamicRuntimeLoad'],uiExtensionMode:'none',engines:{bungee:'^6.0.0'},configSchema:[],
-        ...(name===provider ? {management:{},dependencies:{[dependency]:'^1.0.0'}} : {})}));
+        control:{entry:'control.ts',rpc:[]},capabilities:['hooks','api','controlPlane','dynamicRuntimeLoad'],uiExtensionMode:'none',engines:{bungee:'^6.0.0'},configSchema:[],
+        ...(name===provider ? {management:{},dependencies:{[dependency]:'^1.0.0'}} : {}),
+        ...(name===broken && mode==='publication-failure' ? {runtimeScope:'global'} : {}),
+        ...(name===broken && (mode==='publication-failure'||mode==='unrelated-failure') ? {services:{provides:[{id:'fixture.required.v1',version:1,process:'control',kind:'rpc'}],consumes:[{plugin:broken,id:'fixture.required.v1',version:1,process:'worker',kind:'rpc'}]}} : {}),
+        ...(name===broken && mode==='ingress-policy-failure' ? {ingress:{entry:'policy.ts'}} : {}),
+        ...(name===ordinary ? {contributes:{api:[{path:'/status',methods:['GET'],handler:'status',execution:'control',capability:'config.read'}]}} : {})}));
       await writeFile(join(directory,'main.ts'),'export default {};');
+      if(name===broken && mode==='ingress-policy-failure')await writeFile(join(directory,'policy.ts'),'export default {};');
       const management = name===provider ? `management:{setupStatus:async()=>'ready',initialize:async()=>Response.json({error:'already_initialized'},{status:409}),authenticate:async()=>({id:'fixture',provider:${JSON.stringify(provider)},capabilities:['config.read']}),authorize:async()=>true,hasIdentity:async()=>true,login:async()=>Response.json({signedIn:true}),logout:async()=>Response.json({}),bootstrap:async()=>{},revokeSessions:async()=>{}},` : '';
       const observer = name===provider ? 'export function createObservationAdapter(observation){return { count:()=>observation.withDatabase(db=>db.query("SELECT 1 AS value").get().value) };}'
         : name===broken ? 'export function createObservationAdapter(){throw new Error("unrelated_observation_failure");}' : '';
-      await writeFile(join(directory,'control.ts'),`${observer}export function createControl(context){globalThis.__isolatedManagementOrder.push(${JSON.stringify(name)});globalThis.__isolatedManagementStores.set(${JSON.stringify(name)},context.storage);${name===broken ? "throw new Error('unrelated_failure');" : `return {api:[],rpc:[],${management}start(){},dispose(){}};`}}`);
+      await writeFile(join(directory,'control.ts'),`${observer}export function createControl(context){globalThis.__isolatedManagementOrder.push(${JSON.stringify(name)});globalThis.__isolatedManagementStores.set(${JSON.stringify(name)},context.storage);${name===broken ? "throw new Error('unrelated_failure');" : `return {api:${name===ordinary ? "[{path:'/status',methods:['GET'],handler:'status',invoke:async()=>Response.json({ready:true})}]" : "[]"},rpc:[],${management}start(){},dispose(){globalThis.__isolatedManagementOrder.push(${JSON.stringify(name+':stop')});}};`}}`);
     }
     const catalog = await PluginManifestCatalog.build({scanDirectories:[root]});
     configuration = ConfigRepository.open(join(root,'config.db'), {compileOptions:catalog.toCompileOptions()});
     const committed = configuration.commit({mutation_id:'select-management-provider',expected_revision:1,kind:'config',created_at:1,target_worker_slots:[],
-      aggregate:{logical_configuration:{services:[],routes:[],plugins:[]},plugin_activations:[provider,dependency,broken].map(plugin_name=>({plugin_name}))}});
+      aggregate:{logical_configuration:{services:[],routes:[],plugins:[]},plugin_activations:(mode==='preflight-rejection'?[broken,ordinary]:[provider,dependency,broken,ordinary]).map(plugin_name=>({plugin_name}))}});
     if (committed.kind !== 'committed') throw new Error('management fixture selection was not committed');
     let current = committed.snapshot;
-    expect(configuration.getManagementProtection()).toEqual({required:true,selectedProvider:provider,generation:1});
+    expect(configuration.getManagementProtection()).toEqual(mode==='preflight-rejection'?ANONYMOUS_MANAGEMENT_PROTECTION:{required:true,selectedProvider:provider,generation:1});
     const recovery = {recovery_id:'60000000-0000-4000-8000-000000000001',state:'stopped',target_revision:current.revision,attempt_count:1,max_attempts:6,next_retry_at:null,final_reason_code:'safety_outcome_unknown'};
     let activePublication: any = null;
     let controlFailures = 0;
     const repository = {getSnapshot:()=>current,
       getManagementProtection:()=>configuration!.getManagementProtection(),
       refreshControlProjection:async()=>({snapshot:current,managementProtection:configuration!.getManagementProtection()}),getServingSnapshot:async()=>null,appendServingSnapshot:async()=>{},getActivePublication:async()=>activePublication,...PUBLICATION_REPOSITORY_STUBS,
-      claimPublicationTarget: async () => activePublication,
+      claimPublicationTarget: async () => {if(mode==='claim-blocked')throw new Error('fixture claim blocked');return activePublication;},
+      commit: async (command:any) => {if(mode==='preflight-rejection')return {kind:'stale_revision',expected_revision:command.expected_revision,active_revision:current.revision};const result=configuration!.commit(command);current=configuration!.getSnapshot();return result;},
+      getOperationState: async (id:string) => configuration!.getOperationState(id),
       finalizePublication:async()=>{controlFailures++;return {state:'degraded',error_code:'control_readiness_failed'};},
       getCurrentOperationState:async()=>null,getCurrentRecovery:async()=>mode==='stopped' ? recovery : null,
       getPublicationRecoveryBarrier:async()=>mode==='stopped' ? recovery : null,
-      getRecovery:async()=>recovery,close:async()=>{configuration?.close();configuration=undefined;}};
+      getRecovery:async()=>recovery,close:async()=>{configuration?.close();configuration=undefined;},
+      getRuntimeRecoveryStartupGate:async()=>({kind:'ready',budget:null}),observeRuntimeRecoveryHealth:async()=>null};
     let admissionCache: Map<string, RepositorySnapshot> | undefined;
     const initial = current;
     const originalSet = Map.prototype.set;
@@ -591,31 +602,101 @@ test.each(['stopped', 'publication-failure'] as const)('selected generic authent
     });
     let composedCoordinator: MasterProcessCoordinator | undefined;
     let managementOptions: any; let spawnCalls=0, publishCalls=0;
+    let onRuntimeFailure: ((error:Error)=>void) | undefined;
+    const runtimeRecovery=mode==='data-repair-failure'||mode.startsWith('repair-with-') ? new ComponentRecovery(MASTER_GENERATION,'fixture-boot',{nowNs:()=>1n,supervisor:false,timer:null,exit:()=>{throw new Error('unexpected instance exit');},sleep:async()=>{}}) : undefined;
     const dependencies = {
+      runtimeRecovery,
       context:{cwd:root,moduleDirectory:root,executable:process.execPath,entry:join(root,'main.ts'),pid:process.pid,accessLogDbPath:join(root,'access.db')},clock:{now:Date.now},
       readOptions:()=>({configDbPath:join(root,'config.db'),configDbLockPath:join(root,'config.lock'),workerCount:1,host:'127.0.0.1',port:0,managementHost:'127.0.0.1',managementPort:0,masterControlPort:3011,startupApplyTimeoutMs:100,drainTimeoutMs:100,shutdownTimeoutMs:100}),
-      acquireInstanceLock:async()=>({release:async()=>{}}),migrateAccessDatabase:migrateAccessDatabaseAsync,createMasterStats:createAsyncMasterStats,createPluginPathResolver:()=>({}),buildPluginCatalog:async()=>catalog,
+      acquireInstanceLock:async()=>({release:async()=>{}}),migrateAccessDatabase:migrateAccessDatabaseAsync,createMasterStats:async(path:string)=>{const stats=await createAsyncMasterStats(path);return {...stats,healthy:()=>mode!=='repair-with-observation-failure'};},createPluginPathResolver:()=>({}),buildPluginCatalog:async()=>catalog,
       openRepository:async()=>repository,openPluginState:async(path:string,options:import('../../../src/plugin-state/client').PluginStateOpenOptions)=>PluginStateClient.open(path,{...options,initialize:true}),resolveAuthToken:()=>undefined,
       createAdmission:()=>({snapshot:()=>[],acquire:()=>({worker:null,release:()=>{}}),clear(){},prepare:async()=>({commit:async()=>{},abort:async()=>{}})}),
       resolveWorkerLaunch:()=>({source:'source',executable:process.execPath,args:[]}),createMasterGeneration:()=>MASTER_GENERATION,
       createWorkerFactory:()=>({pids:()=>[],snapshot:()=>[],owns:()=>false,spawn:()=>{spawnCalls++;throw new Error('unexpected_worker_spawn');},subscribeExit:()=>()=>{},subscribeUnavailable:()=>()=>{},disconnectAll(){},markCommitted(){},setRateLimitSession(){},shutdownAll:async()=>[]}),
-      createCoordinator:()=>({recoverAndPublish:async()=>null,startCurrent:async()=>{publishCalls++;throw new Error('unexpected_publication');},publish:async()=>{throw new Error('unexpected_publication');}}),
+      createCoordinator:()=>({recoverAndPublish:async()=>null,startCurrent:async()=>{publishCalls++;if(mode==='unrelated-failure'||mode.startsWith('data-repair')||mode.startsWith('repair-with-')||mode==='preflight-rejection')return {kind:'startup_failed',serving:[],failures:[]};throw new Error('unexpected_publication');},publish:async()=>{if(mode==='unrelated-failure')return {kind:'converged',serving:[]};throw new Error('unexpected_publication');}}),
       createManagementListener:(options:any)=>{if(options.profile==='management')managementOptions=options;return{port:3011,start(){},ready(){},stop:async()=>{}};},
-      createRuntime:(options:any)=>{composedCoordinator=options.coordinator;return new MasterRuntime(options);},installSignalHandlers:(runtime:any)=>({shutdown:()=>runtime.shutdown(),remove(){}}),
+      createRuntime:(options:any)=>{composedCoordinator=options.coordinator;onRuntimeFailure=options.onFailure;return new MasterRuntime(options);},installSignalHandlers:(runtime:any)=>({shutdown:()=>runtime.shutdown(),remove(){}}),
     } as unknown as MasterProcessDependencies;
     try { handle = await startMasterComposition(dependencies); } finally { cacheObserver.mockRestore(); }
-    expect(order.slice(0,2)).toEqual([dependency,provider]);
-    expect(order.includes(broken)).toBe(mode==='publication-failure');
+    if(mode==='preflight-rejection') {
+      expect(order).not.toContain(provider);expect(order).not.toContain(dependency);
+      const response=await managementOptions.controlApi.handle(new Request('http://localhost/api/config',{method:'PUT',headers:{'content-type':'application/json'},
+        body:JSON.stringify({expected_revision:current.revision,mutation_id:'reject-management-preflight',managementSetup:{},aggregate:{...current.aggregate,plugin_activations:[...current.aggregate.plugin_activations,{plugin_name:provider},{plugin_name:dependency}]}})}));
+      expect(response.status).toBe(409);
+      expect(order).toContain(provider+':stop');expect(order).toContain(dependency+':stop');
+      expect(order.indexOf(provider+':stop')).toBeLessThan(order.indexOf(dependency+':stop'));
+      expect(managementOptions.health().management).toBe(true);
+      await handle.shutdown();handle=undefined;
+      return;
+    }
+    if(mode.startsWith('repair-with-')) {
+      let stopped!: () => void;
+      const failureStopped = new Promise<void>(resolve => {stopped=resolve;});
+      const originalStop = runtimeRecovery!.stop.bind(runtimeRecovery);
+      const stopObserver = spyOn(runtimeRecovery!, 'stop').mockImplementation(reason => {originalStop(reason);stopped();});
+      const storageError = new ConfigRepositoryError(mode==='repair-with-repository-failure'?'repository_failure':'schema_corrupt','fixture logical storage failure');
+      const inner = new MasterRuntimeError('repair_failed','fixture repair failed',{cause:storageError,cleanup:[]});
+      const failure = new MasterRuntimeError('repair_failed','fixture repair failed',mode==='repair-with-storage-failure'?inner:undefined);
+      if(mode==='repair-with-repository-failure')Object.defineProperty(failure,'cause',{value:storageError});
+      try {
+        onRuntimeFailure!(failure);
+        expect(managementOptions.health().management).toBe(false);
+        await failureStopped;
+        expect(runtimeRecovery!.state).toBe('stopped');
+        expect(managementOptions.health().management).toBe(false);
+      } finally {stopObserver.mockRestore();}
+      await handle.shutdown();handle=undefined;
+      return;
+    }
+    if(mode.startsWith('data-repair')){
+      onRuntimeFailure!(new MasterRuntimeError('repair_failed','worker exit proof is unavailable',new ConfigRepositoryError('invalid_operation','previous cohort remains protected')));
+      if(runtimeRecovery)expect(runtimeRecovery.state).toBe('healthy');
+    }
+    expect(order.indexOf(dependency)).toBeLessThan(order.indexOf(provider));
+    expect(order.includes(ordinary)).toBe(true);
+    expect(order.includes(broken)).toBe(true);
+    expect((await managementOptions.controlApi.handle(new Request(`http://localhost/api/plugins/${ordinary}/control/status`))).status).toBe(200);
+    if(mode==='claim-blocked'||mode.startsWith('data-repair')){
+      const disabled={...current.aggregate,plugin_activations:current.aggregate.plugin_activations.filter(value=>value.plugin_name!==ordinary)};
+      const saved=await managementOptions.controlApi.handle(new Request('http://localhost/api/config',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({aggregate:disabled,expected_revision:current.revision,mutation_id:'disable-ordinary-control'})}));
+      expect(saved.status).toBe(202);
+      expect(current.revision).toBe(committed.snapshot.revision+1);
+      expect(order).toContain(ordinary+':stop');
+      expect((await managementOptions.controlApi.handle(new Request(`http://localhost/api/plugins/${ordinary}/control/status`))).status).toBe(503);
+    }
     expect(managementOptions.health()).toMatchObject({live:true,management:true,data:false,degraded:true});
     const config = await managementOptions.controlApi.handle(new Request('http://localhost/api/config'));
-    expect(config.status).toBe(200);expect(spawnCalls).toBe(0);expect(publishCalls).toBe(0);
+    expect(config.status).toBe(200);expect(spawnCalls).toBe(0);expect(publishCalls).toBe(mode==='unrelated-failure'||mode.startsWith('data-repair')?1:0);
+    if(mode==='unrelated-failure') {
+      expect(await composedCoordinator!.publish({snapshot:current,operation:{},targets:[]} as any,[])).toMatchObject({kind:'converged'});
+      const bound = configuration!.commit({mutation_id:'bind-scoped-consumer',expected_revision:current.revision,kind:'config',created_at:Date.now(),target_worker_slots:[],
+        aggregate:{...current.aggregate,logical_configuration:{...current.aggregate.logical_configuration,routes:[{
+          id:crypto.randomUUID(),position:0,path:'/bound',plugins:[{id:crypto.randomUUID(),position:0,name:broken,enabled:true,options:{}}],
+          endpoints:[{id:crypto.randomUUID(),position:0,target:'http://127.0.0.1:1',weight:100,priority:1,is_disabled:false,plugins:[]}],
+        }]}}});
+      expect(bound.kind).toBe('committed');
+      current=configuration!.getSnapshot();
+      expect(await composedCoordinator!.publish({snapshot:current,operation:{mutation_id:'bound-scoped-consumer'},targets:[]} as any,[]))
+        .toMatchObject({kind:'degraded',error_code:'control_readiness_failed'});
+      const dispatchBound = configuration!.commit({mutation_id:'bind-dispatch-endpoint',expected_revision:current.revision,kind:'config',created_at:Date.now(),target_worker_slots:[],
+        aggregate:{...current.aggregate,logical_configuration:{...current.aggregate.logical_configuration,routes:[],services:[{
+          id:crypto.randomUUID(),position:0,name:'dispatch-target',plugins:[],endpoints:[{
+            id:crypto.randomUUID(),position:0,target:'http://127.0.0.1:1',weight:100,priority:1,is_disabled:false,
+            plugins:[{id:crypto.randomUUID(),position:0,name:broken,enabled:true,options:{}}],
+          }],
+        }]}}});
+      expect(dispatchBound.kind).toBe('committed');
+      current=configuration!.getSnapshot();
+      expect(await composedCoordinator!.publish({snapshot:current,operation:{mutation_id:'bound-dispatch-endpoint'},targets:[]} as any,[]))
+        .toMatchObject({kind:'degraded',error_code:'control_readiness_failed'});
+    }
     const authMode = await managementOptions.controlApi.handle(new Request('http://localhost/api/auth/mode'));
     expect(authMode.status).toBe(200);
     expect(await authMode.json()).toMatchObject({mode:'plugin',initialized:true,provider:{name:provider}});
     const setup = await managementOptions.controlApi.handle(new Request('http://localhost/api/auth/setup'));
     expect(setup.status).toBe(200);
     expect(await setup.json()).toMatchObject({initialized:true,provider:{name:provider}});
-    if (mode === 'publication-failure') {
+    if (mode === 'publication-failure' || mode === 'ingress-policy-failure') {
       expect(admissionCache).toBeDefined();
       const lastRevision = current.revision + 32;
       for (let revision = current.revision + 1; revision <= lastRevision; revision++) {
@@ -1047,11 +1128,11 @@ test.each(['scheduled', 'running', 'stopped'] as const)(
       expect(readAudit()).toContain(MASTER_COMPOSITION_CONTROL_A);
       expect(recoveryClaims).toBe(recoveryState === 'running' ? 1 : 0);
       expect(auditAtRecoveryClaim.every((audit) => audit.includes(MASTER_COMPOSITION_CONTROL_A)
-        && !audit.includes(MASTER_COMPOSITION_CONTROL_B))).toBe(true);
+        && audit.includes(MASTER_COMPOSITION_CONTROL_B))).toBe(true);
       if (recoveryState === 'stopped') {
         expect(spawnCalls).toBe(0);
         expect(baseStartCalls).toBe(0);
-        expect(readAudit()).toEqual([MASTER_COMPOSITION_CONTROL_A]);
+        expect(new Set(readAudit())).toEqual(new Set([MASTER_COMPOSITION_CONTROL_A, MASTER_COMPOSITION_CONTROL_B]));
       }
       const activeTimers = timers.active().map(({ delay }) => ({ delay }));
       if (recoveryState !== 'stopped') {
@@ -1062,7 +1143,7 @@ test.each(['scheduled', 'running', 'stopped'] as const)(
         expect(activeTimers).toEqual(expectedActiveTimers);
         expect(auditAtRecoveryClaim).toHaveLength(recoveryState === 'running' ? 1 : 0);
         expect(auditAtRecoveryClaim.every((audit) => audit.includes(MASTER_COMPOSITION_CONTROL_A)
-          && !audit.includes(MASTER_COMPOSITION_CONTROL_B))).toBe(true);
+          && audit.includes(MASTER_COMPOSITION_CONTROL_B))).toBe(true);
         expect(recoveryClaims).toBe(recoveryState === 'running' ? 1 : 0);
       } else expect(activeTimers).toEqual([]);
     } finally {
@@ -1072,3 +1153,108 @@ test.each(['scheduled', 'running', 'stopped'] as const)(
     }
   },
 );
+
+test.each(['prepared', 'lease'] as const)('retains control dependencies for %s references and stops after the final invocation returns', async mode => {
+  const root = await mkdtemp(join(tmpdir(), 'bungee-control-references-'));
+  const previousSecret = process.env.BUNGEE_PLUGIN_SECRETS_KEY;
+  process.env.BUNGEE_PLUGIN_SECRETS_KEY = Buffer.alloc(32, 1).toString('base64');
+  let handle: Awaited<ReturnType<typeof startMasterComposition>> | undefined;
+  let configuration: ConfigRepository | undefined;
+  const plugin = 'fixture-reference-consumer', provider = 'fixture-reference-provider';
+  const target = {requestId:'request-reference',attemptId:'attempt-reference',principal:{domain:'plugin',keyId:'key-reference'}};
+  const worker = {role:'worker',process_instance_id:'reference-worker',boot_nonce:'reference-boot',master_generation:MASTER_GENERATION,worker_slot:0};
+  const order: string[] = [];
+  let entered!: () => void, release!: () => void, disposed!: () => void;
+  const invocationEntered = new Promise<void>(resolve => { entered = resolve; });
+  const invocationRelease = new Promise<void>(resolve => { release = resolve; });
+  const consumerDisposed = new Promise<void>(resolve => { disposed = resolve; });
+  (globalThis as any).__controlReference = {order,entered,release:invocationRelease,disposed,mode,target,worker};
+  try {
+    for (const name of [plugin,provider]) {
+      const directory = join(root,name); await mkdir(directory);
+      await writeFile(join(directory,'manifest.json'), JSON.stringify({name,version:'1.0.0',schemaVersion:3,artifactKind:'runtime-plugin',main:'main.ts',
+        control:{entry:'control.ts',rpc:[]},capabilities:['api','controlPlane','dynamicRuntimeLoad'],uiExtensionMode:'none',engines:{bungee:'^6.0.0'},configSchema:[],
+        ...(name===plugin ? {dependencies:{[provider]:'^1.0.0'},contributes:{api:[{path:'/release',methods:['GET'],handler:'release',execution:'control',capability:'config.read'}]}} : {})}));
+      await writeFile(join(directory,'main.ts'),'export default {};');
+      await writeFile(join(directory,'control.ts'), `export function createControl(context){const state=globalThis.__controlReference;return {
+        api:${name===plugin ? `[{path:'/release',methods:['GET'],handler:'release',invoke:async()=>{
+          state.entered();await state.release;
+          if(state.mode==='lease')await context.runAdmissionOperation('cancel',{}, {kind:'admission',worker:state.worker,target:state.target},async()=>null);
+          state.order.push('returned');return Response.json({released:true});}}]` : '[]'},rpc:[],start(){state.order.push(${JSON.stringify(name)});},
+        dispose(){state.order.push(${JSON.stringify(name+':stop')});${name===plugin ? 'state.disposed();' : ''}}};}`);
+    }
+    const catalog = await PluginManifestCatalog.build({scanDirectories:[root]});
+    configuration = ConfigRepository.open(join(root,'config.db'),{compileOptions:catalog.toCompileOptions()});
+    configuration.commit({mutation_id:'reference-configuration',expected_revision:1,kind:'config',created_at:1,target_worker_slots:[],
+      aggregate:{logical_configuration:{services:[],routes:[],plugins:[]},plugin_activations:[plugin,provider].map(plugin_name=>({plugin_name}))}});
+    let current = configuration.getSnapshot();
+    const initial = current;
+    const admission = (snapshot:RepositorySnapshot) => ({...snapshot,plugin_catalog_hash:catalog.hash,master_generation:MASTER_GENERATION,workers:[],admission_sequence:1});
+    let active: ReturnType<typeof admission> | null = null;
+    let prepared: ReturnType<typeof admission> | null = null;
+    let fresh = true, version = 0;
+    const eligibility = new Set<() => void>();
+    const notify = () => {for(const listener of eligibility)listener();};
+    let management: any, coordinator: MasterProcessCoordinator | undefined;
+    const repository = {...PUBLICATION_REPOSITORY_STUBS,getSnapshot:()=>current,getManagementProtection:()=>ANONYMOUS_MANAGEMENT_PROTECTION,
+      refreshControlProjection:async()=>({snapshot:current,managementProtection:ANONYMOUS_MANAGEMENT_PROTECTION}),getActivePublication:async()=>null,
+      getServingSnapshot:async(key:{revision:number})=>key.revision===initial.revision?initial:current,appendServingSnapshot:async()=>{},
+      getCurrentRecovery:async()=>null,getCurrentOperationState:async()=>null,getOperationState:async(id:string)=>configuration!.getOperationState(id),
+      commit:async(command:any)=>{const result=configuration!.commit(command);current=configuration!.getSnapshot();active=admission(current);return result;},
+      claimControllerWithCapability:async(_:unknown,id:string)=>({instance_id:MASTER_GENERATION,current_controller_id:id,controller_epoch:1,updated_at:1}),
+      close:async()=>{}};
+    const dependencies = {
+      context:{cwd:root,moduleDirectory:root,executable:process.execPath,entry:join(root,'main.ts'),pid:process.pid,accessLogDbPath:join(root,'access.db')},clock:{now:Date.now},
+      readOptions:()=>({configDbPath:join(root,'config.db'),configDbLockPath:join(root,'config.lock'),workerCount:1,host:'127.0.0.1',port:0,managementPort:0,masterControlPort:3011,shutdownTimeoutMs:100}),
+      acquireInstanceLock:async()=>({release:async()=>{}}),createControllerClaim:()=>({}),migrateAccessDatabase:async()=>{},
+      createPluginPathResolver:()=>({}),buildPluginCatalog:async()=>catalog,openRepository:async()=>repository,
+      openPluginState:async(path:string,options:import('../../../src/plugin-state/client').PluginStateOpenOptions)=>{
+        const client=await PluginStateClient.open(path,{...options,initialize:true});
+        if(mode==='lease'){
+          const id='lease:'+createHash('sha256').update(JSON.stringify([plugin,target.requestId,target.attemptId])).digest('hex');
+          await client.durable.forNamespace('core-worker-state-leases').transact([{key:id,expectedVersion:0,value:{plugin,worker:JSON.stringify(worker),principal:JSON.stringify(target.principal)}}]);
+        }
+        return client;
+      },
+      deriveTransportSecret:()=>Buffer.alloc(32,8).toString('base64url'),resolveAuthToken:()=>undefined,
+      createAdmission:()=>({snapshot:()=>[],prepare:async()=>({commit:async()=>{},abort:async()=>{}}),adoptCommitted(){},clear(){},acquire:()=>({worker:null,release(){}})}),
+      resolveWorkerLaunch:()=>({source:'source',executable:process.execPath,args:[]}),createMasterGeneration:()=>MASTER_GENERATION,
+      createWorkerFactory:()=>({pids:()=>[],snapshot:()=>[],owns:()=>false,spawn:()=>{throw new Error('unexpected spawn');},subscribeExit:()=>()=>{},subscribeUnavailable:()=>()=>{},lookupExactControlSession:()=>null,
+        subscribeEligibilityChange:(listener:()=>void)=>{eligibility.add(listener);return()=>eligibility.delete(listener);},markCommitted(){},disconnectAll(){},shutdownAll:async()=>[],setRateLimitSession(){}}),
+      createIngressController:()=>({connect:async()=>{},controlPort:3010,publicPort:41001,trustedAdmissionRegistryIfFresh:()=>fresh?{active,prepared,retired:[]}:null,
+        trustedActiveAdmission:()=>null,trustedActiveAdmissionIfFresh:()=>active,hasTrustedActiveAdmission:()=>false,status:async()=>({registry:{active,prepared,retired:[]}}),
+        authenticatedRateLimitSession:()=>({}),subscribeEligibilityChange:()=>()=>{},stopRecovery(){},queryRuntimeState:async()=>({version}),publishRuntimeState:async(value:{version:number})=>{version=value.version;},
+        shutdownDataPlane:async()=>{},disconnect:async()=>{},stop:async()=>{}}),
+      createCoordinator:()=>({recoverAndPublish:async()=>null,startCurrent:async()=>({kind:'startup_failed',serving:[],failures:[]}),publish:async()=>({kind:'converged',serving:[]})}),
+      createManagementListener:(options:any)=>{if(options.profile==='management')management=options;return{port:3011,start(){},ready(){},stop:async()=>{}};},
+      createRuntime:(options:any)=>{coordinator=options.coordinator;return new MasterRuntime(options);},
+      installSignalHandlers:(runtime:any)=>({shutdown:()=>runtime.shutdown(),remove(){}}),
+    } as unknown as MasterProcessDependencies;
+    handle = await startMasterComposition(dependencies);
+    expect(order).toEqual([provider,plugin]);
+    const request = management.controlApi.handle(new Request(`http://localhost/api/plugins/${plugin}/control/release`));
+    await invocationEntered;
+    if(mode==='prepared')prepared=admission(initial);
+    const saved=await management.controlApi.handle(new Request('http://localhost/api/config',{method:'PUT',headers:{'content-type':'application/json'},
+      body:JSON.stringify({expected_revision:current.revision,mutation_id:'release-reference-configuration',aggregate:{...current.aggregate,plugin_activations:[]}})}));
+    expect(saved.status).toBe(202);
+    await coordinator!.startCurrent(current);
+    expect(order).not.toContain(plugin+':stop');expect(order).not.toContain(provider+':stop');
+    if(mode==='prepared'){
+      fresh=false;notify();await coordinator!.startCurrent(current);
+      expect(order).not.toContain(plugin+':stop');
+      fresh=true;prepared=null;notify();
+    }
+    release();
+    const response=await request;expect(response.status).toBe(200);expect(await response.json()).toEqual({released:true});
+    await consumerDisposed;
+    // A final queued coordination observes both the provider disposal and the released lease.
+    await coordinator!.startCurrent(current);
+    expect(order.slice(-3)).toEqual(['returned',plugin+':stop',provider+':stop']);
+    await handle.shutdown();handle=undefined;
+  } finally {
+    release();await handle?.shutdown();configuration?.close();delete (globalThis as any).__controlReference;
+    if(previousSecret===undefined)delete process.env.BUNGEE_PLUGIN_SECRETS_KEY;else process.env.BUNGEE_PLUGIN_SECRETS_KEY=previousSecret;
+    await rm(root,{recursive:true,force:true});
+  }
+});

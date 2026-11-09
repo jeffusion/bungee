@@ -1,9 +1,11 @@
+import {initializeManagementAccount, prepareManagementInitialization} from '../helpers/management-initialization';
+import {buildPluginManifestCatalog} from '../../packages/core/src/plugin-manifest-catalog';
 import {initializePluginStateFixture} from '../helpers/plugin-state-fixture';
 import { ConfigRepository } from '../../packages/core/src/config-storage';
 import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rm, stat, writeFile, appendFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile, appendFile, cp } from 'node:fs/promises';
 import { readdirSync, statSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
@@ -1650,7 +1652,7 @@ async function cleanupDirect(children: readonly ChildProcess[], upstream: Return
   if (errors.length > 0) throw new AggregateError(errors, 'canonical test cleanup failed');
 }
 
-test('cold startup serves after an exited publication worker left signed failed cleanup', async () => {
+test.each(['publication', 'startup'] as const)('cold startup serves after an admitted %s worker left unreleased cleanup', async (origin) => {
   const root = makeCanonicalTempDir('bungee-canonical-failed-cleanup', { daemonSafe: true });
   const { lease, upstream, managedUpstream, fixture, daemon } = await createUnownedCoreSetup(root, reservePortBlock, () => 'recovered');
   const identity = { master_generation: randomUUID(), worker_instance_id: randomUUID(), worker_slot: 1 };
@@ -1658,6 +1660,7 @@ test('cold startup serves after an exited publication worker left signed failed 
   const publication = { mutation_id: randomUUID(), attempt_no: 1, drain_recovery_generation: 0 };
   const descriptorPath = join(workersDirectory, `${identity.worker_instance_id}.json`);
   const rootKey = new Uint8Array(32).fill(9);
+  const additionalLaunches: { identity: typeof identity; admitted: boolean; descriptorPath: string; descriptor: string }[] = [];
   const bootNonce = randomUUID();
   const credential = deriveWorkerSupervisionCredential(deriveWorkerSupervisionSeed(rootKey,
     identity.master_generation, identity.worker_instance_id, identity.worker_slot), bootNonce);
@@ -1669,30 +1672,71 @@ test('cold startup serves after an exited publication worker left signed failed 
         const id = publication.mutation_id;
         const catalog = repository.getSnapshot().content_hash;
         repository.commit({ mutation_id: id, expected_revision: 1, kind: 'config', created_at: 1,
-          target_worker_slots: [1], aggregate: aggregate(upstream.port!, '/proxy') });
+          target_worker_slots: origin === 'startup' ? [] : [1], aggregate: aggregate(upstream.port!, '/proxy') });
         repository.claimPublicationTarget(catalog, 2);
         repository.beginPublication(id, 3);
-        repository.beginWorkerAttempt(id, 1, 0, 'initial', 4);
-        repository.registerWorkerLaunch(identity, guard.facts, { mutation_id: id, worker_slot: 1, attempt_no: 1 }, 4);
-        repository.recordWorkerResult(id, 1, { kind: 'converged', attempt_no: 1, applied_revision: 2 }, 5);
+        if (origin === 'publication') {
+          repository.beginWorkerAttempt(id, 1, 0, 'initial', 4);
+          repository.registerWorkerLaunch(identity, guard.facts, { mutation_id: id, worker_slot: 1, attempt_no: 1 }, 4);
+          repository.recordWorkerResult(id, 1, { kind: 'converged', attempt_no: 1, applied_revision: 2 }, 5);
+        } else {
+          repository.registerWorkerLaunch(identity, guard.facts, null, 4);
+        }
         repository.markDraining(id, 6);
         repository.recordWorkerLaunchAdmitted(identity.worker_instance_id, 6);
         repository.finalizePublication(id, { outcome: 'converged', old_workers_exited: true }, 7);
-        repository.recordWorkerLaunchExit(identity.worker_instance_id, { kind: 'exited', cleanup: 'unknown' }, 8);
+        if (origin === 'publication') repository.recordWorkerLaunchExit(identity.worker_instance_id, { kind: 'exited', cleanup: 'unknown' }, 8);
+        expect(repository.getWorkerLaunch(identity.worker_instance_id)).toMatchObject({
+          admitted: true, exited: origin === 'publication', cleanup_released: false, capacity_reclaimed: false,
+          ...(origin === 'startup' ? { allocation: null } : {}),
+        });
         const target = { revision: 2, content_hash: repository.getSnapshot().content_hash, plugin_catalog_hash: catalog };
         const worker = { ...identity, ...target, boot_nonce: bootNonce, pid: process.pid, private_port: lease.base + 1 };
         await writeFile(descriptorPath, JSON.stringify(signWorkerDescriptor({
           schema: 'bungee-worker-descriptor-v1', role: 'worker', ...worker, lifetime_guard: { ...guard.facts, held: true },
-          control_port: lease.base + 2, master_control_port: lease.base + 3, phase: 'stopped', frozen: true, started_at: 1,
-          evidence: { kind: 'ready', message: { ...worker, status: 'config-ready', publication,
+          control_port: lease.base + 2, master_control_port: lease.base + 3, phase: origin === 'startup' ? 'serving' : 'stopped', frozen: true, started_at: 1,
+          evidence: { kind: 'ready', message: { ...worker, status: 'config-ready', publication: origin === 'startup' ? null : publication,
             plugin_runtime_generation: 1, required_plugins: [], serving_plugins: [] } },
-          cleanup: { ...target, cleanup_state: 'failed', publication: { ...publication } },
+          ...(origin === 'publication' ? { cleanup: { ...target, cleanup_state: 'failed' as const, publication: { ...publication } } } : {}),
         }, credential.process_key)));
+        if (origin === 'startup') for (const [index, admitted] of [true, false, false].entries()) {
+          const extraIdentity = { master_generation: randomUUID(), worker_instance_id: randomUUID(), worker_slot: index % 2 };
+          const extraGuard = armProcessLifetimeGuard({ directory: join(workersDirectory, 'guards'), processInstanceId: extraIdentity.worker_instance_id });
+          try {
+            repository.registerWorkerLaunch(extraIdentity, extraGuard.facts, null, 4);
+            if (admitted) repository.recordWorkerLaunchAdmitted(extraIdentity.worker_instance_id, 6);
+            const extraBoot = randomUUID();
+            const extraCredential = deriveWorkerSupervisionCredential(deriveWorkerSupervisionSeed(rootKey,
+              extraIdentity.master_generation, extraIdentity.worker_instance_id, extraIdentity.worker_slot), extraBoot);
+            const extraWorker = { ...worker, ...extraIdentity, boot_nonce: extraBoot };
+            const descriptor = JSON.stringify(signWorkerDescriptor({
+              schema: 'bungee-worker-descriptor-v1', role: 'worker', ...extraWorker, lifetime_guard: { ...extraGuard.facts, held: true },
+              control_port: lease.base + 2, master_control_port: lease.base + 3, phase: admitted ? 'serving' : 'stopped', frozen: true, started_at: 1,
+              evidence: { kind: 'ready', message: { ...extraWorker, status: 'config-ready', publication: null,
+                plugin_runtime_generation: 1, required_plugins: [], serving_plugins: [] } },
+              ...(!admitted ? { cleanup: { ...target, cleanup_state: 'success' as const, publication: null } } : {}),
+            }, extraCredential.process_key));
+            const extraPath = join(workersDirectory, `${extraIdentity.worker_instance_id}.json`);
+            await writeFile(extraPath, descriptor);
+            expect(parseWorkerDescriptor(JSON.parse(descriptor), extraCredential)).toMatchObject({
+              phase: admitted ? 'serving' : 'stopped', frozen: true,
+              ...(!admitted ? { cleanup: { cleanup_state: 'success', publication: null } } : {}),
+            });
+            expect(repository.getWorkerLaunch(extraIdentity.worker_instance_id)).toMatchObject({
+              allocation: null, admitted, exited: false, cleanup_released: false, capacity_reclaimed: false,
+            });
+            additionalLaunches.push({ identity: extraIdentity, admitted, descriptorPath: extraPath, descriptor });
+          } finally { extraGuard.closeAfterChildExit(); }
+        }
         // Recreate the schema prefix that originally wrote this launch.
         repository.getDatabase().run('DROP TABLE configuration_worker_launch_capacity_reclaims');
         repository.getDatabase().run('DELETE FROM schema_migrations WHERE version=10');
       } finally { repository.close(); }
     } finally { guard.closeAfterChildExit(); }
+    const historicalDescriptor = await readFile(descriptorPath, 'utf8');
+    expect(parseWorkerDescriptor(JSON.parse(historicalDescriptor), credential)).toMatchObject({
+      phase: origin === 'startup' ? 'serving' : 'stopped', frozen: true,
+    });
 
     await daemon.manager.start({ workers: '2', port: String(lease.base + 1) });
     await waitUntil(async (signal) => {
@@ -1701,7 +1745,10 @@ test('cold startup serves after an exited publication worker left signed failed 
     }, 'data health did not recover from a historical cleanup failure');
     const workers = await runtimeWorkers(lease.base);
     expect(workers).toHaveLength(2);
-    expect(workers.every(worker => worker.worker_instance_id !== identity.worker_instance_id)).toBeTrue();
+    const historicalIds = new Set([identity.worker_instance_id, ...additionalLaunches.map(launch => launch.identity.worker_instance_id)]);
+    expect(historicalIds.size).toBe(origin === 'startup' ? 4 : 1);
+    expect(workers.every(worker => !historicalIds.has(worker.worker_instance_id))).toBeTrue();
+    expect(await Promise.all(workers.map(worker => probeProcessInstance(worker.pid, worker.worker_instance_id)))).toEqual(['exact', 'exact']);
     const response = await fetch(`http://127.0.0.1:${lease.base + 1}/proxy`);
     expect(response.status).toBe(200);
     expect(await response.text()).toBe('recovered');
@@ -1713,11 +1760,26 @@ test('cold startup serves after an exited publication worker left signed failed 
     try {
       expect(database.query('SELECT kind FROM configuration_worker_launch_facts WHERE worker_instance_id=? ORDER BY kind').all(identity.worker_instance_id))
         .toEqual([{ kind: 'admitted' }, { kind: 'exited' }]);
-      expect(database.query('SELECT worker_instance_id FROM configuration_worker_launch_capacity_reclaims').all())
-        .toEqual([{ worker_instance_id: identity.worker_instance_id }]);
+      expect(database.query('SELECT worker_instance_id FROM configuration_worker_launch_capacity_reclaims ORDER BY worker_instance_id').all())
+        .toEqual([identity, ...additionalLaunches.filter(launch => launch.admitted).map(launch => launch.identity)]
+          .map(identity => ({ worker_instance_id: identity.worker_instance_id })).sort((a, b) => a.worker_instance_id.localeCompare(b.worker_instance_id)));
     } finally { database.close(); }
+    const repository = ConfigRepository.open(fixture.dbPath);
+    try {
+      expect(repository.getWorkerLaunch(identity.worker_instance_id)).toMatchObject({
+        admitted: true, exited: true, cleanup_released: false, capacity_reclaimed: true,
+      });
+      for (const launch of additionalLaunches) {
+        expect(repository.getWorkerLaunch(launch.identity.worker_instance_id)).toMatchObject({
+          allocation: null, admitted: launch.admitted, exited: true,
+          cleanup_released: !launch.admitted, capacity_reclaimed: launch.admitted,
+        });
+        expect(await readFile(launch.descriptorPath, 'utf8')).toBe(launch.descriptor);
+      }
+    } finally { repository.close(); }
+    expect(await readFile(descriptorPath, 'utf8')).toBe(historicalDescriptor);
     const stopped = parseWorkerDescriptor(JSON.parse(await readFile(descriptorPath, 'utf8')), credential);
-    expect(stopped.cleanup?.cleanup_state).toBe('failed');
+    expect(stopped.cleanup?.cleanup_state).toBe(origin === 'startup' ? undefined : 'failed');
     if (stopped.lifetime_guard === undefined) throw new Error('historical guard is missing from fixture');
     await daemon.manager.stop();
     await closePorts(lease);
@@ -1727,12 +1789,124 @@ test('cold startup serves after an exited publication worker left signed failed 
     await waitUntil(async (signal) => (await fetch(`http://127.0.0.1:${lease.base}/health/data`, { signal })).status === 200,
       'data health did not recover from the durable reclaim without the original guard');
     expect(await (await fetch(`http://127.0.0.1:${lease.base + 1}/after-recovery`)).text()).toBe('recovered');
-    expect(parseWorkerDescriptor(JSON.parse(await readFile(descriptorPath, 'utf8')), credential).cleanup?.cleanup_state).toBe('failed');
+    expect(await readFile(descriptorPath, 'utf8')).toBe(historicalDescriptor);
+    const restartedRepository = ConfigRepository.open(fixture.dbPath);
+    try {
+      for (const launch of [{ identity, admitted: true }, ...additionalLaunches]) {
+        expect(restartedRepository.getWorkerLaunch(launch.identity.worker_instance_id)).toMatchObject({
+          admitted: launch.admitted, exited: true, cleanup_released: !launch.admitted, capacity_reclaimed: launch.admitted,
+        });
+      }
+    } finally { restartedRepository.close(); }
+    for (const launch of additionalLaunches) expect(await readFile(launch.descriptorPath, 'utf8')).toBe(launch.descriptor);
   } finally {
     try { await daemon.manager.stop(); }
     finally { await cleanupDirect([], upstream, root, lease, managedUpstream); }
   }
 }, { timeout: 2 * FIXTURE_STARTUP_WAIT_MS + PUBLICATION_WAIT_MS + 30_000 });
+
+test.each(['claim-blocked', 'workers-unavailable'] as const)('authenticated management remains usable with all workers unavailable during %s', async mode => {
+  const root = makeCanonicalTempDir('bungee-canonical-control-independent', {daemonSafe:true});
+  const {lease,upstream,managedUpstream,fixture,daemon} = await createUnownedCoreSetup(root);
+  let debtGuard: ReturnType<typeof armProcessLifetimeGuard> | undefined;
+  let failure: unknown;
+  let stoppedWorkers: readonly {pid:number;worker_instance_id:string}[]=[];
+  try {
+    await cp(resolve(import.meta.dir,'../../packages/core/dist/plugins/user-auth'),join(fixture.pluginsPath,'user-auth'),{recursive:true});
+    const statePath=join(fixture.pluginsPath,'canonical-state');
+    await mkdir(statePath);
+    await writeFile(join(statePath,'manifest.json'),JSON.stringify({name:'canonical-state',version:'1.0.0',schemaVersion:3,artifactKind:'runtime-plugin',main:'index.js',
+      control:{entry:'control.js',rpc:[]},capabilities:['api','controlPlane','dynamicRuntimeLoad'],uiExtensionMode:'none',engines:{bungee:'^6.0.0'},configSchema:[],
+      services:{provides:[{id:'canonical.state.v1',version:1,process:'control'}]}}));
+    await writeFile(join(statePath,'index.js'),"export default class CanonicalState {bodyRequirements(){return {request:'none'};}register(){}};");
+    await writeFile(join(statePath,'control.js'),`export function createControl(context){return {api:[],rpc:[],start(){context.services.publish('canonical.state.v1',1,{ready:()=>true});},dispose(){}};}`);
+    const pluginPath=join(fixture.pluginsPath,'canonical-plugin');
+    const manifest=JSON.parse(await readFile(join(pluginPath,'manifest.json'),'utf8'));
+    manifest.dependencies={'canonical-state':'^1.0.0'};
+    manifest.contributes.api[0].capability='config.read';
+    manifest.services.consumes.push({plugin:'canonical-state',id:'canonical.state.v1',version:1,process:'control'});
+    await writeFile(join(pluginPath,'manifest.json'),JSON.stringify(manifest));
+    const source=await readFile(join(pluginPath,'control.js'),'utf8');
+    await writeFile(join(pluginPath,'control.js'),source.replace('invoke: async () => ({ accounts: [] })', 'invoke: async () => Response.json({ accounts: [] })').replace('start() { context.services.rpc.publish',"start() { if(!context.services.consume('canonical-state','canonical.state.v1',1).ready())throw new Error('state unavailable'); context.services.rpc.publish"));
+    await prepareManagementInitialization(fixture.dbPath,fixture.pluginsPath);
+    const catalog=await buildPluginManifestCatalog({scanDirectories:[fixture.pluginsPath]});
+    const repository=ConfigRepository.open(fixture.dbPath,{compileOptions:catalog.toCompileOptions()});
+    try {
+      const value=aggregate(upstream.port!,'/proxy',true,managedUpstream.port!);
+      value.plugin_activations=[...value.plugin_activations,{plugin_name:'canonical-state'},{plugin_name:'user-auth'}];
+      expect(repository.commit({mutation_id:randomUUID(),expected_revision:repository.getSnapshot().revision,kind:'config',created_at:Date.now(),target_worker_slots:[0,1],aggregate:value}).kind).toBe('committed');
+    } finally {repository.close();}
+    if(mode==='claim-blocked'){
+      const identity={master_generation:randomUUID(),worker_instance_id:randomUUID(),worker_slot:0};
+      debtGuard=armProcessLifetimeGuard({directory:join(fixture.root,'data/runtime/workers/guards'),processInstanceId:identity.worker_instance_id});
+      const repository=ConfigRepository.open(fixture.dbPath);
+      try {repository.registerWorkerLaunch(identity,debtGuard.facts,null,Date.now());} finally {repository.close();}
+    }
+    await daemon.manager.start({workers:'2',port:String(lease.base+1)});
+    const base=`http://127.0.0.1:${lease.base}`;
+    expect((await fetch(base+'/api/config')).status).toBe(401);
+    const password='canonical-local-password-2026';
+    await initializeManagementAccount(base,'canonical-admin',password);
+    const signed=await fetch(base+'/api/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:'canonical-admin',password,transport:'bearer'})});
+    expect(signed.status).toBe(200);
+    const credentials=await signed.json();
+    expect(typeof credentials.token).toBe('string');
+    const headers={authorization:'Bearer '+credentials.token,'content-type':'application/json'};
+    if(mode==='workers-unavailable'){
+      await waitUntil(async signal=>{
+        const runtime=await (await fetch(base+'/api/config/runtime',{headers,signal})).json();
+        return runtime.publication.serving_complete===true && (runtime.publication.operation?.state==='converged'
+          || (runtime.publication.operation?.state==='degraded' && runtime.publication.operation.error_code==='old_worker_drain_failed' && runtime.publication.cleanup.state==='released'));
+      },'initial publication did not finish before worker termination');
+      expect((await fetch(base+'/health/data')).status).toBe(200);
+      const serving=await (await fetch(base+'/api/config/runtime',{headers})).json();
+      expect(serving.workers).toHaveLength(2);
+      stoppedWorkers=serving.workers;
+      for(const worker of serving.workers){expect(await probeProcessInstance(worker.pid,worker.worker_instance_id)).toBe('exact');process.kill(worker.pid,'SIGKILL');}
+      await waitUntil(async()=> (await Promise.all(serving.workers.map((worker:any)=>probeProcessInstance(worker.pid,worker.worker_instance_id)))).every(value=>value==='dead'),'serving workers did not exit');
+    }
+    await waitUntil(async signal=>{
+      const response=await fetch(base+'/api/config/runtime',{headers,signal});
+      if(!response.ok)return false;
+      const runtime=await response.json();
+      return runtime.publication.serving_complete===false && runtime.publication.serving_revision===null;
+    },'runtime still reports a serving revision');
+    expect((await fetch(base+'/health/management')).status).toBe(200);
+    expect((await fetch(base+'/health/data')).status).toBe(503);
+    expect((await fetch(base+'/api/config')).status).toBe(401);
+    const currentResponse=await fetch(base+'/api/config',{headers});expect(currentResponse.status).toBe(200);
+    const current=await currentResponse.json();
+    expect((await fetch(base+'/api/config/validate',{method:'POST',headers,body:JSON.stringify({aggregate:current.config})})).status).toBe(200);
+    const exported=await fetch(base+'/api/config/export',{headers});expect(exported.status).toBe(200);expect((await exported.json()).source_revision).toBe(current.revision);
+    expect((await fetch(base+'/api/logs',{headers})).status).toBe(200);
+    const accounts=await fetch(base+'/api/plugins/canonical-plugin/control/accounts',{headers});expect(accounts.status).toBe(200);expect(await accounts.json()).toEqual({accounts:[]});
+    const nextAggregate={...current.config,logical_configuration:{...current.config.logical_configuration,routes:current.config.logical_configuration.routes.map((route:any,index:number)=>index===0?{...route,path:'/saved-without-workers'}:route)}};
+    const saved=await fetch(base+'/api/config',{method:'PUT',headers,body:JSON.stringify({expected_revision:current.revision,mutation_id:randomUUID(),aggregate:nextAggregate})});
+    expect(saved.status).toBe(202);
+    const accepted=await saved.json();expect(accepted.revision).toBe(current.revision+1);
+    expect((await (await fetch(base+'/api/config',{headers})).json()).revision).toBe(accepted.revision);
+    expect(durableRevision(fixture.dbPath)).toBe(accepted.revision);
+    expect((await fetch(base+'/api/plugins/canonical-plugin/control/accounts',{headers})).status).toBe(200);
+    expect((await fetch(base+'/health/management')).status).toBe(200);
+    expect((await fetch(base+'/health/data')).status).toBe(503);
+    const finalRuntime=await (await fetch(base+'/api/config/runtime',{headers})).json();
+    expect(finalRuntime.publication.serving_complete).toBe(false);expect(finalRuntime.publication.serving_revision).toBeNull();
+    expect(await Promise.all(stoppedWorkers.map(worker=>probeProcessInstance(worker.pid,worker.worker_instance_id)))).toEqual(stoppedWorkers.map(()=>'dead'));
+    expect(finalRuntime.health.dependencies.filter((dependency:any)=>dependency.component!=='ingress').every((dependency:any)=>dependency.state==='ready')).toBe(true);
+    expect(finalRuntime.health.component_recovery.every((component:any)=>component.state==='healthy')).toBe(true);
+  } catch(error) {
+    failure=error;
+    const appFiles=readdirSync(join(fixture.root,'custom')).filter(appLogFileName).map(file=>join(fixture.root,'custom',file));
+    const logs=await Promise.all([...appFiles,...daemon.logFiles].map(file=>readFile(file,'utf8').catch(()=>'')));
+    console.log(JSON.stringify(summarizeDaemonExitLogs(logs,appFiles.length)));
+  } finally {
+    const errors:unknown[]=failure?[failure]:[];
+    try {debtGuard?.closeAfterChildExit();}catch(error){errors.push(error);}
+    try {await daemon.manager.stop();}catch(error){errors.push(error);}
+    try {await cleanupDirect(daemon.spawned.map(record=>record.child),upstream,root,lease,managedUpstream);}catch(error){errors.push(error);}
+    if(errors.length)throw new AggregateError(errors, 'control independence acceptance failed');
+  }
+}, {timeout:FIXTURE_STARTUP_WAIT_MS+PUBLICATION_WAIT_MS+30_000});
 
 describe.serial('A core lifecycle', () => {
   let state: { root: string; lease: PortLease; fixture: Fixture; upstream: ReturnType<typeof Bun.serve>; managedUpstream: ReturnType<typeof Bun.serve>; daemon: DaemonHarness; polling: AbortController; first?: ChildProcess; second?: ChildProcess; competitor?: ChildProcess; firstController?: { readonly instanceId: string; readonly epoch: number; readonly controllerId: string }; marker: string } | undefined;
