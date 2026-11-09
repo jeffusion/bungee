@@ -217,13 +217,32 @@ describe('real configuration storage deadline and close failure evidence',()=>{
   const silentUrl=new URL('../fixtures/config-storage-silent-worker.ts',import.meta.url);
   test('silence bounds the production queue and expires reads without reporting database release',async()=>{
     let notifications=0;
-    const client=await AsyncConfigRepository.open(path(),{workerUrl:silentUrl,requestTimeoutMs:250,maxPendingRequests:1,
-      onWorkerFailure:()=>{notifications++;}});clients.push(client);
-    const read=client.getOperation('silent').catch(error=>error);
-    await expect(client.getCurrentRecovery()).rejects.toMatchObject({code:'queue_full'});
-    expect(await read).toMatchObject({code:'repository_failure'});expect(notifications).toBe(1);
-    await expect(client.close()).rejects.toMatchObject({code:'repository_failure'});
-    await expect(client.close()).rejects.toMatchObject({code:'repository_failure'});
+    const deadlines: Array<() => void> = [];
+    const originalSetTimeout = globalThis.setTimeout;
+    // Worker startup and SQLite audits must finish before the silent-read deadline is exercised.
+    const timer = spyOn(globalThis, 'setTimeout').mockImplementation(new Proxy(originalSetTimeout, {
+      apply(target, thisArg, args) {
+        const handle = Reflect.apply(target, thisArg, args);
+        const [callback, delay, ...callbackArgs] = args;
+        if (delay === 250 && typeof callback === 'function') {
+          clearTimeout(handle);
+          deadlines.push(() => callback(...callbackArgs));
+        }
+        return handle;
+      },
+    }));
+    try {
+      const client=await AsyncConfigRepository.open(path(),{workerUrl:silentUrl,requestTimeoutMs:250,maxPendingRequests:1,
+        onWorkerFailure:()=>{notifications++;}});clients.push(client);
+      let settled = false;
+      const read=client.getOperation('silent').catch(error=>error).finally(() => { settled = true; });
+      await expect(client.getCurrentRecovery()).rejects.toMatchObject({code:'queue_full'});
+      expect(settled).toBe(false);expect(notifications).toBe(0);
+      expect(deadlines).toHaveLength(2);deadlines[1]!();
+      expect(await read).toMatchObject({code:'repository_failure'});expect(notifications).toBe(1);
+      await expect(client.close()).rejects.toMatchObject({code:'repository_failure'});
+      await expect(client.close()).rejects.toMatchObject({code:'repository_failure'});
+    } finally { timer.mockRestore(); }
   });
   test('close shares one request, refuses new work and expires without false release',async()=>{
     let notifications=0;
