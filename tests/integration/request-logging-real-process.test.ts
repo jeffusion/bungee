@@ -19,6 +19,7 @@ let master: OwnedMaster | undefined;
 let upstream: ReturnType<typeof Bun.serve<string>>;
 const startup: GatewayMasterStartupState = { attempted: false, errors: [] };
 const sockets = new Set<WebSocket>();
+const expectedDisconnectOperationCounts = new Map<string, number>();
 const management = () => `http://127.0.0.1:${lease.base}`;
 const proxy = () => `http://127.0.0.1:${lease.block.ports[1]}`;
 const failurePlugin = 'request-logging-candidate-gate';
@@ -361,6 +362,13 @@ afterAll(async () => {
   let stopped = false;
   let released = !startup.attempted;
   try { if (master) { await stopOwnedMaster(master); stopped = true; } } catch (error) { errors.push(error); }
+  if (stopped) {
+    // The logs API can hide extra rows, so inspect storage after its writers have exited.
+    for (const [path, count] of expectedDisconnectOperationCounts) {
+      try { expect(storedRequestKinds(path), path).toEqual(Array(count).fill('operation')); }
+      catch (error) { errors.push(error); }
+    }
+  }
   try { await upstream?.stop(true); } catch (error) { errors.push(error); }
   try { if (lease) { await releasePortBlock(lease); released = true; } } catch (error) { quarantinePortBlock(lease); errors.push(error); }
   if (fixture) {
@@ -370,7 +378,7 @@ afterAll(async () => {
       }
     } catch (error) { errors.push(error); }
   }
-  if (errors.length) throw new AggregateError(errors, 'request logging fixture cleanup failed');
+  if (errors.length) throw new AggregateError(errors, 'request logging storage verification or fixture cleanup failed');
 }, 45000);
 
 test('ordinary HTTP records only supported bodies and ordinary WebSocket stays outside request logs', async () => {
@@ -601,7 +609,7 @@ test('Responses WS success survives client disconnect only after confirmed compl
         && operation.protocolOutcome === (completed ? 'completed' : undefined)
         && operation.transportOutcome === (completed ? 'completed' : 'unknown');
     }, `wrong result after WS close ${path}`, 12000);
-    expect(storedRequestKinds(path)).toEqual(['operation']);
+    expectedDisconnectOperationCounts.set(path, 1);
   }
   const path = '/codex/disconnect-before-terminal/responses';
   const socket = await connect(path);
@@ -622,7 +630,7 @@ test('Responses WS success survives client disconnect only after confirmed compl
     const rows = await queryLogs(path);
     return rows.length === 2 && rows.some(row => row.protocolOutcome === 'completed' && row.transportOutcome === 'completed');
   }, 'the confirmed WebSocket operation lost its terminal result', 12000);
-  expect(storedRequestKinds(path)).toEqual(['operation', 'operation']);
+  expectedDisconnectOperationCounts.set(path, 2);
 }, 45000);
 
 test('WebSocket body limits and ambiguous frames leave operation outcomes intact', async () => {
