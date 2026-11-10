@@ -12,10 +12,11 @@
   import { Button } from '$components/ui/button';
   import PriceModelPicker from '@plugins/token-stats/ui/PriceModelPicker.svelte';
   import type { ModelsDevProviderSummary, ModelsDevCatalogStatus } from '@plugins/models-dev/contract';
-  import { bindingSource, parseBindings, type ModelBinding as SavedModelBinding } from '@plugins/codex-router/server/config';
+  import { bindingSource, MAX_ALLOWED_TOOLS_LENGTH, parseBindings, type ModelBinding as SavedModelBinding } from '@plugins/codex-router/server/config';
 
   // Drafts may omit the protocol until the user selects it; published bindings require it.
   type ModelBinding = Omit<SavedModelBinding, 'target'> & { target: Omit<SavedModelBinding['target'], 'protocol'> & { protocol?: SavedModelBinding['target']['protocol'] } };
+  const defaultAllowedTools = 'exec_command, write_stdin, apply_patch, view_image, request_user_input, request_permissions, collaboration.*';
 
   let { value = $bindable([]), onchange, onvalidate }: { value?: ModelBinding[]; onchange?: (value: ModelBinding[]) => void; onvalidate?: (error: string | null) => void } = $props();
   const componentId = `codex-bindings-${Math.random().toString(36).slice(2, 10)}`;
@@ -39,7 +40,11 @@
     if ($isLoading) return;
     let error: string | null = null;
     try { parseBindings($state.snapshot(value)); }
-    catch (cause) { error = t(cause instanceof Error && cause.message === 'codex_router_model_conflict' ? 'modelConflict' : 'bindingInvalid'); }
+    catch (cause) {
+      const code = cause instanceof Error ? cause.message : '';
+      error = t(code === 'codex_router_model_conflict' ? 'modelConflict'
+        : code === 'codex_router_invalid_allowed_tools' ? 'allowedToolsInvalid' : 'bindingInvalid');
+    }
     untrack(() => onvalidate?.(error));
   });
   $effect(() => { if (rowIds.length !== value.length) rowIds = value.map((_, index) => rowIds[index] ?? nextRowId++); });
@@ -68,16 +73,20 @@
       sourceProvider: nextMode === 'add' ? undefined : draft ? draft.sourceProvider : 'openai',
     } : entry));
   }
-  function limit(index: number, key: keyof NonNullable<ModelBinding['capabilityOverrides']>, next: boolean | number | undefined) {
+  function limit<K extends keyof NonNullable<ModelBinding['capabilityOverrides']>>(index: number, key: K, next: NonNullable<ModelBinding['capabilityOverrides']>[K]) {
     const overrides = { ...value[index].capabilityOverrides };
-    if (next === undefined) delete overrides[key]; else (overrides as Record<string, unknown>)[key] = next;
+    if (next === undefined) delete overrides[key]; else overrides[key] = next;
     update(index, { capabilityOverrides: overrides });
   }
   function add(nextMode: 'add' | 'replace') {
     const rowId = nextRowId++;
     rowIds = [...rowIds, rowId];
     modes = { ...modes, [rowId]: nextMode };
-    publish([...value, { sourceProvider: nextMode === 'replace' ? 'openai' : undefined, source: '', sourceProtocol: 'responses', provider: '', model: '', target: { type: 'route', id: '' } }]);
+    publish([...value, {
+      sourceProvider: nextMode === 'replace' ? 'openai' : undefined, source: '', sourceProtocol: 'responses',
+      provider: '', model: '', target: { type: 'route', id: '' },
+      capabilityOverrides: { allowedTools: defaultAllowedTools },
+    }]);
   }
   function remove(index: number) {
     delete modes[rowIds[index]]; replacementDrafts.delete(rowIds[index]);
@@ -196,6 +205,14 @@
                 <BCheckbox label={t('toolsOff')} bind:checked={() => binding.capabilityOverrides?.tools === false, checked => limit(index, 'tools', checked ? false : undefined)} />
                 <BCheckbox label={t('imagesOff')} bind:checked={() => binding.capabilityOverrides?.images === false, checked => limit(index, 'images', checked ? false : undefined)} />
                 <BCheckbox label={t('reasoningOff')} bind:checked={() => binding.capabilityOverrides?.reasoning === false, checked => limit(index, 'reasoning', checked ? false : undefined)} />
+              </div>
+              <div class="space-y-1.5">
+                <Label class="block" for={`${id}-allowed-tools`}>{t('allowedTools')}</Label>
+                <Input id={`${id}-allowed-tools`} maxlength={MAX_ALLOWED_TOOLS_LENGTH}
+                  aria-describedby={`${id}-allowed-tools-hint`} disabled={binding.capabilityOverrides?.tools === false}
+                  placeholder="exec_command, apply_patch, mcp__obsidian.*"
+                  bind:value={() => binding.capabilityOverrides?.allowedTools ?? '', next => limit(index, 'allowedTools', next || undefined)} />
+                <p id={`${id}-allowed-tools-hint`} class="text-xs text-zinc-400">{t('allowedToolsHint')}</p>
               </div>
             </div>
           </details>

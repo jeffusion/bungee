@@ -14,6 +14,12 @@
 
 模型绑定直接在入口路由的插件配置表单中编辑并随该路由保存。插件不提供独立设置页，目录管理使用 models-dev 插件。
 
+在模型绑定的「能力限制」中，可填写「允许的工具」（`capabilityOverrides.allowedTools`）。留空时使用目标模型原有的工具能力。用英文逗号分隔规则，`*` 匹配零个或多个字符，名称区分大小写。普通工具写原名，分组内的工具写为 `命名空间.工具名`，例如 `exec_command, apply_patch, mcp__obsidian.*`。无名称的工具按其类型匹配。「禁用工具调用」优先。
+
+在界面新建模型绑定时，表单预填 `exec_command, write_stdin, apply_patch, view_image, request_user_input, request_permissions, collaboration.*`。打开已有绑定时显示已保存的值，清空后保存即允许全部工具。
+
+路由在转换前按白名单筛选本轮和续聊携带的工具声明。请求指定了被排除的工具，或续聊历史中调用过被排除的工具时，路由返回 422。修改白名单后，遇到这类续聊错误可开始新会话。
+
 ```json
 {"models":[{"source":"gpt-native","sourceProtocol":"responses","provider":"anthropic","model":"claude-sonnet-4","target":{"type":"service","id":"目标服务的 UUID","protocol":"anthropic_messages"}}]}
 ```

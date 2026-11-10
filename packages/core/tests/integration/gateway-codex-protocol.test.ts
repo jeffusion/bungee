@@ -148,6 +148,58 @@ test('a Gemini endpoint can map the model and remove converted reasoning setting
   }
 });
 
+test('a Gemini binding filters both tool sources and refuses excluded tool dependencies', async () => {
+  const config = {
+    routes: [{id: 'entry', path: '/codex', plugins: [{name: 'codex-router', path, options: {models: [{
+      source: 'client', provider: 'zai', model: 'glm-5.3-flash',
+      target: {type: 'service', id: 'service', protocol: 'gemini_generate_content'},
+      capabilityOverrides: {allowedTools: ' exec_command, mcp__notes.read*item '},
+    }]}}], endpoints: [{target: 'http://unused'}]}],
+    services: [{id: 'service', name: 'service', endpoints: [{target: 'http://upstream.test'}]}],
+  };
+  const registry = new ScopedPluginRegistry(import.meta.dir);
+  expect((await registry.initializeFromConfig(config)).failed).toBe(0);
+  setScopedPluginRegistry(registry);
+  const calls: any[] = [];
+  globalThis.fetch = Object.assign(async (_url: string, init: RequestInit) => {
+    calls.push(await new Response(init.body).json());
+    return Response.json({candidates: [{content: {role: 'model', parts: [{text: 'answer'}]}, finishReason: 'STOP'}]});
+  }, {preconnect() {}}) as typeof fetch;
+  const tool = (name: string) => ({type: 'function', name, description: name, parameters: {type: 'object', properties: {}}});
+  const tools = [tool('exec_command'), ...Array.from({length: 254}, (_, i) => tool(`excluded_${i}`))];
+  const request = (body: Record<string, unknown>) => handleRequest(new Request('http://local/codex/responses', {
+    method: 'POST', headers: {'content-type': 'application/json'},
+    body: JSON.stringify({model: 'client', tools, input: 'hello', ...body}),
+  }), config, {logging});
+  try {
+    const response = await request({input: [
+      {type: 'additional_tools', tools: [{type: 'namespace', name: 'mcp__notes', tools: [tool('read_item'), tool('read_item_metadata')]}]},
+      {role: 'user', content: 'hello'},
+    ]});
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(calls).toHaveLength(1);
+    const declarations = calls[0].tools[0].functionDeclarations;
+    expect(declarations).toHaveLength(2);
+    expect(declarations[0].description).toContain('exec_command');
+    expect(declarations[1].description).toContain('read_item');
+    expect(declarations[1].description).not.toContain('metadata');
+
+    const forced = await request({tool_choice: {type: 'function', name: 'excluded_0'}});
+    expect(forced.status).toBe(422);
+    expect(await forced.json()).toMatchObject({error: 'codex_router_tool_choice_excluded', param: 'tool_choice'});
+    const history = await request({input: [
+      {type: 'function_call', name: 'excluded_0', call_id: 'c', arguments: '{}'},
+      {type: 'function_call_output', call_id: 'c', output: 'result'},
+    ]});
+    expect(history.status).toBe(422);
+    expect(await history.json()).toMatchObject({error: 'codex_router_tool_history_excluded', param: 'input[0]'});
+    expect(calls).toHaveLength(1);
+  } finally {
+    await registry.destroy();
+  }
+});
+
 for(const [model,wire] of [['glm-5.3','GLM-5.3'],['glm-5.3-flash','GLM-5.3-Flash']])for(const effort of ['low','high','max'])test(`service mapping declares ${model} for ${effort} without leaking annotations`,async()=>{
   const mappingPath=new URL('../../../../plugins/model-mapping/server/index.ts',import.meta.url).pathname;
   const config:any={routes:[{id:'entry',path:'/codex',plugins:[{name:'codex-router',path,options:{models:[{source:'client',provider:'zai',model,target:{type:'service',id:'service',protocol:'chat_completions'}}]}}],endpoints:[{target:'http://unused'}]}],
