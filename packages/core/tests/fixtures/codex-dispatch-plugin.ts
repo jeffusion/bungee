@@ -14,8 +14,6 @@ export default class extends CodexRouterPlugin {
       const mutation=this.fixtureOptions.outboundMutation;
       if('identity' in mutation)ctx.annotations={...ctx.annotations,[MODEL_IDENTITY_ANNOTATION_KEY]:mutation.identity};
       if(mutation.model!==undefined)ctx.body.model=mutation.model;
-      if(mutation.effort!==undefined)ctx.body.reasoning_effort=mutation.effort;
-      if(mutation.path!==undefined)ctx.url.pathname=mutation.path;
       return ctx;
     });
   }

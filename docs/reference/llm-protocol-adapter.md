@@ -60,7 +60,7 @@ Codex Router 负责模型目录替换、绑定选择、dispatch 和 HTTP/WS 传�
 
 转换不会把不可表示的硬约束悄悄删除。工具定义及调用/返回身份、结构化输出、输入顺序、明确历史和终止状态必须保持语义；影响内容或控制语义的未知字段/类型、未解析引用、加密历史、compaction、目标不可表达的格式或角色约束、多个候选不能无损转换时返回具体 param 的错误。生成偏好只有经过校验且有明确省略规则时才可省略，并记录 mapped/omitted 原因；非法值不能当作“未知”继续生成。
 
-会话目录身份为 `deepseek` 的 Responses→Chat Completions 转换，将出站消息中的 `developer` 角色映射为 `system`，保留各条消息的内容；工具调用期间插入的指令位置按下述 Chat 历史规则处理，规范历史仍保留原角色和顺序。该处理依据 [DeepSeek Chat API](https://api-docs.deepseek.com/api/create-chat-completion) 的角色契约，不匹配具体型号，不增加配置字段，也不改写其他提供商或原生 Responses 透传的角色。若后续切换目标使已执行的角色映射不再适用，或最终 DeepSeek 消息仍包含 `developer`，末端校验明确拒绝，不在只读校验阶段重新改写正文。
+会话目录身份为 `deepseek` 的 Responses→Chat Completions 转换，将出站消息中的 `developer` 角色映射为 `system`，保留各条消息的内容；工具调用期间插入的指令位置按下述 Chat 历史规则处理，规范历史仍保留原角色和顺序。该处理依据 [DeepSeek Chat API](https://api-docs.deepseek.com/api/create-chat-completion) 的角色契约，不匹配具体型号，不增加配置字段，也不改写其他提供商或原生 Responses 透传的角色。独立运行的 llm-protocol-adapter 在出站校验时拒绝不再适用的角色映射，以及最终 DeepSeek 消息中的 `developer` 角色。
 
 Chat Completions 上游 `usage` 及其 details 对象是可扩展的辅助统计，不使用封闭字段名单作为响应准入条件。适配器校验核心 token 计数及实际读取的缓存、推理细项，接受可选细项的缺省或 `null`；未消费的统计字段不参与转换决策，不因其出现而中断正文或完成事件。原始统计仍由既有上游 BodyHandle 观察与计量链路读取，转换不修改该对象，也不向 Responses 输出新增未经目标协议定义的字段；这不表示所有上游统计细分均能无损转换。该边界参考 [OpenAI Chat usage](https://platform.openai.com/docs/api-reference/chat/object) 和 [AI SDK DeepSeek 的开放 usage schema](https://github.com/vercel/ai/blob/39aae5425e9f9a25acce413cc7e6823c2b5a73c5/packages/deepseek/src/chat/deepseek-chat-api-types.ts)，不放宽正文、工具、终态或其他协议的既有校验。
 
@@ -105,7 +105,7 @@ Gemini usageMetadata 的辅助统计（如 promptTokensDetails、cacheTokensDeta
 
 显式 effort 按原值写入 Responses 的 reasoning.effort、Chat Completions 的 reasoning_effort、Anthropic Messages 的 output_config.effort 或 Gemini 的 generationConfig.thinkingConfig.thinkingLevel。未选择 effort 时不注入默认等级；适配器不因模型名称自动开启 thinking、adaptive 或设置 budget，推理开关沿用目标端默认行为。Gemini 仅公布目录明确列出的 minimal/low/medium/high 交集，按原值映射 thinkingLevel；none/xhigh/max、toggle 与 budget_tokens 不生成档位，也不换算 budget。
 
-有明确目标 profile 的转换请求必须核验 selectedEffort。真正出站 attempt 再核验实际 model、协议、目录版本、规则版本及 wire effort；后续模型映射、重试/failover 改变目标不能无声丢失已选强度。不将不同档位折叠成相近值，也不从档位臆造 thinking.budget_tokens。字段映射依据 [OpenAI Responses](https://platform.openai.com/docs/api-reference/responses)、[Chat Completions](https://platform.openai.com/docs/api-reference/chat/completions)、[Gemini thinking levels](https://ai.google.dev/api/generate-content#ThinkingConfig) 和 [Anthropic effort](https://platform.claude.com/docs/en/build-with-claude/effort) 的协议定义；提供商的额外约束仍需实际验证，不能由兼容协议名称推断全部行为。
+有明确目标 profile 的转换请求必须核验 selectedEffort。独立运行的 llm-protocol-adapter 在每次出站时核验实际模型、协议、目录版本、规则版本和出站档位。[Codex Router](../../plugins/codex-router/README.md) 使用转换服务，转换完成后由目标链路的规则和插件决定最终请求。不将不同档位折叠成相近值，也不从档位臆造 thinking.budget_tokens。字段映射依据 [OpenAI Responses](https://platform.openai.com/docs/api-reference/responses)、[Chat Completions](https://platform.openai.com/docs/api-reference/chat/completions)、[Gemini thinking levels](https://ai.google.dev/api/generate-content#ThinkingConfig) 和 [Anthropic effort](https://platform.claude.com/docs/en/build-with-claude/effort) 的协议定义；提供商的额外约束仍需实际验证，不能由兼容协议名称推断全部行为。
 
 客户端请求及出站参数校验失败返回本地 422；上游成功响应无法转换时返回结构化 502，已开始的流按现有严格流错误路径结束，不伪造成功终态。本地 `DataAdmissionError` 在每次 attempt 的故障分类前按公共错误契约归一化，脱敏保留安全的状态、原因、重试时间和字段位置，不复制任意异常属性。插件独立打包导致构造器身份不同，也不得将本地协议拒绝降为普通异常、HTML 500、累计为上游故障或触发熔断。
 
@@ -115,7 +115,7 @@ Gemini usageMetadata 的辅助统计（如 promptTokensDetails、cacheTokensDeta
 
 `createSession()` 接受可选 modelIdentity 和原 route 的 restrictions；`validateAttempt()` 接受最终 modelIdentity，结果的 model 保持实际上游名称，catalogModel 返回解析后的目录身份（无资料时为 null），并保留 catalogVersion/rulesVersion。声明读取和会话创建都转换为安全的本地错误；只释放成功创建的会话。
 
-发送前依次检查协议及最终 URL、声明结构、wireModel 与实际模型完全一致、目录身份以及已选推理参数。Gemini 从最终 URL 的终端 `/models/{encodedModel}:generateContent|streamGenerateContent` 段读取模型，允许基址前缀；正文 model 不参与判断。解析失败明确拒绝，没有入口名称回退。其它协议以最终正文的 model 为准；validateAttempt 的 model 参数必须与提取出的实际模型一致。没有声明时只进行原有精确目录解析。
+独立运行的 llm-protocol-adapter 在发送前调用 `validateAttempt()`，依次检查协议及最终 URL、声明结构、wireModel 与实际模型的一致性、目录身份和已选推理参数。Gemini 从最终 URL 的终端 `/models/{encodedModel}:generateContent|streamGenerateContent` 段读取模型，允许基址前缀；正文 model 不参与判断。解析失败明确拒绝，没有入口名称回退。其它协议以最终正文的 model 为准；validateAttempt 的 model 参数必须与提取出的实际模型一致。没有声明时只进行原有精确目录解析。
 
 同一目录身份复用会话锁定的能力快照；目录刷新不会改变活动生成。真正换模型按最终 provider/model 重新解析，继续应用原 route 限制；新目标目录版本必须等于锁定版本。入口没有 profile 且未选 effort 时，首次有效声明锁定快照；已经选 effort 且无法证明原生同模型时，晚到声明不能额外放行。
 
