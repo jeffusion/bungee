@@ -12,7 +12,7 @@ const path=new URL('../fixtures/codex-dispatch-plugin.ts',import.meta.url).pathn
 const previous=getScopedPluginRegistry();afterEach(()=>setScopedPluginRegistry(previous));
 async function waitUntil(predicate:()=>boolean){for(let i=0;i<200;i++){if(predicate())return;await Bun.sleep(10);}throw new Error('Timeout');}
 async function setup(endpoints:any[], bindModels=true, logging?:RequestLoggerDependencies){
-  const config:any={logging:{body:{enabled:!!logging?.bodyStorage}},routes:[{id:'e',path:'/codex',websocket:{enabled:true},path_rewrite:{'^/codex':''},plugins:[{name:'codex-router',path,options:{models:!bindModels?[]:endpoints.map((endpoint,index)=>({source:`m${index}`,provider:endpoint.provider??'p',model:endpoint.model ?? `m${index}`,target:{type:'route',id:`t${index}`,protocol:endpoint.protocol}}))}}],endpoints:[{target:endpoints[0].target}]},...endpoints.map((endpoint,index)=>({id:`t${index}`,path:`/target${index}`,plugins:endpoint.plugins??[],path_rewrite:{[`^/target${index}`]:''},websocket:{enabled:endpoint.ws===true},endpoints:[{id:`u${index}`,target:endpoint.target}]}))]};
+  const config:any={logging:{body:{enabled:!!logging?.bodyStorage}},routes:[{id:'e',path:'/codex',websocket:{enabled:true},path_rewrite:{'^/codex':''},plugins:[{name:'codex-router',path,options:{models:!bindModels?[]:endpoints.map((endpoint,index)=>({source:`m${index}`,provider:endpoint.provider??'p',model:endpoint.model ?? `m${index}`,capabilityOverrides:endpoint.capabilityOverrides,target:{type:'route',id:`t${index}`,protocol:endpoint.protocol}}))}}],endpoints:[{target:endpoints[0].target}]},...endpoints.map((endpoint,index)=>({id:`t${index}`,path:`/target${index}`,plugins:endpoint.plugins??[],path_rewrite:{[`^/target${index}`]:''},websocket:{enabled:endpoint.ws===true},endpoints:[{id:`u${index}`,target:endpoint.target}]}))]};
   const registry=new ScopedPluginRegistry(import.meta.dir);expect((await registry.initializeFromConfig(config)).failed).toBe(0);if(logging)registerRequestLogs(registry.getGatewayHooks());setScopedPluginRegistry(registry);
   const bridge=createWebSocketBridge({closeTimeoutMs:200});const completions=new Set<Promise<void>>();
   const server=Bun.serve({hostname:'127.0.0.1',port:0,websocket:bridge.websocket,async fetch(request,server){if(!isWebSocketUpgradeRequest(request))return runGatewayRequest(request,config,{logging});const result=await runGatewayWebSocket({request,nativeRequest:request,server,config,bridge,servingRevision:1,logging,retain(promise){completions.add(promise);void promise.finally(()=>completions.delete(promise));}});return result.response;}});
@@ -214,6 +214,40 @@ for (const bound of [false,true]) test(`native WS reference continuation retains
     expect(calls[0].input[0]).toEqual(carrier);expect(calls[1].input[0]).toEqual(carrier);
     expect(calls[1].input.map((item:any)=>item.type??item.role)).toEqual(['additional_tools','user','message','user']);
   }finally{await env.close();upstream.stop(true);}
+});
+
+test('native Responses WS continuation caches filtered declarations and rejects excluded hosted history', async () => {
+ const calls: any[] = [];
+ const upstream = Bun.serve({hostname: '127.0.0.1', port: 0, fetch(request, server) {
+   if (server.upgrade(request)) return;
+   return new Response('WS required', {status: 400});
+ }, websocket: {message(socket, message) {
+   const body = JSON.parse(String(message)); calls.push(body);
+   socket.send(JSON.stringify({type: 'response.completed', response: {id: `native-${calls.length}`, object: 'response', status: 'completed', model: body.model, output: []}}));
+ }}});
+ const target = `http://127.0.0.1:${upstream.port}`;
+ const env = await setup([
+   {protocol: 'responses', target, ws: true, capabilityOverrides: {allowedTools: 'kept'}},
+   {protocol: 'responses', target, ws: true},
+ ]);
+ const kept = {type: 'function', name: 'kept', parameters: {type: 'object'}};
+ try {
+   env.client.send(JSON.stringify({type: 'response.create', model: 'm0', input: [
+     {type: 'additional_tools', tools: [kept, {...kept, name: 'excluded'}]}, {role: 'user', content: 'hello'},
+   ]}));
+   const first = (await env.terminal()).at(-1);
+   expect(first.type).toBe('response.completed');
+   const next = env.events.length;
+   env.client.send(JSON.stringify({type: 'response.create', model: 'm1', previous_response_id: first.response.id, input: 'next'}));
+   expect((await env.terminal(next)).at(-1).type).toBe('response.completed');
+   expect(calls.map(body => body.input[0].tools)).toEqual([[kept], [kept]]);
+   const blocked = env.events.length;
+   env.client.send(JSON.stringify({type: 'response.create', model: 'm0', input: [
+     {type: 'web_search_call', id: 'search_1', status: 'completed'}, {role: 'user', content: 'next'},
+   ]}));
+   expect((await env.terminal(blocked)).at(-1)).toMatchObject({type: 'error', status: 422, error: {code: 'codex_router_tool_history_excluded'}});
+   expect(calls).toHaveLength(2);
+ } finally { await env.close(); upstream.stop(true); }
 });
 
 test('each WS generation starts with an independent model identity declaration',async()=>{

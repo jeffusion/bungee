@@ -146,6 +146,16 @@ try {
   await row.getByRole('button', { name: '增加上下文上限', exact: true }).click();
   await expect(row.getByRole('spinbutton', { name: '上下文长度上限', exact: true })).toHaveValue('16001');
   await row.getByRole('checkbox', { name: '禁用图片输入', exact: true }).check();
+  const allowedTools = row.getByRole('textbox', { name: '允许的工具', exact: true });
+  const defaultToolPatterns = 'exec_command, write_stdin, apply_patch, view_image, request_user_input, request_permissions, collaboration.*';
+  await expect(allowedTools).toHaveValue(defaultToolPatterns);
+  const toolPatterns = 'exec_command, apply_patch, mcp__obsidian.*';
+  await allowedTools.fill(toolPatterns);
+  const toolsOff = row.getByRole('checkbox', { name: '禁用工具调用', exact: true });
+  await toolsOff.check();
+  await expect(allowedTools).toBeDisabled();
+  await toolsOff.uncheck();
+  await expect(allowedTools).toHaveValue(toolPatterns);
 
   await dialog.getByRole('button', { name: '添加模型替换', exact: true }).click();
   await expect(dialog.getByTestId('codex-model-binding')).toHaveCount(2);
@@ -184,6 +194,7 @@ try {
   await dialog.getByText('能力限制（可选）', { exact: true }).click();
   await expect(dialog.getByRole('spinbutton', { name: '上下文长度上限', exact: true })).toHaveValue('16001');
   await expect(dialog.getByRole('checkbox', { name: '禁用图片输入', exact: true })).toBeChecked();
+  await expect(dialog.getByRole('textbox', { name: '允许的工具', exact: true })).toHaveValue(toolPatterns);
   await dialog.getByRole('button', { name: '手动输入', exact: true }).click();
   await expect(dialog.getByRole('textbox', { name: '原始模型', exact: true })).toHaveValue('gpt-original');
   await dialog.getByRole('textbox', { name: '原始模型', exact: true }).fill('custom-original');
@@ -243,13 +254,21 @@ try {
   // Changing the target model changes the matching ID too, with no separate field.
   await added.getByRole('combobox', { name: '目标模型', exact: true }).fill('org/model-2');
   await page.getByRole('option', { name: 'org/model-2', exact: true }).click();
+  await added.getByText('能力限制（可选）', { exact: true }).click();
+  const addedAllowedTools = added.getByRole('textbox', { name: '允许的工具', exact: true });
+  await expect(addedAllowedTools).toHaveValue(defaultToolPatterns);
+  await addedAllowedTools.fill('');
+  await added.getByText('能力限制（可选）', { exact: true }).click();
 
   await dialog.getByTestId('plugin-config-save-button').click();
+  await expect(dialog).toHaveCount(0);
 
   await page.getByTestId('section-plugins').getByRole('button', { name: '编辑', exact: true }).click();
   await expect(added.getByRole('radio', { name: '新增模型', exact: true })).toHaveAttribute('aria-checked', 'true');
   await expect(added.getByRole('combobox', { name: '目标模型', exact: true })).toHaveValue('org/model-2');
   await expect(added.getByRole('combobox', { name: '目标模型协议', exact: true })).toHaveValue('Gemini GenerateContent');
+  await added.getByText('能力限制（可选）', { exact: true }).click();
+  await expect(addedAllowedTools).toHaveValue('');
   // A second addition of the same model fails validation before saving.
   await dialog.getByRole('button', { name: '新增模型', exact: true }).click();
   const duplicate = dialog.getByTestId('codex-model-binding').nth(2);

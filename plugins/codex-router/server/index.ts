@@ -8,6 +8,7 @@ import { parseBindings, parseCollaborationRelay, bindingSource } from './config'
 import { mergeCatalog, catalogEtag, CatalogSnapshots, type CatalogSnapshot } from './catalog';
 import { catalogValidatorsClient } from '../contract';
 import { catalogKeys } from './catalog-validators';
+import { applyToolAllowlist } from './tool-allowlist';
 
 export const CodexRouterPlugin = definePlugin(class implements Plugin {
   static readonly name = 'codex-router';
@@ -73,8 +74,10 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       let logicalInput=typeof input.input === 'string' ? [{role:'user',content:input.input}] : input.input;
       if(!Array.isArray(logicalInput))throw new DataAdmissionError(422,'codex_router_invalid_history');
       if(protocol!=='responses' && protocol!=='gemini_generate_content' && !opaqueRestored && logicalInput.some((item:any)=>item?.encrypted_content || item?.type==='compaction'))throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
-      const hasTools=input.tools?.length || logicalInput.some((item:any)=>item?.type==='additional_tools' && item.tools?.length);
+      const hasTools=input.tools?.length || logicalInput.some((item:any)=>(item?.type==='additional_tools' || item?.type==='tool_search_output') && item.tools?.length);
       if(hasTools && (!capabilities.toolCall || binding.capabilityOverrides?.tools===false))throw new DataAdmissionError(422,'codex_router_tools_unsupported');
+      const allowedTools=binding.capabilityOverrides?.tools===false ? undefined : binding.capabilityOverrides?.allowedTools?.trim();
+      if(allowedTools)logicalInput=applyToolAllowlist(input,logicalInput,allowedTools);
       let relayDiagnostics:any[]=[];
       if(protocol!=='responses') {
         try {
@@ -107,7 +110,7 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
           return result;
         });
       }};
-      return {requiredUpstreamId,adapter,...(protocol!=='responses'?{canonicalInput:logicalInput,diagnostics}:{})};
+      return {requiredUpstreamId,adapter,...(protocol!=='responses' || allowedTools ? {canonicalInput:logicalInput} : {}),...(protocol!=='responses'?{diagnostics}:{})};
       }};
     });
     hooks.onBeforeRequest.tap('codex-router.catalog-validator', context => {
