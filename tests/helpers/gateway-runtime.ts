@@ -1,11 +1,12 @@
 import {initializePluginStateFixture} from './plugin-state-fixture';
 import { ConfigRepository } from '../../packages/core/src/config-storage';
-import { spawn, type ChildProcess } from 'node:child_process';
-import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { cp, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { join, resolve } from 'node:path';
+import { promisify } from 'node:util';
+import { DAEMON_PROCESS_IDENTITY_MARKER_PREFIX } from '@jeffusion/bungee-types';
 import { DaemonManager } from '../../packages/cli/src/daemon/manager';
-import { captureDarwinProcessTree, captureProcessTree } from '../../packages/cli/src/daemon/process-tree';
 import { initializePluginSecretsKey } from '../../packages/cli/src/config/plugin-secrets-key';
 import { captureProcessIdentity, probeProcessIdentity, type CapturedProcessIdentity } from '../../packages/core/src/master-runtime/process-identity';
 import { discoverIngressIdentity } from '../../packages/core/src/ingress/supervision-http';
@@ -22,6 +23,7 @@ import {
 const CORE_ENTRY = resolve(import.meta.dir, '../../packages/core/dist/main.js');
 const DIST_PLUGINS = resolve(import.meta.dir, '../../packages/core/dist/plugins');
 const SETUP_TIMEOUT_MS = 30_000;
+const execFileAsync = promisify(execFile);
 
 export type GatewayFixture = Readonly<{
   root: string;
@@ -314,15 +316,19 @@ async function captureOwnedIngress(
   }
   const masterPid = master.child.pid;
   if (masterPid === undefined) throw new Error('master PID is unavailable for ingress ownership capture');
-  const tree = process.platform === 'darwin'
-    ? await captureDarwinProcessTree(masterPid, { expectedExecutable: process.execPath })
-    : await captureProcessTree(masterPid);
-  const matches = tree.filter((item) => item.processIdentity === identity.process_instance_id);
-  const snapshot = matches[0];
-  if (matches.length !== 1 || snapshot === undefined) {
-    throw new Error('expected exactly one owned ingress process in the master process tree');
+  // Inventory only the marked ingress so transient siblings cannot invalidate its ownership capture.
+  const marker = `${DAEMON_PROCESS_IDENTITY_MARKER_PREFIX}${identity.process_instance_id}`;
+  const { stdout } = await execFileAsync('ps', ['-axww', '-o', 'pid=,ppid=,command='], { timeout: 5_000 });
+  const matches: number[] = [];
+  for (const line of stdout.split('\n')) {
+    const [pid, ppid, ...command] = line.trim().split(/\s+/);
+    if (Number(ppid) === masterPid && command.includes(marker)) matches.push(Number(pid));
   }
-  const captured = await captureProcessIdentity(snapshot.pid, identity.process_instance_id);
+  if (matches.length !== 1) throw new Error('expected exactly one marked ingress child of the master');
+  const captured = await captureProcessIdentity(matches[0]!, identity.process_instance_id);
+  if (await realpath(captured.executable) !== await realpath(process.execPath)) {
+    throw new Error('marked ingress is not running the fixture executable');
+  }
   const owned: OwnedWorker = {
     pid: captured.pid,
     workerInstanceId: identity.process_instance_id,
