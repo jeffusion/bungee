@@ -7,7 +7,23 @@ import { forEach } from 'lodash-es';
 import { logger } from '../logger';
 import { processDynamicValue, type ExpressionContext } from '../expression-engine';
 import type { ModificationRules } from '@jeffusion/bungee-types';
+import { isObjectBody } from './body-service';
 export { deepMergeRules } from '../worker/rules/deep-merge';
+
+function removeNestedBodyField(body: Record<string, any>, key: string): boolean {
+  const path = key.split('.');
+  const field = path.pop()!;
+  let parent = body;
+  for (const segment of path) {
+    const child: unknown = Object.hasOwn(parent, segment) ? parent[segment] : undefined;
+    if (!isObjectBody(child)) return false;
+    // Rule expressions can supply objects shared with the original request.
+    const copy = { ...child };
+    parent[segment] = copy;
+    parent = copy;
+  }
+  return Object.hasOwn(parent, field) && delete parent[field];
+}
 
 /**
  * Applies body modification rules to a request/response body
@@ -16,7 +32,8 @@ export { deepMergeRules } from '../worker/rules/deep-merge';
  * - **add**: Adds new fields (unconditional)
  * - **replace**: Replaces existing fields
  * - **default**: Sets field only if undefined
- * - **remove**: Removes fields (unless added/replaced in same rule)
+ * - **remove**: Removes top-level fields (unless added/replaced in same rule).
+ *   For requests, unmatched dotted keys are also tried as paths through JSON objects.
  *
  * **Processing order**: add → replace → default → remove
  *
@@ -110,13 +127,16 @@ export async function executeBodyRules(
 
     // Remove rules: remove fields (unless added/replaced)
     if (rules.remove) {
-      for (const key of rules.remove) {
+      for (const key of new Set(rules.remove)) {
         const wasAdded = rules.add && key in rules.add;
         const wasReplaced = rules.replace && key in rules.replace;
-        if (!wasAdded && !wasReplaced) {
+        if (wasAdded || wasReplaced) continue;
+        if (Object.hasOwn(modifiedBody, key)) {
           delete modifiedBody[key];
-          logger.debug({ request: requestLog, body: { key } }, 'Removed body field');
+        } else if (context.response !== undefined || !key.includes('.') || !removeNestedBodyField(modifiedBody, key)) {
+          continue;
         }
+        logger.debug({ request: requestLog, body: { key } }, 'Removed body field');
       }
     }
   }

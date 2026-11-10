@@ -31,6 +31,37 @@ describe('Body Modification Tests - Deep Copy and Isolation', () => {
     requestLog = { requestId: 'test-request' };
   });
 
+  test('removes nested request fields without changing sibling fields or expression inputs', async () => {
+    const generationConfig = Object.freeze({
+      thinkingConfig: { thinkingBudget: 1024 },
+      temperature: 0.7,
+    });
+    const body = { generationConfig, nullable: null, items: [{ keep: true }] };
+    mockContext.body = body;
+    const result = await applyBodyRules(body, {
+      add: { copy: '{{body.generationConfig}}' },
+      remove: ['generationConfig.thinkingConfig', 'copy.thinkingConfig', 'nullable.field', 'items.0.keep', 'missing.field'],
+    }, mockContext, requestLog);
+
+    expect(result).toEqual({
+      generationConfig: { temperature: 0.7 },
+      copy: { temperature: 0.7 },
+      nullable: null,
+      items: [{ keep: true }],
+    });
+    expect(body.generationConfig.thinkingConfig).toEqual({ thinkingBudget: 1024 });
+  });
+
+  test('prefers a literal top-level field and limits path removal to requests', async () => {
+    const key = 'generationConfig.thinkingConfig';
+    const body = { generationConfig: { thinkingConfig: { thinkingBudget: 1024 } } };
+    const rules = { remove: [key, key] };
+    expect(await applyBodyRules({ ...body, [key]: true }, rules, mockContext, requestLog)).toEqual(body);
+
+    mockContext.response = { headers: {}, body };
+    expect(await applyBodyRules(body, rules, mockContext, requestLog)).toEqual(body);
+  });
+
   test('should not mutate original body when applying add rules', async () => {
     const originalBody: TestBody = {
       model: 'original-model',
