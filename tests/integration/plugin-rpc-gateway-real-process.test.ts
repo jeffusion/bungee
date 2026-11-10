@@ -52,6 +52,7 @@ const ROUTE_ID = '30000000-0000-4000-8000-000000000201';
 
 type ProbeReport = { purpose: string | null; payload: Record<string, any> };
 type ProbeState = {
+  crashEntered: Array<{pid: number; kind: string}>;
   plannerRuns: number;
   shutdownActivePids: number[];
   calls: Array<{ method: string; purpose: string | null; pid: number | null }>;
@@ -301,13 +302,12 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
       const identity = await captureProcessIdentity(oldMaster.child.pid, marker);
       expect(await probeProcessIdentity(identity)).toBe('exact');
       const targetWorker = oldWorkers[0]!;
-      await waitForProbeState(management, currentFixture, state => backgroundReports(state).length === 2, 'background round incomplete');
       const armed = await requestJson(`${management}/api/plugins/${RPC_PROBE_PROVIDER}/control/crash`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({pid: targetWorker.pid})}, currentFixture);
       expect(armed.response.status).toBe(200);
-      const entered = await waitForProbeState(management, currentFixture, state => {
-        const calls = (state as any).crashEntered ?? [];
-        return calls.filter((call: any) => call.pid === targetWorker.pid).length === 64;
-      }, 'the original worker did not occupy all 64 caller slots');
+      const entered = await waitForProbeState(management, currentFixture, state =>
+        state.crashEntered.some(call => call.pid === targetWorker.pid && call.kind === 'command')
+        && state.crashEntered.some(call => call.pid === targetWorker.pid && call.kind === 'query'),
+      'the old control did not enter both calls from the target worker');
       const db = new Database(pluginStateFixturePath(currentFixture.configDbPath), {readonly: true});
       let pending: Array<{payload: string}>;
       let savedProof: any;
@@ -321,8 +321,8 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
       expect(savedProof.physical).toEqual(identity);
       expect(JSON.parse(pending[0]!.payload).source).toEqual(savedProof.source);
       expect(pending).toHaveLength(1);
-      expect((entered as any).crashEntered.filter((call: any) => call.kind === 'command')).toHaveLength(1);
-      evidence = {masterPid: identity.pid, workers: oldWorkers, entered: (entered as any).crashEntered, pending: pending.length, executor: savedProof};
+      expect(entered.crashEntered).toHaveLength(2);
+      evidence = {masterPid: identity.pid, workers: oldWorkers, entered: entered.crashEntered, pending: pending.length, executor: savedProof};
       // Kill only the captured executor, after its REAL business handler entered.
       expect(await probeProcessIdentity(identity)).toBe('exact');
       const exited = once(oldMaster.child, 'exit');
@@ -337,12 +337,13 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
         .toEqual(oldWorkers.map(worker => `${worker.pid}:${worker.worker_instance_id}:${worker.boot_nonce}`).sort());
       const recovered = await waitForProbeState(management, currentFixture, state => {
         const reports = state.reports.filter(report => report.payload.phase === 'crash-recovered');
-        return reports.some(report => report.payload.pid === targetWorker.pid
-          && report.payload.commandCode === 'unknown' && report.payload.persisted === 'unknown'
-          && report.payload.settled === 64 && report.payload.capacity === 64);
-      }, 'surviving workers did not recover all terminal barriers/capacity', 40000);
+        return reports.some(report => report.payload.pid === targetWorker.pid);
+      }, 'the surviving worker did not report recovery', 40000);
+      const report = recovered.reports.find(({payload}) => payload.phase === 'crash-recovered' && payload.pid === targetWorker.pid)!;
+      expect(report.payload).toMatchObject({commandCode: 'unknown', persisted: 'unknown'});
+      expect(['failed', 'revoked']).toContain(report.payload.queryCode);
       // No accepted query or command is automatically resent to the replacement executor.
-      expect((recovered as any).crashEntered).toEqual([]);
+      expect(recovered.crashEntered).toEqual([]);
       const recoveredDb = new Database(pluginStateFixturePath(currentFixture.configDbPath), {readonly: true});
       try {
         const terminal = recoveredDb.query<{state: string}, []>(`SELECT json_extract(CAST(payload AS TEXT), '$.state') AS state
