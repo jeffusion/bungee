@@ -1,3 +1,15 @@
+# [6.14.0](https://github.com/jeffusion/bungee/compare/v6.13.1...v6.14.0) (2026-11-10)
+
+
+### Bug Fixes
+
+* **test:** 消除网关进程与日志库的测试竞争 ([2a2e66b](https://github.com/jeffusion/bungee/commit/2a2e66b6eb1602ff8f07a118347ee5a103b69313))
+
+
+### Features
+
+* **core:** 支持按点号路径移除请求体字段 ([ea62562](https://github.com/jeffusion/bungee/commit/ea625623a771ac552510f55144800e26c0cedeb3))
+
 ## [6.13.1](https://github.com/jeffusion/bungee/compare/v6.13.0...v6.13.1) (2026-11-09)
 
 
