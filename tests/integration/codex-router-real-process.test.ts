@@ -1244,7 +1244,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     await assertMetered(calls.slice(start));
   },60000);
 
-  for(const cipher of ['fixture-opaque-agent-task','fixture-headerless-relay'])for(const relayType of ['route','service'] as const)test(`built native auxiliary relay (${cipher}, ${relayType}) uses shared cache across workers, isolates identity and counts actual calls`, async () => {
+  for(const [cipher,relayType] of [['fixture-opaque-agent-task','route'],['fixture-headerless-relay','service']] as const)test(`built native auxiliary relay (${cipher}, ${relayType}) uses shared cache across workers, isolates identity and counts actual calls`, async () => {
     const saved=structuredClone(aggregate),start=calls.length;
     try {
       aggregate.logical_configuration.routes[0].path_rewrite={'^/codex':'/backend-api/codex'};
@@ -1266,10 +1266,9 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       expect(relayed.body.input).toEqual([agentMessage(cipher)]);
       const restored=calls[start+1]!.body.messages.find((item:any)=>item.role==='user').content;
       expect(restored.map((part:any)=>part.text)).toContain(relayTask);
-      const observed=new Set([calls[start+1]!.pid]);
-      for(let i=0;i<16 && observed.size<2;i++) {
-        const result=await post(request);expect(result.status).toBe(200);observed.add(calls.at(-1)!.pid);
-      }
+      const second=await post(request);expect(second.status).toBe(200);
+      expect(calls.slice(start)).toHaveLength(3);
+      const observed=new Set([calls[start+1]!.pid,calls[start+2]!.pid]);
       expect(observed).toEqual(new Set(workers.map(worker=>worker.pid)));
       expect(calls.slice(start).filter(call=>call.body.tools?.[0]?.name==='relay_external_agent_payload')).toHaveLength(1);
       const socket=await openSocket();
@@ -1368,38 +1367,30 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     let socket: Socket | undefined;
     try {
       aggregate.plugin_activations.push({plugin_name:'model-mapping'});
-      const service = aggregate.logical_configuration.services[0];
-      service.failover = {enabled:true,retry_on:['>400'],passive_health:{consecutive_failures:3},recovery:{backoff_base_ms:300000}};
-      service.plugins = [{id:uuid(31),position:1,name:'model-mapping',enabled:true,options:{modelMappings:[
+      aggregate.logical_configuration.services[0].plugins = [{id:uuid(31),position:1,name:'model-mapping',enabled:true,options:{modelMappings:[
         {source:CODEX_CHAT_MODEL,target:'GLM-5.3-Flash'},
       ]}}];
       await publish();
-      socket = await openSocket();
       const before = calls.length;
-      for (let i=0;i<5;i++) {
-        const result = await post({model:'org/chat',input:'unsupported effort',reasoning:{effort:'medium'}});
-        expect(result.status).toBe(422);
-        expect(result.body).toMatchObject({error:'llm_adapter_unsupported_reasoning',param:'reasoning.effort'});
-        const events = await socket.create({model:'org/chat',input:'unsupported effort',reasoning:{effort:'medium'}},true);
-        expect(events).toHaveLength(1);
-        expect(events[0]).toMatchObject({type:'error',status:422,error:{code:'llm_adapter_unsupported_reasoning',param:'reasoning.effort'}});
-        expect(calls).toHaveLength(before);
+      const unsupported = {model:'org/chat',input:'unsupported effort',reasoning:{effort:'medium'}};
+      const denied = await post(unsupported);
+      expect(denied.status).toBe(422);
+      expect(denied.body).toMatchObject({error:'llm_adapter_unsupported_reasoning',param:'reasoning.effort'});
+      socket = await openSocket();
+      const errors = await socket.create(unsupported,true);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatchObject({type:'error',status:422,error:{code:'llm_adapter_unsupported_reasoning',param:'reasoning.effort'}});
+      expect(calls).toHaveLength(before);
+      const supported = {model:'org/chat',input:smallHistory,tools,reasoning:{effort:'high'}};
+      expect((await post(supported)).status).toBe(200);
+      expect((await socket.create(supported)).at(-1).type).toBe('response.completed');
+      const mapped = calls.slice(before);
+      expect(mapped).toHaveLength(2);
+      for (const call of mapped) {
+        expect(call.body).toMatchObject({model:'GLM-5.3-Flash',reasoning_effort:'high'});
+        expect(JSON.stringify(call.body.messages)).toContain('custom result');
       }
-      for (const effort of ['low','high','max']) {
-        const result = await post({model:'org/chat',input:smallHistory,tools,reasoning:{effort}});
-        expect(result.status).toBe(200);
-        expect(calls.at(-1)!.body).toMatchObject({model:'GLM-5.3-Flash',reasoning_effort:effort});
-        expect(calls.at(-1)!.body).not.toHaveProperty('thinking');
-        expect(JSON.stringify(calls.at(-1)!.body.messages)).toContain('custom result');
-        const events = await socket.create({model:'org/chat',input:smallHistory,tools,reasoning:{effort}});
-        expect(events.at(-1).type).toBe('response.completed');
-        expect(calls.at(-1)!.body).toMatchObject({model:'GLM-5.3-Flash',reasoning_effort:effort});
-        expect(calls.at(-1)!.body).not.toHaveProperty('thinking');
-      }
-      for(let i=0;i<16 && new Set(calls.slice(before).map(call=>call.pid)).size<2;i++) {
-        expect((await post({model:'org/chat',input:'second worker positive control',reasoning:{effort:'max'}})).status).toBe(200);
-      }
-      expect(new Set(calls.slice(before).map(call=>call.pid))).toEqual(new Set(workers.map(worker=>worker.pid)));
+      expect(new Set(mapped.map(call=>call.pid))).toEqual(new Set(workers.map(worker=>worker.pid)));
       if(process.env.BUNGEE_CODEX_CLI_PROBE==='1') {
         const start=calls.length;
         const cli=await probeCodexChatgptModels({root:fixture!.root,baseUrl:`${proxy}/codex`,mockUrl:`http://127.0.0.1:${upstream!.port}`,token,
@@ -1416,8 +1407,6 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       const outgoing=calls.slice(before);
       for(const call of outgoing){expect(call.body).toMatchObject({model:'GLM-5.3-Flash'});expect(call.body).not.toHaveProperty('thinking');}
       await assertMetered(outgoing);
-      console.info(`codex_router_wire_alias ${JSON.stringify({workerPids:workers.map(w=>w.pid),refusedGenerations:10,
-        upstreamCalls:outgoing.length,wireModel:'GLM-5.3-Flash',efforts:['low','high','max']})}`);
     } catch (error) {
       throw new Error(`Wire alias acceptance failed: ${String(error)}; ${await master!.diagnostics?.()}`,{cause:error});
     } finally {

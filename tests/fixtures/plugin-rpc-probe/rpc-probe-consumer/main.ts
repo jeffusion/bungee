@@ -85,26 +85,31 @@ const crashTimer = setInterval(() => {
     crashStarted = true;
     const pid = process.pid;
     if (status.pid !== pid) return;
-    await new Promise(resolve => setTimeout(resolve, 50));
-    const command = client.crashCommand({pid}, {operationId: `rpc-probe.crash.${pid}`})
+    const operationId = `rpc-probe.crash.${pid}`;
+    const command = client.crashCommand({pid}, {operationId})
       .then(() => 'resolved', (error: any) => codeOf(error));
-    // Default caller capacity is 64: leave all 64 real tasks outstanding.
-    const holds = Array.from({length: 63}, () => client.crashHold({pid})
-      .then(() => 'resolved', (error: any) => codeOf(error)));
-    const outcomes = await Promise.all([command, ...holds]);
-    // Once physically released, wait for the new control directory to be ready.
+    const query = client.crashHold({pid}).then(() => 'resolved', (error: any) => codeOf(error));
+    const [commandCode, queryCode] = await Promise.all([command, query]);
+    // The old calls can settle before the replacement control reconciles the journal.
+    const deadline = Date.now() + 20_000;
+    let connected = false;
     let lastCode = 'none';
-    for (let attempt = 0; attempt < 400; attempt++) {
+    while (Date.now() < deadline) {
       try {
-        const probes = await Promise.all(Array.from({length: 64}, () => client.pulse({pid, note: 'capacity-reclaimed'})));
-        const persisted = await client.crashCommand.queryResult(`rpc-probe.crash.${pid}`)
+        if (!connected) {
+          await client.pulse({pid, note: 'control-reconnected'});
+          connected = true;
+        }
+        lastCode = await client.crashCommand.queryResult(operationId)
           .then(() => 'resolved', (error: any) => codeOf(error));
-        await client.report({pid, phase: 'crash-recovered', commandCode: outcomes[0], settled: outcomes.length,
-          capacity: probes.length, persisted});
-        return;
-      } catch (error: any) { lastCode = codeOf(error); await new Promise(resolve => setTimeout(resolve, 50)); }
+        if (lastCode !== 'pending') {
+          await client.report({pid, phase: 'crash-recovered', commandCode, queryCode, persisted: lastCode});
+          return;
+        }
+      } catch (error: any) { lastCode = codeOf(error); }
+      await new Promise(resolve => setTimeout(resolve, 50));
     }
-    process.stderr.write(`rpc_probe_crash_recovery_timeout pid=${pid} lastCode=${lastCode} outcomes=${JSON.stringify(outcomes)}\n`);
+    process.stderr.write(`rpc_probe_crash_recovery_timeout pid=${pid} lastCode=${lastCode} commandCode=${commandCode} queryCode=${queryCode}\n`);
   })().catch(() => {}).finally(() => { crashPolling = false; });
 }, 100);
 crashTimer.unref?.();

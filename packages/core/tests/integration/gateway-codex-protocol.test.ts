@@ -121,7 +121,7 @@ test('a Gemini endpoint can map the model and remove converted reasoning setting
       id: 'gemini-endpoint',
       target: 'http://upstream.test',
       plugins: [{name: 'model-mapping', path: mappingPath, options: {modelMappings: [{source: model, target: wireModel}]}}],
-      request: {body: {remove: ['generationConfig']}},
+      request: {body: {remove: ['generationConfig.thinkingConfig']}},
     }]}],
   };
   const registry = new ScopedPluginRegistry(import.meta.dir, emptyCatalogServiceHost());
