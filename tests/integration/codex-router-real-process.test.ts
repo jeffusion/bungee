@@ -1363,7 +1363,7 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
     } finally {await socket.close();}
   }, 45000);
 
-  test('built model mapping identity preserves verified effort; bundled HTTP/WS refusals never poison the shared upstream', async () => {
+  test('built model mapping forwards the wire name and rejects unsupported client effort over HTTP/WS', async () => {
     const saved = structuredClone(aggregate);
     let socket: Socket | undefined;
     try {
@@ -1371,19 +1371,16 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       const service = aggregate.logical_configuration.services[0];
       service.failover = {enabled:true,retry_on:['>400'],passive_health:{consecutive_failures:3},recovery:{backoff_base_ms:300000}};
       service.plugins = [{id:uuid(31),position:1,name:'model-mapping',enabled:true,options:{modelMappings:[
-        {source:CODEX_CHAT_MODEL,target:'GLM-5.3-Flash',catalogModel:{provider:'zai',model:CODEX_CHAT_MODEL}}, {source:'glm-5.3',target:'unverified-wire-model'},
+        {source:CODEX_CHAT_MODEL,target:'GLM-5.3-Flash'},
       ]}}];
-      aggregate.logical_configuration.routes[0].plugins.find((p:any)=>p.name==='codex-router').options.models.push({
-        provider:'zai',source:'org/unverified',model:'glm-5.3',target:{type:'service',id:CHAT,protocol:'chat_completions'},
-      });
       await publish();
       socket = await openSocket();
       const before = calls.length;
       for (let i=0;i<5;i++) {
-        const result = await post({model:'org/unverified',input:'strict rejection',reasoning:{effort:'max'}});
+        const result = await post({model:'org/chat',input:'unsupported effort',reasoning:{effort:'medium'}});
         expect(result.status).toBe(422);
         expect(result.body).toMatchObject({error:'llm_adapter_unsupported_reasoning',param:'reasoning.effort'});
-        const events = await socket.create({model:'org/unverified',input:'strict rejection',reasoning:{effort:'max'}},true);
+        const events = await socket.create({model:'org/chat',input:'unsupported effort',reasoning:{effort:'medium'}},true);
         expect(events).toHaveLength(1);
         expect(events[0]).toMatchObject({type:'error',status:422,error:{code:'llm_adapter_unsupported_reasoning',param:'reasoning.effort'}});
         expect(calls).toHaveLength(before);
