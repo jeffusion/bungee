@@ -1,3 +1,11 @@
+## [6.14.1](https://github.com/jeffusion/bungee/compare/v6.14.0...v6.14.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* **codex-router:** 尊重目标链路的请求改写 ([14cbc5a](https://github.com/jeffusion/bungee/commit/14cbc5a269fe104a776fece153f1bd36ff1c21bd))
+* **test:** 等待 RPC 命令恢复并精简重复的网关用例 ([2f6c13f](https://github.com/jeffusion/bungee/commit/2f6c13f51c92e12e8337d8d99d2c5c9770fc1efd))
+
 # [6.14.0](https://github.com/jeffusion/bungee/compare/v6.13.1...v6.14.0) (2026-11-10)
 
 
