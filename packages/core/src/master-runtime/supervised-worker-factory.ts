@@ -733,7 +733,9 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
         || cleanup.publication.mutation_id !== launch.allocation.mutation_id
         || cleanup.publication.attempt_no !== launch.allocation.attempt_no) return false;
     }
-    if (cleanupState === 'failed' || (launch.allocation === null && cleanup.publication !== null)) {
+    // A prospective launch can shut down before emitting config-ready. Its signed
+    // cleanup and matching lifetime guard are the proof for an unadmitted launch.
+    if (cleanupState === 'failed' || (launch.admitted && launch.allocation === null && cleanup.publication !== null)) {
       const message = descriptor.evidence.message;
       if (message === undefined || !('revision' in message) || identityKey(message) !== identityKey(launch.identity)
         || message.pid !== descriptor.pid || message.boot_nonce !== descriptor.boot_nonce
@@ -1155,8 +1157,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
         worker_instance_id: worker.status.worker_instance_id,
         worker_slot: worker.status.worker_slot,
       };
-      const workerKey = this.admissionWorkerKey(identity, worker.status.boot_nonce, worker.status.private_port,
-        worker.status.revision, worker.status.content_hash, worker.status.plugin_catalog_hash);
+      const workerKey = JSON.stringify([identityKey(identity), worker.status.boot_nonce]);
       if (protectedIdentities.has(workerKey)) continue;
       if (this.options.confirmOrphan !== undefined) {
         try {
@@ -1221,6 +1222,9 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
             issues.push({ file: worker.file, kind: 'unreachable', detail: error instanceof Error ? error.message : String(error) });
           }
           if (await this.waitForExactExit(process) !== null) {
+            // The guard is permanently retired. Release the probe lock so launch
+            // debt settlement can reacquire it and verify the signed cleanup.
+            process.releaseLifetimeRetirementFence();
             cleaned.push(identity);
           } else {
             // No exit proof: ownership is kept (no release, no disconnect) and the caller
@@ -1252,8 +1256,7 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
         } catch { continue; }
         const identity: ConfigProcessIdentity = { master_generation: descriptor.master_generation,
           worker_instance_id: descriptor.worker_instance_id, worker_slot: descriptor.worker_slot };
-        const key = this.admissionWorkerKey(identity, descriptor.boot_nonce, descriptor.private_port,
-          descriptor.revision, descriptor.content_hash, descriptor.plugin_catalog_hash);
+        const key = JSON.stringify([identityKey(identity), descriptor.boot_nonce]);
         if (protectedIdentities.has(key)) continue;
         if (await this.options.retirementRepository?.getRetirementDescriptorCleanupState(identity.worker_instance_id) === 'pending') continue;
         const terminal = descriptor.evidence.message;
@@ -1319,9 +1322,8 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
 
   private admissionIdentityKeys(status: AdmissionRegistryStatus): Set<string> {
     const sets = [status.active, status.prepared, ...status.retired];
-    return new Set(sets.flatMap((set) => set === null ? [] : parseAdmissionSet(set).workers.map((worker) => this.admissionWorkerKey({
-      master_generation: worker.master_generation, worker_instance_id: worker.worker_instance_id, worker_slot: worker.worker_slot,
-    }, worker.boot_nonce, worker.private_port, set.revision, set.content_hash, set.plugin_catalog_hash))));
+    return new Set(sets.flatMap((set) => set === null ? [] : parseAdmissionSet(set).workers.map((worker) =>
+      JSON.stringify([identityKey(worker), worker.boot_nonce]))));
   }
 
   private admissionRegistrySnapshot(status: AdmissionRegistryStatus): { readonly protectedWorkers: Set<string>; readonly registryIdentity: string } {

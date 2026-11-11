@@ -330,12 +330,31 @@ async function commit(
   aggregateValue: ConfigurationAggregate,
   fixture: GatewayFixture,
 ): Promise<void> {
-  const result = await requestJson(`${management}/api/config`, {
+  const result = await saveConfiguration(management, expectedRevision, mutationId, aggregateValue);
+  if (result.status !== 202) {
+    throw new Error(`config API ${result.status}: ${scrub(JSON.stringify(result.body), fixture)}`);
+  }
+}
+
+async function saveConfiguration(
+  management: string,
+  expectedRevision: number,
+  mutationId: string,
+  aggregateValue: ConfigurationAggregate,
+): Promise<{ status: number; body: unknown }> {
+  const response = await fetch(`${management}/api/config`, {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ expected_revision: expectedRevision, mutation_id: mutationId, aggregate: aggregateValue }),
-  }, fixture);
-  expect(result.response.status).toBe(202);
+    signal: AbortSignal.timeout(40_000),
+  });
+  return { status: response.status, body: await response.json() };
+}
+
+async function expectUnsaved(management: string, mutationId: string, fixture: GatewayFixture): Promise<void> {
+  const result = await requestJson(`${management}/api/config/operations/${mutationId}`, {}, fixture);
+  expect(result.response.status).toBe(404);
+  expect(result.body).toEqual({ error: 'operation_not_found' });
 }
 
 async function exactWorkerCount(master: OwnedMaster, workerInstanceIds: readonly string[]): Promise<number> {
@@ -367,15 +386,6 @@ async function waitForWorkersExited(
 
 function expectDisjoint(left: readonly string[], right: readonly string[]): void {
   expect(left.filter((value) => right.includes(value))).toEqual([]);
-}
-
-function expectUnstartedWorkers(operationValue: OperationBody, revision: number): void {
-  expect(operationValue.operation?.target_worker_count).toBe(2);
-  expect(operationValue.workers).toHaveLength(2);
-  expect(operationValue.workers?.every((worker) => worker.mutation_id === operationValue.operation?.mutation_id
-    && worker.target_revision === revision && worker.attempt_no === 0
-    && worker.last_begin_previous_attempt_no === null && worker.last_begin_reason === null
-    && worker.state === 'pending' && worker.applied_revision === null)).toBe(true);
 }
 
 function expectStartedWorkers(operationValue: OperationBody, revision: number): void {
@@ -505,7 +515,7 @@ describe('configuration updates while the old generation drains', () => {
     }
   }, 45_000);
 
-  test('old streaming request drains while B serves, C is superseded unclaimed, D becomes latest, and restart keeps D', async () => {
+  test('old streaming request drains while B serves, then the next save starts and survives restart', async () => {
     if (fixture === undefined || lease === undefined || master === undefined
       || upstreamA?.port === undefined || upstreamB?.port === undefined || upstreamD?.port === undefined) {
       testFailed = true;
@@ -519,6 +529,10 @@ describe('configuration updates while the old generation drains', () => {
     const streamAbort = new AbortController();
     let streamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let restartedMaster: OwnedMaster | undefined;
+    let nextSave: ReturnType<typeof saveConfiguration> | undefined;
+    let nextGate: ReturnType<typeof Bun.serve> | undefined;
+    let nextStartedBeforeDrain = false;
+    const nextHits: GateHit[] = [];
 
     try {
       const initialWorkerIds = [...firstMaster.workers.keys()];
@@ -558,39 +572,40 @@ describe('configuration updates while the old generation drains', () => {
       await waitUntil(async () => await exactWorkerCount(firstMaster, workersA.map((worker) => worker.worker_instance_id)) > 0,
         'the old streaming generation exited before the held request was released', 10_000);
 
-      // C must be a real configuration change, not a duplicate target of B.
-      const mutationC = randomUUID();
-      await commit(management, revisionB, mutationC, aggregate(upstreamB.port!, 'debug'), currentFixture);
-      const revisionC = revisionB + 1;
+      const workerIdsA = workersA.map((worker) => worker.worker_instance_id);
+      nextGate = Bun.serve({
+        hostname: '127.0.0.1',
+        port: 0,
+        fetch: async (request) => {
+          nextHits.push(await readGateHit(request));
+          if (await exactWorkerCount(firstMaster, workerIdsA) > 0) nextStartedBeforeDrain = true;
+          return new Response('ready');
+        },
+      });
       const mutationD = randomUUID();
-      await commit(management, revisionC, mutationD, aggregate(upstreamD.port!), currentFixture);
-      const revisionD = revisionC + 1;
+      nextSave = saveConfiguration(management, revisionB, mutationD,
+        aggregate(upstreamD.port!, undefined, `http://127.0.0.1:${nextGate.port}/gate`));
+      void nextSave.catch(() => undefined);
+      const revisionD = revisionB + 1;
 
-      const [operationC, operationD] = await Promise.all([
-        waitForOperation(management, mutationC, ['pending'], currentFixture),
-        waitForOperation(management, mutationD, ['pending'], currentFixture),
-      ]);
-      expectUnstartedWorkers(operationC, revisionC);
-      expectUnstartedWorkers(operationD, revisionD);
-      expect(operationC.operation).toMatchObject({ expected_revision: revisionB, committed_revision: revisionC, state: 'pending' });
-      expect(operationD.operation).toMatchObject({ expected_revision: revisionC, committed_revision: revisionD, state: 'pending' });
       const heldRuntime = await runtime(management, currentFixture);
-      expect(heldRuntime.revision).toBe(revisionD);
-      expect(heldRuntime.publication).toMatchObject({ serving_complete: false, serving_revision: revisionB });
+      expect(heldRuntime.revision).toBe(revisionB);
+      expect(heldRuntime.publication?.serving_revision).toBe(revisionB);
       expect(heldRuntime.workers?.map((worker) => worker.worker_instance_id).sort())
         .toEqual(workersB.map((worker) => worker.worker_instance_id).sort());
-      expect(heldRuntime.workers?.every((worker) => worker.revision === revisionB)).toBe(true);
-      expect((await snapshot(management, currentFixture)).revision).toBe(revisionD);
+      await expectUnsaved(management, mutationD, currentFixture);
+      expect(nextHits).toHaveLength(0);
+      expect(await probe(proxy, currentFixture)).toBe('B');
 
       releaseStream();
       const tail = await readRemaining(streamReader, 20_000);
       expect(tail).toContain('last');
       streamReader = undefined;
 
-      const supersededC = await waitForOperation(management, mutationC, ['superseded'], currentFixture);
-      expect(supersededC.operation?.committed_revision).toBe(revisionC);
-      expectUnstartedWorkers(supersededC, revisionC);
-      await waitForWorkersExited(firstMaster, workersA.map((worker) => worker.worker_instance_id),
+      expect((await nextSave).status).toBe(202);
+      expect(nextHits).toHaveLength(2);
+      expect(nextStartedBeforeDrain).toBe(false);
+      await waitForWorkersExited(firstMaster, workerIdsA,
         'old A worker processes did not exit after the held request completed');
 
       const convergedD = await waitForOperation(management, mutationD, ['converged'], currentFixture);
@@ -631,10 +646,12 @@ describe('configuration updates while the old generation drains', () => {
       releaseStream();
       streamAbort.abort();
       if (streamReader !== undefined) await streamReader.cancel().catch(() => undefined);
+      await nextSave?.catch(() => undefined);
+      await nextGate?.stop(true);
     }
   }, 120_000);
 
-  test('cancels a pre-ready candidate when a newer target is saved and serves only the latest batch', async () => {
+  test('prepares the first candidate before saving and rejects a concurrent write from the same revision', async () => {
     if (fixture === undefined || lease === undefined || master === undefined
       || upstreamA?.port === undefined || upstreamB?.port === undefined) {
       testFailed = true;
@@ -650,6 +667,9 @@ describe('configuration updates while the old generation drains', () => {
     let holdGate: ReturnType<typeof Bun.serve> | undefined;
     let passGate: ReturnType<typeof Bun.serve> | undefined;
     let gateFailure: Error | undefined;
+    let firstSave: ReturnType<typeof saveConfiguration> | undefined;
+    let concurrentSave: ReturnType<typeof saveConfiguration> | undefined;
+    const concurrentHits: GateHit[] = [];
 
     try {
       holdGate = Bun.serve({
@@ -657,14 +677,7 @@ describe('configuration updates while the old generation drains', () => {
         port: 0,
         idleTimeout: 0,
         fetch: async (request) => {
-          const body = await request.json() as { pid?: unknown; marker?: unknown };
-          if (!Number.isSafeInteger(body.pid) || typeof body.marker !== 'string'
-            || !/^[0-9a-f-]{36}$/.test(body.marker)) {
-            return Response.json({ error: 'invalid candidate gate request' }, { status: 400 });
-          }
-          const pid = body.pid as number;
-          const identity = await captureProcessIdentity(pid, body.marker);
-          hits.push({ pid, marker: body.marker, identity });
+          hits.push(await readGateHit(request));
           await held.promise;
           return new Response('released');
         },
@@ -673,7 +686,7 @@ describe('configuration updates while the old generation drains', () => {
         hostname: '127.0.0.1',
         port: 0,
         fetch: async (request) => {
-          await request.body?.cancel();
+          concurrentHits.push(await readGateHit(request));
           return new Response('ready');
         },
       });
@@ -681,62 +694,70 @@ describe('configuration updates while the old generation drains', () => {
         throw new Error('candidate gates did not bind');
       }
 
+      const initial = await snapshot(management, currentFixture);
+      const baselineMutation = randomUUID();
+      await commit(management, initial.revision, baselineMutation, aggregate(upstreamA.port!), currentFixture);
       const baseline = await snapshot(management, currentFixture);
-      await waitForFixturePublication({
-        base: management,
-        revision: baseline.revision,
-        childExited: () => firstMaster.child.exitCode !== null || firstMaster.child.signalCode !== null,
-      });
-      const baselineRuntime = await runtime(management, currentFixture);
-      const baselineWorkers = baselineRuntime.workers ?? [];
-      if (baselineWorkers.length !== 2) {
-        throw new Error('candidate cancellation fixture requires two currently serving workers');
-      }
+      expect(baseline.revision).toBe(initial.revision + 1);
+      await waitForOperation(management, baselineMutation, ['converged'], currentFixture);
+      const baselineWorkers = await waitForServing(management, baseline.revision, firstMaster, currentFixture);
       await recordOwnedWorkers(firstMaster, baselineWorkers);
       const baselineIds = baselineWorkers.map((worker) => worker.worker_instance_id);
 
       const mutationB = randomUUID();
-      await commit(management, baseline.revision, mutationB,
-        aggregate(upstreamB.port!, undefined, `http://127.0.0.1:${holdGate.port}/gate`), currentFixture);
+      firstSave = saveConfiguration(management, baseline.revision, mutationB,
+        aggregate(upstreamB.port!, undefined, `http://127.0.0.1:${holdGate.port}/gate`));
+      void firstSave.catch(() => undefined);
       const revisionB = baseline.revision + 1;
       await waitUntil(() => hits.length >= 2, 'two candidate workers did not reach the pre-ready gate', 20_000);
+      expect(hits).toHaveLength(2);
       for (const hit of hits) {
         firstMaster.workers.set(hit.marker, {
           pid: hit.pid, workerInstanceId: hit.marker, identity: hit.identity,
         });
       }
-      const heldRuntime = await runtime(management, currentFixture);
-      expect(heldRuntime.revision).toBe(revisionB);
-      expect(heldRuntime.publication).toMatchObject({ serving_complete: false, serving_revision: baseline.revision });
-      expect(heldRuntime.workers?.map((worker) => worker.worker_instance_id).sort()).toEqual([...baselineIds].sort());
 
       const mutationC = randomUUID();
-      await commit(management, revisionB, mutationC,
-        aggregate(upstreamA.port!, undefined, `http://127.0.0.1:${passGate.port}/gate`), currentFixture);
-      const revisionC = revisionB + 1;
+      concurrentSave = saveConfiguration(management, baseline.revision, mutationC,
+        aggregate(upstreamA.port!, undefined, `http://127.0.0.1:${passGate.port}/gate`));
+      void concurrentSave.catch(() => undefined);
 
-      const supersededB = await waitForOperation(management, mutationB, ['superseded'], currentFixture);
-      expect(supersededB.operation).toMatchObject({ committed_revision: revisionB, state: 'superseded' });
-      expect(hits).toHaveLength(2);
-      await waitForWorkersExited(firstMaster, hits.map((hit) => hit.marker),
-        'pre-ready candidate workers did not exit after supersession');
-
-      const convergedC = await waitForOperation(management, mutationC, ['converged'], currentFixture);
-      expect(convergedC.operation).toMatchObject({ committed_revision: revisionC, state: 'converged' });
-      expectStartedWorkers(convergedC, revisionC);
-      const workersC = await waitForServing(management, revisionC, firstMaster, currentFixture);
-      await recordOwnedWorkers(firstMaster, workersC);
-      const workerIdsC = workersC.map((worker) => worker.worker_instance_id);
-      expectDisjoint(workerIdsC, baselineIds);
-      expectDisjoint(workerIdsC, hits.map((hit) => hit.marker));
+      expect(await snapshot(management, currentFixture)).toEqual(baseline);
+      const heldRuntime = await runtime(management, currentFixture);
+      expect(heldRuntime.revision).toBe(baseline.revision);
+      expect(heldRuntime.publication).toMatchObject({ serving_complete: true, serving_revision: baseline.revision });
+      expect(heldRuntime.workers?.map((worker) => worker.worker_instance_id).sort()).toEqual([...baselineIds].sort());
+      await expectUnsaved(management, mutationB, currentFixture);
+      await expectUnsaved(management, mutationC, currentFixture);
+      expect(concurrentHits).toHaveLength(0);
       expect(await probe(proxy, currentFixture)).toBe('A');
+      expect(await exactWorkerCount(firstMaster, baselineIds)).toBe(2);
+      expect(await exactWorkerCount(firstMaster, hits.map((hit) => hit.marker))).toBe(2);
+
+      held.resolve();
+      expect((await firstSave).status).toBe(202);
+      const stale = await concurrentSave;
+      expect(stale.status).toBe(409);
+      expect(stale.body).toMatchObject({ error: 'stale_revision', active: { revision: revisionB } });
+      expect(concurrentHits).toHaveLength(0);
+      await expectUnsaved(management, mutationC, currentFixture);
+
+      const converged = await waitForOperation(management, mutationB, ['converged'], currentFixture);
+      expect(converged.operation).toMatchObject({ committed_revision: revisionB, state: 'converged' });
+      expectStartedWorkers(converged, revisionB);
+      const workersB = await waitForServing(management, revisionB, firstMaster, currentFixture);
+      await recordOwnedWorkers(firstMaster, workersB);
+      const workerIdsB = workersB.map((worker) => worker.worker_instance_id);
+      expectDisjoint(workerIdsB, baselineIds);
+      expect([...workerIdsB].sort()).toEqual(hits.map((hit) => hit.marker).sort());
+      expect(await probe(proxy, currentFixture)).toBe('B');
       await waitForWorkersExited(firstMaster, baselineIds,
-        'old serving workers did not exit after the latest candidate became serving');
+        'old serving workers did not exit after the first save became serving');
 
       const finalSnapshot = await snapshot(management, currentFixture);
-      expect(finalSnapshot.revision).toBe(revisionC);
-      expect(workersC.every((worker) => worker.content_hash === finalSnapshot.content_hash)).toBe(true);
-      expect(await exactWorkerCount(firstMaster, workerIdsC)).toBe(2);
+      expect(finalSnapshot.revision).toBe(revisionB);
+      expect(workersB.every((worker) => worker.content_hash === finalSnapshot.content_hash)).toBe(true);
+      expect(await exactWorkerCount(firstMaster, workerIdsB)).toBe(2);
     } catch (error) {
       testFailed = true;
       const diagnostics = (await firstMaster.diagnostics?.().catch((cause) => safeGatewayError(cause, currentFixture)) ?? '').slice(-12_000);
@@ -744,6 +765,7 @@ describe('configuration updates while the old generation drains', () => {
       throw gateFailure;
     } finally {
       held.resolve();
+      await Promise.allSettled([firstSave, concurrentSave]);
       const stopped = await Promise.allSettled([holdGate?.stop(true), passGate?.stop(true)]);
       const failures = stopped.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
       if (failures.length > 0) {
@@ -756,7 +778,7 @@ describe('configuration updates while the old generation drains', () => {
     }
   }, 120_000);
 
-  test('master SIGKILL while cancelled candidate cleanup is unconfirmed blocks a third batch and resumes the latest target', async () => {
+  test('master SIGKILL during uncommitted candidate cleanup preserves the serving revision and prevents a third batch', async () => {
     if (fixture === undefined || lease === undefined || master === undefined
       || upstreamA?.port === undefined || upstreamB?.port === undefined || upstreamD?.port === undefined) {
       testFailed = true;
@@ -772,13 +794,16 @@ describe('configuration updates while the old generation drains', () => {
     const initHits: GateHit[] = [];
     const cleanupHits: GateHit[] = [];
     const cohortHits: GateHit[] = [];
-    let mutationB = '';
     let cohortStartedBeforeCandidateProof = false;
     let initGate: ReturnType<typeof Bun.serve> | undefined;
     let cleanupGate: ReturnType<typeof Bun.serve> | undefined;
     let cohortGate: ReturnType<typeof Bun.serve> | undefined;
     let restartedMaster: OwnedMaster | undefined;
+    let restart: Promise<OwnedMaster> | undefined;
+    let rejectedSave: ReturnType<typeof saveConfiguration> | undefined;
+    let queuedSave: ReturnType<typeof saveConfiguration> | undefined;
     let gateFailure: Error | undefined;
+    let launchDb: Database | undefined;
 
     try {
       const initial = await snapshot(management, currentFixture);
@@ -792,6 +817,11 @@ describe('configuration updates while the old generation drains', () => {
       const baselineIds = baselineWorkers.map((worker) => worker.worker_instance_id);
       expect(await probe(proxy, currentFixture)).toBe('A');
 
+      launchDb = new Database(currentFixture.configDbPath, { readonly: true });
+      launchDb.exec('PRAGMA busy_timeout = 5000');
+      const launchCleanup = launchDb.query(
+        "SELECT 1 FROM configuration_worker_launch_facts WHERE worker_instance_id = ? AND kind = 'cleanup'",
+      );
       initGate = Bun.serve({
         hostname: '127.0.0.1',
         port: 0,
@@ -799,7 +829,7 @@ describe('configuration updates while the old generation drains', () => {
         fetch: async (request) => {
           initHits.push(await readGateHit(request));
           await initHeld.promise;
-          return new Response('released');
+          return new Response('reject candidate', { status: 500 });
         },
       });
       cleanupGate = Bun.serve({
@@ -818,18 +848,12 @@ describe('configuration updates while the old generation drains', () => {
         fetch: async (request) => {
           const hit = await readGateHit(request);
           cohortHits.push(hit);
-          for (const candidate of initHits) {
-            if (await probeProcessIdentity(candidate.identity) === 'exact') {
+          for (const candidate of cleanupHits) {
+            const probeResult = await probeProcessIdentity(candidate.identity);
+            if ((probeResult !== 'dead' && probeResult !== 'mismatch') || launchCleanup.get(candidate.marker) === null) {
               cohortStartedBeforeCandidateProof = true;
             }
           }
-          const operationState = await requestJson(
-            `${management}/api/config/operations/${mutationB}`, {}, currentFixture,
-          ).then(
-            result => (result.body as OperationBody).operation?.state,
-            () => undefined,
-          );
-          if (operationState !== 'superseded') cohortStartedBeforeCandidateProof = true;
           return new Response('ready');
         },
       });
@@ -837,12 +861,12 @@ describe('configuration updates while the old generation drains', () => {
         throw new Error('candidate cancellation gates did not bind');
       }
 
-      mutationB = randomUUID();
-      await commit(management, baselineRevision, mutationB,
+      const mutationB = randomUUID();
+      rejectedSave = saveConfiguration(management, baselineRevision, mutationB,
         aggregate(upstreamB.port!, undefined,
           `http://127.0.0.1:${initGate.port}/gate`,
-          `http://127.0.0.1:${cleanupGate.port}/cleanup`), currentFixture);
-      const revisionB = baselineRevision + 1;
+          `http://127.0.0.1:${cleanupGate.port}/cleanup`));
+      void rejectedSave.catch(() => undefined);
       await waitUntil(() => initHits.length >= 2, 'two candidates did not enter their pre-ready gate', 20_000);
       expect(initHits).toHaveLength(2);
       for (const hit of initHits) {
@@ -850,88 +874,52 @@ describe('configuration updates while the old generation drains', () => {
           pid: hit.pid, workerInstanceId: hit.marker, identity: hit.identity,
         });
       }
-
-      const pendingLatestMutation = randomUUID();
-      await commit(management, revisionB, pendingLatestMutation,
-        aggregate(upstreamD.port!, undefined, `http://127.0.0.1:${cohortGate.port}/gate`), currentFixture);
-      const pendingLatestRevision = revisionB + 1;
-
-      await waitUntil(() => cleanupHits.length >= 2, 'cancelled candidates did not enter their managed cleanup gate', 20_000);
-      expect(cleanupHits).toHaveLength(2);
-      expect(cleanupHits.map((hit) => hit.marker).sort()).toEqual(initHits.map((hit) => hit.marker).sort());
-      // Event-gated peak: no latest initialization may be observed while a cancelled
-      // candidate is still exact or its durable cleanup is not yet superseded.
+      const candidateIds = initHits.map((hit) => hit.marker);
+      initHeld.resolve();
+      await waitUntil(() => cleanupHits.length >= 2, 'rejected candidates did not enter their managed cleanup gate', 20_000);
+      expect(cleanupHits.map((hit) => hit.marker).sort()).toEqual([...candidateIds].sort());
+      const finalMutation = randomUUID();
+      const next = aggregate(upstreamD.port!, undefined, `http://127.0.0.1:${cohortGate.port}/gate`);
+      queuedSave = saveConfiguration(management, baselineRevision, finalMutation, next);
+      void queuedSave.catch(() => undefined);
+      await expectUnsaved(management, mutationB, currentFixture);
+      await expectUnsaved(management, finalMutation, currentFixture);
       expect(cohortHits).toHaveLength(0);
-      expect(await exactWorkerCount(oldMaster, initHits.map((hit) => hit.marker))).toBe(2);
-      expect(await exactWorkerCount(oldMaster, baselineIds) + await exactWorkerCount(oldMaster, initHits.map((hit) => hit.marker))).toBe(4);
-
-      oldMaster.child.kill('SIGKILL');
-      await waitUntil(() => oldMaster.child.exitCode !== null || oldMaster.child.signalCode !== null,
-        'old master did not exit after SIGKILL', 10_000);
-      expect(oldMaster.child.exitCode !== null || oldMaster.child.signalCode !== null).toBe(true);
-      expect(await exactWorkerCount(oldMaster, initHits.map((hit) => hit.marker))).toBe(2);
+      expect((await snapshot(management, currentFixture)).revision).toBe(baselineRevision);
+      expect(await exactWorkerCount(oldMaster, candidateIds)).toBe(2);
       expect(await exactWorkerCount(oldMaster, baselineIds)).toBe(2);
 
-      master = undefined;
-      const restarted = await startMaster(currentFixture, currentLease);
-      restartedMaster = restarted;
-      await waitForHealth(restarted, currentLease.base, currentFixture);
-      for (const hit of initHits) {
-        restarted.workers.set(hit.marker, {
-          pid: hit.pid, workerInstanceId: hit.marker, identity: hit.identity,
-        });
-      }
-
-      const durableLatest = await snapshot(management, currentFixture);
-      expect(durableLatest.revision).toBe(pendingLatestRevision);
+      oldMaster.child.kill('SIGKILL');
+      await waitUntil(() => oldMaster.child.signalCode === 'SIGKILL',
+        'old master did not exit after SIGKILL', 10_000);
+      expect(await rejectedSave.then(() => 'response', () => 'connection_lost')).toBe('connection_lost');
+      expect(await queuedSave.then(() => 'response', () => 'connection_lost')).toBe('connection_lost');
+      expect(await exactWorkerCount(oldMaster, candidateIds)).toBe(2);
+      expect(await exactWorkerCount(oldMaster, baselineIds)).toBe(2);
       expect(await probe(proxy, currentFixture)).toBe('A');
-      expect(cohortHits).toHaveLength(0);
-      expect(await exactWorkerCount(restarted, initHits.map((hit) => hit.marker))).toBe(2);
-      const pendingB = await requestJson(`${management}/api/config/operations/${mutationB}`, {}, currentFixture);
-      expect((pendingB.body as OperationBody).operation?.state).not.toBe('superseded');
 
-      // A new save must be accepted while the older cancelled candidate's cleanup
-      // remains unconfirmed and the current latest target has not been claimed.
-      const finalMutation = randomUUID();
-      await commit(management, pendingLatestRevision, finalMutation,
-        aggregate(upstreamD.port!, 'debug', `http://127.0.0.1:${cohortGate.port}/gate`), currentFixture);
-      const finalRevision = pendingLatestRevision + 1;
-      const savedFinal = await snapshot(management, currentFixture);
-      expect(savedFinal.revision).toBe(finalRevision);
-      expect(savedFinal.content_hash).not.toBe(durableLatest.content_hash);
-      const pendingLatest = await requestJson(
-        `${management}/api/config/operations/${pendingLatestMutation}`, {}, currentFixture,
-      );
-      expect(pendingLatest.response.status).toBe(202);
-      const pendingLatestBody = pendingLatest.body as OperationBody;
-      expect(pendingLatestBody.operation).toMatchObject({
-        mutation_id: pendingLatestMutation, committed_revision: pendingLatestRevision, state: 'pending',
-      });
-      expectUnstartedWorkers(pendingLatestBody, pendingLatestRevision);
-      const pendingFinal = await requestJson(
-        `${management}/api/config/operations/${finalMutation}`, {}, currentFixture,
-      );
-      expect(pendingFinal.response.status).toBe(202);
-      const pendingFinalBody = pendingFinal.body as OperationBody;
-      expect(pendingFinalBody.operation).toMatchObject({
-        mutation_id: finalMutation, committed_revision: finalRevision,
-      });
-      expect(pendingFinalBody.operation?.state).not.toBe('superseded');
-      expectUnstartedWorkers(pendingFinalBody, finalRevision);
+      restart = startMaster(currentFixture, currentLease);
+      void restart.catch(() => undefined);
+      await waitUntil(() => startup.master !== undefined && startup.master !== oldMaster,
+        'replacement master did not spawn during unconfirmed candidate cleanup', 10_000);
+      for (const [workerId, owned] of oldMaster.workers) startup.master!.workers.set(workerId, owned);
+      expect(await probe(proxy, currentFixture)).toBe('A');
+      expect(await exactWorkerCount(oldMaster, candidateIds)).toBe(2);
+      expect(await exactWorkerCount(oldMaster, baselineIds)).toBe(2);
       expect(cohortHits).toHaveLength(0);
-      expect(await exactWorkerCount(restarted, initHits.map((hit) => hit.marker))).toBe(2);
 
       cleanupHeld.resolve();
-      const supersededB = await waitForOperation(management, mutationB, ['superseded'], currentFixture);
-      expect(supersededB.operation).toMatchObject({ mutation_id: mutationB, committed_revision: revisionB, state: 'superseded' });
-      await waitForWorkersExited(restarted, initHits.map((hit) => hit.marker),
-        'cancelled candidates did not exit after their cleanup gate was released');
-      const supersededPending = await waitForOperation(management, pendingLatestMutation, ['superseded'], currentFixture);
-      expect(supersededPending.operation).toMatchObject({
-        mutation_id: pendingLatestMutation, committed_revision: pendingLatestRevision, state: 'superseded',
-      });
-      expectUnstartedWorkers(supersededPending, pendingLatestRevision);
-
+      const restarted = await restart;
+      restartedMaster = restarted;
+      await waitForHealth(restarted, currentLease.base, currentFixture);
+      expect((await snapshot(management, currentFixture)).revision).toBe(baselineRevision);
+      await expectUnsaved(management, mutationB, currentFixture);
+      await expectUnsaved(management, finalMutation, currentFixture);
+      expect(await probe(proxy, currentFixture)).toBe('A');
+      await commit(management, baselineRevision, finalMutation, next, currentFixture);
+      await waitForWorkersExited(restarted, candidateIds,
+        'rejected candidates did not exit after their cleanup gate was released');
+      const finalRevision = baselineRevision + 1;
       const convergedFinal = await waitForOperation(management, finalMutation, ['converged'], currentFixture);
       expect(convergedFinal.operation).toMatchObject({ mutation_id: finalMutation, committed_revision: finalRevision, state: 'converged' });
       expectStartedWorkers(convergedFinal, finalRevision);
@@ -940,16 +928,11 @@ describe('configuration updates while the old generation drains', () => {
       const finalIds = finalWorkers.map((worker) => worker.worker_instance_id);
       expect(cohortHits).toHaveLength(2);
       expect(cohortStartedBeforeCandidateProof).toBe(false);
-      expectDisjoint(finalIds, initHits.map((hit) => hit.marker));
+      expectDisjoint(finalIds, candidateIds);
       expectDisjoint(finalIds, baselineIds);
       expect(await probe(proxy, currentFixture)).toBe('D');
       await waitForWorkersExited(restarted, baselineIds,
-        'the pre-crash serving cohort did not exit after the latest cohort became serving');
-      const stillSupersededPending = await requestJson(
-        `${management}/api/config/operations/${pendingLatestMutation}`, {}, currentFixture,
-      );
-      expect(stillSupersededPending.response.status).toBe(409);
-      expectUnstartedWorkers(stillSupersededPending.body as OperationBody, pendingLatestRevision);
+        'the pre-crash serving cohort did not exit after the corrected save');
 
       const finalSnapshot = await snapshot(management, currentFixture);
       expect(finalSnapshot.revision).toBe(finalRevision);
@@ -967,7 +950,9 @@ describe('configuration updates while the old generation drains', () => {
     } finally {
       initHeld.resolve();
       cleanupHeld.resolve();
+      await Promise.allSettled([rejectedSave, queuedSave, restart]);
       const stopped = await Promise.allSettled([initGate?.stop(true), cleanupGate?.stop(true), cohortGate?.stop(true)]);
+      launchDb?.close();
       const failures = stopped.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
       if (failures.length > 0) {
         testFailed = true;
@@ -979,7 +964,7 @@ describe('configuration updates while the old generation drains', () => {
     }
   }, 150_000);
 
-  test('a rejected candidate settles degraded after exact cleanup and a corrected target serves', async () => {
+  test('a rejected candidate is never saved, exits after cleanup, and a corrected target serves', async () => {
     if (fixture === undefined || lease === undefined || master === undefined
       || upstreamA?.port === undefined || upstreamB?.port === undefined || upstreamD?.port === undefined) {
       testFailed = true;
@@ -997,6 +982,7 @@ describe('configuration updates while the old generation drains', () => {
     let cleanupGate: ReturnType<typeof Bun.serve> | undefined;
     let passGate: ReturnType<typeof Bun.serve> | undefined;
     let gateFailure: Error | undefined;
+    let rejectedSave: ReturnType<typeof saveConfiguration> | undefined;
 
     try {
       const initial = await snapshot(management, currentFixture);
@@ -1043,11 +1029,11 @@ describe('configuration updates while the old generation drains', () => {
       }
 
       const mutationB = randomUUID();
-      await commit(management, baselineRevision, mutationB,
+      rejectedSave = saveConfiguration(management, baselineRevision, mutationB,
         aggregate(upstreamB.port!, undefined,
           `http://127.0.0.1:${initGate.port}/gate`,
-          `http://127.0.0.1:${cleanupGate.port}/cleanup`), currentFixture);
-      const revisionB = baselineRevision + 1;
+          `http://127.0.0.1:${cleanupGate.port}/cleanup`));
+      void rejectedSave.catch(() => undefined);
 
       // Event-gated peak in a normal update: both A workers still serve while both B
       // candidates are alive inside init, before the gate rejects them.
@@ -1062,50 +1048,33 @@ describe('configuration updates while the old generation drains', () => {
 
       failureRelease.resolve();
 
-      let failedOperation: OperationBody | undefined;
-      await waitUntil(async () => {
-        const result = await requestJson(`${management}/api/config/operations/${mutationB}`, {}, currentFixture);
-        if (result.response.status !== 202) {
-          throw new Error(`failed operation returned ${result.response.status}: ${result.text}`);
-        }
-        failedOperation = result.body as OperationBody;
-        return failedOperation.operation?.state === 'degraded';
-      }, 'rejected candidate did not settle degraded', 30_000);
-      if (failedOperation === undefined) throw new Error('failed operation was not observed');
-      expect(failedOperation.operation).toMatchObject({
-        mutation_id: mutationB, expected_revision: baselineRevision, committed_revision: revisionB,
-        state: 'degraded', result_status: 202, error_code: 'replacement_convergence_failed',
-      });
-      expect(failedOperation.workers).toHaveLength(2);
-      expect(failedOperation.workers?.every((worker) => worker.mutation_id === mutationB
-        && worker.target_revision === revisionB && worker.state === 'failed'
-        && worker.applied_revision === null && (worker.attempt_no ?? 0) > 0)).toBe(true);
+      const rejected = await rejectedSave;
+      expect(rejected.status).toBe(503);
+      expect(rejected.body).toEqual({ error: 'control_readiness_failed' });
+      await expectUnsaved(management, mutationB, currentFixture);
 
-      // Degraded is only durable because both rejected candidates exited and their
-      // managed cleanup ran; an unknown outcome would have stayed non-terminal.
-      expect(cleanupHits.map((hit) => hit.marker).sort()).toEqual(initHits.map((hit) => hit.marker).sort());
+      expect(new Set(cleanupHits.map((hit) => hit.marker))).toEqual(new Set(initHits.map((hit) => hit.marker)));
       await waitForWorkersExited(firstMaster, initHits.map((hit) => hit.marker),
         'rejected candidate workers did not exit after their cleanup gate ran');
       expect(await exactWorkerCount(firstMaster, initHits.map((hit) => hit.marker))).toBe(0);
 
       const failedSnapshot = await snapshot(management, currentFixture);
-      expect(failedSnapshot.revision).toBe(revisionB);
-      expect(failedSnapshot.content_hash).not.toBe(baselineSnapshot.content_hash);
+      expect(failedSnapshot).toEqual(baselineSnapshot);
       const failedRuntime = await runtime(management, currentFixture);
-      expect(failedRuntime.revision).toBe(revisionB);
-      expect(failedRuntime.publication).toMatchObject({ serving_complete: false, serving_revision: baselineRevision });
+      expect(failedRuntime.revision).toBe(baselineRevision);
+      expect(failedRuntime.publication).toMatchObject({ serving_complete: true, serving_revision: baselineRevision });
       expect(failedRuntime.workers?.map((worker) => worker.worker_instance_id).sort())
         .toEqual([...baselineIds].sort());
       expect(await probe(proxy, currentFixture)).toBe('A');
       expect(await exactWorkerCount(firstMaster, baselineIds)).toBe(2);
 
       const mutationC = randomUUID();
-      await commit(management, revisionB, mutationC,
+      await commit(management, baselineRevision, mutationC,
         aggregate(upstreamD.port!, undefined, `http://127.0.0.1:${passGate.port}/gate`), currentFixture);
-      const revisionC = revisionB + 1;
+      const revisionC = baselineRevision + 1;
       const convergedC = await waitForOperation(management, mutationC, ['converged'], currentFixture);
       expect(convergedC.operation).toMatchObject({
-        mutation_id: mutationC, expected_revision: revisionB, committed_revision: revisionC, state: 'converged',
+        mutation_id: mutationC, expected_revision: baselineRevision, committed_revision: revisionC, state: 'converged',
       });
       expectStartedWorkers(convergedC, revisionC);
       const workersC = await waitForServing(management, revisionC, firstMaster, currentFixture);
@@ -1121,16 +1090,7 @@ describe('configuration updates while the old generation drains', () => {
         'old workers did not exit after the corrected target became serving');
       expect(await exactWorkerCount(firstMaster, workerIdsC)).toBe(2);
 
-      // C's revision must not rewrite B's terminal history.
-      const retainedB = await requestJson(`${management}/api/config/operations/${mutationB}`, {}, currentFixture);
-      expect(retainedB.response.status).toBe(202);
-      const retained = retainedB.body as OperationBody;
-      expect(retained.operation).toMatchObject({
-        mutation_id: mutationB, expected_revision: baselineRevision, committed_revision: revisionB,
-        state: 'degraded', result_status: 202, error_code: 'replacement_convergence_failed',
-      });
-      expect(retained.operation?.error_detail).toBe(failedOperation.operation?.error_detail);
-      expect(retained.workers).toEqual(failedOperation.workers);
+      await expectUnsaved(management, mutationB, currentFixture);
     } catch (error) {
       testFailed = true;
       const diagnostics = (await firstMaster.diagnostics?.().catch((cause) => safeGatewayError(cause, currentFixture)) ?? '').slice(-12_000);
@@ -1140,6 +1100,7 @@ describe('configuration updates while the old generation drains', () => {
       throw gateFailure;
     } finally {
       failureRelease.resolve();
+      await rejectedSave?.catch(() => undefined);
       const stopped = await Promise.allSettled([initGate?.stop(true), cleanupGate?.stop(true), passGate?.stop(true)]);
       const failures = stopped.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
       if (failures.length > 0) {
@@ -1152,7 +1113,7 @@ describe('configuration updates while the old generation drains', () => {
     }
   }, 180_000);
 
-  test('master SIGKILL while the serving cohort drains resumes the persisted latest target after the held stream ends', async () => {
+  test('master SIGKILL during drain keeps the saved revision serving and leaves the queued write unsaved', async () => {
     if (fixture === undefined || lease === undefined || master === undefined
       || upstreamB?.port === undefined || upstreamD?.port === undefined) {
       testFailed = true;
@@ -1169,6 +1130,7 @@ describe('configuration updates while the old generation drains', () => {
     let streamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let restartedMaster: OwnedMaster | undefined;
     let retirementDb: Database | undefined;
+    let queuedSave: ReturnType<typeof saveConfiguration> | undefined;
 
     try {
       // A dedicated held target: the shared fixture stream gate is already released by
@@ -1238,21 +1200,12 @@ describe('configuration updates while the old generation drains', () => {
       await waitUntil(async () => await exactWorkerCount(firstMaster, workerIdsA) > 0,
         'the old streaming generation exited before the held request was released', 10_000);
 
-      const mutationC = randomUUID();
-      await commit(management, revisionB, mutationC, aggregate(upstreamB.port!, 'debug'), currentFixture);
-      const revisionC = revisionB + 1;
       const mutationD = randomUUID();
-      await commit(management, revisionC, mutationD, aggregate(upstreamD.port!), currentFixture);
-      const revisionD = revisionC + 1;
-      const [operationC, operationD] = await Promise.all([
-        waitForOperation(management, mutationC, ['pending'], currentFixture),
-        waitForOperation(management, mutationD, ['pending'], currentFixture),
-      ]);
-      expectUnstartedWorkers(operationC, revisionC);
-      expectUnstartedWorkers(operationD, revisionD);
-      expect(operationC.operation).toMatchObject({ expected_revision: revisionB, committed_revision: revisionC, state: 'pending' });
-      expect(operationD.operation).toMatchObject({ expected_revision: revisionC, committed_revision: revisionD, state: 'pending' });
-      expect((await snapshot(management, currentFixture)).revision).toBe(revisionD);
+      const next = aggregate(upstreamD.port!);
+      queuedSave = saveConfiguration(management, revisionB, mutationD, next);
+      void queuedSave.catch(() => undefined);
+      await expectUnsaved(management, mutationD, currentFixture);
+      expect((await snapshot(management, currentFixture)).revision).toBe(revisionB);
       expect(await probe(proxy, currentFixture)).toBe('B');
 
       const inheritedIngress = firstMaster.ingress;
@@ -1261,9 +1214,9 @@ describe('configuration updates while the old generation drains', () => {
 
       const crashStartedAt = Date.now();
       firstMaster.child.kill('SIGKILL');
-      await waitUntil(() => firstMaster.child.exitCode !== null || firstMaster.child.signalCode !== null,
+      await waitUntil(() => firstMaster.child.signalCode === 'SIGKILL',
         'old master did not exit after SIGKILL', 10_000);
-      expect(firstMaster.child.exitCode !== null || firstMaster.child.signalCode !== null).toBe(true);
+      expect(await queuedSave.then(() => 'response', () => 'connection_lost')).toBe('connection_lost');
       expect(await exactWorkerCount(firstMaster, workerIdsA)).toBeGreaterThan(0);
       expect(await exactWorkerCount(firstMaster, workerIdsB)).toBe(2);
 
@@ -1289,23 +1242,11 @@ describe('configuration updates while the old generation drains', () => {
       expect(restarted.ingress.workerInstanceId).toBe(inheritedIngress.workerInstanceId);
       expect(await probeProcessIdentity(restarted.ingress.identity)).toBe('exact');
 
-      expect((await snapshot(management, currentFixture)).revision).toBe(revisionD);
+      expect((await snapshot(management, currentFixture)).revision).toBe(revisionB);
       expect(await probe(proxy, currentFixture)).toBe('B');
       expect(await exactWorkerCount(restarted, workerIdsA)).toBeGreaterThan(0);
       expect(await exactWorkerCount(restarted, workerIdsB)).toBe(2);
-      const heldLatest = await requestJson(`${management}/api/config/operations/${mutationD}`, {}, currentFixture);
-      expect(heldLatest.response.status).toBe(202);
-      const heldLatestBody = heldLatest.body as OperationBody;
-      expect(heldLatestBody.operation).toMatchObject({
-        mutation_id: mutationD, committed_revision: revisionD, state: 'pending',
-      });
-      expectUnstartedWorkers(heldLatestBody, revisionD);
-      const heldMiddle = await requestJson(`${management}/api/config/operations/${mutationC}`, {}, currentFixture);
-      expect([202, 409]).toContain(heldMiddle.response.status);
-      const heldMiddleBody = heldMiddle.body as OperationBody;
-      expect(heldMiddleBody.operation?.committed_revision).toBe(revisionC);
-      expect(heldMiddleBody.operation?.state).toMatch(/^(pending|superseded)$/);
-      expectUnstartedWorkers(heldMiddleBody, revisionC);
+      await expectUnsaved(management, mutationD, currentFixture);
       const heldB = await requestJson(`${management}/api/config/operations/${mutationB}`, {}, currentFixture);
       expect(heldB.response.status).toBe(202);
       expect((heldB.body as OperationBody).operation).toMatchObject({
@@ -1330,12 +1271,7 @@ describe('configuration updates while the old generation drains', () => {
           && oldA.some((row) => row.exit_state === 'live' && row.cleanup_state === 'unknown');
       }, `retirement for ${mutationB} did not stop with an unproven old-A exit`, 30_000);
       expect(await exactWorkerCount(restarted, workerIdsA)).toBeGreaterThan(0);
-      const stillPendingD = await requestJson(`${management}/api/config/operations/${mutationD}`, {}, currentFixture);
-      expect(stillPendingD.response.status).toBe(202);
-      expect((stillPendingD.body as OperationBody).operation).toMatchObject({
-        mutation_id: mutationD, committed_revision: revisionD, state: 'pending',
-      });
-      expectUnstartedWorkers(stillPendingD.body as OperationBody, revisionD);
+      await expectUnsaved(management, mutationD, currentFixture);
 
       released.resolve();
       const tail = await readRemaining(streamReader, 20_000);
@@ -1353,10 +1289,10 @@ describe('configuration updates while the old generation drains', () => {
         state: 'degraded', result_status: 202, error_code: 'old_worker_drain_failed',
       });
 
-      const supersededC = await waitForOperation(management, mutationC, ['superseded'], currentFixture);
-      expect(supersededC.operation?.committed_revision).toBe(revisionC);
-      expectUnstartedWorkers(supersededC, revisionC);
-
+      expect((await snapshot(management, currentFixture)).revision).toBe(revisionB);
+      expect(await probe(proxy, currentFixture)).toBe('B');
+      await commit(management, revisionB, mutationD, next, currentFixture);
+      const revisionD = revisionB + 1;
       const convergedD = await waitForOperation(management, mutationD, ['converged'], currentFixture);
       expect(convergedD.operation).toMatchObject({ mutation_id: mutationD, committed_revision: revisionD, state: 'converged' });
       expectStartedWorkers(convergedD, revisionD);
@@ -1381,6 +1317,7 @@ describe('configuration updates while the old generation drains', () => {
       throw new Error(safeGatewayError(new Error(`${safeGatewayError(error, currentFixture)}; master exit=${activeMaster.child.exitCode ?? activeMaster.child.signalCode ?? 'running'}; diagnostics=${diagnostics}`), currentFixture, 24_576));
     } finally {
       released.resolve();
+      await queuedSave?.catch(() => undefined);
       retirementDb?.close();
       streamAbort.abort();
       if (streamReader !== undefined) await streamReader.cancel().catch(() => undefined);

@@ -198,6 +198,11 @@ export async function discoverSupervisedWorkers(options: WorkerDiscoveryOptions)
          || status.master_generation !== identity.master_generation || status.boot_nonce !== hint.boot_nonce
          || status.control_port !== candidate.descriptor.control_port
          || !sameStatusEvidence(liveDescriptor, status)) throw new SupervisionProtocolError('malformed_message', 'online status identity does not match descriptor or master control port');
+      // Recovery must be able to shut down a signed orphan before it becomes ready.
+      if (options.mode === 'orphan-inventory' && status.phase === 'candidate') {
+        workers.push({ file, hint, descriptor: liveDescriptor, credential, client, status });
+        continue;
+      }
       const expected = options.expectedAdmission === undefined ? undefined : expectedWorker(options, hint);
       const ready = status.evidence.message;
       if (status.phase !== 'serving' || status.evidence.kind !== 'ready' || ready?.status !== 'config-ready'
