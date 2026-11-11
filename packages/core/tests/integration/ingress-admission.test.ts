@@ -145,14 +145,15 @@ describe('ingress admission set and registry', () => {
       expect(registry.status().handoff).toMatchObject({
         retired_id: admissionSetRetiredId(firstWithPort), pending: 1, complete: false, remaining_ms: 5,
       });
-      monotonicNow = 10;
-      expect(registry.status().handoff).toMatchObject({ pending: 1, complete: false, remaining_ms: 0 });
+      monotonicNow = 4.5;
+      expect(registry.status().handoff).toMatchObject({ pending: 1, complete: false, remaining_ms: 1 });
       registry.commit(secondWithPort);
-      expect(registry.status().handoff).toMatchObject({ pending: 1, complete: false, remaining_ms: 0 });
+      expect(registry.status().handoff).toMatchObject({ pending: 1, complete: false, remaining_ms: 1 });
       expect(await (await fetch(`http://127.0.0.1:${listener.port}/health`)).text()).toBe('new');
       expect(newRequests).toBe(1);
       releasePending();
       expect(await (await pending).text()).toBe('old');
+      monotonicNow = 5;
       expect(registry.status().handoff).toMatchObject({ pending: 0, complete: true, remaining_ms: 0 });
     } finally {
       releasePending();
@@ -161,6 +162,91 @@ describe('ingress admission set and registry', () => {
       await newWorker.stop(true);
     }
   });
+});
+
+test('each retired batch ends only its own WebSockets, including handshakes to a shared worker', async () => {
+  const { default: WebSocket } = await import('@bungee/ws-client');
+  const handshakeStarted = Promise.withResolvers<void>();
+  const handshakeAborted = Promise.withResolvers<void>();
+  const releaseHandshake = Promise.withResolvers<void>();
+  const worker = Bun.serve({ hostname: '127.0.0.1', port: 0,
+    async fetch(request, server) {
+      if (new URL(request.url).pathname === '/pending') {
+        request.signal.addEventListener('abort', () => {
+          handshakeAborted.resolve();
+          releaseHandshake.resolve();
+        }, { once: true });
+        handshakeStarted.resolve();
+        await releaseHandshake.promise;
+        return new Response('late');
+      }
+      if (server.upgrade(request)) return;
+      return new Response('upgrade required', { status: 426 });
+    }, websocket: { message(socket, message) { socket.send(message); } },
+  });
+  let monotonicNow = 0;
+  const registry = new IngressAdmissionRegistry(() => monotonicNow);
+  const first = { ...admission(1), workers: [{ ...admission(1).workers[0]!, private_port: worker.port! }] };
+  const second = { ...first, admission_sequence: 2 };
+  const third = { ...first, admission_sequence: 3 };
+  registry.prepare(first); registry.commit(first);
+  const listener = createIngressPublicListener({ hostname: '127.0.0.1', port: 0,
+    transportSecret: generateWorkerTransportSecret(), admission: registry });
+  listener.start();
+  const clients: InstanceType<typeof WebSocket>[] = [];
+  const client = (path: string) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${listener.port}${path}`);
+    clients.push(socket);
+    socket.on('error', () => {});
+    return socket;
+  };
+  const connect = (path: string) => new Promise<InstanceType<typeof WebSocket>>((resolve, reject) => {
+    const socket = client(path);
+    socket.once('open', () => resolve(socket)).once('error', reject);
+  });
+  const closed = (socket: InstanceType<typeof WebSocket>) => new Promise<number>(resolve => socket.once('close', resolve));
+  const echo = (socket: InstanceType<typeof WebSocket>) => new Promise<string>((resolve, reject) => {
+    if (socket.readyState !== WebSocket.OPEN) { reject(new Error('session already closed')); return; }
+    socket.once('message', data => resolve(data.toString()));
+    socket.send('echo');
+  });
+  try {
+    const oldest = await connect('/echo');
+    const oldestClosed = closed(oldest);
+    const rejected = new Promise<number>((resolve, reject) => {
+      const socket = client('/pending');
+      socket.once('unexpected-response', (_, response) => {
+        response.resume();
+        resolve(response.statusCode!);
+        socket.terminate();
+      }).once('open', () => reject(new Error('retired handshake unexpectedly upgraded')));
+    });
+    await handshakeStarted.promise;
+    registry.prepare(second, 25); registry.commit(second);
+    const middle = await connect('/echo');
+    const middleClosed = closed(middle);
+    const middleLease = registry.acquire();
+    middleLease.release();
+    registry.prepare(third, 100); registry.commit(third);
+    const active = await connect('/echo');
+    registry.releaseRetired(first);
+    expect(await echo(oldest)).toBe('echo');
+    monotonicNow = 25;
+    expect(await rejected).toBe(503);
+    expect(await oldestClosed).toBe(1006);
+    await handshakeAborted.promise;
+    expect(await echo(middle)).toBe('echo');
+    expect(await echo(active)).toBe('echo');
+    monotonicNow = 100;
+    expect(registry.status().handoff).toMatchObject({ retired_id: admissionSetRetiredId(second), remaining_ms: 0 });
+    expect(middleLease.retirementSignal?.aborted).toBe(false);
+    expect(await middleClosed).toBe(1006);
+    expect(await echo(active)).toBe('echo');
+  } finally {
+    releaseHandshake.resolve();
+    for (const socket of clients) socket.terminate();
+    await listener.stop(); await worker.stop(true);
+  }
 });
 
 test('public WS admission defaults to 512 and applies committed count changes without evicting sockets', async () => {

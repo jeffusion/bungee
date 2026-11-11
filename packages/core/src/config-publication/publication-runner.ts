@@ -94,6 +94,7 @@ export type PublicationRunOptions = {
   readonly recoveringMaster: boolean;
   readonly priorAttemptExited?: boolean;
   readonly recoveredActive?: { readonly workers: readonly ServingConfigWorker[]; readonly admission: import('./coordinator-types').PreparedWorkerAdmission };
+  readonly preparedCandidate?: NonNullable<PublicationRunOptions['recoveredActive']>;
   readonly confirmPreviousWorkersExited?: (replacements: readonly ServingConfigWorker[]) => Promise<boolean>;
   /** Shared creation gate; called immediately before any replacement is forked. */
   readonly ensureCreationPermitted: () => Promise<CreationPermit>;
@@ -437,8 +438,10 @@ export async function runPublication(
   });
   let admissionCommitted = false;
   let admissionCommitMayHaveBeenSent = false;
-  let preparedAdmission: Awaited<ReturnType<WorkerAdmissionController['prepare']>> | null = null;
+  let preparedAdmission: Awaited<ReturnType<WorkerAdmissionController['prepare']>> | null = options.preparedCandidate?.admission ?? null;
   let oldWorkersExited = false;
+  let hasRetiredWorkers = oldWorkers.length > 0;
+  for (const worker of options.preparedCandidate?.workers ?? []) options.owned.adoptServing(worker);
   try {
     throwIfPublicationCancelled(options.signal);
     if (initialState === 'draining' && options.recoveredActive === undefined && options.priorAttemptExited !== true) {
@@ -478,7 +481,7 @@ export async function runPublication(
       admissionCommitted = true;
       admissionCommitMayHaveBeenSent = true;
       await options.workerFactory.markCommitted(options.recoveredActive.workers.map(worker => worker.process));
-    } else {
+    } else if (options.preparedCandidate === undefined) {
       const permit = await options.ensureCreationPermitted();
       if (!permit.allowed) {
         return { kind: 'outcome_unknown', fatal: false, code: 'control_recovering',
@@ -535,7 +538,7 @@ export async function runPublication(
     }
     throwIfPublicationCancelled(options.signal);
     const mutationId = refreshed.operation.mutation_id;
-    if (options.recoveredActive === undefined && options.repository.enterPublicationPrepare !== undefined) {
+    if (options.recoveredActive === undefined && options.preparedCandidate === undefined && options.repository.enterPublicationPrepare !== undefined) {
       const committedRevision = refreshed.operation.committed_revision;
       const latestRevision = options.latestRevision();
       if (latestRevision > committedRevision
@@ -556,7 +559,7 @@ export async function runPublication(
         return await releaseCancelledCandidate(options, refreshed, attempts, oldWorkers);
       }
     }
-    if (options.recoveredActive === undefined && options.repository.freezePublicationServingSet !== undefined) {
+    if (options.recoveredActive === undefined && options.preparedCandidate === undefined && options.repository.freezePublicationServingSet !== undefined) {
       await options.repository.freezePublicationServingSet(mutationId, refreshed.operation.drain_recovery_generation,
         options.owned.serving().map(worker => {
           if (worker.boot_nonce === undefined || worker.process.kernelBootId === undefined) throw new Error('publication serving lifetime identity is incomplete');
@@ -569,7 +572,7 @@ export async function runPublication(
     }
     if (options.repository.getPublicationRetirement !== undefined) {
       let retirement = await options.repository.getPublicationRetirement(mutationId);
-      if (retirement === null && options.recoveredActive !== undefined) {
+      if (retirement === null && (options.recoveredActive !== undefined || options.preparedCandidate !== undefined)) {
         return retiredOutcomeUnknown(options, oldWorkers, new Error('durable retirement membership is missing; offline conversion is required'));
       }
       if (retirement === null) {
@@ -585,6 +588,7 @@ export async function runPublication(
         });
         retirement = await options.repository.freezePublicationRetirement!(mutationId, refreshed.operation.drain_recovery_generation, members, options.clock.now());
       }
+      hasRetiredWorkers ||= retirement.members.length > 0;
       for (const worker of oldWorkers) {
         const member = retirement.members.find(member => member.identity.worker_instance_id === worker.process.identity.worker_instance_id);
         if (member === undefined) throw new Error('retired worker is outside durable membership');
@@ -594,13 +598,15 @@ export async function runPublication(
       }
     }
     if (options.recoveredActive === undefined) {
-      publicationPhase(options, refreshed, 'admission.prepare', 'enter');
-      try {
-        preparedAdmission = options.signal === undefined
-          ? await options.admission.prepare(options.owned.serving(), undefined, publicationPolicy.drain_timeout_ms, refreshed.snapshot.aggregate.logical_configuration.websocket_max_connections, refreshed.snapshot.aggregate.logical_configuration.websocket_max_message_bytes)
-          : await options.admission.prepare(options.owned.serving(), options.signal, publicationPolicy.drain_timeout_ms, refreshed.snapshot.aggregate.logical_configuration.websocket_max_connections, refreshed.snapshot.aggregate.logical_configuration.websocket_max_message_bytes);
-      } finally {
-        publicationPhase(options, refreshed, 'admission.prepare', 'exit');
+      if (preparedAdmission === null) {
+        publicationPhase(options, refreshed, 'admission.prepare', 'enter');
+        try {
+          preparedAdmission = await options.admission.prepare(options.owned.serving(), options.signal,
+            publicationPolicy.drain_timeout_ms, refreshed.snapshot.aggregate.logical_configuration.websocket_max_connections,
+            refreshed.snapshot.aggregate.logical_configuration.websocket_max_message_bytes);
+        } finally {
+          publicationPhase(options, refreshed, 'admission.prepare', 'exit');
+        }
       }
       throwIfPublicationCancelled(options.signal);
       try {
@@ -710,7 +716,8 @@ export async function runPublication(
     }
     // A fenced draining recovery (drain_recovery_generation > 0) may only terminalize as
     // degraded old_worker_drain_failed, now backed by real old_workers_exited evidence.
-    const drainedAfterRecoveryFence = options.recoveringMaster || refreshed.operation.drain_recovery_generation > 0;
+    const drainedAfterRecoveryFence = refreshed.operation.drain_recovery_generation > 0
+      || (options.recoveringMaster && (initialState !== 'committed' || hasRetiredWorkers));
     const outcome: FinalizePublicationOutcome = failuresDuringDrain.length === 0 && !drainedAfterRecoveryFence
       ? { outcome: 'converged', old_workers_exited: true }
       : { outcome: 'degraded', error_code: 'old_worker_drain_failed',
@@ -753,12 +760,20 @@ export async function runPublication(
         if (!admissionCommitted) return recoveringOutcome(options, oldWorkers, error);
         return retiredOutcomeUnknown(options, oldWorkers, error);
       }
-      return await cleanupPreCommitFailure(options, oldWorkers, error);
+      if (!options.preparedCandidate) return await cleanupPreCommitFailure(options, oldWorkers, error);
     }
     if (admissionCommitted) {
       return { kind: 'outcome_unknown', fatal: true, code: 'repository_failure',
         error, serving: oldWorkersExited ? options.owned.serving() : [...oldWorkers, ...options.owned.serving()],
         pending: options.owned.pending() };
+    }
+    if (options.preparedCandidate) {
+      try { await preparedAdmission?.abort(); } catch (abortError) {
+        error = new AggregateError([error, abortError], 'worker admission abort failed');
+      }
+      const cleanup = await cleanupCandidates(options);
+      return { kind: 'outcome_unknown', fatal: false, code: 'control_recovering',
+        error: { cause: error, cleanup }, serving: oldWorkers, pending: options.owned.pending() };
     }
     return await cleanupPreCommitFailure(options, oldWorkers, error);
   }

@@ -13,8 +13,10 @@ function fixture(capacity=10000) {
     if(entry==='gate')return {bodyRequirements() { return Object.freeze({ request: 'none' }); }, plan:()=>reject?{denial:{status:403 as const,error:'gate'}}:{snapshot:null}};
     const rate=createIngress();rate.keyedState={...rate.keyedState!,capacity};return rate;
   }})});
-  const publish = (byKey:any)=>host.publish({version:++version,plugins:[{name:'identity',entry:'identity',catalogHash:'hash',policy:null},{name:'rate',entry:'rate',catalogHash:'hash',policy:{byKey}},{name:'gate',entry:'gate',catalogHash:'hash',policy:null}]});
-  return {host,publish,clock:(n:number)=>now=n,reject:(v:boolean)=>reject=v,store:()=> (host as any).plugins[1].keyed as KeyedAdmissionState};
+  const input = (byKey:any)=>({version:++version,plugins:[{name:'identity',entry:'identity',catalogHash:'hash',policy:null},{name:'rate',entry:'rate',catalogHash:'hash',policy:{byKey}},{name:'gate',entry:'gate',catalogHash:'hash',policy:null}]});
+  return {host,publish:(byKey:any)=>host.publish(input(byKey)),
+    prepare:(byKey:any)=>host.preparePublication(input(byKey),true,undefined,'hash'),
+    clock:(n:number)=>now=n,reject:(v:boolean)=>reject=v,store:()=> (host as any).plugins[1].keyed as KeyedAdmissionState};
 }
 test('indexed expiry heap stays bounded through updates and matches expiry order',()=>{
  const store=new KeyedAdmissionState(200);const due=new Map<string,number>();
@@ -56,6 +58,24 @@ test('publication accrues old rate before new rate and recomputes expiry without
   f.host.admit(target(),worker);await f.publish({});expect(f.store().size).toBe(1);
   f.clock(2750);f.host.sweepKeyedState();expect(f.store().size).toBe(0);
  }finally{f.host.dispose();}
+});
+test('prepared rate does not accrue credit until actual cutover, including consecutive cutovers', async () => {
+ const f=fixture();await f.publish({k:{rps:1,burst:2}});
+ try {
+  f.host.admit(target(),worker);f.host.admit(target(),worker);
+  f.clock(500);
+  const faster=await f.prepare({k:{rps:10,burst:2}});
+  f.clock(600);
+  faster.commit()();
+  expect(()=>f.host.admit(target(),worker)).toThrow('exhausted');
+  f.clock(625);
+  const slow=await f.prepare({k:{rps:1,burst:2}});
+  f.clock(650);
+  slow.commit()();
+  // The ten-per-second rate was in effect from 600 to 650 only.
+  f.host.admit(target(),worker);
+  expect(()=>f.host.admit(target(),worker)).toThrow('exhausted');
+ } finally { f.host.dispose(); }
 });
 test('unit metadata remains compatible and unrepresentable expiry is rejected',()=>{
  expect(validatePolicy({rps:1,burst:2})).toEqual({rps:1,burst:2});

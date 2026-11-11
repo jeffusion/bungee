@@ -364,6 +364,7 @@ class FaultRepository implements ConfigPublicationRepository {
 class FakeAdmissionController implements WorkerAdmissionController {
   readonly registry = new WorkerAdmissionRegistry();
   prepareError: Error | null = null;
+  commitError: Error | null = null;
   afterCommit: (() => void) | null = null;
   private readonly handoff = Object.freeze({
     retired_id: `sha256:${'d'.repeat(64)}`, pending: 0, complete: true, remaining_ms: 0,
@@ -379,6 +380,10 @@ class FakeAdmissionController implements WorkerAdmissionController {
     return this.registry.prepare(workers).then((prepared) => Object.freeze({
       commit: async (): Promise<void> => {
         this.events.push('commit');
+        if (this.commitError !== null) {
+          await prepared.abort();
+          throw this.commitError;
+        }
         await prepared.commit();
         this.afterCommit?.();
       },
@@ -700,7 +705,7 @@ describe('MasterConfigPublicationCoordinator', () => {
     expect(admission.registry.select()?.process).toBe(worker);
   });
 
-  test('cleans newly ready current workers and preserves existing admission when prepare fails', async () => {
+  test.each(['prepare', 'commit'] as const)('cleans newly ready current workers and preserves existing admission when %s is known to fail', async (phase) => {
     // Given
     const { repository } = openRepository();
     const snapshot = repository.getSnapshot();
@@ -709,7 +714,8 @@ describe('MasterConfigPublicationCoordinator', () => {
     const existingEvidence = serving(existing, 1, snapshot.content_hash);
     const admission = new FakeAdmissionController(events);
     await (await admission.registry.prepare([existingEvidence])).commit();
-    admission.prepareError = new Error('injected startup prepare failure');
+    if (phase === 'prepare') admission.prepareError = new Error('injected startup prepare failure');
+    else admission.commitError = Object.assign(new Error('injected ingress commit rejection'), { code: 'admission_not_committed' });
     const factory = new FakeFactory(events);
     const coordinator = new MasterConfigPublicationCoordinator({
       repository, workerFactory: factory, workerCount: 2, admission,
@@ -1956,7 +1962,9 @@ describe('MasterConfigPublicationCoordinator', () => {
         drain_recovery_generation: target.drain_recovery_generation }, 2, active.snapshot.content_hash);
       const outcome = await pending;
       expect(proofs).toBe(1);
-      expect(outcome).toMatchObject({ kind: 'degraded', error_code: 'old_worker_drain_failed', operation: { state: 'degraded' } });
+      expect(outcome).toMatchObject(phase === 'committed'
+        ? { kind: 'converged', operation: { state: 'converged' } }
+        : { kind: 'degraded', error_code: 'old_worker_drain_failed', operation: { state: 'degraded' } });
       expect(repository.getActivePublication()).toBeNull();
       expect(admission.registry.select()?.process).toBe(worker);
     });

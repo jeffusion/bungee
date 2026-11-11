@@ -33,6 +33,7 @@ export class IngressAdmissionRegistry {
   private readonly aborted = new Map<string, AdmissionSet>();
   private readonly releasedRetired = new Map<string, AdmissionSet>();
   private readonly pendingByAdmission = new Map<string, number>();
+  private activeTransport = new AbortController();
   private handoff: { readonly retiredId: string; readonly deadline: number } | null = null;
 
   constructor(private readonly monotonicNow: () => number = () => performance.now()) {}
@@ -72,34 +73,60 @@ export class IngressAdmissionRegistry {
     return set;
   }
 
-  commit(input: unknown): void {
+  commitTarget(input: unknown): AdmissionSet | null {
     if (this.frozen) throw new AdmissionRegistryError('frozen', 'admission registry is frozen');
     const set = parseAdmissionSet(input);
     const identity = admissionSetIdentity(set);
-    if (this.active !== null && admissionSetIdentity(this.active) === identity) return;
-    if (this.retired.some((candidate) => admissionSetIdentity(candidate) === identity)) return;
-    if (this.releasedRetired.has(identity)) return;
+    if (this.active !== null && admissionSetIdentity(this.active) === identity) return null;
+    if (this.retired.some((candidate) => admissionSetIdentity(candidate) === identity)) return null;
+    if (this.releasedRetired.has(identity)) return null;
     if (this.prepared === null || this.prepared.identity !== identity) {
       throw new AdmissionRegistryError('missing', 'commit identity does not match prepared admission');
     }
-    const old = this.active;
-    const retiredId = this.activeRetiredId;
-    if (old !== null && this.retired.length >= this.retiredCapacity) {
+    if (this.active !== null && this.retired.length >= this.retiredCapacity) {
       throw new AdmissionRegistryError('capacity', 'retired admission capacity is exhausted');
     }
+    return this.prepared.set;
+  }
+
+  commit(input: unknown, prepareDataAdmission?: () => () => void): void {
+    const set = this.commitTarget(input);
+    if (set === null) return;
+    const prepared = this.prepared!;
+    const old = this.active;
+    const retiredId = this.activeRetiredId;
     const nextRetired = old === null ? this.retired : Object.freeze([old, ...this.retired]);
+    const nextRetiredId = admissionSetRetiredId(prepared.set);
+    const oldRetiredId = old === null ? null : retiredId ?? admissionSetRetiredId(old);
+    let activateDataAdmission: (() => void) | undefined;
+    try {
+      activateDataAdmission = prepareDataAdmission?.();
+    } catch (error) {
+      this.abort(set);
+      throw error;
+    }
     // Native parser policy must be ready before this admission becomes observable.
     for (const listener of this.messagePolicyListeners) listener(set.websocket_max_message_bytes);
-    this.active = this.prepared.set;
-    this.activeRequestLogCollector = this.prepared.requestLogCollector;
-    this.activeRetiredId = admissionSetRetiredId(this.active);
-    this.handoff = old === null ? null : {
-      retiredId: retiredId ?? admissionSetRetiredId(old),
-      deadline: this.monotonicNow() + this.prepared.handoffTimeoutMs,
-    };
+    const oldTransport = this.activeTransport;
+    activateDataAdmission?.();
+    const handoff = oldRetiredId === null ? null : { retiredId: oldRetiredId, deadline: this.monotonicNow() + prepared.handoffTimeoutMs };
+    this.active = prepared.set;
+    this.activeTransport = new AbortController();
+    this.activeRequestLogCollector = prepared.requestLogCollector;
+    this.activeRetiredId = nextRetiredId;
+    this.handoff = handoff;
     this.prepared = null;
     this.nextIndex = 0;
     this.retired = nextRetired;
+    if (handoff !== null) this.scheduleRetiredTransport(handoff.deadline, oldTransport);
+  }
+
+  private scheduleRetiredTransport(deadline: number, controller: AbortController): void {
+    const delay = Math.max(0, Math.ceil(deadline - this.monotonicNow()));
+    setTimeout(() => {
+      if (this.monotonicNow() < deadline) this.scheduleRetiredTransport(deadline, controller);
+      else controller.abort();
+    }, delay).unref?.();
   }
 
   abort(input: unknown): void {
@@ -126,7 +153,8 @@ export class IngressAdmissionRegistry {
       throw new AdmissionRegistryError('missing', 'retired admission identity is unknown');
     }
     this.retired = Object.freeze(this.retired.filter((_, candidateIndex) => candidateIndex !== index));
-    if (this.handoff?.retiredId === admissionSetRetiredId(set)) this.handoff = null;
+    const retiredId = admissionSetRetiredId(set);
+    if (this.handoff?.retiredId === retiredId) this.handoff = null;
     this.releasedRetired.delete(identity);
     this.releasedRetired.set(identity, set);
     while (this.releasedRetired.size > this.retiredCapacity) {
@@ -159,7 +187,7 @@ export class IngressAdmissionRegistry {
     return worker;
   }
 
-  acquire(): { readonly worker: Pick<AdmissionWorker, 'private_port'> | null; release(): void } {
+  acquire(): { readonly worker: Pick<AdmissionWorker, 'private_port'> | null; readonly retirementSignal?: AbortSignal; release(): void } {
     const set = this.active;
     const identity = this.activeRetiredId;
     if (set === null || identity === null || set.workers.length === 0) return { worker: null, release() {} };
@@ -170,6 +198,7 @@ export class IngressAdmissionRegistry {
     let released = false;
     return {
       worker,
+      retirementSignal: this.activeTransport.signal,
       release: () => {
         if (released) return;
         released = true;
@@ -196,15 +225,17 @@ export class IngressAdmissionRegistry {
 
   status(): AdmissionRegistryStatus {
     const handoff = this.handoff;
+    const remaining = handoff === null ? 0 : Math.max(0, Math.ceil(handoff.deadline - this.monotonicNow()));
+    const pending = handoff === null ? 0 : this.pendingByAdmission.get(handoff.retiredId) ?? 0;
     return Object.freeze({
       active: this.active,
       prepared: this.prepared?.set ?? null,
       retired: this.retired,
       handoff: handoff === null ? null : Object.freeze({
         retired_id: handoff.retiredId,
-        pending: this.pendingByAdmission.get(handoff.retiredId) ?? 0,
-        complete: (this.pendingByAdmission.get(handoff.retiredId) ?? 0) === 0,
-        remaining_ms: Math.max(0, Math.floor(handoff.deadline - this.monotonicNow())),
+        pending,
+        complete: pending === 0,
+        remaining_ms: remaining,
       }),
     });
   }

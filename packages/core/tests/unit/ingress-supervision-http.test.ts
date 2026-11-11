@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test';
+import { randomUUID } from 'node:crypto';
+import { DataAdmissionHost } from '../../src/data-admission/host';
+import type { RateLimitWorkerIdentity } from '../../src/rate-limit';
 import {
   deriveSupervisionProcessKey,
   hashSupervisionBody,
@@ -61,6 +64,115 @@ function rawRequest(client: IngressControllerClient, init: RequestInit = {}): Pr
 }
 
 describe('ingress supervision HTTP', () => {
+  test('a signed candidate keeps the old policy until its batch commits and reconciles live state', async () => {
+    const registry = new IngressAdmissionRegistry();
+    let reconcileFailure = false;
+    let pauseLoad = false;
+    const loading = Promise.withResolvers<void>(), finishLoading = Promise.withResolvers<void>();
+    const host = new DataAdmissionHost({
+      authorizeWorker: worker => registry.authorizeRateLimitWorker(worker),
+      catalogHash: sequence => [registry.status().active, registry.status().prepared].find(set => set?.admission_sequence === sequence)?.plugin_catalog_hash ?? null,
+      admissionSequence: () => registry.status().active?.admission_sequence ?? null,
+      clock: () => 100,
+      loadPlugin: async () => {
+        if (pauseLoad) { loading.resolve(); await finishLoading.promise; }
+        return { createIngress: () => ({
+        bodyRequirements: () => ({ request: 'none' }),
+        resolveIdentity: target => target.principal,
+        keyedState: { capacity: 10, expiresAt: () => 1_000, policyForKey: value => value, reconcile(state) {
+          if (reconcileFailure) throw new Error('bucket reconcile failed');
+          return Number(state) + 10;
+        } },
+        plan(target, policy, state) {
+          if (target.principal.credentialVersion !== policy) return { denial: { status: 401, error: 'credential_revoked' } };
+          const next = Number(state ?? 0) + 1;
+          return { state: next, snapshot: next };
+        },
+        }) };
+      },
+    });
+    const server = new IngressSupervisionHttpServer({ credential, registry, dataAdmission: host });
+    const controller = client(server);
+    let sequence = 3;
+    const command = (path: string, body: unknown) => controller.command(authority, sequence++, path, body);
+    const old = admission(1), aborted = admission(2);
+    const next = { ...admission(3), workers: [{ ...admission(3).workers[0]!, worker_instance_id: randomUUID() }] };
+    const policy = (set: AdmissionSet, value: number) => ({ routeRequirements: [], plugins: [{ name: 'access', entry: 'access', catalogHash: set.plugin_catalog_hash, policy: value }] });
+    const commit = (set: AdmissionSet, value: number) => command('/commit', { admission: set, dataAdmission: policy(set, value) });
+    const worker = (set: AdmissionSet): RateLimitWorkerIdentity => ({ role: 'worker', master_generation: set.master_generation,
+      process_instance_id: set.workers[0]!.worker_instance_id, boot_nonce: set.workers[0]!.boot_nonce, worker_slot: 0 });
+    const target = (credentialVersion: number, keyId = 'key') => ({ requestId: randomUUID(), attemptId: randomUUID(),
+      principal: { domain: 'data', keyId, credentialVersion }, routeId: 'route', serviceId: null, upstreamId: 'upstream',
+      url: 'http://example.test/', model: null, now: 100 });
+    const tryOld = () => host.admit(target(1), worker(old)).snapshots.access;
+    let nativeFailure = false;
+    registry.subscribeWebSocketMessagePolicy(() => { if (nativeFailure) throw new Error('native policy failed'); });
+    try {
+      await controller.attach(await controller.challenge(authority), authority, 1);
+      await controller.lease(authority, Date.now() + 5_000, 2);
+      await command('/prepare', prepareBody(old));
+      await commit(old, 1);
+      expect(tryOld()).toBe(1);
+
+      await command('/prepare', prepareBody(aborted));
+      await expect(command('/data-admission/publish', { ...policy(aborted, 2), admissionSequence: 2, version: 2 })).rejects.toThrow('admission_missing');
+      expect(tryOld()).toBe(2);
+      await command('/abort', aborted);
+      await expect(commit(aborted, 2)).rejects.toThrow('admission_missing');
+      expect(tryOld()).toBe(3);
+
+      await command('/prepare', prepareBody(next));
+      await expect(commit(admission(4), 2)).rejects.toThrow('admission_missing');
+      expect(tryOld()).toBe(4);
+      expect(() => host.admit(target(2), worker(next))).toThrow('admission_worker_not_active');
+      nativeFailure = true;
+      await expect(commit(next, 2)).rejects.toThrow('supervision_failure');
+      const inFlight = target(1);
+      const oldGrant = host.admit(inFlight, worker(old));
+      expect(oldGrant.snapshots.access).toBe(5);
+
+      nativeFailure = false;
+      reconcileFailure = true;
+      await expect(commit(next, 2)).rejects.toThrow('supervision_failure');
+      expect(registry.status().prepared).toBeNull();
+      expect(tryOld()).toBe(6);
+      await expect(command('/prepare', { ...prepareBody(next), dataAdmission: policy(next, 2) })).rejects.toThrow('supervision_failure');
+      expect(registry.status()).toMatchObject({ active: old, prepared: null });
+
+      reconcileFailure = false;
+      await command('/data-admission/freeze-scope', { plugin: 'access', keyId: 'frozen' });
+      pauseLoad = true;
+      const preparing = command('/prepare', { ...prepareBody(next), dataAdmission: policy(next, 2) });
+      await loading.promise;
+      expect(tryOld()).toBe(7);
+      expect(registry.status()).toMatchObject({ active: old, prepared: null });
+      finishLoading.resolve();
+      await preparing;
+      expect(registry.status()).toMatchObject({ active: old, prepared: next });
+      expect(host.status().version).toBe(1);
+      // A policy update aimed at the serving set cannot pass the prepared candidate.
+      await expect(command('/data-admission/publish', { ...policy(old, 1), admissionSequence: 1, version: 2 })).rejects.toThrow('supervision_failure');
+      expect(tryOld()).toBe(8);
+      expect(host.admit(target(1, 'new-key'), worker(old)).snapshots.access).toBe(1);
+      reconcileFailure = true;
+      expect(() => host.admit(target(1, 'new-key'), worker(old))).toThrow('admission_policy_preparing');
+      // Commit must never rerun the now-failing reconcile hook.
+      await commit(next, 2);
+      await commit(old, 1);
+      await commit(next, 2);
+      expect((await controller.status(authority, sequence++)).dataAdmission?.version).toBe(2);
+      expect(registry.status().active).toEqual(next);
+      expect(() => host.admit(target(1), worker(next))).toThrow('credential_revoked');
+      expect(() => host.admit(target(2, 'frozen'), worker(next))).toThrow('plugin_state_unavailable');
+      expect(host.admit(target(2), worker(next)).snapshots.access).toBe(19);
+      expect(host.admit(target(2, 'new-key'), worker(next)).snapshots.access).toBe(12);
+      expect(host.beforeAttempt(inFlight, worker(old))).toBe(oldGrant);
+    } finally {
+      server.stop();
+      host.dispose();
+    }
+  });
+
   test('status payload pid is a strict positive integer under exact keys', () => {
     const registry = { active: null, handoff: null, prepared: null, retired: [] };
     const base = { state: 'attached' as const, registry };

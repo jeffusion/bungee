@@ -4,7 +4,9 @@ import type { CommitConfigurationResult, ConfigurationOperationState,
   ConfigurationResult, RepositorySnapshot } from '../config-storage';
 import { ConfigRepositoryError } from '../config-storage';
 import { validateMutationId } from '../config-storage/repository-validation';
-import { hashConfigurationContent } from '../config-storage/content-hash';
+import { hashConfigurationContent, hashConfigurationRequest } from '../config-storage/content-hash';
+import type { PreparedConfigurationPublication } from '../config-storage/config-repository';
+import { ConfigurationStorageResultUnknownError } from '../config-storage/storage-protocol';
 import { parseNormalizeCompileAggregate } from '../config-storage/aggregate';
 import { isPluginName } from '../config-storage/plugin-name';
 import type { ServingConfigWorker } from '../config-publication';
@@ -41,7 +43,7 @@ export interface ConfigControlRepository {
     readonly mutation_id: string; readonly expected_revision: number;
     readonly aggregate: ConfigurationAggregate; readonly kind: 'config' | 'admin_state';
     readonly created_at: number; readonly target_worker_slots: readonly number[];
-  }): Promise<CommitConfigurationResult>;
+  }, publication?: PreparedConfigurationPublication): Promise<CommitConfigurationResult>;
 }
 
 export type ConfigControlApiOptions = {
@@ -90,6 +92,11 @@ export type ConfigControlApiOptions = {
   readonly onConfigurationCommitted?: (snapshot: RepositorySnapshot) => Promise<void>;
   readonly mutationSettlement?: { pending: PendingCommit | null; readonly ownedRequests: WeakSet<Request> };
   readonly serializeMutation?: <T>(operation: () => Promise<T>) => Promise<T>;
+  readonly serializeConfiguration?: <T>(operation: () => Promise<T>) => Promise<T>;
+  readonly prepareConfiguration?: (
+    snapshot: RepositorySnapshot, mutationId: string, requestSignal: AbortSignal,
+    commit: (publication: PreparedConfigurationPublication, signal: AbortSignal, verifyPrepared: () => Promise<boolean>) => Promise<CommitConfigurationResult | Response>,
+  ) => Promise<CommitConfigurationResult | Response>;
   readonly requestManualRecovery?: (
     recoveryId: string, sourceMutationId: string, expectedRevision: number,
   ) => Promise<import('../config-storage').ConfigurationRecovery>;
@@ -386,7 +393,7 @@ async function putConfig(
   const kind = envelope.kind ?? 'config';
   if (typeof mutationId !== 'string' || !validateMutationId(mutationId)
     || (kind !== 'config' && kind !== 'admin_state')) return json({ error: 'invalid_request' }, 400);
-  return serializeMutation(options, async () => {
+  return serializeConfiguration(options, async () => {
     const activeResult = safeSnapshot(options);
     if (activeResult instanceof Response) return activeResult;
     const active = activeResult;
@@ -409,7 +416,7 @@ async function duplicateRoute(request: Request, options: ConfigControlApiOptions
     return json({ error: 'invalid_request' }, 400);
   }
   const { path, mutation_id: mutationId } = envelope;
-  return serializeMutation(options, async () => {
+  return serializeConfiguration(options, async () => {
     const active = safeSnapshot(options);
     if (active instanceof Response) return active;
     if (!await options.managementAuth?.recheck(request) || !matchesCurrentAuth(request, active, options)) return json({ error: 'unauthorized' }, 401);
@@ -635,6 +642,11 @@ function serializeMutation<T>(options: ConfigControlApiOptions, operation: () =>
   return options.serializeMutation === undefined ? operation() : options.serializeMutation(operation);
 }
 
+function serializeConfiguration<T>(options: ConfigControlApiOptions, operation: () => Promise<T>): Promise<T> {
+  const serialize = () => serializeMutation(options, operation);
+  return options.serializeConfiguration === undefined ? serialize() : options.serializeConfiguration(serialize);
+}
+
 const RETRY_FIELDS = new Set(['request_id', 'expected_revision']);
 
 function recoveryIdentityMatches(
@@ -781,6 +793,12 @@ function isMutationRequest(
     || (pluginToggleMatch !== null && method === 'POST');
 }
 
+export function isConfigurationMutationRequest(request: Request): boolean {
+  const path = new URL(request.url).pathname;
+  return isMutationRequest(path, request.method, /^\/api\/upstreams\/([^/]+)\/enabled$/.exec(path),
+    /^\/api\/plugins\/([^/]+)\/(enable|disable)$/.exec(path));
+}
+
 async function mutationReadinessResponse(options: ConfigControlApiOptions): Promise<Response | null> {
   let readiness: ReturnType<ConfigControlApiOptions['isMutationReady']> = true;
   try {
@@ -797,10 +815,27 @@ async function commitConfigurationMutation(
   options: ConfigControlApiOptions,
   mutation: ConfigurationMutation,
 ): Promise<Response> {
+  if (request.signal.aborted) return json({ error: 'control_recovering' }, 503);
   const protectionGuard = await options.validateManagementTransition?.(request, mutation.active.aggregate, mutation.next);
   if (protectionGuard) return protectionGuard;
+  const command = Object.freeze({mutation_id:mutation.mutationId, expected_revision:mutation.expectedRevision,
+    aggregate:mutation.next, kind:mutation.kind, created_at:options.clock.now(),
+    target_worker_slots:Object.freeze(Array.from({length:options.workerCount}, (_, slot) => slot))});
+  const preparedRequestHash = options.prepareConfiguration === undefined ? undefined : hashConfigurationRequest({
+    kind: command.kind, expected_revision: command.expected_revision, aggregate: command.aggregate,
+    target_worker_slots: command.target_worker_slots, management_provider: options.managementAuth?.selected(mutation.next) ?? null,
+  });
+  if (preparedRequestHash !== undefined) {
+    const previous = await repositoryCall(() => options.repository.getOperationState(command.mutation_id));
+    if (previous !== null) return mapCommit(previous.operation.request_hash === preparedRequestHash
+      ? { kind: 'duplicate', operation: previous.operation }
+      : { kind: 'idempotency_key_reused', mutation_id: command.mutation_id }, options, mutation.active);
+    if (mutation.active.revision !== mutation.expectedRevision) {
+      return json({ error: 'stale_revision', active: snapshotBody(mutation.active) }, 409);
+    }
+  }
   if (mutation.active.revision !== mutation.expectedRevision) {
-    const result = await commitProtectedMutation(request, mutation, [], options);
+    const result = await commitProtectedMutation(request, command, [], options);
     return result.kind === 'committed'
       ? acceptCommitted(mutation.mutationId, result.snapshot.revision, options)
       : mapCommit(result, options, options.repository.getSnapshot());
@@ -817,65 +852,62 @@ async function commitConfigurationMutation(
       'Configuration control preflight failed');
     return json({ error: 'control_readiness_failed' }, 503);
   }
-  const guard = await options.guardManagementTransition?.(request, mutation.active.aggregate, mutation.next, mutation.managementSetup);
-  if (guard) { await rollbackControlActivations(activated, options); return guard; }
-  const freshResult = safeSnapshot(options);
-  if (freshResult instanceof Response) {
-    const rollbackErrors = await rollbackControlActivations(activated, options);
-    if (rollbackErrors.length > 0) {
-      logger.error({ errors: rollbackErrors.map(serializeErrorChain), mutationId: mutation.mutationId },
-        'Configuration control preflight rollback failed during recovery');
+  const finish = async (publication?: PreparedConfigurationPublication, signal?: AbortSignal,
+    verifyPrepared?: () => Promise<boolean>): Promise<CommitConfigurationResult | Response> => {
+    const fresh = safeSnapshot(options);
+    if (fresh instanceof Response) return fresh;
+    const auth = options.managementAuth;
+    if (!auth || !await auth.recheck(request) || !matchesCurrentAuth(request, fresh, options)) {
+      return json({ error: 'unauthorized' }, 401);
     }
-    return freshResult;
-  }
-  const auth = options.managementAuth;
-  if (!auth || !await auth.recheck(request) || !matchesCurrentAuth(request, freshResult, options)) {
-    await rollbackControlActivations(activated, options);
-    return json({ error: 'unauthorized' }, 401);
-  }
-  const capability = /^\/api\/plugins\/[^/]+\/(enable|disable)$/.test(new URL(request.url).pathname)
-    ? 'plugins.toggle' : 'config.write';
-  if (!await auth.authorized(request, capability)
-    || (auth.selected(mutation.active.aggregate) !== auth.selected(mutation.next)
-      && !await auth.authorized(request, 'auth.mode'))) {
-    await rollbackControlActivations(activated, options);
-    return json({ error: 'forbidden' }, 403);
-  }
-  if (freshResult.revision !== mutation.expectedRevision) {
-    await rollbackControlActivations(activated, options);
-    return json({ error: 'stale_revision', expected_revision: freshResult.revision,
-      active: snapshotBody(freshResult) }, 409);
-  }
-  const postPreflightReadiness = await mutationReadinessResponse(options);
-  if (postPreflightReadiness !== null) {
-    const rollbackErrors = await rollbackControlActivations(activated, options);
-    if (rollbackErrors.length > 0) {
-      logger.error({ errors: rollbackErrors.map(serializeErrorChain), mutationId: mutation.mutationId },
-        'Configuration control preflight rollback failed during recovery');
+    const capability = /^\/api\/plugins\/[^/]+\/(enable|disable)$/.test(new URL(request.url).pathname)
+      ? 'plugins.toggle' : 'config.write';
+    if (!await auth.authorized(request, capability)
+      || (auth.selected(mutation.active.aggregate) !== auth.selected(mutation.next)
+        && !await auth.authorized(request, 'auth.mode'))) return json({ error: 'forbidden' }, 403);
+    if (fresh.revision !== mutation.expectedRevision) {
+      return json({ error: 'stale_revision', expected_revision: fresh.revision, active: snapshotBody(fresh) }, 409);
     }
-    return postPreflightReadiness;
+    const readiness = await mutationReadinessResponse(options);
+    if (readiness !== null) return readiness;
+    const finalDataGuard = await options.guardDataTransition?.(fresh.aggregate, mutation.next, mutation.duplicatedRouteId);
+    if (finalDataGuard) return finalDataGuard;
+    if (!await auth.recheck(request) || !await auth.authorized(request, capability)) return json({error:'unauthorized'},401);
+    await auth.validateWrite(request);
+    if (signal?.aborted || request.signal.aborted) return json({ error: 'control_recovering' }, 503);
+    const guard = await options.guardManagementTransition?.(request, fresh.aggregate, mutation.next, mutation.managementSetup);
+    if (guard) return guard;
+    const finalTransition = await options.validateManagementTransition?.(request, fresh.aggregate, mutation.next);
+    if (finalTransition) return finalTransition;
+    if (verifyPrepared !== undefined && !await verifyPrepared()) return json({ error: 'control_recovering' }, 503);
+    if (signal?.aborted || request.signal.aborted) return json({ error: 'control_recovering' }, 503);
+    return commitProtectedMutation(request, command, activated, options, publication, preparedRequestHash);
+  };
+  let result: CommitConfigurationResult | Response;
+  try {
+    result = options.prepareConfiguration === undefined ? await finish() : await options.prepareConfiguration({
+      revision: command.expected_revision + 1, aggregate: command.aggregate, content_hash: hashConfigurationContent(command.aggregate),
+    }, command.mutation_id, request.signal, finish);
+  } catch (error) {
+    if (!options.mutationSettlement!.ownedRequests.has(request)) await rollbackControlActivations(activated, options);
+    throw error;
   }
-  const finalDataGuard = await options.guardDataTransition?.(freshResult.aggregate, mutation.next, mutation.duplicatedRouteId);
-  if (finalDataGuard) { await rollbackControlActivations(activated, options); return finalDataGuard; }
-  if (!await auth.recheck(request) || !await auth.authorized(request, capability)) {
+  if (result instanceof Response) {
     await rollbackControlActivations(activated, options);
-    return json({error:'unauthorized'},401);
+    return result;
   }
-  await auth.validateWrite(request);
-  const finalTransition = await options.validateManagementTransition?.(request, freshResult.aggregate, mutation.next);
-  if (finalTransition) {
-    await rollbackControlActivations(activated, options);
-    return finalTransition;
-  }
-  const result = await commitProtectedMutation(request, mutation, activated, options);
   if (result.kind === 'committed') return acceptCommitted(mutation.mutationId, result.snapshot.revision, options);
+  if (result.kind === 'duplicate' && preparedRequestHash !== undefined) {
+    return acceptCommitted(mutation.mutationId, result.operation.committed_revision, options);
+  }
   return mapCommit(result, options, options.repository.getSnapshot());
 }
 
 type CommitCommand = Parameters<ConfigControlRepository['commit']>[0];
-type PendingCommit = {readonly command: CommitCommand; readonly activated: readonly string[]; readonly transition: ManagementTransition | null};
+type PendingCommit = {readonly command: CommitCommand; readonly activated: readonly string[]; readonly transition: ManagementTransition | null;
+  readonly preparedRequestHash?: Sha256Digest };
 
-async function settleProtectedCommit(pending: PendingCommit, result: CommitConfigurationResult, options: ConfigControlApiOptions): Promise<void> {
+async function settleProtectedCommit(pending: PendingCommit, result: CommitConfigurationResult | null, options: ConfigControlApiOptions): Promise<void> {
   // A transition cannot reopen on a cached pair after an uncertain storage boundary.
   if (pending.transition && !options.repository.refreshControlProjection) throw new RepositoryUnavailableError(new Error('control_projection_refresh_unavailable'));
   // Refresh the current pair even for duplicate: its operation can refer to a historical revision.
@@ -886,7 +918,7 @@ async function settleProtectedCommit(pending: PendingCommit, result: CommitConfi
   if (rollbackErrors.length) throw new AggregateError(rollbackErrors, 'control preflight rollback failed');
   if (pending.transition) options.managementAuth!.completeTransition(pending.transition);
   options.mutationSettlement!.pending = null;
-  if (result.kind === 'committed' || result.kind === 'duplicate') {
+  if (result?.kind === 'committed' || result?.kind === 'duplicate') {
     try { await options.onConfigurationCommitted?.(current); }
     catch (error) {
       logger.error({error:serializeErrorChain(error),revision:current.revision}, 'Committed configuration observer failed');
@@ -894,25 +926,35 @@ async function settleProtectedCommit(pending: PendingCommit, result: CommitConfi
   }
 }
 
-async function commitProtectedMutation(request: Request, mutation: ConfigurationMutation, activated: readonly string[], options: ConfigControlApiOptions): Promise<CommitConfigurationResult> {
+async function commitProtectedMutation(
+  request: Request, command: CommitCommand, activated: readonly string[], options: ConfigControlApiOptions,
+  publication?: PreparedConfigurationPublication, preparedRequestHash?: Sha256Digest,
+): Promise<CommitConfigurationResult> {
   const auth = options.managementAuth;
-  const changing = auth?.selected() === null && auth.selected(mutation.next) !== null;
+  const changing = auth?.selected() === null && auth.selected(command.aggregate) !== null;
   if (changing) {
-    try { auth!.provider(auth!.selected(mutation.next)); }
+    try { auth!.provider(auth!.selected(command.aggregate)); }
     catch { await rollbackControlActivations(activated, options); throw new RepositoryUnavailableError(new Error('management_provider_unavailable')); }
   }
-  const command = Object.freeze({mutation_id:mutation.mutationId, expected_revision:mutation.expectedRevision,
-    aggregate:mutation.next, kind:mutation.kind, created_at:options.clock.now(),
-    target_worker_slots:Object.freeze(Array.from({length:options.workerCount}, (_, slot) => slot))});
   options.mutationSettlement!.ownedRequests.add(request);
-  let pending: PendingCommit = {command, activated, transition:changing ? auth!.beginTransition(mutation.mutationId) : null};
+  let pending: PendingCommit = {command, activated, preparedRequestHash, transition:changing ? auth!.beginTransition(command.mutation_id) : null};
   let result: CommitConfigurationResult;
-  try { result = await options.repository.commit(command); }
+  try { result = await options.repository.commit(command, publication); }
   catch (error) {
     if (!(error instanceof ConfigRepositoryError) || error.code === 'result_unknown') {
       // Only internal reconciliation can use this exact command. Public authentication stays closed.
-      if (!pending.transition && auth) pending = {...pending, transition:auth.beginTransition(mutation.mutationId)};
+      if (!pending.transition && auth) pending = {...pending, transition:auth.beginTransition(command.mutation_id)};
       options.mutationSettlement!.pending = pending;
+      if (preparedRequestHash !== undefined) {
+        let confirmed: CommitConfigurationResult | null;
+        try {
+          confirmed = await readPreparedCommit(pending, options);
+          await settleProtectedCommit(pending, confirmed, options);
+        } catch {
+          throw new ConfigurationStorageResultUnknownError('commitPrepared', command.mutation_id);
+        }
+        if (confirmed !== null) return confirmed;
+      }
     } else {
       await rollbackControlActivations(activated, options);
       if (pending.transition) auth!.completeTransition(pending.transition);
@@ -922,16 +964,31 @@ async function commitProtectedMutation(request: Request, mutation: Configuration
   }
   // A failed refresh after an acknowledged commit is also unresolved until the current pair can be confirmed.
   options.mutationSettlement!.pending = pending;
-  await settleProtectedCommit(pending, result, options);
+  try { await settleProtectedCommit(pending, result, options); }
+  catch (error) {
+    if (preparedRequestHash !== undefined) throw new ConfigurationStorageResultUnknownError('commitPrepared', command.mutation_id);
+    throw error;
+  }
   return result;
+}
+
+async function readPreparedCommit(pending: PendingCommit, options: ConfigControlApiOptions): Promise<CommitConfigurationResult | null> {
+  const state = await repositoryCall(() => options.repository.getOperationState(pending.command.mutation_id));
+  if (state === null) return null;
+  return state.operation.request_hash === pending.preparedRequestHash
+    && state.operation.committed_revision === pending.command.expected_revision + 1
+    ? { kind: 'duplicate', operation: state.operation }
+    : { kind: 'idempotency_key_reused', mutation_id: pending.command.mutation_id };
 }
 
 async function reconcilePendingCommit(options: ConfigControlApiOptions): Promise<void> {
   const pending = options.mutationSettlement?.pending;
   if (!pending) return;
-  const result = await repositoryCall(() => options.repository.commit(pending.command));
+  const result = pending.preparedRequestHash === undefined
+    ? await repositoryCall(() => options.repository.commit(pending.command))
+    : await readPreparedCommit(pending, options);
   await settleProtectedCommit(pending, result, options);
-  if (result.kind === 'committed' || result.kind === 'duplicate') {
+  if (result?.kind === 'committed' || result?.kind === 'duplicate') {
     await acceptCommitted(pending.command.mutation_id, result.kind === 'committed' ? result.snapshot.revision : result.operation.committed_revision, options);
   }
 }
@@ -958,7 +1015,7 @@ async function toggleUpstreamEnabled(
   if (!body.ok) return json({ error: body.error }, body.status);
   const parsedBody = exactObject(body.value, TOGGLE_FIELDS);
   if (parsedBody === null || typeof parsedBody.enabled !== 'boolean') return json({ error: 'invalid_request' }, 400);
-  return serializeMutation(options, async () => {
+  return serializeConfiguration(options, async () => {
     const activeResult = safeSnapshot(options);
     if (activeResult instanceof Response) return activeResult;
     const active = activeResult;
@@ -985,7 +1042,7 @@ async function togglePluginActivation(
   const envelope = exactObject(raw.value, new Set(['expected_revision','mutation_id','managementSetup']));
   if (!envelope || (envelope.expected_revision !== undefined && !Number.isSafeInteger(envelope.expected_revision))
     || (envelope.mutation_id !== undefined && (typeof envelope.mutation_id !== 'string' || !validateMutationId(envelope.mutation_id)))) return json({ error: 'invalid_request' }, 400);
-  return serializeMutation(options, async () => {
+  return serializeConfiguration(options, async () => {
     const activeResult = safeSnapshot(options);
     if (activeResult instanceof Response) return activeResult;
     const active = activeResult;
@@ -1031,7 +1088,7 @@ async function importConfig(
     || !('envelope' in wrapper)) return json({ error: 'invalid_request' }, 400);
   const expectedRevision = wrapper.expected_revision;
   const mutationId = wrapper.mutation_id;
-  return serializeMutation(options, async () => {
+  return serializeConfiguration(options, async () => {
     const activeResult = safeSnapshot(options);
     if (activeResult instanceof Response) return activeResult;
     const active = activeResult;

@@ -34,4 +34,4 @@ export async function readResource(resource:string,keyId:string,state:Pick<NonNu
   if(resource!=='api-key')throw new Error('resource_not_supported');
   return {value:((await state.get('policies'))?.value as any)?.byKey?.[keyId]??null};
 }
-export default {createControl,readResource};
+export default {supportsOnlinePreparation: true, createControl,readResource};

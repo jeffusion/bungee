@@ -32,6 +32,7 @@ export class PublicationTaskManager implements PublicationTaskLifecycle {
   private pending = false;
   private scheduled = false;
   private running: Promise<void> | null = null;
+  private retainConfigurationWork: ((work: Promise<unknown>) => void) | null = null;
   private readonly stopController = new AbortController();
   private readonly schedule: (callback: () => void) => void;
 
@@ -82,6 +83,23 @@ export class PublicationTaskManager implements PublicationTaskLifecycle {
     }));
     this.tail = recovery.then(() => undefined, () => undefined);
     return recovery;
+  }
+
+  serializeConfiguration<T>(task: () => Promise<T>): Promise<T> {
+    let work: Promise<unknown> | undefined;
+    const current = this.tail.then(async () => {
+      this.retainConfigurationWork = (continuation) => { work = continuation; };
+      try { return await task(); }
+      finally { this.retainConfigurationWork = null; }
+    });
+    // A saved response can finish before cutover and retirement release the queue.
+    this.tail = current.then(() => work, () => work).then(() => undefined, () => undefined);
+    return current;
+  }
+
+  retainConfiguration(work: Promise<unknown>): void {
+    if (this.retainConfigurationWork === null) throw new PublicationTaskError('configuration task does not own the publication queue');
+    this.retainConfigurationWork(work);
   }
 
   private async drain(): Promise<void> {

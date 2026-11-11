@@ -39,8 +39,10 @@ interface WebSocketUpgradeServer {
 export interface WebSocketUpgradeOptions {
   readonly url: URL | string;
   readonly headers: Headers;
-  /** Handshake cancellation only. Removed before committing the downstream upgrade. */
+  /** Client cancellation is observed until the handshake finishes. */
   readonly signal?: AbortSignal;
+  /** Ingress admission retirement ends pending handshakes and established connections. */
+  readonly retirementSignal?: AbortSignal;
   readonly onOpen?: () => unknown;
   readonly onMessage?: (direction: 'client' | 'upstream', message: WebSocketMessageView) => unknown;
   readonly onDownstreamMessage?: (message: WebSocketMessageView) => unknown;
@@ -287,6 +289,7 @@ export class WebSocketBridge {
     const capacityRejection = this.#capacityRejection('upgrade');
     if (capacityRejection) return Promise.resolve(capacityRejection);
     if (options.signal?.aborted) return Promise.resolve(new Response('WebSocket handshake cancelled', { status: 499 }));
+    if (options.retirementSignal?.aborted) return Promise.resolve(new Response('Worker admission retired', { status: 503 }));
     let url: URL;
     try {
       url = new URL(options.url);
@@ -928,6 +931,10 @@ class BridgeSession {
   #upstreamMessages = 0;
   #clientBytes = 0;
   #upstreamBytes = 0;
+  readonly #retire = (): void => {
+    this.cancelHandshake(503, 'Worker admission retired');
+    this.terminate();
+  };
 
   constructor(bridge: WebSocketBridge, request: Request, server: WebSocketUpgradeServer, options: WebSocketUpgradeOptions, url: URL) {
     this.#bridge = bridge; this.#limits = bridge.sessionLimits(); this.#request = request; this.#server = server; this.#options = options; this.#url = url;
@@ -944,6 +951,7 @@ class BridgeSession {
     this.#handshakeTimer.unref?.();
     this.#abort = () => this.cancelHandshake(499, 'WebSocket handshake cancelled');
     this.#options.signal?.addEventListener('abort', this.#abort, { once: true });
+    this.#options.retirementSignal?.addEventListener('abort', this.#retire, { once: true });
     try {
       const socket = this.#upstream = createUpstream(this.#url, this.#options.headers, this.#protocols, this.#limits);
       socket.on('upgrade', (response) => this.#upgraded(response));
@@ -962,6 +970,7 @@ class BridgeSession {
       socket.on('close', (code, reason) => this.#upstreamClose(code, reason.toString('utf8')));
       // Abort may have happened while constructing the socket.
       if (this.#options.signal?.aborted) this.cancelHandshake(499, 'WebSocket handshake cancelled');
+      if (this.#options.retirementSignal?.aborted) this.#retire();
     } catch {
       this.#upstreamGone = true;
       this.#finishHandshake(new Response('WebSocket upstream handshake failed', { status: 502 }));
@@ -1052,6 +1061,7 @@ class BridgeSession {
 
   downstreamOpen(socket: Bun.ServerWebSocket<WebSocketBridgeData>): void {
     this.#downstream = socket;
+    if (this.#options.retirementSignal?.aborted) { socket.terminate(); return; }
     if (this.#closing) { socket.close(wireCloseCode(this.#code), this.#reason); return; }
     if (!this.#bridge.accepting) { this.close(1012, 'Service restarting'); return; }
     this.#openedAt = performance.now();
@@ -1214,6 +1224,7 @@ class BridgeSession {
   #maybeFinish(): void {
     if (this.#finished || !this.#upstreamGone || !this.#downstreamGone) return;
     this.#finished = true;
+    this.#options.retirementSignal?.removeEventListener('abort', this.#retire);
     if (this.#closeTimer) clearTimeout(this.#closeTimer);
     this.#early.length = 0; this.#earlyBytes = 0;
     this.refreshBuffered();

@@ -94,6 +94,44 @@ function control(events: string[]): ControlPlugin {
   };
 }
 
+test('online preparation denies writes and discards deferred effects unless activated', async () => {
+  let preparing = true;
+  let writes = 0;
+  const calls: string[] = [];
+  const host = createPluginControlHost({
+    records: [record()], secretStores: stores([]), storage: storages(), isPreparing: () => preparing,
+    durableState: () => ({ get: async () => null, list: async () => [], transact: async () => { writes++; return []; } }),
+    loadControl: async () => ({
+      supportsOnlinePreparation: true,
+      createControl(context) {
+        return { api: [], rpc: [], async start() {
+          expect(await context.durableState!.get('state')).toBeNull();
+          expect(() => context.durableState!.transact([])).toThrow('read-only');
+          expect(() => context.storage.set('state', 1)).toThrow('read-only');
+          expect(() => context.secretStore.compareAndSet('state', null, 'state')).toThrow('read-only');
+          context.afterActivation!(async () => {
+            await context.durableState!.transact([]);
+            calls.push('activated');
+          });
+        }, dispose() {} };
+      },
+    }),
+  });
+  try {
+    await host.reconcile(['fake-control']);
+    expect(host.status('fake-control')).toBe('ready');
+    await host.reconcile([]);
+    expect(writes).toBe(0);
+    expect(calls).toEqual([]);
+    await host.reconcile(['fake-control']);
+    preparing = false;
+    await host.reconcile(['fake-control']);
+    await host.reconcile(['fake-control']);
+    expect(writes).toBe(1);
+    expect(calls).toEqual(['activated']);
+  } finally { await host.dispose(); }
+});
+
 const tempRoots: string[] = [];
 const timeoutRestorers: Array<() => void> = [];
 afterEach(() => {

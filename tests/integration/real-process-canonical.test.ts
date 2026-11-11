@@ -136,7 +136,7 @@ async function makeFixture(root: string, name: string, credentialPort: number): 
   await writeFile(join(pluginPath, 'manifest.json'), JSON.stringify({
     name: 'canonical-plugin', version: '1.0.0', schemaVersion: 3, artifactKind: 'runtime-plugin', main: 'index.js',
     capabilities: ['hooks', 'api', 'controlPlane', 'dynamicRuntimeLoad'], uiExtensionMode: 'none', engines: { bungee: '^6.0.0' },
-    builtin: false, control: { entry: 'control.js', rpc: [{ name: 'getCredential', access: 'bound-attempt' }] },
+    builtin: false, control: { entry: 'control.js', rpc: [{ name: 'getCredential', access: 'bound-attempt' }] }, ingress: { entry: 'ingress.js' },
     services: { provides: [{ id: credentialContract.id, version: 1, process: 'control', kind: 'rpc' }],
       consumes: [{ plugin: 'canonical-plugin', id: credentialContract.id, version: 1, process: 'worker', kind: 'rpc' }] },
     contributes: { api: [
@@ -146,10 +146,17 @@ async function makeFixture(root: string, name: string, credentialPort: number): 
       allowedOrigins: [`https://127.0.0.1:${credentialPort}`], allowedRequests: [{ pathname: '/managed-proxy', methods: ['GET'] }], allowedHeaderNames: ['x-canonical-token'],
     } }] }, configSchema: [], metadata: { name: 'canonical-plugin', description: 'canonical', icon: 'test' },
   }));
-  await writeFile(join(pluginPath, 'index.js'), `export default class CanonicalPlugin { static name = 'canonical-plugin'; static version = '1.0.0'; static controlRpcContract = ${JSON.stringify(credentialContract)}; bodyRequirements() { return { request: 'none' }; } register() {} };`);
+  await writeFile(join(pluginPath, 'index.js'), `import { existsSync } from 'node:fs';
+export default class CanonicalPlugin {
+  static name = 'canonical-plugin'; static version = '1.0.0'; static controlRpcContract = ${JSON.stringify(credentialContract)};
+  bodyRequirements() { return { request: 'none' }; }
+  register() {
+    if (existsSync(${JSON.stringify(join(fixtureRoot, 'reject-worker-start'))})) throw new Error('fixture rejects candidate worker');
+  }
+};`);
   await writeFile(join(pluginPath, 'control.js'), `import { appendFileSync } from 'node:fs';
  const contract = ${JSON.stringify(credentialContract)};
- export default { createControl(context) {
+ export default { supportsOnlinePreparation: true, createControl(context) {
   const getCredential = async () => {
     appendFileSync(${JSON.stringify(controlAuditPath)}, 'rpc:' + process.pid + '\\n');
     return { version: 1, expiresAt: Date.now() + 60000, headers: { 'x-canonical-token': 'canonical' } };
@@ -158,8 +165,14 @@ async function makeFixture(root: string, name: string, credentialPort: number): 
   { path: '/accounts', methods: ['GET'], handler: 'listAccounts', invoke: async () => ({ accounts: [] }) },
   { path: '/accounts/draft', methods: ['POST'], handler: 'createDraft', invoke: async () => ({}) },
 ], rpc: [{ name: 'getCredential', handler: 'getCredential', invoke: getCredential }],
+ policy: () => ({ version: 0, value: null }),
  start() { context.services.rpc.publish(contract, { getCredential }); }, dispose() {} }; } };
 `);
+  await writeFile(join(pluginPath, 'ingress.js'), `import { existsSync } from 'node:fs';
+export function createIngress() {
+  if (existsSync(${JSON.stringify(join(fixtureRoot, 'reject-ingress-prepare'))})) throw new Error('fixture rejects ingress preparation');
+  return { bodyRequirements: () => ({ request: 'none' }), plan: () => ({}) };
+}`);
   const repository = ConfigRepository.open(dbPath);
   repository.close();
   await initializePluginStateFixture(dbPath);
@@ -1729,8 +1742,24 @@ test.each(['publication', 'startup'] as const)('cold startup serves after an adm
           } finally { extraGuard.closeAfterChildExit(); }
         }
         // Recreate the schema prefix that originally wrote this launch.
-        repository.getDatabase().run('DROP TABLE configuration_worker_launch_capacity_reclaims');
-        repository.getDatabase().run('DELETE FROM schema_migrations WHERE version=10');
+        const db = repository.getDatabase();
+        db.run('DROP TRIGGER configuration_worker_launch_intents_no_update');
+        db.run('DROP INDEX configuration_operations_single_owner');
+        db.run('DROP INDEX configuration_recoveries_active_target_revision');
+        for (const table of ['configuration_operations', 'configuration_recoveries', 'configuration_worker_launch_intents']) {
+          db.run(`ALTER TABLE ${table} DROP COLUMN runtime_epoch`);
+        }
+        db.run(`CREATE TRIGGER configuration_worker_launch_intents_no_update
+          BEFORE UPDATE ON configuration_worker_launch_intents
+          BEGIN SELECT RAISE(ABORT,'worker launch intent is immutable'); END`);
+        db.run(`CREATE UNIQUE INDEX configuration_operations_single_owner
+          ON configuration_operations((state IN ('committed','publishing','draining')))
+          WHERE state IN ('committed','publishing','draining')`);
+        db.run(`CREATE UNIQUE INDEX configuration_recoveries_active_target_revision
+          ON configuration_recoveries(target_revision) WHERE state IN ('scheduled','running')`);
+        db.run('DROP TABLE runtime_cutovers');
+        db.run('DROP TABLE configuration_worker_launch_capacity_reclaims');
+        db.run('DELETE FROM schema_migrations WHERE version>=10');
       } finally { repository.close(); }
     } finally { guard.closeAfterChildExit(); }
     const historicalDescriptor = await readFile(descriptorPath, 'utf8');
@@ -1882,10 +1911,10 @@ test.each(['claim-blocked', 'workers-unavailable'] as const)('authenticated mana
     const accounts=await fetch(base+'/api/plugins/canonical-plugin/control/accounts',{headers});expect(accounts.status).toBe(200);expect(await accounts.json()).toEqual({accounts:[]});
     const nextAggregate={...current.config,logical_configuration:{...current.config.logical_configuration,routes:current.config.logical_configuration.routes.map((route:any,index:number)=>index===0?{...route,path:'/saved-without-workers'}:route)}};
     const saved=await fetch(base+'/api/config',{method:'PUT',headers,body:JSON.stringify({expected_revision:current.revision,mutation_id:randomUUID(),aggregate:nextAggregate})});
-    expect(saved.status).toBe(202);
-    const accepted=await saved.json();expect(accepted.revision).toBe(current.revision+1);
-    expect((await (await fetch(base+'/api/config',{headers})).json()).revision).toBe(accepted.revision);
-    expect(durableRevision(fixture.dbPath)).toBe(accepted.revision);
+    expect(saved.status).toBe(503);
+    expect(await saved.json()).toMatchObject({error:'control_recovering'});
+    expect((await (await fetch(base+'/api/config',{headers})).json()).revision).toBe(current.revision);
+    expect(durableRevision(fixture.dbPath)).toBe(current.revision);
     expect((await fetch(base+'/api/plugins/canonical-plugin/control/accounts',{headers})).status).toBe(200);
     expect((await fetch(base+'/health/management')).status).toBe(200);
     expect((await fetch(base+'/health/data')).status).toBe(503);
@@ -1960,6 +1989,10 @@ describe.serial('A core lifecycle', () => {
     const initialMutation = randomUUID();
     const initialResponse = await publish(lease.base, upstream.port, initialMutation, 1, '/proxy', true, managedUpstream.port);
     if (initialResponse.status !== 202) throw new Error(`managed aggregate rejected: ${initialResponse.status} ${await initialResponse.text()}`);
+    expect(await initialResponse.json()).toMatchObject({
+      revision: 2, operation: { mutation_id: initialMutation, prepare_started: true },
+      workers: [{ state: 'converged', applied_revision: 2, attempt_no: 1 }],
+    });
     await awaitConverged(lease.base, initialMutation, state.polling.signal);
     expect(durableRevision(fixture.dbPath)).toBe(2);
     state.firstController = durableController(fixture.dbPath) ?? undefined;
@@ -1969,6 +2002,22 @@ describe.serial('A core lifecycle', () => {
     expect(initialManaged.status).toBe(200);
     expect(await initialManaged.text()).toBe('A');
     expect(await readFile(fixture.controlAuditPath, 'utf8').catch(() => '')).toContain(`rpc:${first.pid}`);
+    const oldWorkers = await runtimeWorkers(lease.base);
+    for (const marker of ['reject-worker-start', 'reject-ingress-prepare']) {
+      const rejectionMarker = join(fixture.root, marker);
+      await writeFile(rejectionMarker, '');
+      try {
+        const rejected = randomUUID();
+        const response = await publish(lease.base, upstream.port, rejected, 2, '/failed-candidate', true, managedUpstream.port);
+        expect(response.status).toBe(503);
+        expect(await response.json()).toMatchObject({ error: 'control_readiness_failed' });
+        expect((await fetch(`http://127.0.0.1:${lease.base}/api/config/operations/${rejected}`)).status).toBe(404);
+        expect(durableRevision(fixture.dbPath)).toBe(2);
+        expect(await runtimeWorkers(lease.base)).toEqual(oldWorkers);
+        expect(await (await fetch(`http://127.0.0.1:${lease.base + 1}/proxy`)).text()).toBe('A');
+        expect((await fetch(`http://127.0.0.1:${lease.base + 1}/failed-candidate`)).status).toBe(404);
+      } finally { await rm(rejectionMarker); }
+    }
   }, { timeout: FIXTURE_STARTUP_WAIT_MS + PUBLICATION_WAIT_MS + 30_000 });
   test('keeps A alive after SIGKILL, rejects the concurrent owner, and rejects stale mutation', async () => {
     if (state === undefined || state.firstController === undefined) throw new Error('core setup did not complete');

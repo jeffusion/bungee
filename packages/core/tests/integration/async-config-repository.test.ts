@@ -2,7 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { AsyncConfigRepository, ConfigRepository, ConfigRepositoryError,
   ConfigurationStorageResultUnknownError, hashConfigurationContent } from '../../src/config-storage';
 import type { ConfigurationStorageWorker } from '../../src/config-storage/async-config-repository';
@@ -166,6 +166,48 @@ describe('configuration storage execution boundary', () => {
     const restarted = await open(dbPath);
     expect(restarted.getSnapshot().revision).toBe(2);
     expect((await restarted.getOperation('lost-acknowledgement'))?.committed_revision).toBe(2);
+  });
+
+  test('prepared CAS rolls back incomplete evidence and preserves its serving and retirement authority after a lost ACK', async () => {
+    const dbPath = path();
+    const identity = { worker_instance_id: crypto.randomUUID(), master_generation: crypto.randomUUID(), worker_slot: 0 };
+    const boot = `linux:${crypto.randomUUID()}`;
+    const guard = { schema: 'bungee-process-lifetime-guard-v1' as const, identity: crypto.randomUUID(),
+      process_instance_id: identity.worker_instance_id, path: join(dirname(dbPath), 'guard'), device: '1', inode: '42',
+      host_boot_id: boot, domain: 'bungee-local-flock' as const };
+    const input = command('prepared-lost-ack');
+    const client = await open(dbPath);
+    await client.registerWorkerLaunch(identity, guard, null, input.created_at);
+    const pluginCatalogHash = snapshot.content_hash;
+    const worker = { identity, guard, boot_nonce: crypto.randomUUID(), kernel_boot_id: boot, pid: 1, private_port: 1,
+      revision: 2, content_hash: snapshot.content_hash, plugin_catalog_hash: pluginCatalogHash,
+      publication: { mutation_id: input.mutation_id, attempt_no: 1, drain_recovery_generation: 0 } };
+    const publication = { pluginCatalogHash, workers: [worker], retired: [] };
+    const rejection = await client.commit(input, {
+      ...publication, workers: [{ ...worker, guard: { ...guard, inode: '43' } }],
+    }).catch((error: unknown) => error);
+    expect(rejection).toMatchObject({ code: 'invalid_operation' });
+    expect(client.getSnapshot().revision).toBe(1);
+    expect(await client.getOperation(input.mutation_id)).toBeNull();
+    expect(await client.getWorkerLaunch(identity.worker_instance_id)).toMatchObject({ allocation: null });
+    await client.close();
+
+    const losingClient = await AsyncConfigRepository.open(dbPath,
+      { workerUrl: new URL('../fixtures/config-storage-exit-worker.ts', import.meta.url) });
+    clients.push(losingClient);
+    await expect(losingClient.commit(input, publication)).rejects.toMatchObject({
+      code: 'result_unknown', mutationId: input.mutation_id,
+    });
+    const restarted = await open(dbPath);
+    expect(restarted.getSnapshot().revision).toBe(2);
+    expect(await restarted.getActivePublication()).toMatchObject({ operation: {
+      mutation_id: input.mutation_id, prepare_started: true, state: 'publishing',
+    } });
+    expect(await restarted.getPublicationServingSet(input.mutation_id, 0)).toMatchObject({ workers: [worker] });
+    expect(await restarted.getPublicationRetirement(input.mutation_id)).toMatchObject({ state: 'pending', members: [] });
+    expect(await restarted.getWorkerLaunch(identity.worker_instance_id)).toMatchObject({ allocation: {
+      mutation_id: input.mutation_id, worker_slot: 0, attempt_no: 1,
+    } });
   });
 
   test('plugin dependency graph compiles on the client and only prepared JSON crosses the worker boundary', async () => {

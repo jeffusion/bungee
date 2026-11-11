@@ -15,6 +15,25 @@ async function settle(): Promise<void> {
 }
 
 describe('PublicationTaskManager', () => {
+  test('a save ACK keeps the online cutover and retirement ahead of later publication', async () => {
+    const retirement = Promise.withResolvers<void>();
+    const events: string[] = [];
+    const manager = new PublicationTaskManager({ publish: async () => { events.push('background'); return converged; } });
+    await manager.serializeConfiguration(async () => {
+      manager.retainConfiguration(retirement.promise);
+      manager.wake();
+      events.push('ack');
+    });
+    const next = manager.serializeConfiguration(async () => { events.push('next'); });
+    await settle();
+    expect(events).toEqual(['ack']);
+    events.push('released');
+    retirement.resolve();
+    await next;
+    expect(events).toEqual(['ack', 'released', 'background', 'next']);
+    await manager.stop();
+  });
+
   test('starts after scheduling, coalesces wakes during a run, and stop waits for the run', async () => {
     const scheduler = new ManualScheduler();
     let calls = 0;

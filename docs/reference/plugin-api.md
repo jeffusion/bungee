@@ -194,6 +194,12 @@ Stream 的读信用 `creditBytes` 和 duplex 的 `readCreditBytes` 均以字节�
 
 插件 API 声明 path、methods、handler、execution 和 capability；Host 按当前 management subject 授权后调用。不得从请求 JSON 自行信任 principal。资源 collection／extension reader 只取得 get/list，不启动停用插件，不授予写能力。
 
+在线激活 control 插件时，模块通过 `supportsOnlinePreparation: true` 声明加载、`createControl` 和 `start` 可以先于配置保存执行。这些步骤完成必需的读取、校验和服务注册。宿主在准备阶段限制存储写入，插件把恢复写入、外部请求和后台调度注册到 `ControlHostContext.afterActivation`。配置确认持久化并结束 ingress 切换临界区后，宿主执行这些回调。准备失败或撤销会释放候选实例并丢弃回调。缺少声明的 control 插件可以在已保存配置的启动路径加载，在线新启用会拒绝保存。
+
+在线更新启动的候选 worker 在准备阶段可以读取已声明的快照并发出 bootstrap 查询。插件应把带操作 ID 的命令留到 worker 接流后执行。依赖 bootstrap 命令才能初始化的插件会使在线保存失败，已保存配置的正常启动仍可执行这些命令。
+
+运行就绪必须依赖 `start` 已完成的校验和可用的服务。维护任务的执行条件和恢复行为由插件定义。插件模块和通道仍遵循受信插件的副作用约定。宿主只限制它授予的能力。
+
 `native-static` 组件随 UI 构建注册，不能运行时任意注入 Svelte 模块；iframe 扩展使用沙箱协议，不能当作原生组件访问宿主。导航是业务页入口，设置和 widget 使用对应 contributes 字段，不使用旧 handler/settingsPage 示范。
 
 原生导航项可通过 `contributes.navigation[].layout: "standalone"` 让菜单入口直接渲染声明的 `component`。组件自行提供页面标题和容器。宿主仍检查插件启用状态和组件归属，插件设置页继续使用详情布局。

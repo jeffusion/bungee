@@ -1,6 +1,7 @@
 import { isIP } from 'node:net';
 import { DAEMON_UPDATES_PATH } from '@jeffusion/bungee-types';
 import { PLUGIN_STORAGE_RPC_PATH } from '../data-admission/rpc';
+import { isConfigurationMutationRequest } from '../master-runtime/control-api';
 import { attestManagementRequestSource } from './request-source';
 import { PLUGIN_PEER_WS_PATH, type PluginPeerConnectionData, type PluginPeerWebSocketServer } from '../plugin-services/peer-websocket';
 import {
@@ -271,6 +272,7 @@ export function createManagementListener(options: ManagementListenerOptions): Ma
             callbacks.clear();
           };
           const handledRequest = new Request(request, { signal: combined.signal });
+          if (isConfigurationMutationRequest(handledRequest)) connection.timeout(request, 120);
           attestManagementRequestSource(handledRequest, connection.requestIP(request)?.address, options.trustedProxyAddresses);
           const response = await handleManagementRequest(handledRequest, options, context);
           return trackManagementResponse(response, settle);

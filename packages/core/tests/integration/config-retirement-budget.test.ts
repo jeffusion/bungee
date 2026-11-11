@@ -125,6 +125,10 @@ test('migration 2 rollback and reopen preserve multiple operation, worker and re
     for (const table of ['ui_menu_layout', 'configuration_request_logs_default', 'configuration_worker_launch_capacity_reclaims', 'configuration_worker_launch_facts', 'configuration_worker_launch_intents', 'configuration_publication_candidate_evidence', 'configuration_retirement_retry_requests','configuration_retirement_evidence', 'configuration_retirements', 'configuration_publication_serving_sets', 'runtime_recovery_tickets', 'runtime_recovery_budget']) {
       db.run(`DROP TABLE ${table}`);
     }
+    db.run('DROP INDEX configuration_recoveries_active_target_revision');
+    db.run('ALTER TABLE configuration_recoveries DROP COLUMN runtime_epoch');
+    db.run(CONFIG_SCHEMA_STATEMENTS.find(statement => statement.startsWith('CREATE UNIQUE INDEX configuration_recoveries_active_target_revision'))!);
+    db.run('DROP TABLE runtime_cutovers');
     db.run('DELETE FROM schema_migrations WHERE version>=2');
     verifySchemaFingerprint(db, 1);
     const tables = db.query<{ name: string }, []>("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map(row => row.name);

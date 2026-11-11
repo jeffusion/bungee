@@ -118,9 +118,9 @@ export class AsyncConfigRepository {
   }
   getSupervisionState(): SupervisionState { return this.supervision; }
 
-  async commit(command: CommitConfigurationCommandV1): Promise<CommitConfigurationResult> {
+  async commit(command: CommitConfigurationCommandV1, publication?: import('./config-repository').PreparedConfigurationPublication): Promise<CommitConfigurationResult> {
     const prepared = prepareCommitCommand(command, this.options.compileOptions);
-    const result = await this.rpc('commitPrepared', prepared);
+    const result = publication === undefined ? await this.rpc('commitPrepared', prepared) : await this.rpc('commitPrepared', prepared, publication);
     if (result.kind === 'committed' || result.kind === 'duplicate') {
       try { await this.refreshControlProjection(); }
       catch { throw new ConfigurationStorageResultUnknownError('commitPrepared', prepared.mutationId); }
@@ -285,6 +285,11 @@ export class AsyncConfigRepository {
   getCurrentOperationState(...args: Parameters<ConfigRepository['getCurrentOperationState']>): Promise<ReturnType<ConfigRepository['getCurrentOperationState']>> {
     return this.rpc('getCurrentOperationState', ...args);
   }
+
+  getRuntimeEpoch(): Promise<number> {
+    return this.rpc('getRuntimeEpoch');
+  }
+
   getRecovery(...args: Parameters<ConfigRepository['getRecovery']>): Promise<ReturnType<ConfigRepository['getRecovery']>> {
     return this.rpc('getRecovery', ...args);
   }

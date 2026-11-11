@@ -76,6 +76,7 @@ export class ModelsDevCatalogManager {
   private controller: AbortController | undefined;
   private inFlight: Promise<void> | undefined;
   private initialization: Promise<void> | undefined;
+  private refreshScheduled = false;
   private stopped = false;
   private readonly now: () => number;
 
@@ -83,8 +84,12 @@ export class ModelsDevCatalogManager {
     this.now = options.now ?? Date.now;
   }
 
-  async start(): Promise<void> {
+  async start(schedule = true): Promise<void> {
     await (this.initialization ??= this.restore());
+    if (schedule && !this.refreshScheduled) {
+      this.refreshScheduled = true;
+      this.schedule();
+    }
   }
 
   statusSnapshot(): ManagerStatus {
@@ -154,8 +159,6 @@ export class ModelsDevCatalogManager {
       this.view.fail('snapshot');
       this.status.lastError = 'snapshot';
     }
-    if (this.stopped) return;
-    this.schedule();
   }
 
   private async load(): Promise<void> {
@@ -347,7 +350,10 @@ class ModelsDevControl implements PluginControl {
 
   async start(): Promise<void> {
     this.assertAlive();
-    await this.manager.start();
+    if (this.host.afterActivation) {
+      await this.manager.start(false);
+      this.host.afterActivation(() => this.manager.start());
+    } else await this.manager.start();
   }
 
   async dispose(): Promise<void> {
@@ -377,4 +383,4 @@ export function createControl(context: ControlHostContext, options?: ModelsDevCa
   return new ModelsDevControl(context, options);
 }
 
-export default { createControl } satisfies ControlPlugin;
+export default { supportsOnlinePreparation: true, createControl } satisfies ControlPlugin;

@@ -17,6 +17,7 @@ export async function forwardPublicWebSocket(request: Request, server: Bun.Serve
     return await bridge.upgrade(request,server,{
       url:`ws://127.0.0.1:${lease.worker.private_port}${original.pathname}${original.search}`,
       headers:privateRequestHeaders(request,options.transportSecret,peer,identity),signal:request.signal,
+      retirementSignal:lease.retirementSignal,
     });
   } finally {lease.release();}
 }

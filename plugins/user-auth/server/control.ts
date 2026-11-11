@@ -791,22 +791,17 @@ export class UserAuthControl implements PluginControl, ManagementProvider {
         return { version: record?.version ?? 0, policy: record ? validateSessionPolicy(envelope(record.value, 'policy'), 'corrupt_state', 503) : { ...DEFAULT_SESSION_POLICY } };
     }
     async start() {
-        await clearSetupCode(this.state);
-        await ensureSetup(this.state, this.now);
+        const activate = async () => {
+            await clearSetupCode(this.state);
+            await ensureSetup(this.state, this.now);
+            await observeClock(this.state, this.now);
+            await this.cleanupDeletedConnections();
+        };
         await readManagementSetup(this.state);
-        await observeClock(this.state, this.now);
         await this.readSessionPolicy();
-        const records = await this.records();
-        slots(records, 'session', MAX_SESSIONS, validateSession);
-        slots(records, 'failure', MAX_FAILURES, validateFailure);
-        this.flows(records);
-        for (const r of records.filter(r => r.key.startsWith('credential:'))) {
-            localValue(r);
-            if (!users(records).some(u => r.key === 'credential:' + u.id))
-                fail('corrupt_state', 503);
-        }
-        await this.cleanupDeletedConnections();
         this.dummy = await this.hash(randomBytes(32).toString('base64url'));
+        if (this.host.afterActivation) this.host.afterActivation(activate);
+        else await activate();
     }
     dispose() { this.disposed = true; }
     private hash(p: string) { return Bun.password.hash(p, { algorithm: 'argon2id', memoryCost: 65536, timeCost: 3 }); }
@@ -818,6 +813,10 @@ export class UserAuthControl implements PluginControl, ManagementProvider {
             const b = object(input);
             if (b.operation === 'initialize') {
                 exact(b, ['operation', 'username', 'password', 'passwordConfirmation']);
+                if (this.host.afterActivation) {
+                    await clearSetupCode(this.state);
+                    await ensureSetup(this.state, this.now);
+                }
                 await this.createInitialUser(b);
                 return;
             }
@@ -1812,7 +1811,7 @@ const passwordPrompts = [
     {name: 'password', label: 'New password', secret: true},
     {name: 'passwordConfirmation', label: 'Confirm password', secret: true},
 ] as const;
-export default { createControl, readManagementSetup, offlineRecovery: { kind: 'identity', actions: {
+export default { supportsOnlinePreparation: true, createControl, readManagementSetup, offlineRecovery: { kind: 'identity', actions: {
     'add-user': {prompts: passwordPrompts, run: (input, context) => addUserOffline({...input, operation: 'add-user'}, context)},
     'reset-password': {prompts: passwordPrompts, run: (input, context) => resetUserPasswordOffline({...input, operation: 'reset-password'}, context)},
     reset: {prompts: [{name: 'username', label: 'Recovery username', secret: false}, ...passwordPrompts.slice(1), {name: 'reason', label: 'Recovery reason', secret: false}, {name: 'disableTurnstile', label: 'Disable Turnstile? Type yes to disable; default no', secret: false}], run: (input, context) => recoverIdentity({...input, operation: 'reset'}, context)},

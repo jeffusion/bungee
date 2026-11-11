@@ -189,4 +189,4 @@ export async function readResourceCollection(resource: string, state: ReadState)
 }
 export async function readAdmissionRequirements(state: ReadState): Promise<readonly string[]> { return (await current(state)).protectedRouteIds; }
 export async function verifyDataPrincipal(principal: DataPrincipal, state: ReadState): Promise<boolean> { return validPrincipal(principal, await current(state), Date.now()); }
-export default {createControl, readResource, readResourceCollection, readAdmissionRequirements, verifyDataPrincipal};
+export default {supportsOnlinePreparation: true, createControl, readResource, readResourceCollection, readAdmissionRequirements, verifyDataPrincipal};

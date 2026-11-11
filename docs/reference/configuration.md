@@ -32,11 +32,11 @@ Keys, administrator sessions and plugin ledgers are durable runtime state outsid
 | Import snapshot | `POST /api/config/import` |
 | Runtime workers | `GET /api/config/runtime` |
 
-Writes use optimistic concurrency with `expected_revision` and return `202` plus an operation ID after the configuration is durably saved. Saving does not wait for an earlier publication or old-worker drain. A stale revision returns a conflict; re-read and review the changes rather than resubmitting an old aggregate against a newer revision.
+Online writes use optimistic concurrency with `expected_revision`. The master waits for the candidate workers and ingress policy to prepare, then returns `202` and an operation ID after durable storage confirms the write. The same operation tracks ingress cutover and old-worker drain. A stale revision returns `409`. Read the current revision before updating your changes.
 
-The configuration workspace, imports, entity editors and plugin activation finish saving when the master confirms the database commit. Editing and further saves remain available while the data plane applies the configuration. A shared banner tracks application across page navigation; slow startup or old requests draining does not mean the configuration was not saved. Publication updates do not replace unsaved editor changes.
+If candidate preparation fails, the API returns `503 control_readiness_failed` and the current revision and active ingress stay in place. If the publication queue is blocked by recovery or missing admission evidence, it returns `503 control_recovering` before saving. The editor keeps unsaved changes after either response.
 
-The master applies one target at a time and selects the latest saved target when it becomes available. Intermediate targets need not receive traffic. When a target is claimed, earlier unclaimed targets are marked superseded without starting workers. A starting candidate can be cancelled before admission preparation, but its exit and required cleanup must be confirmed before a replacement starts. A superseded operation remains a saved configuration record, not proof that it served traffic. Once admission preparation begins, the attempt must complete or recover through its original safety protocol.
+The master applies one target at a time. The previous retirement must release worker capacity before another online candidate starts. Startup, offline and recovery targets that were already saved can still use the publication queue.
 
 Operation states distinguish `pending` (saved, waiting to be claimed), `committed` (claimed publication target), `publishing`, `draining`, and the terminal states `converged`, `degraded`, and `superseded`. In particular, `pending` is already durable; it is not an unsent editor draft. A superseded operation is not a failed save and must not be blindly submitted again. Inspect the latest target and actual serving identity separately.
 
@@ -169,7 +169,7 @@ The `aggregate` field is the complete object shown above. Management protection 
 | 字段 | 默认值 | 作用 |
 |---|---|---|
 | `drain_start_timeout_ms` | `5000` | 从下发排空命令到确认旧工作进程已开始排空。超时后只查询状态，不作为结束进程的依据。 |
-| `drain_timeout_ms` | `300000` | 从旧工作进程实际开始排空到既有请求结束。到期后可能强制结束剩余请求。 |
+| `drain_timeout_ms` | `300000` | Ingress 从切流开始允许旧批连接继续处理的时长。Worker 收到排空命令后，也用该值限制自身排空时长。 |
 | `worker_exit_timeout_ms` | `10000` | 从排空结束或决定强制结束之后，到资源清理完成并确认进程退出。缺少精确退出证据时该轮发布保持未定，不能标记为成功。 |
 
 - 计时器安全上限为 `2147483000` ms（即 2147483 秒）：Bun 1.4.2 中超过该值的 `setTimeout` 会溢出为 1 ms。校验同时要求正的安全整数。
@@ -181,7 +181,9 @@ The `aggregate` field is the complete object shown above. Management protection 
 - 这些期限是发布策略，不是单次 API / LLM 请求超时或 idle timeout，也不存在按模式切换的开关。控制台按秒显示与编辑；查看页面不会把默认值写入配置。
 - `publication` 与代理请求预算相互独立，不是代理的 `request_ms` / first-byte / idle budget，也不覆盖前置插件处理阶段。代理现有 `request_ms` 默认 30 秒与可选 first-byte 预算，据此不能声称整条请求链已被一个统一 deadline 接管。
 
-**派生交接前置阶段（H）。** 除三个用户期限外，实现中还有一个派生的前置阶段 H，其时长等于本次目标 `drain_timeout_ms`，它不是第四个用户设置。Ingress 提交后立即把新请求切到新代；此前已按旧 admission / worker 身份选定旧进程的私有请求，要等到取得响应头或失败才算释放，这段等待就是 H。H 从 Ingress commit 起单调计时，同一 boot 内重连或重试不会重新授予。H 是额外的前置阶段，不消耗、也不重启 worker 真正开始排空后的 D；若 H 逾期仍未完成，只是非致命的 unknown：保留新代接流、旧代与双方租约，操作保持非终态并禁止启动下一次发布，之后只查询同一屏障。保存新的期望配置不会解除这个屏障。因此换代 / 退场的总时长不能写成 C + D + E。
+Ingress 切流时为旧批连接设定期限 H，时长取本次目标的 `drain_timeout_ms`。新请求立即走新批。旧请求取得响应头或失败后，Ingress 记录该请求已完成交接。H 到期时，Ingress 取消仍在等待响应头或握手的请求，并断开旧批尚未结束的 HTTP 响应流和 WebSocket。重连或重发切流命令沿用原期限。
+
+Master 根据同一旧批次的签名状态确认交接完成，再开始 Worker 排空和退出取证。若到期后的复查仍无法确认交接，发布保留未定状态，旧批继续占用容量。Worker 的排空和退出各有独立期限。
 
 API 场景的较短排空起始建议（5 / 30 / 10 秒）：
 

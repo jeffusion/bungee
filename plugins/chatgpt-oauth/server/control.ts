@@ -216,9 +216,16 @@ class ChatgptControl implements PluginControl {
 
   async start(): Promise<void> {
     this.assertAlive();
-    await this.accounts.purgeRevoked();
-    this.assertAlive();
-    this.autoReset.start();
+    const activate = async () => {
+      this.assertAlive();
+      await this.accounts.purgeRevoked();
+      this.assertAlive();
+      this.autoReset.start();
+    };
+    if (this.host.afterActivation) {
+      await this.accounts.list();
+      this.host.afterActivation(activate);
+    } else await activate();
   }
 
   private async refresh(id: string, signal: AbortSignal): Promise<StoredAccount> {
@@ -539,4 +546,4 @@ export const api = Object.freeze([
 export const rpc = Object.freeze([{ name: 'getCredential', handler: 'getCredential' }, { name: 'rejectAccess', handler: 'rejectAccess' }] as const);
 export const controlApi = api;
 export const controlRpc = rpc;
-export default { createControl } satisfies ControlPlugin;
+export default { supportsOnlinePreparation: true, createControl } satisfies ControlPlugin;

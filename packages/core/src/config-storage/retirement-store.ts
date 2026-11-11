@@ -9,6 +9,8 @@ import { snapshotJsonGraph } from './json-preflight';
 import { validateDigest } from './repository-validation';
 import { isLowercaseUuid } from './validation';
 import { sqliteAll, sqliteGet } from './sqlite-query';
+import { isCurrentRuntimeOperation } from './runtime-cutover';
+import { readActiveRevision } from './current-revision';
 
 export type RetirementExitState = 'live' | 'confirmed' | 'unknown';
 export type RetirementCleanupState = 'success' | 'failed' | 'unknown';
@@ -50,6 +52,8 @@ export function requestPublicationRetirementRetry(db:Database,requestId:string,m
     if(existing.source_mutation_id!==mutationId||existing.target_revision!==revision) throw new ConfigRepositoryError('cas_conflict','retirement retry identity was reused');
     return existing;
   }
+  if (readActiveRevision(db) !== revision) throw new ConfigRepositoryError('cas_conflict', 'retirement retry revision changed');
+  requireCurrentRuntime(db, mutationId);
   const operation=sqliteGet<{state:string;committed_revision:number},[string]>(db,
     'SELECT state,committed_revision FROM configuration_operations WHERE mutation_id=?',mutationId);
   const retirement=readPublicationRetirement(db,mutationId);
@@ -59,6 +63,9 @@ export function requestPublicationRetirementRetry(db:Database,requestId:string,m
   return readPublicationRetirementRetry(db,requestId)!;
 }
 function invalid(message: string): never { throw new ConfigRepositoryError('invalid_operation', message); }
+function requireCurrentRuntime(db: Database, mutationId: string): void {
+  if (!isCurrentRuntimeOperation(db, mutationId)) invalid('retirement or serving authority does not belong to the current runtime');
+}
 function natural(value: unknown, minimum = 0): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= minimum;
 }
@@ -124,6 +131,7 @@ export function freezePublicationRetirement(db: Database, mutationId: string, ge
 }
 /** The first C deadline is durable after handoff and before sending a drain command. */
 export function freezePublicationRetirementDrainStart(db:Database,mutationId:string,memberId:string,bootId:string,deadlineNs:string,now:number):PublicationRetirement {
+  requireCurrentRuntime(db, mutationId);
   const before=readPublicationRetirement(db,mutationId);
   const member=before?.members.find(item=>item.identity.worker_instance_id===memberId);
   if(!before||!member||member.deadline_boot_id!==bootId||!natural(now)||!(/^[1-9]\d{0,24}$/.test(deadlineNs))) invalid('retirement drain start is invalid');
@@ -138,6 +146,7 @@ export function freezePublicationRetirementDrainStart(db:Database,mutationId:str
 export function recordPublicationRetirementEvidence(db: Database, mutationId: string, memberId: string,
   exit: RetirementExitState, cleanup: RetirementCleanupState, now: number,
   deadline?: { readonly boot_id: string; readonly exit_deadline_ns: string }): PublicationRetirement {
+  requireCurrentRuntime(db, mutationId);
   if (!['live', 'confirmed', 'unknown'].includes(exit) || !['success', 'failed', 'unknown'].includes(cleanup) || !natural(now)) invalid('retirement evidence is invalid');
   const before = readPublicationRetirement(db, mutationId);
   const evidence = before?.evidence.find(item => item.member_id === memberId);
@@ -160,6 +169,7 @@ export function recordPublicationRetirementEvidence(db: Database, mutationId: st
   return readPublicationRetirement(db, mutationId)!;
 }
 export function stopPublicationRetirement(db: Database, mutationId: string, reason: RetirementStopReason, now: number): PublicationRetirement {
+  requireCurrentRuntime(db, mutationId);
   if (!['exit_unknown', 'cleanup_unknown', 'release_unknown'].includes(reason) || !natural(now)) invalid('retirement stop reason is invalid');
   const before = readPublicationRetirement(db, mutationId);
   if (!before) invalid('retirement is not frozen');
@@ -169,6 +179,7 @@ export function stopPublicationRetirement(db: Database, mutationId: string, reas
 }
 /** Typed retry reuses the same members/deadlines and never begins worker attempts. */
 export function retryPublicationRetirement(db: Database, mutationId: string, now: number): PublicationRetirement {
+  requireCurrentRuntime(db, mutationId);
   const before = readPublicationRetirement(db, mutationId);
   if (!before || !natural(now)) invalid('retirement retry is invalid');
   if (before.state === 'released' || before.state === 'pending') return before;
@@ -176,6 +187,7 @@ export function retryPublicationRetirement(db: Database, mutationId: string, now
   return readPublicationRetirement(db, mutationId)!;
 }
 export function markPublicationRetirementReleased(db: Database, mutationId: string, now: number): PublicationRetirement {
+  requireCurrentRuntime(db, mutationId);
   const before = readPublicationRetirement(db, mutationId);
   if (!before || !natural(now)) invalid('retirement release is invalid');
   if (before.state === 'released') return before;
@@ -271,6 +283,7 @@ export function freezePublicationServingSet(db: Database, mutationId: string, ge
     if (canonicalJson(before.workers) !== canonicalJson(workers)) throw new ConfigRepositoryError('cas_conflict', 'publication serving members are already frozen');
     return before;
   }
+  requireCurrentRuntime(db, mutationId);
   const operation = sqliteGet<{ state: string; committed_revision: number; target_worker_count: number; drain_recovery_generation: number }, [string]>(db,
     'SELECT state,committed_revision,target_worker_count,drain_recovery_generation FROM configuration_operations WHERE mutation_id=?', mutationId);
   if (!operation || operation.state === 'converged' || operation.state === 'degraded' ||
@@ -292,6 +305,7 @@ export function freezePublicationServingSet(db: Database, mutationId: string, ge
   return readPublicationServingSet(db, mutationId, generation)!;
 }
 export function confirmPublicationServingMemberExit(db: Database, mutationId: string, generation: number, workerInstanceId: string): PublicationServingSet {
+  requireCurrentRuntime(db, mutationId);
   const before = readPublicationServingSet(db, mutationId, generation);
   if (!before || !before.workers.some(worker => worker.identity.worker_instance_id === workerInstanceId)) invalid('publication serving member is outside durable authority');
   if (before.exited.includes(workerInstanceId)) return before;

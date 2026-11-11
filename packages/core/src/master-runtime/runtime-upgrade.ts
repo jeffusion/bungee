@@ -1,5 +1,8 @@
 import {resolve,dirname,join} from 'node:path';
+import { lstat } from 'node:fs/promises';
+import { constants, Database } from 'bun:sqlite';
 import {AsyncConfigRepository} from '../config-storage';
+import { prepareConfigurationRuntimeCutover } from '../config-storage/config-repository';
 import {PluginStateClient} from '../plugin-state/client';
 import {parsePluginSecretsKey} from '../plugin-control';
 import {resolveStorageWorkerUrls} from './process-options';
@@ -21,5 +24,20 @@ export async function prepareRuntimeUpgrade(configDbPath:string):Promise<{conver
       cursor=result.last_key!;
     }
     return {converted_executor_proofs:converted};
+  });
+}
+
+/** The Docker host operator confirms the old instance is stopped and fenced from restart. */
+export async function prepareStoppedDockerCutover(configDbPath: string, stoppedContainerId: string) {
+  if (!/^[0-9a-f]{64}$/.test(stoppedContainerId)) throw new Error('invalid_stopped_docker_container_id');
+  const path = resolve(configDbPath);
+  return withOfflineStorageSession(path, async session => {
+    const status = await lstat(path);
+    if (!status.isFile() || status.size === 0) throw new Error('invalid_existing_configuration_database');
+    const { db } = await session.open(async () => {
+      const db = new Database(path, constants.SQLITE_OPEN_READWRITE | constants.SQLITE_OPEN_NOFOLLOW);
+      return { db, async close() { db.close(true); } };
+    });
+    return prepareConfigurationRuntimeCutover(db, stoppedContainerId, Date.now());
   });
 }

@@ -88,6 +88,8 @@ export interface BoundAttemptContext {
 
 export interface ControlHostContext {
   readonly signal: AbortSignal;
+  /** Present during online preparation. Effects registered here run only after durable activation. */
+  readonly afterActivation?: (effect: () => void | Promise<void>) => void;
   readonly managementOrigin?: string;
   readonly trustedSource?: (request: Request) => string;
   readonly secretStore: SecretStore;
@@ -169,6 +171,8 @@ export type OfflineRecoveryCapability =
   | {readonly kind: 'plugin-state'; recover(input: unknown, context: OfflineRecoveryContext): unknown | Promise<unknown>};
 
 export interface ControlPlugin {
+  /** Module loading, creation, and start prepare runtime services without external effects. */
+  readonly supportsOnlinePreparation?: true;
   readManagementSetup?(state: Pick<PluginDurableState, 'get' | 'list'>): Promise<{initialized:boolean}>;
   readonly offlineRecovery?: OfflineRecoveryCapability;
   createControl(context: ControlHostContext): PluginControl;

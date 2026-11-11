@@ -90,4 +90,4 @@ export function createControl(context: ControlHostContext): PluginControl {
   return new ModelMappingControl(context);
 }
 
-export default { createControl } satisfies ControlPlugin;
+export default { supportsOnlinePreparation: true, createControl } satisfies ControlPlugin;

@@ -36,9 +36,9 @@ function waitBeforePoll(scheduler: PublicationScheduler, delay: number, signal?:
 }
 
 /**
- * Wait for the ingress-owned pre-drain handoff barrier. Its remaining time is authoritative:
- * Retry at most two unavailable status reads on the same handle. Never prepare/commit
- * again, restart H, or begin worker D without an exact signed completion status.
+ * Wait for the ingress-owned pre-drain handoff barrier. At expiry, allow one more
+ * poll for cancellation to settle. Retry at most two unavailable status reads.
+ * Worker drain requires signed completion for the same retired admission.
  */
 export async function waitForAdmissionHandoff(
   prepared: PreparedWorkerAdmission,
@@ -49,6 +49,7 @@ export async function waitForAdmissionHandoff(
   if (!hasRetiredWorkers && prepared.handoffStatus === undefined) return { kind: 'complete' };
   let retiredId: string | null = null;
   let statusFailures = 0;
+  let expired = false;
   while (true) {
     if (signal?.aborted) return { kind: 'unknown', reason: 'cancelled' };
     try {
@@ -60,8 +61,9 @@ export async function waitForAdmissionHandoff(
       if (!validStatus(status) || (retiredId !== null && status.retired_id !== retiredId)) return { kind: 'unknown', reason: 'invalid' };
       retiredId = status.retired_id;
       if (status.complete) return { kind: 'complete' };
-      if (status.remaining_ms === 0) return { kind: 'unknown', reason: 'expired' };
-      const resumed = await waitBeforePoll(scheduler, Math.max(1, Math.min(100, status.remaining_ms)), signal);
+      if (expired) return { kind: 'unknown', reason: 'expired' };
+      expired = status.remaining_ms === 0;
+      const resumed = await waitBeforePoll(scheduler, expired ? 100 : Math.min(100, status.remaining_ms), signal);
       if (resumed !== 'poll') return { kind: 'unknown', reason: resumed };
     } catch (error) {
       if (signal?.aborted) return { kind: 'unknown', reason: 'cancelled' };

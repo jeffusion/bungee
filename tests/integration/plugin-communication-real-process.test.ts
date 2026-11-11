@@ -42,6 +42,8 @@ import {
   type PortLease,
 } from '../helpers/gateway-runtime';
 import { CHANNEL_PROBE_CONSUMER, CHANNEL_PROBE_CROSS, CHANNEL_PROBE_PROVIDER, createChannelGatewayFixture } from '../helpers/plugin-communication-fixture';
+import { ConfigRepository } from '../../packages/core/src/config-storage';
+import { buildPluginManifestCatalog } from '../../packages/core/src/plugin-manifest-catalog';
 import {
   CHANNEL_ACK_EVENTS,
   CHANNEL_DUPLEX_FAIL_WRITE_SIZE,
@@ -115,8 +117,6 @@ describe('plugin communication channels real-process integration (control provid
   beforeAll(async () => {
     fixture = await createChannelGatewayFixture();
     lease = await reservePortBlock();
-    master = await startGatewayMaster(fixture, lease);
-    await waitForHealth(master, lease.base, fixture);
   }, 90_000);
 
   afterAll(async () => {
@@ -157,7 +157,7 @@ describe('plugin communication channels real-process integration (control provid
   }, 45_000);
 
   test('both supervised workers stream, upload, snapshot, and subscribe over the peer channel', async () => {
-    if (fixture === undefined || lease === undefined || master === undefined) {
+    if (fixture === undefined || lease === undefined) {
       throw new Error('real-process fixture did not initialize');
     }
     const currentFixture = fixture;
@@ -165,12 +165,6 @@ describe('plugin communication channels real-process integration (control provid
     const management = `http://127.0.0.1:${currentLease.base}`;
 
     try {
-      const initial = await requestJson(`${management}/api/config`, {}, currentFixture);
-      expect(initial.response.status).toBe(200);
-      const initialRevision = Number((initial.body as { revision?: number }).revision);
-      expect(Number.isSafeInteger(initialRevision)).toBe(true);
-      expect(initialRevision).toBeGreaterThan(0);
-
       const aggregate = {
         plugin_activations: [
           { plugin_name: CHANNEL_PROBE_PROVIDER },
@@ -191,15 +185,19 @@ describe('plugin communication channels real-process integration (control provid
         },
       };
       const mutationId = randomUUID();
-      const commit = await requestJson(`${management}/api/config`, {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ expected_revision: initialRevision, mutation_id: mutationId, aggregate }),
-      }, currentFixture);
-      expect(commit.response.status).toBe(202);
+      // These probes write snapshots and durable events from control bootstrap.
+      const catalog = await buildPluginManifestCatalog({ scanDirectories: [currentFixture.pluginsPath] });
+      const repository = ConfigRepository.open(currentFixture.configDbPath, { compileOptions: catalog.toCompileOptions() });
+      let revision: number;
+      try {
+        const commit = repository.commit({ mutation_id: mutationId, expected_revision: repository.getSnapshot().revision,
+          kind: 'config', created_at: Date.now(), target_worker_slots: [0, 1], aggregate });
+        if (commit.kind !== 'committed') throw new Error(`fixture configuration rejected: ${commit.kind}`);
+        revision = commit.snapshot.revision;
+      } finally { repository.close(); }
+      master = await startGatewayMaster(currentFixture, currentLease);
+      await waitForHealth(master, currentLease.base, currentFixture);
       await waitForOperation(management, mutationId, currentFixture);
-
-      const revision = initialRevision + 1;
       const workers = await waitForWorkers(management, revision, currentFixture);
       await recordOwnedWorkers(master, workers);
       expect(workers).toHaveLength(2);

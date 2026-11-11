@@ -381,7 +381,7 @@ export class ConfigurationRecoveryRunner {
     if (!this.isCurrent(generation)) return { kind: 'complete' };
     const heldOwner = active !== null && (
       (active.operation.cancel_requested === true && active.operation.prepare_started === false)
-      || active.operation.state === 'draining');
+      || active.operation.prepare_started || active.operation.state === 'draining');
     if (!heldOwner) {
       this.evidenceObservation = false;
       if (active === null) this.observationCompleted = true;

@@ -25,6 +25,8 @@ import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { once } from 'node:events';
 import { captureProcessIdentity, probeProcessIdentity, probeProcessInstance } from '../../packages/core/src/master-runtime/process-identity';
+import { ConfigRepository } from '../../packages/core/src/config-storage';
+import { buildPluginManifestCatalog } from '../../packages/core/src/plugin-manifest-catalog';
 import {
   cleanupGatewayFixture,
   quarantinePortBlock,
@@ -169,12 +171,27 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
         },
       };
       const mutationId = randomUUID();
-      const commit = await requestJson(`${management}/api/config`, {
+      const command = { expected_revision: initialRevision, mutation_id: mutationId, aggregate };
+      const rejected = await fetch(`${management}/api/config`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ expected_revision: initialRevision, mutation_id: mutationId, aggregate }),
-      }, currentFixture);
-      expect(commit.response.status).toBe(202);
+        body: JSON.stringify(command),
+      });
+      expect(rejected.status).toBe(503);
+      expect(await rejected.json()).toEqual({ error: 'control_readiness_failed' });
+      expect((await requestJson(`${management}/api/config`, {}, currentFixture)).body).toMatchObject({ revision: initialRevision });
+      await stopOwnedMaster(master);
+      master = undefined;
+      await ensureTestPortBlockClosed(currentLease.block);
+
+      // A saved configuration can run commands during normal worker bootstrap.
+      const catalog = await buildPluginManifestCatalog({ scanDirectories: [currentFixture.pluginsPath] });
+      const repository = ConfigRepository.open(currentFixture.configDbPath, { compileOptions: catalog.toCompileOptions() });
+      try {
+        expect(repository.commit({ ...command, kind: 'config', created_at: Date.now(), target_worker_slots: [0, 1] }).kind).toBe('committed');
+      } finally { repository.close(); }
+      master = await startGatewayMaster(currentFixture, currentLease);
+      await waitForHealth(master, currentLease.base, currentFixture);
       await waitForOperation(management, mutationId, currentFixture);
 
       const revision = initialRevision + 1;

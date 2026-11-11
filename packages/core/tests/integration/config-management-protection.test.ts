@@ -8,6 +8,7 @@ import { AsyncConfigRepository, ConfigRepository, type ConfigurationCompileOptio
 import { migrateConfigurationDatabase, CONFIG_MIGRATIONS } from '../../src/config-storage/migrations';
 import { prepareCommitCommand } from '../../src/config-storage/prepared-command';
 import { CONFIG_SCHEMA_STATEMENTS } from '../../src/config-storage/schema';
+import { prepareConfigurationRuntimeCutover } from '../../src/config-storage/config-repository';
 
 const roots: string[] = [];
 const backends: ConfigRepository[] = [];
@@ -70,6 +71,10 @@ describe('durable management protection', () => {
       statement.startsWith('CREATE TRIGGER configuration_operations_terminal'))) db.run(trigger);
     db.run(`INSERT INTO configuration_operations (${operationColumns}) SELECT ${operationColumns} FROM operations_v3`);
     db.run('DROP TABLE operations_v3');
+    db.run('DROP INDEX configuration_recoveries_active_target_revision');
+    db.run('ALTER TABLE configuration_recoveries DROP COLUMN runtime_epoch');
+    db.run(CONFIG_SCHEMA_STATEMENTS.find(statement => statement.startsWith('CREATE UNIQUE INDEX configuration_recoveries_active_target_revision'))!);
+    db.run('DROP TABLE runtime_cutovers');
     db.run('DELETE FROM schema_migrations WHERE version>=4');
     migrateConfigurationDatabase(db, CONFIG_MIGRATIONS.slice(0, 3));
     const revisions = db.query('SELECT * FROM configuration_revisions').all();
@@ -132,6 +137,24 @@ describe('durable management protection', () => {
     repository.commit(input); finish(repository, 'enable');
     expect(() => repository.commitPrepared(prepareCommitCommand(command(repository.getSnapshot(), 'missing-catalog', ['identity-one'])))).toThrow();
     expect(repository.getManagementProtection().required).toBe(true);
+  });
+
+  test('cold startup rejects a missing protected provider without clearing the guard', () => {
+    const dbPath = path();
+    const repository = open(dbPath, { offline: true });
+    repository.commit(command(repository.getSnapshot(), 'protected-cutover', ['identity-one']));
+    finish(repository, 'protected-cutover');
+    const protection = repository.getManagementProtection();
+    const saved = repository.getSnapshot();
+    prepareConfigurationRuntimeCutover(repository.getDatabase(), '3'.repeat(64), 101);
+    repository.close();
+    backends.splice(backends.indexOf(repository), 1);
+
+    expect(() => open(dbPath, { compileOptions: { ...catalog, availablePlugins: new Set(['audit', 'request-logs']) } }))
+      .toThrow('runtime cutover requires the protected management provider');
+    const reopened = open(dbPath);
+    expect(reopened.getControlProjection()).toEqual({ snapshot: saved, managementProtection: protection });
+    expect(reopened.getOperation('protected-cutover')).toMatchObject({ state: 'converged' });
   });
 
   test.each(['after_materialization', 'after_targets'] as const)('rolls back protection and activation at %s', stage => {

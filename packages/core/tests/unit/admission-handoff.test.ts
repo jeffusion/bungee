@@ -95,7 +95,23 @@ describe('admission handoff wait', () => {
         return { retired_id: `sha256:${'a'.repeat(64)}`, pending: 1, complete: false, remaining_ms: 0 };
       },
     }, scheduler, true)).toEqual({ kind: 'unknown', reason: 'expired' });
-    expect(reads).toBe(2);
+    expect(reads).toBe(3);
+  });
+
+  test('checks signed completion again when cancellation is settling at expiry', async () => {
+    const scheduler = new ManualScheduler();
+    let reads = 0;
+    const waiting = waitForAdmissionHandoff({
+      async commit() {}, async abort() {}, async releaseRetiredAfterExitProof() {},
+      async handoffStatus() {
+        const complete = ++reads === 2;
+        return { retired_id: `sha256:${'a'.repeat(64)}`, pending: complete ? 0 : 1, complete, remaining_ms: 0 };
+      },
+    }, scheduler, true);
+    await Promise.resolve();
+    expect(scheduler.delays).toEqual([100]);
+    scheduler.fireNext();
+    expect(await waiting).toEqual({ kind: 'complete' });
   });
 
   test('cancels an unavailable-status retry without sending a later read', async () => {

@@ -1,4 +1,4 @@
-import type { DataAdmissionHost, DataAdmissionPublication } from '../data-admission/host';
+import type { DataAdmissionHost, DataAdmissionPublication, PreparedDataAdmission } from '../data-admission/host';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { snapshotJsonGraph } from '../config-storage/json-preflight';
@@ -25,9 +25,9 @@ import {
 } from '../supervision';
 import { AdmissionRegistryError, IngressAdmissionRegistry, type AdmissionRegistryStatus } from './admission-registry';
 import { AdmissionSetError } from './admission-set';
-import { parseAdmissionSet, type AdmissionSet } from './admission-set';
+import { admissionSetIdentity, parseAdmissionSet, type AdmissionSet } from './admission-set';
 
-const DEFAULT_BODY_BYTES = 1_048_576;
+export const DEFAULT_INGRESS_SUPERVISION_BODY_BYTES = 1_048_576;
 const DEFAULT_BODY_TIMEOUT_MS = 5_000;
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 20;
 
@@ -330,6 +330,7 @@ export class IngressSupervisionHttpServer {
   private attached = false;
   private frozen = true;
   private admissionFence = 0;
+  private preparedPolicy: { set: AdmissionSet; input: string; data: PreparedDataAdmission } | null = null;
   private deadline: number | null = null;
   private deadlineTimer: ReturnType<typeof setTimeout> | null = null;
   private statusSequence = 1;
@@ -345,7 +346,7 @@ export class IngressSupervisionHttpServer {
     this.authority = options.authority ?? new SupervisionAuthorityGuard();
     this.commands = options.commands ?? new SupervisionCommandGuard(this.authority);
     this.clock = options.clock ?? (() => Date.now());
-    this.maxBodyBytes = options.maxBodyBytes ?? DEFAULT_BODY_BYTES;
+    this.maxBodyBytes = options.maxBodyBytes ?? DEFAULT_INGRESS_SUPERVISION_BODY_BYTES;
     this.bodyTimeoutMs = options.bodyTimeoutMs ?? DEFAULT_BODY_TIMEOUT_MS;
     this.attachGraceMs = options.attachGraceMs ?? 5_000;
     this.pid = options.pid ?? process.pid;
@@ -390,6 +391,7 @@ export class IngressSupervisionHttpServer {
 
   stop(): void {
     this.admissionFence++;
+    this.clearPreparedPolicy();
     if (this.deadlineTimer !== null) clearTimeout(this.deadlineTimer);
     this.deadlineTimer = null;
     this.deadline = null;
@@ -398,6 +400,7 @@ export class IngressSupervisionHttpServer {
   private freezeAt(deadline: number): void {
     if (this.deadline !== deadline) return;
     this.admissionFence++;
+    this.clearPreparedPolicy();
     this.frozen = true;
     this.deadline = null;
     if (this.deadlineTimer !== null) clearTimeout(this.deadlineTimer);
@@ -493,6 +496,7 @@ export class IngressSupervisionHttpServer {
     }
     acceptAttach(message as AttachMessage, this.credential, this.challenges, this.authority);
     this.admissionFence++;
+    this.clearPreparedPolicy();
     this.attached = true;
     this.frozen = true;
     this.registry.setFrozen(true);
@@ -543,7 +547,15 @@ export class IngressSupervisionHttpServer {
       if (message.method !== 'POST') throw new SupervisionProtocolError('malformed_message', 'ingress mutation must use POST');
       if (message.path === '/data-admission/publish') {
         if (!this.options.dataAdmission) throw new Error('data admission unavailable');
-        return this.options.dataAdmission.publish(commandBody as DataAdmissionPublication);
+        const publication = plain(commandBody) as unknown as DataAdmissionPublication;
+        const { active } = this.registry.status();
+        if (!active || publication.admissionSequence !== active.admission_sequence) {
+          throw new AdmissionRegistryError('missing', 'admission policy does not match the active set');
+        }
+        return this.options.dataAdmission.publish(publication, () => {
+          assertStillAuthorized();
+          if (this.registry.status().active !== active) throw new AdmissionRegistryError('stale', 'active admission changed during policy loading');
+        });
       }
       if (message.path === '/data-admission/freeze') {
         if (commandBody !== null) throw new Error('invalid freeze command');
@@ -564,12 +576,13 @@ export class IngressSupervisionHttpServer {
       }
       if (message.path === '/__supervision/prepare' || message.path === '/prepare') {
         const body = plain(commandBody);
-        exact(body, ['admission', 'handoff_timeout_ms']);
+        exact(body, body.dataAdmission === undefined ? ['admission', 'handoff_timeout_ms'] : ['admission', 'handoff_timeout_ms', 'dataAdmission']);
         if (typeof body.handoff_timeout_ms !== 'number' || !Number.isSafeInteger(body.handoff_timeout_ms)
           || body.handoff_timeout_ms <= 0 || body.handoff_timeout_ms > 2_147_483_000) {
           throw new SupervisionProtocolError('malformed_message', 'handoff timeout is invalid');
         }
         const admission = parseAdmissionSet(body.admission);
+        let collector: Parameters<IngressAdmissionRegistry['prepare']>[2];
         if (admission.request_log_collector_entry !== undefined) {
           const entry = pathToFileURL(admission.request_log_collector_entry);
           entry.searchParams.set('catalog', admission.plugin_catalog_hash);
@@ -585,21 +598,71 @@ export class IngressSupervisionHttpServer {
           const deadline = new Promise<never>((_, reject) => {
             timer = setTimeout(() => reject(new AdmissionSetError('malformed', 'ingress request log collector timed out')), 1000);
           });
-          const collector = await Promise.race([load(), deadline]).finally(() => clearTimeout(timer));
+          collector = await Promise.race([load(), deadline]).finally(() => clearTimeout(timer));
           assertStillAuthorized();
           if (typeof collector !== 'function') throw new AdmissionSetError('malformed', 'invalid ingress request log collector');
+        }
+        assertStillAuthorized();
+        const staged = this.preparedPolicy;
+        if (staged && staged.set === this.registry.status().prepared) {
+          if (admissionSetIdentity(staged.set) !== admissionSetIdentity(admission) || staged.input !== JSON.stringify(body.dataAdmission)) {
+            throw new AdmissionRegistryError('conflict', 'prepared admission policy changed');
+          }
           this.registry.prepare(admission, body.handoff_timeout_ms, collector);
         } else {
-          this.registry.prepare(admission, body.handoff_timeout_ms);
+          this.clearPreparedPolicy();
+          const policy = body.dataAdmission === undefined ? null : await this.loadCandidatePolicy(
+            admission, body.dataAdmission, assertStillAuthorized, admission.plugin_catalog_hash,
+          );
+          try {
+            assertStillAuthorized();
+            const set = this.registry.prepare(admission, body.handoff_timeout_ms, collector);
+            if (policy) this.preparedPolicy = { set, input: JSON.stringify(body.dataAdmission), data: policy };
+          } catch (error) {
+            policy?.abort();
+            throw error;
+          }
         }
         return { operation: 'prepared', status: this.registry.status() };
       }
       if (message.path === '/__supervision/commit' || message.path === '/commit') {
-        this.registry.commit(commandBody);
+        const host = this.options.dataAdmission;
+        if (!host) this.registry.commit(commandBody);
+        else {
+          const body = plain(commandBody);
+          const set = this.registry.commitTarget(body.admission);
+          if (set === null) exact(body, ['admission', 'dataAdmission']);
+          else {
+            const staged = this.preparedPolicy?.set === set ? this.preparedPolicy : null;
+            let prepared: PreparedDataAdmission;
+            try {
+              exact(body, ['admission', 'dataAdmission']);
+              if (staged && staged.input !== JSON.stringify(body.dataAdmission)) {
+                throw new AdmissionRegistryError('conflict', 'commit policy does not match prepared admission');
+              }
+              prepared = staged?.data ?? await this.loadCandidatePolicy(set, body.dataAdmission, assertStillAuthorized);
+              assertStillAuthorized();
+            } catch (error) {
+              assertStillAuthorized();
+              if (this.registry.status().prepared === set) this.registry.abort(set);
+              if (staged) this.clearPreparedPolicy();
+              throw error;
+            }
+            if (this.registry.status().prepared !== set) throw new AdmissionRegistryError('stale', 'prepared admission changed during policy loading');
+            try { this.registry.commit(set, () => prepared.commit()); }
+            finally {
+              if (staged) {
+                if (this.registry.status().prepared === set) this.registry.abort(set);
+                this.clearPreparedPolicy();
+              }
+            }
+          }
+        }
         return { operation: 'committed', status: this.registry.status() };
       }
       if (message.path === '/__supervision/abort' || message.path === '/abort') {
         this.registry.abort(commandBody);
+        if (this.preparedPolicy?.set !== this.registry.status().prepared) this.clearPreparedPolicy();
         return { operation: 'aborted', status: this.registry.status() };
       }
       if (message.path === '/__supervision/release-retired' || message.path === '/release-retired') {
@@ -632,6 +695,32 @@ export class IngressSupervisionHttpServer {
       setTimeout(() => { void Promise.resolve(this.onShutdown?.()).catch(() => undefined); }, 0);
     }
     return response;
+  }
+
+  private clearPreparedPolicy(): void {
+    this.preparedPolicy?.data.abort();
+    this.preparedPolicy = null;
+  }
+
+  private async loadCandidatePolicy(set: AdmissionSet, value: unknown, assertAuthority: () => void,
+    preparedCatalogHash?: string): Promise<PreparedDataAdmission> {
+    const host = this.options.dataAdmission;
+    if (!host) throw new Error('data admission unavailable');
+    const policy = plain(value);
+    exact(policy, ['plugins', 'routeRequirements']);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let expired = false;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => { expired = true; reject(new Error('candidate admission policy load timed out')); }, 1000);
+    });
+    try {
+      return await Promise.race([host.preparePublication({
+        ...policy, version: host.status().version + 1, admissionSequence: set.admission_sequence,
+      } as unknown as DataAdmissionPublication, true, () => {
+        assertAuthority();
+        if (expired) throw new Error('candidate admission policy load timed out');
+      }, preparedCatalogHash), deadline]);
+    } finally { clearTimeout(timer); }
   }
 }
 
