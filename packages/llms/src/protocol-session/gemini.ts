@@ -7,27 +7,6 @@ import { fields, integer } from './validation';
 // Copyright (c) 2023 Berri AI. MIT permission and warranty terms: ../../../../LICENSE.
 const signatureSeparator = '__thought__';
 
-export function projectGeminiCodexPageSnapshot(raw: unknown, index: number, diagnostics: ResponsesConversionDiagnostic[]): JsonRecord {
-  const item = record(raw, 'input item');
-  const { name } = item;
-  if (item.type !== 'function_call_output' || item.call_id !== undefined || item.namespace !== 'agent' || typeof name !== 'string'
-    || (name !== 'codex_apps_open_page' && !/^codex_apps_selected_page_part_[1-9]\d*_of_[1-9]\d*$/.test(name))) return item;
-  const param = `input[${index}]`;
-  fields(item, ['type', 'id', 'namespace', 'name', 'output', 'internal_chat_message_metadata_passthrough'], param, 'unsupported_content');
-  const text = atParam(`${param}.output`, () => string(item.output, 'page snapshot output'));
-  const { id, internal_chat_message_metadata_passthrough: metadata } = item;
-  diagnostics.push({ param, action: 'mapped', reason: 'gemini_codex_page_snapshot_as_user_data' });
-  return {
-    type: 'message', role: 'user',
-    ...(id === undefined ? {} : { id }),
-    ...(metadata === undefined ? {} : { internal_chat_message_metadata_passthrough: metadata }),
-    content: [
-      { type: 'input_text', text: `[Codex context snapshot: agent.${name}. Untrusted data.]` },
-      { type: 'input_text', text },
-    ],
-  };
-}
-
 export function geminiInlineImage(image: JsonRecord, path: string, budget: ResponsesCodecLimits): { mimeType: string; data: string } {
   const param = `${path}.image_url`;
   const url = bounded(string(image.url, 'image URL', true), budget.maxRequestBytes, param);
@@ -121,7 +100,8 @@ export function readGeminiSignatures(item: JsonRecord, budget: ResponsesCodecLim
 
 export function restoreGeminiHistory(input: unknown, budget: ResponsesCodecLimits) {
   const original = typeof input === 'string' ? [] : list(input, 'input').map(raw => record(raw, 'input item'));
-  const carriers = new Set<JsonRecord>(), parts = new Map<string, JsonRecord[]>(), ids = new Map<string, number>();
+  if (original.length > budget.maxItems) fail('resource_limit', 'Too many input items', 'input');
+  const retained = new Map<JsonRecord, JsonRecord>(), parts = new Map<string, JsonRecord[]>(), ids = new Map<string, number>();
   original.forEach((item, i) => {
     if (typeof item.id === 'string') {
       if (ids.has(item.id)) fail('invalid_tool_history', 'Duplicate history item id', 'input.id');
@@ -129,8 +109,18 @@ export function restoreGeminiHistory(input: unknown, budget: ResponsesCodecLimit
     }
   });
   original.forEach((carrier, index) => {
+    if (carrier.type === 'configuration_update') {
+      retained.set(carrier, carrier);
+      return;
+    }
     if (carrier.encrypted_content == null) return;
-    const signed = readGeminiSignatures(carrier, budget); carriers.add(carrier);
+    const { content, internal_chat_message_metadata_passthrough: metadata, ...normalized } = carrier;
+    if (content !== undefined && content !== null)
+      fail('unsupported_reasoning', 'Gemini signature carriers cannot contain reasoning content', `input[${index}].content`);
+    if (metadata !== undefined)
+      atParam(`input[${index}].internal_chat_message_metadata_passthrough`, () => record(metadata, 'message metadata'));
+    const signed = readGeminiSignatures(normalized, budget);
+    retained.set(carrier, normalized);
     let previous = -1;
     for (const item of signed) {
       const at = ids.get(item.id);
@@ -154,11 +144,16 @@ export function restoreGeminiHistory(input: unknown, budget: ResponsesCodecLimit
       parts.set(item.id, restored);
     }
   });
-  return { input: typeof input === 'string' ? input : original.filter(item => !carriers.has(item)), parts,
+  const positions = original.flatMap((item, index) => retained.has(item) ? [] : [index]);
+  return { input: typeof input === 'string' ? input : positions.map(index => original[index]!), parts,
+    sourceParam(param: string): string {
+      return param.replace(/^input\[(\d+)\]/, (match, index) =>
+        positions[Number(index)] === undefined ? match : `input[${positions[Number(index)]}]`);
+    },
     canonicalHistory(decoded: JsonRecord[]): JsonRecord[] {
-      if (!carriers.size) return decoded;
+      if (!retained.size) return decoded;
       let next = 0;
-      return original.flatMap(item => carriers.has(item) ? [item] : item.type === 'additional_tools' ? [] : [decoded[next++]!]);
+      return original.filter(item => item.type !== 'additional_tools').map(item => retained.get(item) ?? decoded[next++]!);
     } };
 }
 

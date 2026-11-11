@@ -6,13 +6,40 @@ import {createPluginHooks} from '../../../../packages/core/src/hooks';
 const cache=new HistoryCache();const transport=new HistoryTransport(cache);
 async function dispatchPrepared(hooks:any,input:any){const decision=await hooks.onDispatchRequest.promise(input);if(!decision)return decision;const prepared=await decision.prepareRequest({...input,executeAuxiliary:async()=>{throw new Error('unexpected relay');}});return {...decision,...prepared};}
 const caps={status:()=>({version:1}),model:()=>({provider:'p',model:'m',name:'m',contextWindow:32000,outputLimit:4096,toolCall:true,reasoning:false,inputModalities:['text']})};
-async function router(protocol:string,alias='m',principal:any={domain:'data',keyId:'k',credentialVersion:1}){
+async function router(protocol:string,alias='m',principal:any={domain:'data',keyId:'k',credentialVersion:1},catalog=caps){
   const binding={provider:'p',model:'m',alias,target:{type:'route',id:protocol,protocol}};
-  const handler=new CodexRouterPlugin({models:[binding]});await handler.init( {scope:{type:'route',routeId:'/codex'},services:{consume:(provider:string)=>provider==='llm-protocol-adapter'?conversionService(caps as any,true):caps,rpc:{consume:()=>({get:async(input:any)=>transport.get(input),put:async(input:any)=>transport.put(input)})}}} as any);
+  const handler=new CodexRouterPlugin({models:[binding]});await handler.init( {scope:{type:'route',routeId:'/codex'},services:{consume:(provider:string)=>provider==='llm-protocol-adapter'?conversionService(catalog as any,true):catalog,rpc:{consume:()=>({get:async(input:any)=>transport.get(input),put:async(input:any)=>transport.put(input)})}}} as any);
   const hooks=createPluginHooks();handler.register(hooks);
-  const dispatch=(body:any)=>dispatchPrepared(hooks,{context:{method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},body,requestId:crypto.randomUUID(),clientIP:'local'},targets:[{type:'route',id:protocol}],signal:new AbortController().signal,principal,servingRevision:1});
-  return {dispatch};
+  const prepare=async(body:any)=>{
+    const context={method:'POST',originalUrl:new URL('http://local/codex/responses'),url:new URL('http://local/codex/responses'),routeId:'/codex',headers:{},body,requestId:crypto.randomUUID(),clientIP:'local'};
+    const decision=await dispatchPrepared(hooks,{context,targets:[{type:'route',id:protocol}],signal:new AbortController().signal,principal,servingRevision:1});
+    return {decision,body:context.body};
+  };
+  return {dispatch:async(body:any)=>(await prepare(body)).decision,prepare};
 }
+test('Gemini Router continues signed Codex history and keeps the effort update through a response reference',async()=>{
+  const catalog={...caps,model:()=>({...caps.model(),reasoning:true,reasoningOptionsStatus:'known',reasoningOptions:[{type:'effort',values:['high','medium']}]})};
+  const {prepare}=await router('gemini_generate_content','m',{domain:'data',keyId:'gemini-replay',credentialVersion:1},catalog);
+  const reasoning={effort:'high'},thoughtSignature='dGVzdA==';
+  const respond=async(decision:any,text:string)=>{
+    const hooks=createPluginHooks();decision.adapter.register(hooks);
+    const result=await hooks.onResponse.promise(Response.json({}),{bodyHandle:{json:async()=>({candidates:[{content:{role:'model',parts:[{text,thoughtSignature}]},finishReason:'STOP'}]})}} as any);
+    return result.json();
+  };
+  const first={role:'user',content:'first'};
+  const seed=await prepare({model:'m',reasoning,input:[first]});
+  const reply=await respond(seed.decision,'signed answer');
+  const [message,carrier]=reply.output;
+  const update={type:'configuration_update',reasoning:{effort:'medium'}};
+  const next=await prepare({model:'m',reasoning,input:[first,message,{...carrier,content:null,internal_chat_message_metadata_passthrough:{turn_id:'fixture'}},update,{role:'user',content:'continue'}]});
+  expect(next.body.generationConfig.thinkingConfig).toEqual({thinkingLevel:'medium'});
+  expect(next.body.contents[1].parts).toEqual([{text:'signed answer',thoughtSignature}]);
+  const second=await respond(next.decision,'second answer');
+  const replay=await prepare({model:'m',reasoning,previous_response_id:second.id,input:'again'});
+  expect(replay.body.generationConfig.thinkingConfig).toEqual({thinkingLevel:'medium'});
+  expect(replay.body.contents.filter((item:any)=>item.role==='model').flatMap((item:any)=>item.parts)).toEqual([{text:'signed answer',thoughtSignature},{text:'second answer',thoughtSignature}]);
+  await respond(replay.decision,'done');
+});
 test('Chat and Anthropic JSON results return Responses and retain ordinary history across consumers',async()=>{
   cache.clear();const first=await router('chat_completions');
   const decision=await first.dispatch({model:'m',input:'hello'});const hooks=createPluginHooks();decision!.adapter!.register(hooks);

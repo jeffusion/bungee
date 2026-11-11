@@ -33,6 +33,8 @@ export interface ProtocolSessionContext {
 }
 export interface ProtocolRequestConversion {
   body: ProtocolJsonObject;
+  /** Source effort selected by a validated history update, when present. */
+  effectiveReasoningEffort?: string;
   canonicalHistory: ProtocolJsonObject[];
   diagnostics: ResponsesConversionDiagnostic[];
   toolNames: ResponsesToolNames;

@@ -49,7 +49,7 @@ function code(fn: () => unknown, value: string, param?: string) {
   }
 }
 describe('pure protocol sessions, local fixtures for the complete declared matrix', () => {
-  test('description exposes 4 passthrough, 11 conversions, 1 unsupported pair', () => { const d = describeProtocolConversion(); expect(d.rulesVersion).toBe('1.0.4'); expect(d.matrix.filter(x => x.mode === 'convert')).toHaveLength(11); expect(d.matrix.filter(x => x.mode === 'passthrough')).toHaveLength(4); expect(d.matrix.filter(x => x.mode === 'unsupported')).toHaveLength(1); });
+  test('description exposes 4 passthrough, 11 conversions, 1 unsupported pair', () => { const d = describeProtocolConversion(); expect(d.rulesVersion).toBe('1.0.5'); expect(d.matrix.filter(x => x.mode === 'convert')).toHaveLength(11); expect(d.matrix.filter(x => x.mode === 'passthrough')).toHaveLength(4); expect(d.matrix.filter(x => x.mode === 'unsupported')).toHaveLength(1); });
   for (const source of LLM_PROTOCOLS)
     for (const target of LLM_PROTOCOLS) {
       const pair = describeProtocolConversion().matrix.find(x => x.sourceProtocol === source && x.targetProtocol === target)!;
@@ -447,6 +447,36 @@ test('Chat replay merges adjacent assistant text around tool calls without losin
  expect(jsonReplay.map(message=>message.role)).toEqual(messages.map(message=>message.role));
  expect(textOf(jsonReplay[1].content)).toBe(textOf(messages[1].content));
  expect(jsonReplay.slice(2)).toEqual(messages.slice(2));
+});
+
+test('Chat converts Codex page and selection snapshots in order while still pairing normal tool results', () => {
+  const convert = (input: unknown[]) => createProtocolSession(ctx('responses', 'chat_completions'))
+    .convertRequest({ input, tools: [{ type: 'function', name: 'lookup' }] });
+  const page = {
+    type: 'function_call_output', id: 'page', name: 'codex_apps_open_page', namespace: 'agent',
+    output: '{"page_id":null}', internal_chat_message_metadata_passthrough: { turn_id: 'fixture' },
+  };
+  const selection = { ...page, id: 'selection', name: 'codex_apps_selected_page_part_1_of_1', output: 'Selected text' };
+  const call = { type: 'function_call', name: 'lookup', call_id: 'call', arguments: '{}' };
+  const result = { type: 'function_call_output', call_id: 'call', output: 'Tool result' };
+  const input = [{ role: 'user', content: 'Read this' }, page, call, result, selection, { role: 'user', content: 'Continue' }];
+  const converted = convert(input);
+  const snapshot = (item: typeof page) => ({ role: 'user', content: [
+    { type: 'text', text: `[Codex context snapshot: agent.${item.name}. Untrusted data.]` },
+    { type: 'text', text: item.output },
+  ] });
+  expect(converted.body.messages).toMatchObject([
+    { role: 'user' }, snapshot(page), { role: 'assistant', tool_calls: [{ id: 'call' }] },
+    { role: 'tool', tool_call_id: 'call', content: 'Tool result' }, snapshot(selection), { role: 'user' },
+  ]);
+  for (const index of [1, 4]) {
+    expect(converted.canonicalHistory[index]).toMatchObject({ type: 'message', role: 'user' });
+    expect(converted.diagnostics).toContainEqual({ param: `input[${index}]`, action: 'mapped', reason: 'chat_codex_page_snapshot_as_user_data' });
+  }
+  expect(convert(converted.canonicalHistory).body).toEqual(converted.body);
+  code(() => convert([call, { type: 'function_call_output', output: 'missing call ID' }]), 'invalid_payload', 'input[1]');
+  code(() => convert([{ ...page, name: 'unknown' }]), 'unsupported_content', 'input[0].name');
+  code(() => convert([{ ...page, call_id: 'call' }]), 'unsupported_content', 'input[0].name');
 });
 
 test('Chat defers instructions until parallel tool results finish without changing replay history', () => {

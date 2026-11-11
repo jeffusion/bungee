@@ -2,7 +2,7 @@ import { createProtocolSession, describeProtocolConversion, inspectAgentMessages
 import type { ModelIdentityDeclaration, ModelsDevCapabilitiesService } from '../../models-dev/contract';
 import type { CapabilityContext, ConversionService, EffectiveCapabilities, AdapterSession, HistoryClient } from '../contract';
 import {AgentRelay} from './relay';
-export const REASONING_RULES_VERSION = '2026-10-27.1';
+export const REASONING_RULES_VERSION = '2026-11-11.1';
 const concrete = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 // Protocol-level value constraints only; the catalog must explicitly advertise each effort.
 const effortProtocols = new Set(['responses', 'chat_completions', 'anthropic_messages', 'gemini_generate_content']);
@@ -102,6 +102,11 @@ export function conversionService(catalog: ModelsDevCapabilitiesService, worker:
                         selected = effort;
                     }
                     const result = engine.convertRequest(raw);
+                    if (result.effectiveReasoningEffort !== undefined) {
+                        if (!profile?.supportedEfforts.includes(result.effectiveReasoningEffort))
+                            fail('reasoning.effort');
+                        selected = result.effectiveReasoningEffort;
+                    }
                     rewrittenDeveloper = false;
                     if (deepseekChat)
                         for (const message of chatMessages(result.body))
