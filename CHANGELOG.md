@@ -1,3 +1,10 @@
+## [6.15.1](https://github.com/jeffusion/bungee/compare/v6.15.0...v6.15.1) (2026-11-11)
+
+
+### Bug Fixes
+
+* **llms:** 修复 Codex 跨协议续聊和页面快照转换 ([ef6a4f1](https://github.com/jeffusion/bungee/commit/ef6a4f10d0543d85810e0a8b884876fcef1b54bc))
+
 # [6.15.0](https://github.com/jeffusion/bungee/compare/v6.14.1...v6.15.0) (2026-11-11)
 
 
