@@ -176,7 +176,7 @@ The `aggregate` field is the complete object shown above. Management protection 
 - 校验不要求三个字段之间存在固定比例或先后关系。
 - 三个期限分别约束不同阶段，不能相加当作“整轮发布总超时”。
 - 修改从本次发布开始生效：新一轮发布使用目标 snapshot 的 `publication`；恢复不会重置同一排空任务的 `drain_timeout_ms`。
-- `drain_timeout_ms` 越长，旧代进程及其连接占用资源越久。期间可以保存新配置，但下一批候选必须等待旧代退出且 retirement 安全释放；不在排空期间启动第三批 Worker。
+- `drain_timeout_ms` 越长，旧代进程及其连接占用资源越久。在线保存等待上一批旧进程确认退出并释放退役占用，再启动候选并验证新配置。
 - `worker_exit_timeout_ms`（E）在 worker 自然排空到达终态或决定强制结束时创建一次。其后的状态查询、强制停止、资源清理、关闭与 OS 退出取证共用同一段剩余 E，不会重新授予一段完整 E；清理的签名终态与精确退出分别取证，即使进程已经退出，清理失败也不能判为成功。
 - 这些期限是发布策略，不是单次 API / LLM 请求超时或 idle timeout，也不存在按模式切换的开关。控制台按秒显示与编辑；查看页面不会把默认值写入配置。
 - `publication` 与代理请求预算相互独立，不是代理的 `request_ms` / first-byte / idle budget，也不覆盖前置插件处理阶段。代理现有 `request_ms` 默认 30 秒与可选 first-byte 预算，据此不能声称整条请求链已被一个统一 deadline 接管。
