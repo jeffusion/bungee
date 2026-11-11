@@ -1,3 +1,17 @@
+# [6.15.0](https://github.com/jeffusion/bungee/compare/v6.14.1...v6.15.0) (2026-11-11)
+
+
+### Bug Fixes
+
+* **config:** 先验证候选配置再保存并切换流量 ([ef36e19](https://github.com/jeffusion/bungee/commit/ef36e19139a201ca65902f3ff8ff5d437d0fc842))
+* **config:** 回收主进程中断后尚未就绪的候选 worker ([dd4fe7c](https://github.com/jeffusion/bungee/commit/dd4fe7ce60aa5f88184e6c92ce73e5d5a8a3b450))
+* **llms:** 将 Codex 页面快照映射到 Gemini 用户上下文 ([d36b90d](https://github.com/jeffusion/bungee/commit/d36b90d463f22083e39fb86fa7a81532d7779c82))
+
+
+### Features
+
+* **codex-router:** 支持按模型绑定设置工具白名单 ([6a1cb31](https://github.com/jeffusion/bungee/commit/6a1cb3141df04972bcfa30f5179042e241c6f715))
+
 ## [6.14.1](https://github.com/jeffusion/bungee/compare/v6.14.0...v6.14.1) (2026-11-10)
 
 
