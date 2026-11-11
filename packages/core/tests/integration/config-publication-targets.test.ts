@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { ConfigurationAggregate, Sha256Digest } from '@jeffusion/bungee-types';
@@ -37,7 +37,8 @@ const roots: string[] = [];
 const repositories: ConfigRepository[] = [];
 
 function databasePath(): string {
-  const root = mkdtempSync(join(tmpdir(), 'bungee-publication-targets-'));
+  // The offline cutover uses SQLITE_OPEN_NOFOLLOW, including for parent directories.
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'bungee-publication-targets-'));
   roots.push(root);
   return join(root, 'config.db');
 }

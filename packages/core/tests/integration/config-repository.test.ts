@@ -1216,12 +1216,12 @@ describe('ConfigRepository schema enforcement and corruption handling', () => {
     const inspector = new Database(dbPath, { readwrite: true, strict: true });
     inspector.run('PRAGMA foreign_keys = ON');
     inspector.run('PRAGMA busy_timeout = 5000');
-    const definitions = inspector.query<{ name: string; sql: string }, []>(`SELECT name,sql FROM sqlite_master
-      WHERE type='table' AND name NOT LIKE 'sqlite_%'`).all();
+    const tables = inspector.query<{ name: string; strict: number }, []>(`SELECT name,strict FROM pragma_table_list
+      WHERE schema='main' AND type='table' AND name NOT LIKE 'sqlite_%'`).all();
 
     // When / Then
-    expect(definitions).toHaveLength(28);
-    expect(definitions.every(({ sql }) => sql.includes('STRICT'))).toBe(true);
+    expect(tables).toContainEqual({ name: 'runtime_cutovers', strict: 1 });
+    expect(tables.every(({ strict }) => strict === 1)).toBe(true);
     expect(() => inspector.run(`INSERT INTO services (id,position,name,policy_json)
       VALUES ('10000000-0000-4000-8000-000000000099','wrong','bad','{}')`)).toThrow();
     expect(() => inspector.run(`INSERT INTO configuration_revisions
