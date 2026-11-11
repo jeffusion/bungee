@@ -9,7 +9,6 @@ import { canonicalJson, hashConfigurationContent, hashConfigurationRequest } fro
 import { readRepositorySnapshot, verifyRepositoryIntegrity } from '../../src/config-storage/repository-snapshot';
 import { prepareCommitCommand } from '../../src/config-storage/prepared-command';
 import { commitTransaction } from '../../src/config-storage/commit-transaction';
-import { createAutomaticRecovery, createStoppedRecovery, createManualRecovery, claimRecoveryAttempt, succeedRecovery } from '../../src/config-storage/recovery-store';
 import { getServingSnapshot } from '../../src/config-storage/serving-snapshot';
 import { parseNormalizeCompileAggregate } from '../../src/config-storage/aggregate';
 import type { ConfigurationAggregate } from '@jeffusion/bungee-types';
@@ -41,6 +40,20 @@ function fixture(withReference=true, publicationState: 'converged' | 'committed'
   return {db,path,hash,aggregate};
 }
 function close(db:Database){db.close(true);handles.delete(db);}
+
+function seedRecovery(db: Database, state: 'scheduled' | 'stopped' | 'succeeded'): void {
+  // Seed the version 4 rows directly because the runtime store requires the current schema.
+  const [recoveryId, trigger, attempts, nextRetryAt, reason, detail, createdAt, updatedAt] = {
+    scheduled: [id(10), 'automatic', 0, 252, null, null, 2, 2],
+    stopped: [id(10), 'automatic', 0, null, 'deterministic_control_failure', 'control unavailable', 2, 2],
+    succeeded: [id(11), 'manual', 1, null, 'target_serving', 'control recovered', 3, 5],
+  }[state];
+  db.run(`INSERT INTO configuration_recoveries
+    (recovery_id,source_mutation_id,target_revision,trigger,state,attempt_count,max_attempts,
+     next_retry_at,final_reason_code,final_reason_detail,created_at,updated_at)
+    VALUES (?,?,2,?,?,?,6,?,?,?,?,?)`,
+  [recoveryId, id(4), trigger, state, attempts, nextRetryAt, reason, detail, createdAt, updatedAt]);
+}
 
 describe('service reference SQLite migration',()=>{
   test('catalog-backed production commits reject mixed plugin and Service cycles before writing',async()=>{
@@ -127,10 +140,9 @@ describe('service reference SQLite migration',()=>{
   }, {timeout:30_000});
 
   test('reports scheduled and stopped recovery identities and retains the previous schema',()=>{
-    for(const state of ['scheduled','stopped']){
+    for(const state of ['scheduled','stopped'] as const){
       const {db}=fixture(true,'degraded');
-      if(state==='scheduled')createAutomaticRecovery(db,id(10),id(4),2,2);
-      else createStoppedRecovery(db,id(10),id(4),2,'deterministic_control_failure','control unavailable',2);
+      seedRecovery(db,state);
       expect(()=>migrateConfigurationDatabase(db)).toThrow(`recovery ${id(10)} (${state})`);
       expect(db.query<{version:number},[]>('SELECT max(version) AS version FROM schema_migrations').get()!.version).toBe(4);
       expect(db.query<{state:string},[]>('SELECT state FROM configuration_recoveries').get()!.state).toBe(state);
@@ -145,9 +157,8 @@ describe('service reference SQLite migration',()=>{
 
   test('a later successful recovery supersedes a historical stopped recovery for upgrade readiness',()=>{
     const {db}=fixture(true,'degraded');
-    createStoppedRecovery(db,id(10),id(4),2,'deterministic_control_failure','control unavailable',2);
-    createManualRecovery(db,id(11),id(4),2,3);claimRecoveryAttempt(db,id(11),0,4);
-    succeedRecovery(db,id(11),1,'target_serving','control recovered',5);
+    seedRecovery(db,'stopped');
+    seedRecovery(db,'succeeded');
     migrateConfigurationDatabase(db);
     expect(readRepositorySnapshot(db).revision).toBe(3);
     expect(db.query<{state:string},[]>('SELECT state FROM configuration_recoveries ORDER BY recovery_sequence').all()).toEqual([{state:'stopped'},{state:'succeeded'}]);

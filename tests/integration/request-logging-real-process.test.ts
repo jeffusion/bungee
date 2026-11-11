@@ -48,15 +48,15 @@ async function snapshot() {
   return result.body as { revision: number; config: ConfigurationAggregate };
 }
 
-async function waitForPublication(mutation: string, revision: number, state: 'converged' | 'degraded' = 'converged') {
+async function waitForPublication(mutation: string, revision: number) {
   await waitUntil(async () => {
     const result = await requestJson(`${management()}/api/config/operations/${mutation}`, {}, fixture);
     const operation = (result.body as { operation?: { state: string; committed_revision: number } }).operation;
-    if (operation?.state !== state && ['converged', 'failed', 'degraded'].includes(operation?.state ?? '')) {
-      throw new Error(`Log fixture publication did not reach ${state}: ${result.text}`);
+    if (operation?.state === 'failed' || operation?.state === 'degraded') {
+      throw new Error(`Log fixture publication did not converge: ${result.text}`);
     }
-    return operation?.state === state && operation.committed_revision === revision;
-  }, `request log fixture publication did not reach ${state}`, 35000);
+    return operation?.state === 'converged' && operation.committed_revision === revision;
+  }, 'request log fixture publication did not converge', 35000);
   const runtime = await requestJson(`${management()}/api/config/runtime`, {}, fixture);
   expect(runtime.response.status).toBe(200);
   const body = runtime.body as { workers: Parameters<typeof recordOwnedWorkers>[1]; publication: { serving_revision: number } };
@@ -64,14 +64,14 @@ async function waitForPublication(mutation: string, revision: number, state: 'co
   return body.publication;
 }
 
-async function publish(revision: number, aggregate: ConfigurationAggregate, state?: 'degraded') {
+async function publish(revision: number, aggregate: ConfigurationAggregate) {
   const mutation = randomUUID();
   const result = await requestJson(`${management()}/api/config`, {
     method: 'PUT', headers: jsonHeaders,
     body: JSON.stringify({ expected_revision: revision, mutation_id: mutation, aggregate }),
   }, fixture);
   expect(result.response.status, result.text).toBe(202);
-  return waitForPublication(mutation, revision + 1, state);
+  return waitForPublication(mutation, revision + 1);
 }
 
 async function setCollection(action: 'enable' | 'disable', whileServing?: (revision: number) => Promise<void>) {
@@ -939,13 +939,24 @@ test('collection follows the serving revision and historical query and export su
   expect(await queryLogs(restartedPath)).toEqual([]);
 
   const enabled = await snapshot();
-  const failed = await publish(enabled.revision, {
+  const mutation = randomUUID();
+  const aggregate: ConfigurationAggregate = {
     plugin_activations: [...enabled.config.plugin_activations.filter(({ plugin_name }) => plugin_name !== 'request-logs'), { plugin_name: failurePlugin }],
     logical_configuration: { ...enabled.config.logical_configuration, plugins: [
       { id: randomUUID(), position: 1, name: failurePlugin, enabled: true },
     ] },
-  }, 'degraded');
-  expect(failed).toMatchObject({ serving_revision: enabled.revision, serving_complete: false });
-  expect((await snapshot()).config.plugin_activations).not.toContainEqual({ plugin_name: 'request-logs' });
+  };
+  const rejected = await fetch(`${management()}/api/config`, {
+    method: 'PUT', headers: jsonHeaders, signal: AbortSignal.timeout(5000),
+    body: JSON.stringify({ expected_revision: enabled.revision, mutation_id: mutation, aggregate }),
+  });
+  expect(rejected.status).toBe(503);
+  expect(await rejected.json()).toEqual({ error: 'control_readiness_failed' });
+  const operation = await requestJson(`${management()}/api/config/operations/${mutation}`, {}, fixture);
+  expect(operation.response.status, operation.text).toBe(404);
+  expect(await snapshot()).toEqual(enabled);
+  const runtime = await requestJson(`${management()}/api/config/runtime`, {}, fixture);
+  expect(runtime.response.status, runtime.text).toBe(200);
+  expect(runtime.body).toMatchObject({ publication: { serving_revision: enabled.revision, serving_complete: true } });
   await waitForHttpRecords(await echoHttp('after-failed-publication'));
 }, 120000);
