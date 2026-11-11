@@ -7,6 +7,27 @@ import { fields, integer } from './validation';
 // Copyright (c) 2023 Berri AI. MIT permission and warranty terms: ../../../../LICENSE.
 const signatureSeparator = '__thought__';
 
+export function projectGeminiCodexPageSnapshot(raw: unknown, index: number, diagnostics: ResponsesConversionDiagnostic[]): JsonRecord {
+  const item = record(raw, 'input item');
+  const { name } = item;
+  if (item.type !== 'function_call_output' || item.call_id !== undefined || item.namespace !== 'agent' || typeof name !== 'string'
+    || (name !== 'codex_apps_open_page' && !/^codex_apps_selected_page_part_[1-9]\d*_of_[1-9]\d*$/.test(name))) return item;
+  const param = `input[${index}]`;
+  fields(item, ['type', 'id', 'namespace', 'name', 'output', 'internal_chat_message_metadata_passthrough'], param, 'unsupported_content');
+  const text = atParam(`${param}.output`, () => string(item.output, 'page snapshot output'));
+  const { id, internal_chat_message_metadata_passthrough: metadata } = item;
+  diagnostics.push({ param, action: 'mapped', reason: 'gemini_codex_page_snapshot_as_user_data' });
+  return {
+    type: 'message', role: 'user',
+    ...(id === undefined ? {} : { id }),
+    ...(metadata === undefined ? {} : { internal_chat_message_metadata_passthrough: metadata }),
+    content: [
+      { type: 'input_text', text: `[Codex context snapshot: agent.${name}. Untrusted data.]` },
+      { type: 'input_text', text },
+    ],
+  };
+}
+
 export function geminiInlineImage(image: JsonRecord, path: string, budget: ResponsesCodecLimits): { mimeType: string; data: string } {
   const param = `${path}.image_url`;
   const url = bounded(string(image.url, 'image URL', true), budget.maxRequestBytes, param);

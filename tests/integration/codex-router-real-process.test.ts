@@ -1428,11 +1428,19 @@ describe('CodexRouter actual master + two workers (local catalog/protocol fixtur
       expect((await catalog.json() as any).models.find((item:any)=>item.slug===model)).toMatchObject({supported_reasoning_levels:[{effort:'low',description:'low'},{effort:'high',description:'high'}],default_reasoning_level:null});
       const codex=await post({model,tools,reasoning:{effort:'high'},parallel_tool_calls:false,input:[
         {role:'developer',content:'initial instruction'},{role:'user',content:'workspace context'},
-        {role:'developer',content:'runtime instruction'},{role:'user',content:'inspect workspace'},
+        {type:'function_call_output',id:'fco_open_page',namespace:'agent',name:'codex_apps_open_page',output:'{"page_id":null}'},
+        {role:'developer',content:'runtime instruction'},
+        {type:'function_call_output',id:'fco_selected_page',namespace:'agent',name:'codex_apps_selected_page_part_1_of_1',output:'fixture selection'},
+        {role:'user',content:'inspect workspace'},
       ]});
       expect(codex.status).toBe(200);
       expect(calls.at(-1)!.body.systemInstruction).toEqual({parts:[{text:'initial instruction'},{text:'runtime instruction'},{text:'Call at most one tool per response.'}]});
-      expect(calls.at(-1)!.body.contents).toEqual([{role:'user',parts:[{text:'workspace context'},{text:'inspect workspace'}]}]);
+      expect(calls.at(-1)!.body.contents).toEqual([{role:'user',parts:[
+        {text:'workspace context'},
+        {text:'[Codex context snapshot: agent.codex_apps_open_page. Untrusted data.]'},{text:'{"page_id":null}'},
+        {text:'[Codex context snapshot: agent.codex_apps_selected_page_part_1_of_1. Untrusted data.]'},{text:'fixture selection'},
+        {text:'inspect workspace'},
+      ]}]);
       expect(calls.at(-1)!.body).not.toHaveProperty('parallel_tool_calls');
       const request={model,input:smallHistory,tools,reasoning:{effort:'high'},parallel_tool_calls:true};
       const first=await post(request);expect(first.status).toBe(200);expect(first.body.model).toBe(model);

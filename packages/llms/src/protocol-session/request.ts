@@ -1,7 +1,7 @@
 import { validateAgentMessage } from '../responses-codec/agent-messages';
 import { decodeResponsesRequest } from '../responses-codec';
 import { argumentObject, atParam, fail, list, record, string, limits, type JsonRecord } from '../responses-codec/common';
-import { decodeGeminiCallId, geminiInlineImage, geminiToolResponse, restoreGeminiHistory } from './gemini';
+import { decodeGeminiCallId, geminiInlineImage, geminiToolResponse, projectGeminiCodexPageSnapshot, restoreGeminiHistory } from './gemini';
 import { fields, integer, bool, textParts } from './validation';
 import { geminiSchemaToJson } from './schema';
 import type { LLMProtocol, ProtocolSessionContext, ProtocolRequestConversion } from './types';
@@ -418,11 +418,14 @@ function validateCanonical(b: JsonRecord, context: ProtocolSessionContext): void
 }
 export function convertProtocolRequest(raw: unknown, context: ProtocolSessionContext): ProtocolRequestConversion {
   const b = canonicalRequest(raw, context.sourceProtocol, context.model);
+  const responsesToGemini = context.sourceProtocol === 'responses' && context.targetProtocol === 'gemini_generate_content';
+  const pageSnapshotDiagnostics: ProtocolRequestConversion['diagnostics'] = [];
+  if (responsesToGemini && Array.isArray(b.input))
+    b.input = b.input.map((item, index) => projectGeminiCodexPageSnapshot(item, index, pageSnapshotDiagnostics));
   const originalInput = b.input;
   if(context.streaming!==undefined){bool(context.streaming,'context.streaming');if(b.stream!==undefined&&b.stream!==context.streaming)fail('invalid_payload','Request stream mode disagrees with transport context','stream');b.stream=context.streaming;}
   validateCanonical(b, context);
-  const geminiHistory = context.sourceProtocol === 'responses' && context.targetProtocol === 'gemini_generate_content'
-    ? restoreGeminiHistory(b.input, limits(context.capabilities?.limits)) : undefined;
+  const geminiHistory = responsesToGemini ? restoreGeminiHistory(b.input, limits(context.capabilities?.limits)) : undefined;
   if (geminiHistory) b.input = geminiHistory.input;
   const cap = { ...context.capabilities, agentMessageDelivery: context.agentMessageDelivery ?? context.capabilities?.agentMessageDelivery, omitOptionalWebSearch: true, preserveToolIdentityDescription: true, preserveRefusalContent: true }, policy = context.reasoningPolicy;
   const reasoning = b.reasoning === undefined ? undefined : record(b.reasoning, 'reasoning');
@@ -516,8 +519,9 @@ export function convertProtocolRequest(raw: unknown, context: ProtocolSessionCon
   const decodingTarget = target === 'gemini_generate_content' ? 'chat_completions' : target;
   if (target === 'gemini_generate_content' && reasoning)
     b.reasoning = { ...reasoning, effort: undefined };
-  const decoded = decodeResponsesRequest(b, decodingTarget, { ...cap, reasoningHistory: target !== 'anthropic_messages' && cap.reasoningHistory === true, reasoningEffort: target === 'chat_completions' && cap.reasoningEffort === true, anthropicThinkingBudget: undefined }, { preserveContentOrder: target === 'gemini_generate_content', toolOutputImages: context.sourceProtocol === 'responses' && target === 'gemini_generate_content' });
+  const decoded = decodeResponsesRequest(b, decodingTarget, { ...cap, reasoningHistory: target !== 'anthropic_messages' && cap.reasoningHistory === true, reasoningEffort: target === 'chat_completions' && cap.reasoningEffort === true, anthropicThinkingBudget: undefined }, { preserveContentOrder: target === 'gemini_generate_content', toolOutputImages: responsesToGemini });
   const diagnostics = decoded.diagnostics;
+  diagnostics.push(...pageSnapshotDiagnostics);
   if (target === 'gemini_generate_content' && decoded.body.parallel_tool_calls === true) {
     delete decoded.body.parallel_tool_calls;
     diagnostics.push({ param: 'parallel_tool_calls', action: 'omitted', reason: 'gemini_parallel_tool_calls_allowed' });

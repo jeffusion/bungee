@@ -84,6 +84,8 @@ Responses→Gemini 的普通 user 消息同样支持上述内嵌图片，按图�
 
 Responses→Gemini 按出现顺序归集所有 system/developer 消息到 systemInstruction，包括用户消息之后追加的指令。中途指令记录 gemini_mid_conversation_instructions_consolidated；正文与指令各自的相对顺序保留，但指令在原对话中的位置不再保留。规范历史保持原顺序，生成的单工具提示不写入历史。该兼容策略不放宽未知内容、原生密文、工具参数或其它协议对的校验。
 
+Responses→Gemini 将 Codex 注入的 `agent.codex_apps_open_page` 和 `agent.codex_apps_selected_page_part_<序号>_of_<总数>` 快照转成带来源标记的 user 文本。此规则只适用于缺省 `call_id` 且 `output` 为字符串的 `function_call_output`。快照正文按原顺序进入对话和规范历史，记录 `gemini_codex_page_snapshot_as_user_data` 诊断。普通工具结果仍通过 `call_id` 与对应调用配对。
+
 普通文本和推理 Part 的签名及边界通过尾部 reasoning 项的 encrypted_content 携带。`bungee_gemini:` 是网关私有 opaque 格式，包含版本、输出项引用、Part 长度、内容摘要与原始签名，不表示 OpenAI 能解析该数据。流式文本照常发送，晚到签名不修改已发 item_id。客户端须完整回传 output，包括该 reasoning 项，且保留被签名文本与项 ID；回放严格校验引用、内容摘要、编码和资源限额。只对 Responses→Gemini 恢复此格式，原生 OpenAI 密文和 compaction 仍拒绝，不新增持久化存储。
 
 Gemini usageMetadata 的辅助统计（如 promptTokensDetails、cacheTokensDetails、trafficType）不作为正文准入条件。实际消费的核心计数仍严格校验；toolUsePromptTokenCount 计入 input_tokens，thoughtsTokenCount 计入 output_tokens 及 reasoning_tokens，并核对 totalTokenCount。原始细项继续由既有上游计量链路读取，不伪造 Responses 不支持的细分字段。
