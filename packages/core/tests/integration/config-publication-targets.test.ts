@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { ConfigurationAggregate, Sha256Digest } from '@jeffusion/bungee-types';
@@ -11,9 +11,13 @@ import {
   hashConfigurationContent,
 } from '../../src/config-storage';
 import { migrateConfigurationDatabase } from '../../src/config-storage/migrations';
+import { prepareConfigurationRuntimeCutover } from '../../src/config-storage/config-repository';
+import { verifySchemaFingerprint } from '../../src/config-storage/schema-fingerprint';
 import { replaceActiveMaterialization } from '../../src/config-storage/materialize';
 import { STATEFUL_INTEGRATION_TEST_TIMEOUT_MS } from '../helpers/test-budgets';
 import { settleWorkerLaunch } from '../helpers/worker-launch';
+import { acquireMasterInstanceLock } from '../../src/master-runtime/instance-lock';
+import { prepareStoppedDockerCutover } from '../../src/master-runtime/runtime-upgrade';
 
 setDefaultTimeout(STATEFUL_INTEGRATION_TEST_TIMEOUT_MS);
 
@@ -32,10 +36,14 @@ const VALUE: ConfigurationAggregate = {
 const roots: string[] = [];
 const repositories: ConfigRepository[] = [];
 
-function open(): { readonly repository: ConfigRepository; readonly dbPath: string } {
+function databasePath(): string {
   const root = mkdtempSync(join(tmpdir(), 'bungee-publication-targets-'));
   roots.push(root);
-  const dbPath = join(root, 'config.db');
+  return join(root, 'config.db');
+}
+
+function open(): { readonly repository: ConfigRepository; readonly dbPath: string } {
+  const dbPath = databasePath();
   const repository = ConfigRepository.open(dbPath);
   repositories.push(repository);
   return { repository, dbPath };
@@ -807,6 +815,188 @@ describe('worker launch storage', () => {
 });
 
 describe('publication safety barriers', () => {
+  test('a stopped Docker cutover preserves draining history and lets the new catalog claim revision 109', async () => {
+    const { repository, dbPath } = open();
+    for (let expected = 1; expected < 105; expected += 1) commit(repository, `saved-${expected + 1}`, expected, CREATED_AT, []);
+    commit(repository, 'owner-106', 105, CREATED_AT, [0, 1]);
+    claim(repository);
+    repository.beginPublication('owner-106', CREATED_AT + 1);
+    const serving = [identity('1060', 0), identity('1061', 1)];
+    for (const { worker_slot: slot } of serving) repository.beginWorkerAttempt('owner-106', slot, 0, 'initial', CREATED_AT + 2);
+    for (const worker of serving) {
+      const slot = worker.worker_slot;
+      repository.registerWorkerLaunch(worker, guard(worker.worker_instance_id, String(1062 + slot)),
+        allocation('owner-106', slot), CREATED_AT + 3);
+      repository.recordWorkerResult('owner-106', slot, { kind: 'converged', attempt_no: 1, applied_revision: 106 }, CREATED_AT + 4);
+      repository.recordWorkerLaunchAdmitted(worker.worker_instance_id, CREATED_AT + 4);
+    }
+    expect(repository.enterPublicationPrepare('owner-106', 106, CREATED_AT + 5).kind).toBe('granted');
+    repository.markDraining('owner-106', CREATED_AT + 5);
+    const members = [0, 1].map(slot => ({
+      identity: identity(String(1050 + slot), slot), boot_nonce: uuid(String(1052 + slot)), pid: 20 + slot,
+      private_port: 3_010 + slot, revision: 105, content_hash: repository.getSnapshot().content_hash,
+      plugin_catalog_hash: CATALOG, publication: null, guard: null, drain_id: uuid(String(1054 + slot)),
+      deadline_boot_id: 'fixture-kernel', start_deadline_ns: null,
+    }));
+    repository.freezePublicationRetirement('owner-106', 0, members, CREATED_AT + 5);
+    repository.stopPublicationRetirement('owner-106', 'exit_unknown', CREATED_AT + 6);
+    const unconfirmed = identity('1064');
+    repository.registerWorkerLaunch(unconfirmed, guard(unconfirmed.worker_instance_id, '1065'), null, CREATED_AT + 6);
+    for (let expected = 106; expected < 109; expected += 1) commit(repository, `saved-${expected + 1}`, expected, CREATED_AT + 7, [0, 1]);
+    const saved = repository.getSnapshot();
+    const history = repository.getOperationState('owner-106');
+    const retirement = repository.getPublicationRetirement('owner-106');
+    repository.consumeRuntimeRecoveryRestartTicket(uuid('1066'), { owner: uuid('1'), boot_id: 'fixture-kernel', monotonic_ns: '0' });
+    expect(() => repository.claimPublicationTarget(OTHER_CATALOG, CREATED_AT + 8)).toThrow('catalog identity is immutable');
+    const stoppedContainerId = '1'.repeat(64);
+    repository.close();
+    repositories.splice(repositories.indexOf(repository), 1);
+    const accessLockPath = process.env.BUNGEE_ACCESS_DB_PATH;
+    process.env.BUNGEE_ACCESS_DB_PATH = join(dbPath, '..', 'access.db');
+    try {
+      const activeLock = await acquireMasterInstanceLock(`${dbPath}.lock`);
+      try { await expect(prepareStoppedDockerCutover(dbPath, stoppedContainerId)).rejects.toThrow('instance lock'); }
+      finally { await activeLock.release(); }
+
+      const cutover = await prepareStoppedDockerCutover(dbPath, stoppedContainerId);
+      expect(cutover).toMatchObject({ runtime_epoch: 1, saved_revision: 109, stopped_container_id: stoppedContainerId });
+      const restarted = ConfigRepository.open(dbPath);
+      try {
+        expect(restarted.getSnapshot()).toEqual(saved);
+        expect(restarted.getActivePublication()).toBeNull();
+        expect(restarted.getOutstandingPublicationCandidates()).toEqual([]);
+        expect(restarted.getWorkerLaunchInventory()).toEqual([]);
+        expect(restarted.getRuntimeRecoveryBudget().tickets).toBe(0);
+        expect(restarted.getDatabase().query('SELECT ticket_id FROM runtime_recovery_tickets').all()).toEqual([{ ticket_id: uuid('1066') }]);
+        expect(restarted.getOperationState('owner-106')).toEqual(history);
+        expect(restarted.getPublicationRetirement('owner-106')).toEqual(retirement);
+        expect(restarted.getPublicationRetirement('owner-106')?.evidence).toEqual(members.map(({ identity: worker }) =>
+          expect.objectContaining({ member_id: worker.worker_instance_id, exit_state: 'unknown', cleanup_state: 'unknown' })));
+        expect(restarted.getWorkerLaunch(unconfirmed.worker_instance_id)).toMatchObject({ exited: false, cleanup_released: false });
+        expect(() => restarted.recordWorkerLaunchExit(unconfirmed.worker_instance_id, { kind: 'exited', cleanup: 'released' }, CREATED_AT + 9)).toThrow(ConfigRepositoryError);
+        expect(() => restarted.markPublicationRetirementReleased('owner-106', CREATED_AT + 9)).toThrow(ConfigRepositoryError);
+        expect(commit(restarted, 'owner-106', 105, CREATED_AT, [0, 1])).toEqual({ kind: 'duplicate', operation: history?.operation });
+        expect(restarted.claimPublicationTarget(OTHER_CATALOG, CREATED_AT + 10)).toMatchObject({
+          operation: { mutation_id: 'saved-109', state: 'committed' }, snapshot: saved, plugin_catalog_hash: OTHER_CATALOG,
+        });
+        expect(restarted.getOperation('saved-107')?.state).toBe('superseded');
+        expect(restarted.getOperation('saved-108')?.state).toBe('superseded');
+        restarted.verify();
+      } finally { restarted.close(); }
+
+      expect(await prepareStoppedDockerCutover(dbPath, stoppedContainerId)).toEqual(cutover);
+      const reopened = ConfigRepository.open(dbPath);
+      try {
+        expect(reopened.getRuntimeEpoch()).toBe(1);
+        expect(reopened.getActivePublication()?.operation.mutation_id).toBe('saved-109');
+      } finally { reopened.close(); }
+    } finally {
+      if (accessLockPath === undefined) delete process.env.BUNGEE_ACCESS_DB_PATH;
+      else process.env.BUNGEE_ACCESS_DB_PATH = accessLockPath;
+    }
+  });
+
+  test('cutover failure on a version 10 database rolls back the entire migration', () => {
+    const dbPath = databasePath();
+    const db = new Database(dbPath, { create: true, readwrite: true, strict: true });
+    try {
+      migrateConfigurationDatabase(db, CONFIG_MIGRATIONS.slice(0, 10));
+      db.run(`CREATE TEMP TRIGGER fail_cutover BEFORE UPDATE ON runtime_recovery_budget
+        BEGIN SELECT RAISE(ABORT,'fixture budget update failed'); END`);
+      let failure: unknown;
+      try { prepareConfigurationRuntimeCutover(db, 'a'.repeat(64), CREATED_AT); }
+      catch (error) { failure = error; }
+      expect(failure).toMatchObject({ code: 'migration_failed', cause: { message: 'fixture budget update failed' } });
+    } finally { db.close(); }
+
+    const reopened = new Database(dbPath, { readwrite: true, strict: true });
+    try {
+      verifySchemaFingerprint(reopened, 10);
+      expect(reopened.query('SELECT version FROM schema_migrations ORDER BY version').all())
+        .toEqual(CONFIG_MIGRATIONS.slice(0, 10).map(({ version }) => ({ version })));
+      expect(reopened.query("SELECT name FROM sqlite_schema WHERE name='runtime_cutovers'").get()).toBeNull();
+      expect(prepareConfigurationRuntimeCutover(reopened, 'a'.repeat(64), CREATED_AT)).toMatchObject({ runtime_epoch: 1, saved_revision: 1 });
+    } finally { reopened.close(); }
+  });
+
+  test('cutover rejects a nonempty SQLite file without configuration schema', async () => {
+    const dbPath = databasePath();
+    const db = new Database(dbPath, { create: true, readwrite: true, strict: true });
+    try { db.run('PRAGMA user_version=7'); }
+    finally { db.close(); }
+    expect(statSync(dbPath).size).toBeGreaterThan(0);
+    const accessDbPath = process.env.BUNGEE_ACCESS_DB_PATH;
+    process.env.BUNGEE_ACCESS_DB_PATH = join(dbPath, '..', 'access.db');
+    try {
+      await expect(prepareStoppedDockerCutover(dbPath, 'b'.repeat(64))).rejects.toThrow('requires an existing configuration database');
+    } finally {
+      if (accessDbPath === undefined) delete process.env.BUNGEE_ACCESS_DB_PATH;
+      else process.env.BUNGEE_ACCESS_DB_PATH = accessDbPath;
+    }
+    const reopened = new Database(dbPath, { readonly: true, strict: true });
+    try {
+      expect(reopened.query('PRAGMA user_version').get()).toEqual({ user_version: 7 });
+      expect(reopened.query('SELECT name FROM sqlite_schema').all()).toEqual([]);
+    } finally { reopened.close(); }
+  });
+
+  test('cutover preserves existing serving authority replay and rejects new archived authority', () => {
+    const { repository } = open();
+    commit(repository, 'frozen-r2', 1, CREATED_AT, []);
+    claim(repository);
+    repository.beginPublication('frozen-r2', CREATED_AT + 1);
+    const frozen = repository.freezePublicationServingSet('frozen-r2', 0, []);
+    prepareConfigurationRuntimeCutover(repository.getDatabase(), 'c'.repeat(64), CREATED_AT + 2);
+
+    commit(repository, 'unfrozen-r3', 2, CREATED_AT + 3, []);
+    claim(repository, CREATED_AT + 4);
+    repository.beginPublication('unfrozen-r3', CREATED_AT + 4);
+    expect(repository.getPublicationServingSet('unfrozen-r3', 0)).toBeNull();
+    prepareConfigurationRuntimeCutover(repository.getDatabase(), 'd'.repeat(64), CREATED_AT + 5);
+
+    expect(repository.freezePublicationServingSet('frozen-r2', 0, [])).toEqual(frozen);
+    expect(() => repository.freezePublicationServingSet('unfrozen-r3', 0, [])).toThrow('does not belong to the current runtime');
+    expect(repository.getPublicationServingSet('unfrozen-r3', 0)).toBeNull();
+  });
+
+  test('cutover rolls back atomically and permits startup at the saved revision with an archived recovery', () => {
+    const { dbPath, repository } = open();
+    repository.close();
+    repositories.splice(repositories.indexOf(repository), 1);
+    const offline = ConfigRepository.open(dbPath, { offline: true });
+    repositories.push(offline);
+    commit(offline, 'recovery-source', 1, CREATED_AT, []);
+    claim(offline);
+    offline.beginPublication('recovery-source', CREATED_AT + 1);
+    offline.finalizePublication('recovery-source', { outcome: 'degraded', error_code: 'control_readiness_failed',
+      error_detail: 'fixture control is unavailable', recovery_disposition: 'deterministic_control_failure' }, CREATED_AT + 2);
+    const originalRecovery = offline.createManualRecovery(uuid('2100'), 'recovery-source', 2, CREATED_AT + 3);
+    offline.claimRecoveryAttempt(originalRecovery.recovery_id, 0, CREATED_AT + 4);
+    const running = offline.getRecovery(originalRecovery.recovery_id);
+    const oldOperation = offline.getCurrentOperationState();
+    const db = offline.getDatabase();
+    db.run(`CREATE TEMP TRIGGER fail_cutover BEFORE UPDATE ON runtime_recovery_budget
+      BEGIN SELECT RAISE(ABORT,'fixture budget update failed'); END`);
+    const stoppedContainerId = '2'.repeat(64);
+    expect(() => prepareConfigurationRuntimeCutover(db, stoppedContainerId, CREATED_AT + 5)).toThrow(ConfigRepositoryError);
+    expect(offline.getRuntimeEpoch()).toBe(0);
+    expect(offline.getPublicationRecoveryBarrier()).toEqual(running);
+    db.run('DROP TRIGGER fail_cutover');
+
+    expect(prepareConfigurationRuntimeCutover(db, stoppedContainerId, CREATED_AT + 5)).toMatchObject({ runtime_epoch: 1, saved_revision: 2 });
+    expect(offline.getCurrentRecovery()).toBeNull();
+    expect(offline.getPublicationRecoveryBarrier()).toBeNull();
+    expect(offline.getCurrentOperationState()).toBeNull();
+    expect(offline.getOperationState('recovery-source')).toEqual(oldOperation);
+    expect(offline.claimPublicationTarget(OTHER_CATALOG, CREATED_AT + 6)).toBeNull();
+    expect(offline.getSnapshot()).toMatchObject({ revision: 2, content_hash: hashConfigurationContent(VALUE) });
+    expect(offline.getRecovery(originalRecovery.recovery_id)).toEqual(running);
+    expect(offline.createManualRecovery(originalRecovery.recovery_id, 'recovery-source', 2, CREATED_AT + 6)).toEqual(running);
+    expect(() => offline.claimRecoveryAttempt(originalRecovery.recovery_id, 0, CREATED_AT + 6)).toThrow(ConfigRepositoryError);
+    expect(offline.createManualRecovery(uuid('2101'), 'recovery-source', 2, CREATED_AT + 6)).toMatchObject({ state: 'scheduled' });
+    offline.verify();
+  });
+
   test('blocks a new claim while an older batch retirement is unresolved', () => {
     // Given
     const { repository } = open();

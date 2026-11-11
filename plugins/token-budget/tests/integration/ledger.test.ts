@@ -5,6 +5,7 @@ import {mkdtempSync,rmSync} from 'node:fs';import {tmpdir} from 'node:os';import
 import {PLUGIN_DURABLE_STATE_SCHEMA_SQL,PluginDurableStateStore} from '../../../../packages/core/src/plugin-durable-state';
 import {setPolicy,publication,readKey,readUsage,stateRpc,recoverPending} from '../../server/ledger';
 import {createIngress} from '../../server/policy';
+import {createControl} from '../../server/control';
 const dbs:Database[]=[];const dirs:string[]=[];afterEach(()=>{for(const db of dbs.splice(0))try{db.close()}catch{};for(const dir of dirs.splice(0))rmSync(dir,{recursive:true,force:true});});
 function setup(path=':memory:'){const db=new Database(path);dbs.push(db);db.exec(PLUGIN_DURABLE_STATE_SCHEMA_SQL);return {db,state:new PluginDurableStateStore(db).forNamespace('token-budget')};}
 const principal={domain:'data' as const,keyId:'k',credentialVersion:1};
@@ -40,4 +41,23 @@ test('actual SQLite reopen retains pending/history and blocks until recovery set
  const dir=mkdtempSync(join(tmpdir(),'budget-'));dirs.push(dir);const path=join(dir,'state.db');const {db,state}=setup(path);(await setPolicy(state,'k',{mode:'monthly',limit:10}));const snapshot=createIngress().plan(target,(await publication(state)).value,null).snapshot!;(await stateRpc('prepare',{snapshot},{state,...target}));db.close();
  const reopened=new Database(path);dbs.push(reopened);const recovered=new PluginDurableStateStore(reopened).forNamespace('token-budget');(await recoverPending(recovered));expect(createIngress().plan({...target,now:Date.UTC(2026,1,1)},(await publication(recovered)).value,null).denial?.status).toBe(503);
  (await stateRpc('settle',{result:result(1,2,'official')},{state:recovered,...target}));expect((await readKey(recovered,'k')).cumulative).toBe(3);expect((await readKey(recovered,'k')).unresolved).toEqual({});
+});
+
+test('candidate control prepares conservative admission without changing pending durable attempts', async () => {
+ const {state}=setup();
+ await setPolicy(state,'k',{mode:'monthly',limit:10});
+ const snapshot=createIngress().plan(target,(await publication(state)).value,null).snapshot!;
+ await stateRpc('prepare',{snapshot},{state,...target});
+ const before=await state.list();
+ let activate!:()=>void|Promise<void>;
+ const control=createControl({signal:new AbortController().signal,durableState:state,
+  afterActivation:effect=>{activate=effect;},publishPolicy:async()=>{}} as any);
+ try {
+  await control.start();
+  expect(await state.list()).toEqual(before);
+  expect(createIngress().plan(target,control.policy!().value,null).denial?.status).toBe(503);
+  await activate();
+  expect(await state.list()).not.toEqual(before);
+  expect((await readUsage(state,'k')).attempts[0]?.status).toBe('unknown');
+ } finally { await control.dispose(); }
 });

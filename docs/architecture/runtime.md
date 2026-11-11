@@ -21,14 +21,16 @@ HTTP bodies are opaque streams by default. Worker rules, explicit plugin require
 
 ## Revision Publication
 
-1. The control API commits a complete aggregate to `data/bungee.db` using `expected_revision` and acknowledges durable storage without waiting for publication.
-2. The single publication owner claims the latest saved target and freezes its snapshot identity independently of later saves.
-3. The master starts replacement workers with the exact revision, content hash, plugin catalog hash, and plugin activation names. Each worker compiles the snapshot and ACKs its private port and validated hashes.
-4. Before admission preparation, a newer saved target can cancel an obsolete candidate. Confirmed exit and required cleanup must precede creation of its replacement. Cancellation and permission to begin admission preparation are mutually exclusive.
-5. Once admission preparation begins, the attempt follows its original switching and recovery protocol. The master switches admission only after all replacement ACKs match.
-6. Old workers drain; exact exit evidence and retirement release complete the attempt. Only then can another candidate batch start.
+1. An online configuration write enters the publication queue. The master starts replacement workers with the prospective revision, content hash, plugin catalog hash and activation set. Each worker compiles the snapshot and acknowledges its private port and validated hashes.
+2. Ingress prepares the exact candidate cohort and its policy while the previous admission continues serving. The master rechecks the write authorization and signed ingress membership before saving.
+3. The configuration storage Worker compares `expected_revision` and commits the aggregate, the exact candidate's publication ownership, and its retirement authority in one transaction. The master acknowledges the durable save.
+4. The master instructs ingress to activate the prepared workers and policy together. Old workers drain within the publication policy. Exact exit evidence and retirement release free capacity for the next candidate.
 
-Saving, applying and serving are separate facts. Unclaimed targets may be superseded without application; cancelled candidates retain their operation identity and audit record. Neither durable storage nor a superseded outcome proves that a revision served traffic. Late results cannot transfer authority between attempts.
+If preparation fails or storage rejects the write, the master aborts the candidate admission and shuts down the candidate workers. An unknown storage result requires authoritative evidence for the original operation and candidate before the master can authorize cutover. Durable storage and verified ingress admission remain separate facts.
+
+The master serializes ingress preparation, the durable write and cutover with admission-policy publication and settlement. Ingress reconciles live keyed state before acknowledging prepare. During preparation, old ingress requests continue to update their active state and mirror compatible updates into the prepared state. A request whose keyed update the candidate cannot represent receives a temporary admission failure before either state is debited. Cutover activates the already reconciled state. Rate-limit policy changes begin accruing credit when ingress switches.
+
+The same publication queue handles revisions already saved by startup maintenance, offline tools and recovery. Unclaimed saved targets may be superseded without application. Once a claimed operation starts admission preparation, recovery follows its frozen identity and retirement authority.
 
 Normal updates allow at most the serving batch plus one candidate or draining batch: `2N` workers for a configured count of `N`, excluding the master and ingress. There is no third prewarming batch during drain. Unconfirmed exits continue to occupy capacity, including after master recovery.
 
@@ -44,7 +46,7 @@ For previously admitted startup launches without a publication allocation, recov
 
 For a cancelled owner that has not begun admission preparation, the existing serial recovery scheduler rechecks late exit and cleanup evidence with capped backoff, including after master restart. These observations do not initialize workers or consume initialization-recovery attempts. Stopped safety-unknown barriers remain closed.
 
-Failure before the admission switch keeps the previous admitted set. After a switch may have been sent, recovery must establish the actual serving identity rather than assume rollback. Missing exit or release evidence blocks another publication, not an otherwise authorized configuration save. If an admitted worker later exits, supervision republishes using validated survivors and spawns only missing slots.
+Failure before the admission switch keeps the previous admitted set. After the master may have sent a switch, recovery checks which cohort ingress serves. Missing exit or release evidence blocks another online configuration publication and save. If an admitted worker later exits, supervision republishes using validated survivors and spawns only missing slots.
 
 ## Configuration Truth
 

@@ -37,19 +37,30 @@ export class KeyedAdmissionState {
       this.entries.set(key, entry); this.heap.push(entry); this.repair(entry.index);
     }
   }
-  sweep(now: number, limit = 256): number {
+  delete(key: string): void {
+    const entry = this.entries.get(key);
+    if (!entry) return;
+    const last = this.heap.pop()!;
+    this.entries.delete(key);
+    if (last === entry) return;
+    this.heap[entry.index] = last;
+    last.index = entry.index;
+    this.repair(entry.index);
+  }
+  sweep(now: number, limit = 256, removedKey?: (key: string) => void): number {
     let removed = 0;
     while (removed < limit && this.heap.length && this.heap[0]!.expires <= now) {
-      const first = this.heap[0]!, last = this.heap.pop()!;
-      this.entries.delete(first.key);
-      if (this.heap.length) { this.heap[0] = last; last.index = 0; this.repair(0); }
+      const first = this.heap[0]!;
+      this.delete(first.key);
+      removedKey?.(first.key);
       removed++;
     }
     return removed;
   }
   /** Rebuild off the request path; callers swap only after every publication validates. */
-  reconcile(transform: (key: string, value: DurableJson) => {value: DurableJson; expires: number}, now = -Infinity): KeyedAdmissionState {
-    const next = new KeyedAdmissionState(this.capacity);
+  reconcile(transform: (key: string, value: DurableJson) => {value: DurableJson; expires: number}, now = -Infinity,
+    capacity = this.capacity): KeyedAdmissionState {
+    const next = new KeyedAdmissionState(capacity);
     for (const entry of this.entries.values()) {
       if (entry.expires <= now) continue;
       const result = transform(entry.key, structuredClone(entry.value));

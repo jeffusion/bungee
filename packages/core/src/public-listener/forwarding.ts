@@ -13,6 +13,7 @@ export interface AdmittedWorkerSelector {
   subscribeWebSocketMessagePolicy?(listener: (maxMessageBytes: number) => void): () => void;
   acquire(): {
     readonly worker: Pick<ServingConfigWorker, 'private_port'> | null;
+    readonly retirementSignal?: AbortSignal;
     release(): void;
   };
 }
@@ -69,6 +70,8 @@ async function forwardToSelectedWorker(
   }
   const method = request.method.toUpperCase();
   const startedAt = performance.now();
+  const signal = lease.retirementSignal === undefined ? request.signal
+    : AbortSignal.any([request.signal, lease.retirementSignal]);
   try {
     const originalUrl = new URL(request.url);
     const privateUrl = `http://127.0.0.1:${worker.private_port}${originalUrl.pathname}${originalUrl.search}`;
@@ -76,7 +79,7 @@ async function forwardToSelectedWorker(
       method: request.method,
       headers: privateRequestHeaders(request, options.transportSecret, trustedPeer, identity),
       body: method === 'GET' || method === 'HEAD' ? null : request.body,
-      signal: request.signal,
+      signal,
       redirect: 'manual',
       maxRedirects: 0,
       decompress: false,
@@ -90,7 +93,8 @@ async function forwardToSelectedWorker(
       headers: publicResponseHeaders(response.headers),
     });
   } catch {
-    const errorCode = request.signal.aborted ? 'client_closed_request' : 'bad_gateway';
+    const status = request.signal.aborted ? 499 : lease.retirementSignal?.aborted ? 503 : 502;
+    const errorCode = status === 499 ? 'client_closed_request' : status === 503 ? 'service_unavailable' : 'bad_gateway';
     try {
       logger.warn({ ingressForwarding: {
         phase: 'private_response_headers',
@@ -99,10 +103,9 @@ async function forwardToSelectedWorker(
         elapsed_ms: Math.max(0, Math.round(performance.now() - startedAt)),
       } }, 'Ingress private request forwarding failed');
     } catch { /* diagnostics must not alter the controlled proxy response */ }
-    return errorResponse(request.signal.aborted ? 499 : 502);
+    return errorResponse(status);
   } finally {
-    // Release at response headers: the worker has accepted the request, while its body may
-    // continue streaming during the subsequent graceful drain.
+    // The handoff tracks acceptance at the response headers. The signal still owns the body.
     lease.release();
   }
 }

@@ -7,8 +7,9 @@ import { readAllOperations, readAllWorkers } from './operation-store';
 import { requireSafeInteger } from './persisted-validation';
 import { ConfigRepositoryError } from './repository-types';
 import { validateDigest } from './repository-validation';
-import { sqliteAll } from './sqlite-query';
+import { sqliteAll, sqliteGet } from './sqlite-query';
 import { validateOperationRelations } from './operation-relations';
+import { auditRuntimeCutovers } from './runtime-cutover';
 
 type StateRow = {
   readonly id: number; readonly active_revision: number; readonly schema_version: number;
@@ -42,6 +43,7 @@ export function auditConfigurationTables(db: Database): AuditedConfigurationStat
   requireSafeInteger(state.active_revision, 'configuration_state.active_revision', 1);
   requireSafeInteger(state.created_at, 'configuration_state.created_at');
   requireSafeInteger(state.updated_at, 'configuration_state.updated_at', state.created_at);
+  auditRuntimeCutovers(db, state.active_revision);
   const revisions = sqliteAll<RevisionRow, []>(db, `SELECT revision,content_hash,kind,created_at
     FROM configuration_revisions ORDER BY revision`);
   if (revisions.length !== state.active_revision) {
@@ -82,14 +84,13 @@ export function auditConfigurationTables(db: Database): AuditedConfigurationStat
     }
     workersByMutation.set(worker.mutation_id, [...(workersByMutation.get(worker.mutation_id) ?? []), worker]);
   }
-  let owner: ConfigurationOperation | undefined;
+  if (sqliteGet<{ runtime_epoch: number }, []>(db, `SELECT runtime_epoch FROM configuration_operations
+    WHERE state IN ('committed','publishing','draining') GROUP BY runtime_epoch HAVING count(*)>1`) !== null) {
+    throw new ConfigRepositoryError('schema_corrupt', 'multiple publication owners exist for one runtime epoch');
+  }
   for (const operation of operations) {
     const workers = workersByMutation.get(operation.mutation_id) ?? [];
     validateOperationRelations(operation, workers);
-    if (operation.state === 'committed' || operation.state === 'publishing' || operation.state === 'draining') {
-      if (owner !== undefined) throw new ConfigRepositoryError('schema_corrupt', 'multiple publication owners exist');
-      owner = operation;
-    }
     if (operation.state === 'superseded' && operation.committed_revision === state.active_revision) {
       throw new ConfigRepositoryError('schema_corrupt', 'the latest revision cannot be superseded');
     }

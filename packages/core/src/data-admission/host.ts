@@ -24,7 +24,11 @@ export interface AdmissionGrant {
   readonly version: number;
   readonly snapshots: Readonly<Record<string, DurableJson>>;
 }
-interface PluginRuntime { publication: AdmissionPluginPublication; plugin: IngressPlugin; state: DurableJson; keyed?: KeyedAdmissionState }
+interface PluginRuntime { publication: AdmissionPluginPublication; plugin: IngressPlugin; state: DurableJson; keyed?: KeyedAdmissionState; activatedAt?: number }
+export interface PreparedDataAdmission { commit(): () => void; abort(): void }
+export type CandidateDataAdmission = Pick<DataAdmissionPublication, 'plugins'> & {
+  readonly routeRequirements: NonNullable<DataAdmissionPublication['routeRequirements']>;
+};
 interface StoredGrant { entryRouteId?: string; routeId: string; sourcePrincipal: DataPrincipal; worker: string; grant: AdmissionGrant; plugins: readonly PluginRuntime[]; expires: number | null }
 function workerKey(worker: RateLimitWorkerIdentity): string {
   return JSON.stringify([worker.master_generation, worker.process_instance_id, worker.boot_nonce, worker.worker_slot]);
@@ -43,6 +47,7 @@ export class DataAdmissionHost {
   private version = 0;
   private routeRequirements: readonly AdmissionRequirement[] = [];
   private plugins: readonly PluginRuntime[] = [];
+  private preparing: ReadonlyMap<PluginRuntime, PluginRuntime> | null = null;
   private grants = new Map<string, StoredGrant>();
   private publication: string | null = null;
   private previews = new Map<string, { target: AdmissionTarget; worker: string; version: number; expires: number }>();
@@ -55,45 +60,106 @@ export class DataAdmissionHost {
     loadPlugin?(entry: string): Promise<{ createIngress(): IngressPlugin }>;
     clock?(): number;
   }) {}
-  async publish(input: DataAdmissionPublication): Promise<{ version: number }> {
+  async publish(input: DataAdmissionPublication, assertAuthority?: () => void): Promise<{ version: number }> {
+    if (!this.disposed && input.version === this.version && JSON.stringify(input) === this.publication) {
+      assertAuthority?.();
+      return this.status();
+    }
+    const prepared = await this.preparePublication(input, false, assertAuthority);
+    assertAuthority?.();
+    prepared.commit()();
+    return this.status();
+  }
+  async preparePublication(input: DataAdmissionPublication, candidate: boolean, assertAuthority?: () => void,
+    preparedCatalogHash?: string): Promise<PreparedDataAdmission> {
     if (this.disposed) throw new Error('admission host disposed');
+    if (this.preparing !== null) throw new Error('candidate admission policy is already prepared');
     if (!Number.isSafeInteger(input.version) || input.version < 1 || !Array.isArray(input.plugins)) throw new Error('invalid admission publication');
+    if (candidate && input.unblock !== undefined) throw new Error('candidate policy cannot unblock admission scopes');
     const serialized = JSON.stringify(input);
     if (serialized.length > 1_048_576) throw new Error('admission publication too large');
-    if (input.version === this.version && serialized === this.publication) return this.status();
     if (input.version <= this.version) throw new Error('stale admission publication');
+    input = structuredClone(input);
+    const previousVersion = this.version;
+    const catalogHash = preparedCatalogHash ?? this.options.catalogHash(input.admissionSequence);
+    const assertCurrent = (checkCatalog = true) => {
+      if (this.disposed) throw new Error('admission host disposed');
+      if ((candidate && previousVersion !== this.version) || input.version <= this.version) throw new Error('stale admission publication');
+      if (checkCatalog && catalogHash !== this.options.catalogHash(input.admissionSequence)) throw new Error('admission plugin catalog changed');
+    };
     const names = new Set<string>();
-    const plugins: PluginRuntime[] = [];
+    const loaded: PluginRuntime[] = [];
     for (const publication of input.plugins) {
-      if (!publication.name || names.has(publication.name) || publication.catalogHash !== this.options.catalogHash(input.admissionSequence)
+      if (!publication.name || names.has(publication.name) || publication.catalogHash !== catalogHash
         || !publication.entry || publication.entry.includes('\0')) throw new Error('invalid admission plugin catalog evidence');
       names.add(publication.name);
       const module = await (this.options.loadPlugin ?? (entry => import(entry)))(publication.entry);
+      assertAuthority?.();
+      assertCurrent(preparedCatalogHash === undefined);
       if (typeof module.createIngress !== 'function') throw new Error('ingress plugin must export createIngress');
       const plugin = module.createIngress();
       if (typeof plugin.plan !== 'function' || typeof plugin.bodyRequirements !== 'function') throw new Error('invalid ingress plugin');
-      const previous = this.plugins.find(p => p.publication.name === publication.name && p.publication.entry === publication.entry);
-      plugins.push({ publication: plugin.keyedState ? freezeJson(structuredClone(publication)) : structuredClone(publication), plugin, state: previous?.state ?? null,
-        ...(plugin.keyedState ? {keyed: previous?.keyed ?? new KeyedAdmissionState(plugin.keyedState.capacity)} : {}) });
+      loaded.push({ publication: plugin.keyedState ? freezeJson(publication) : publication, plugin, state: null,
+        ...(plugin.keyedState ? {keyed: new KeyedAdmissionState(plugin.keyedState.capacity)} : {}) });
     }
-    const requirements = input.routeRequirements ?? this.routeRequirements;
-    if (!Array.isArray(requirements) || requirements.some(r => !r.plugin || !Array.isArray(r.routeIds)
-      || r.routeIds.some((id: unknown) => typeof id !== 'string' || !id || id.length > 256))) throw new Error('invalid admission requirements');
-    // Loading may yield, so shutdown and a newer publication must win.
-    if (this.disposed) throw new Error('admission host disposed');
-    if (input.version <= this.version) throw new Error('stale admission publication');
+    const requirements = input.routeRequirements;
+    if (requirements !== undefined && (!Array.isArray(requirements) || requirements.some(r => !r.plugin || !Array.isArray(r.routeIds)
+      || r.routeIds.some((id: unknown) => typeof id !== 'string' || !id || id.length > 256)))) throw new Error('invalid admission requirements');
+    assertCurrent(preparedCatalogHash === undefined);
+    if (preparedCatalogHash === undefined) return {
+      commit: () => {
+        assertCurrent();
+        if (this.preparing !== null) throw new Error('candidate admission policy is already prepared');
+        const plugins = this.reconcile(loaded);
+        return () => this.activate(input, plugins, serialized, candidate);
+      },
+      abort() {},
+    };
+    if (this.preparing !== null) throw new Error('candidate admission policy is already prepared');
+    const mirrored = new Map<PluginRuntime, PluginRuntime>();
+    const plugins = this.reconcile(loaded, mirrored);
+    this.preparing = mirrored;
+    const abort = () => { if (this.preparing === mirrored) this.preparing = null; };
+    return {
+      commit: () => {
+        assertCurrent();
+        if (this.preparing !== mirrored) throw new Error('candidate admission policy was aborted');
+        return () => {
+          const now = this.now();
+          for (const runtime of mirrored.keys()) this.sweepRuntime(runtime, now, runtime.keyed?.capacity);
+          abort();
+          this.activate(input, plugins, serialized, candidate);
+        };
+      },
+      abort,
+    };
+  }
+  private reconcileKey(runtime: PluginRuntime, previous: PluginRuntime, key: string, state: DurableJson, now: number,
+    deferUntilActivation: boolean): {value: DurableJson; expires: number} {
+    const adapter = runtime.plugin.keyedState!;
+    const value = structuredClone(adapter.reconcile(state, structuredClone(adapter.policyForKey(runtime.publication.policy, key)), now,
+      { previousActivation: previous.activatedAt!, deferUntilActivation }));
+    return {value, expires: adapter.expiresAt(structuredClone(value))};
+  }
+  private reconcile(loaded: readonly PluginRuntime[], mirror?: Map<PluginRuntime, PluginRuntime>): readonly PluginRuntime[] {
     const now = this.now();
-    for (const runtime of plugins) if (runtime.keyed && runtime.plugin.keyedState) {
-      const adapter = runtime.plugin.keyedState;
-      runtime.keyed = runtime.keyed.reconcile((key, state) => {
-        const value = adapter.reconcile(state, structuredClone(adapter.policyForKey(runtime.publication.policy, key)), now);
-        return {value, expires: adapter.expiresAt(value)};
-      }, now);
-      runtime.keyed.sweep(now, runtime.keyed.capacity);
-    }
+    return loaded.map(runtime => {
+      const previous = this.plugins.find(p => p.publication.name === runtime.publication.name && p.publication.entry === runtime.publication.entry);
+      const next = runtime.keyed
+        ? { ...runtime, keyed: previous?.keyed?.reconcile((key, state) =>
+          this.reconcileKey(runtime, previous, key, state, now, mirror !== undefined), now, runtime.keyed.capacity) ?? runtime.keyed }
+        : { ...runtime, state: previous?.state ?? null };
+      next.keyed?.sweep(now, next.keyed.capacity);
+      if (previous && !!previous.keyed === !!next.keyed) mirror?.set(previous, next);
+      return next;
+    });
+  }
+  private activate(input: DataAdmissionPublication, plugins: readonly PluginRuntime[], serialized: string, candidate: boolean): void {
     this.publicationAdmissionSequence = input.admissionSequence;
-    this.routeRequirements = structuredClone(requirements);
+    this.routeRequirements = input.routeRequirements ?? this.routeRequirements;
     // In-flight grants need plugin hooks and snapshots, never the mutable bucket store.
+    const activatedAt = this.now();
+    for (const runtime of plugins) runtime.activatedAt = activatedAt;
     this.plugins = plugins;
     if (plugins.some(runtime => runtime.keyed) && !this.cleanupTimer) {
       this.cleanupTimer = setInterval(() => this.sweepKeyedState(), 1000);
@@ -102,13 +168,17 @@ export class DataAdmissionHost {
       clearInterval(this.cleanupTimer); this.cleanupTimer = null;
     }
     this.version = input.version;
-    this.blocked = false;
+    if (!candidate) this.blocked = false;
     for (const scope of input.unblock ?? []) this.blockedScopes.delete(JSON.stringify([scope.plugin, scope.keyId]));
     this.publication = serialized;
-    return this.status();
   }
-  sweepKeyedState(): void { for (const runtime of this.plugins) runtime.keyed?.sweep(this.now()); }
-  dispose(): void { this.disposed = true; this.blocked = true; if (this.cleanupTimer) clearInterval(this.cleanupTimer); this.cleanupTimer = null; this.plugins = []; this.grants.clear(); this.previews.clear(); }
+  private sweepRuntime(runtime: PluginRuntime, now: number, limit?: number): void {
+    const staged = this.preparing?.get(runtime)?.keyed;
+    runtime.keyed?.sweep(now, limit, key => staged?.delete(key));
+    staged?.sweep(now, limit);
+  }
+  sweepKeyedState(): void { for (const runtime of this.plugins) this.sweepRuntime(runtime, this.now()); }
+  dispose(): void { this.disposed = true; this.blocked = true; if (this.cleanupTimer) clearInterval(this.cleanupTimer); this.cleanupTimer = null; this.plugins = []; this.preparing = null; this.grants.clear(); this.previews.clear(); }
   freeze(): void { this.blocked = true; }
   freezePluginKey(plugin: string, keyId: string): void {
     if (!plugin || !keyId || plugin.length > 128 || keyId.length > 128) throw new Error('invalid admission scope');
@@ -206,7 +276,7 @@ export class DataAdmissionHost {
       const key = nowTarget.principal.keyId;
       const plan = runtime.plugin.plan(adapter ? {...nowTarget, now: this.now()} : nowTarget,
         structuredClone(adapter ? adapter.policyForKey(runtime.publication.policy, key) : runtime.publication.policy),
-        structuredClone(runtime.keyed ? runtime.keyed.get(key) : runtime.state));
+        structuredClone(runtime.keyed ? runtime.keyed.get(key) : runtime.state), runtime.activatedAt);
       if (this.blockedScopes.has(JSON.stringify([runtime.publication.name, nowTarget.principal.keyId])) && plan.snapshot != null) {
         throw new DataAdmissionError(503, 'plugin_state_unavailable');
       }
@@ -215,7 +285,7 @@ export class DataAdmissionHost {
       const expires = state !== undefined && adapter ? adapter.expiresAt(state) : undefined;
       if (expires !== undefined && !Number.isFinite(expires)) throw new DataAdmissionError(503, 'plugin_state_unavailable');
       if (state !== undefined && runtime.keyed && !runtime.keyed.hasRoom(key)) {
-        runtime.keyed.sweep(this.now(), runtime.keyed.capacity);
+        this.sweepRuntime(runtime, this.now(), runtime.keyed.capacity);
         if (!runtime.keyed.hasRoom(key)) throw new DataAdmissionError(503, 'admission_key_capacity');
       }
       staged.push({ runtime, state, expires, snapshot: structuredClone(plan.snapshot ?? null) });
@@ -229,10 +299,30 @@ export class DataAdmissionHost {
       return grant;
     }
     if (this.grants.size >= 100000) throw new DataAdmissionError(503, 'admission_capacity');
+    const mirrored: { runtime: PluginRuntime; value: DurableJson; expires?: number }[] = [];
+    const key = nowTarget.principal.keyId;
+    for (const plan of staged) {
+      const next = this.preparing?.get(plan.runtime);
+      if (!next || plan.state === undefined) continue;
+      if (!next.keyed) { mirrored.push({ runtime: next, value: plan.state }); continue; }
+      try {
+        const now = this.now();
+        const {value, expires} = this.reconcileKey(next, plan.runtime, key, structuredClone(plan.state), now, true);
+        if (!next.keyed.hasRoom(key)) next.keyed.sweep(now, next.keyed.capacity);
+        if (!Number.isFinite(expires) || !next.keyed.hasRoom(key)) throw new Error('candidate keyed state is unavailable');
+        mirrored.push({ runtime: next, value, expires });
+      } catch {
+        throw new DataAdmissionError(503, 'admission_policy_preparing');
+      }
+    }
     // No awaits between the last policy check and these writes.
     for (const plan of staged) if (plan.state !== undefined) {
       if (plan.runtime.keyed) plan.runtime.keyed.set(nowTarget.principal.keyId, plan.state, plan.expires!);
       else plan.runtime.state = plan.state;
+    }
+    for (const plan of mirrored) {
+      if (plan.runtime.keyed) plan.runtime.keyed.set(key, plan.value, plan.expires!);
+      else plan.runtime.state = plan.value;
     }
     this.previews.delete(target.requestId);
     this.grants.set(target.requestId, { entryRouteId:target.entryRouteId, routeId: target.routeId, sourcePrincipal: structuredClone(target.principal), worker: workerKey(worker), grant, plugins: this.plugins.map(runtime => ({publication: runtime.publication, plugin: runtime.plugin, state: null})), expires: null });

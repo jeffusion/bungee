@@ -68,6 +68,20 @@ function manager(storage: MemoryStorage, fetchImpl: typeof fetch, store = snapsh
 }
 const okFetch = (catalog: unknown): typeof fetch => Object.assign(async () => Response.json(catalog), { preconnect: () => {} });
 
+test('catalog preparation restores its current view without scheduling network refresh', async () => {
+  let scheduled = 0;
+  const storage = new MemoryStorage();
+  const instance = new ModelsDevCatalogManager(storage, { current: async () => null, publish: async () => undefined },
+    { schedule: () => { scheduled++; return 0 as any; }, cancel() {}, fetch: async () => { throw new Error('unexpected network'); } });
+  try {
+    await instance.start(false);
+    expect(scheduled).toBe(0);
+    await instance.start();
+    await instance.start();
+    expect(scheduled).toBe(1);
+  } finally { await instance.stop(); }
+});
+
 describe('models-dev authoritative snapshot', () => {
   test('the production async store restores and publishes only after the database commit', async () => {
     const client = await PluginStateClient.open(':memory:', { initialize: true });

@@ -613,6 +613,7 @@ export type ControlPeerSession = Readonly<{
   readonly activatedPlugins: readonly string[];
   /** The peer's pinned first start target, or `null` when it never accepted one. */
   readonly configurationTarget: ControlPeerConfigurationTarget | null;
+  readonly isProspective?: () => boolean;
   /**
    * Real per-process exit subscription (the physical child-exit notification).
    * A factory-level retirement/cleanup notification is NOT an exit proof and
@@ -668,6 +669,7 @@ type ControlPeerRecord = {
   /** Plugins activated by this peer's own exact serving snapshot. */
   readonly activatedPlugins: ReadonlySet<string>;
   readonly configurationTarget: ControlPeerConfigurationTarget | null;
+  readonly isProspective?: () => boolean;
   /**
    * Real publication directory learned from this peer's own host over the peer
    * link. Routing only ever uses entries from here — never a manifest
@@ -746,7 +748,7 @@ export class ControlPeerBroker {
   #resolveChannelRoute(target: PluginChannelTarget, lane: PluginChannelLane): PluginChannelRouteResolution {
     const key = channelRouteKey(target);
     const matches = [...this.#peers.values()].filter((record) => {
-      if (record.stopped || record.retiring) return false;
+      if (record.stopped || record.retiring || record.isProspective?.()) return false;
       const entry = record.channelDirectory.get(key);
       return entry !== undefined && entry.ready && entry.kind === lane;
     });
@@ -775,7 +777,7 @@ export class ControlPeerBroker {
     }
     if (input.providerProcess !== 'control' || input.link === null) return false;
     const record = [...this.#peers.values()].find(candidate => candidate.link === input.link);
-    if (record === undefined || record.stopped) return false;
+    if (record === undefined || record.stopped || (record.isProspective?.() && input.lane !== 'snapshot')) return false;
     // A retiring peer stops NEW channel work but its already-accepted transfers,
     // subscriptions and snapshot sessions keep their exact continuation frames.
     if (record.retiring && !input.continuation) return false;
@@ -846,7 +848,7 @@ export class ControlPeerBroker {
    */
   #candidates(key: string, provider: string): ControlPeerRecord[] {
     return [...this.#peers.values()].filter(record =>
-      !record.stopped && !record.retiring && this.#readyEntry(record, key, provider) !== null);
+      !record.stopped && !record.retiring && !record.isProspective?.() && this.#readyEntry(record, key, provider) !== null);
   }
 
   #reconcileAll(): void {
@@ -1029,6 +1031,7 @@ export class ControlPeerBroker {
       routes: new Map(),
       activatedPlugins: new Set(session.activatedPlugins),
       configurationTarget: session.configurationTarget,
+      isProspective: session.isProspective,
       directory: new Map(),
       directoryRevision: null,
       directoryLoaded: false,
@@ -1137,6 +1140,7 @@ export class ControlPeerBroker {
       }
       if (isHostDirectoryQuery(metadata)) return directoryExecution(this.#options.services, 'control', request.input);
       if (isHostChannelDirectoryQuery(metadata)) return channelDirectoryExecution(this.channels, request.input);
+      if (record.isProspective?.() && (metadata.purpose !== 'bootstrap' || metadata.operationId !== null)) return null;
       if (metadata.caller.scope !== 'global' || metadata.caller.subject.includes('@') || metadata.host !== null || record.retiring) return null;
       return this.#invokeIncoming(record, metadata, request, metadata.caller.subject, 'global');
     }

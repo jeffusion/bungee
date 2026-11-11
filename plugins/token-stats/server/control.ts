@@ -275,7 +275,7 @@ export function createControl(context: ControlHostContext): PluginControl {
   return new TokenStatsControl(context);
 }
 
-export default { createControl } satisfies ControlPlugin;
+export default { supportsOnlinePreparation: true, createControl } satisfies ControlPlugin;
 
 
 /** Trusted catalog adapter. Host invokes this export only inside its access-storage Worker. */

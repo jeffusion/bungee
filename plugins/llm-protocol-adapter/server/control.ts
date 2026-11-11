@@ -8,8 +8,12 @@ export function createControl(host: ControlHostContext): PluginControl {
     const catalog = host.services!.consume<ModelsDevCapabilitiesService>('models-dev', MODELS_DEV_CAPABILITIES_SERVICE_ID, MODELS_DEV_CAPABILITIES_CONTRACT_VERSION);
     const conversion = conversionService(catalog, false);
     host.services!.publish(CONVERSION_SERVICE_ID, CONVERSION_VERSION, conversion);
-    const history = new HistoryTransport(), timer = setInterval(() => history.sweep(), 30000);
-    timer.unref?.();
+    const history = new HistoryTransport();
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const sweepHistory = () => {
+        timer = setInterval(() => history.sweep(), 30000);
+        timer.unref?.();
+    };
     const dispose = () => { clearInterval(timer); history.clear(); conversion.dispose(); };
     host.signal.addEventListener('abort', dispose, { once: true });
     host.services!.rpc!.publish(historyRpc, { get: input => history.get(input), put: input => { try {
@@ -20,6 +24,6 @@ export function createControl(host: ControlHostContext): PluginControl {
             logger.error({ code, index: input.index, total: input.total }, 'llm_adapter_history_rejected');
             throw error;
         } } });
-    return { api: [], rpc: [], start() { }, async dispose() { dispose(); } };
+    return { api: [], rpc: [], start() { if (host.afterActivation) host.afterActivation(sweepHistory); else sweepHistory(); }, async dispose() { dispose(); } };
 }
-export default { createControl } satisfies ControlPlugin;
+export default { supportsOnlinePreparation: true, createControl } satisfies ControlPlugin;

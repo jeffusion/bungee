@@ -1,4 +1,5 @@
 import type { Database } from 'bun:sqlite';
+import { CURRENT_RUNTIME_EPOCH } from './runtime-cutover';
 import type {
   ConfigurationRecovery,
   ConfigurationRecoveryReasonCode,
@@ -154,6 +155,13 @@ export function readRecovery(db: Database, recoveryId: string): ConfigurationRec
   return row === null ? null : recoveryFromRow(row);
 }
 
+function requireCurrentRecovery(db: Database, recoveryId: string): ConfigurationRecovery {
+  const row = sqliteGet<RecoveryRow, [string]>(db, `${RECOVERY_SELECT} WHERE recovery_id=?
+    AND runtime_epoch=${CURRENT_RUNTIME_EPOCH}`, recoveryId);
+  if (row === null) invalid('recovery does not belong to the current runtime');
+  return recoveryFromRow(row);
+}
+
 function readRecoveryRows(db: Database, sql: string, ...params: (string | number)[]): ConfigurationRecovery[] {
   return sqliteAll<RecoveryRow, (string | number)[]>(db, sql, ...params).map(recoveryFromRow);
 }
@@ -171,6 +179,7 @@ export function readPublicationRecoveryBarrier(
   return readRecoveryRows(db, `${RECOVERY_SELECT}
     WHERE (state IN ('scheduled','running')
        OR (state='stopped' AND final_reason_code='safety_outcome_unknown'))${exclusion}
+    AND runtime_epoch=${CURRENT_RUNTIME_EPOCH}
     ORDER BY CASE WHEN state IN ('scheduled','running') THEN 0 ELSE 1 END,
       recovery_sequence DESC LIMIT 1`,
   ...(excludeRecoveryId === null ? [] : [excludeRecoveryId]))[0] ?? null;
@@ -184,6 +193,7 @@ export function readLatestRecovery(db: Database, targetRevision: number): Config
 /** The newest recovery attempt is authoritative, independent of how far saves advanced. */
 export function readCurrentRecovery(db: Database): ConfigurationRecovery | null {
   return readRecoveryRows(db, `${RECOVERY_SELECT}
+    WHERE runtime_epoch=${CURRENT_RUNTIME_EPOCH}
     ORDER BY CASE WHEN state IN ('scheduled','running') THEN 0 ELSE 1 END,
       recovery_sequence DESC LIMIT 1`)[0] ?? null;
 }
@@ -255,7 +265,7 @@ function requireSource(db: Database, sourceMutationId: string): { readonly commi
 function requireNoActivePublication(db: Database): void {
   const active = sqliteGet<{ readonly mutation_id: string }, []>(db,
     `SELECT mutation_id FROM configuration_operations
-     WHERE state IN ('committed','publishing','draining') LIMIT 1`);
+     WHERE state IN ('committed','publishing','draining') AND runtime_epoch=${CURRENT_RUNTIME_EPOCH} LIMIT 1`);
   if (active !== null) invalid('an active publication already exists');
 }
 
@@ -282,6 +292,7 @@ function insertRecovery(
     return existing;
   }
   const active = readRecoveryRows(db, `${RECOVERY_SELECT} WHERE target_revision=? AND state IN ('scheduled','running')
+    AND runtime_epoch=${CURRENT_RUNTIME_EPOCH}
     ORDER BY recovery_sequence DESC LIMIT 1`, targetRevision)[0];
   if (active !== undefined) {
     throw new ConfigRepositoryError('recovery_in_progress', 'target revision already has an active recovery', undefined, active);
@@ -305,8 +316,8 @@ function insertRecovery(
   if (initial.final_reason_detail !== null) requireDetail(initial.final_reason_detail);
   db.run(`INSERT INTO configuration_recoveries
     (recovery_id,source_mutation_id,target_revision,trigger,state,attempt_count,max_attempts,
-     next_retry_at,final_reason_code,final_reason_detail,created_at,updated_at)
-    VALUES (?,?,?, ?,?,0,6,?,?,?,?,?)`,
+     next_retry_at,final_reason_code,final_reason_detail,created_at,updated_at,runtime_epoch)
+    VALUES (?,?,?, ?,?,0,6,?,?,?,?,?,${CURRENT_RUNTIME_EPOCH})`,
   [recoveryId, sourceMutationId, targetRevision, trigger, initial.state, nextRetryAt,
     initial.final_reason_code, initial.final_reason_detail, now, now]);
   const created = readRecovery(db, recoveryId);
@@ -360,8 +371,7 @@ export function createManualRecovery(
 export function claimRecoveryAttempt(
   db: Database, recoveryId: string, previousAttemptCount: number, now: number,
 ): ConfigurationRecovery {
-  const recovery = readRecovery(db, recoveryId);
-  if (recovery === null) invalid('recovery was not found');
+  const recovery = requireCurrentRecovery(db, recoveryId);
   requireNoActivePublication(db);
   const barrier = readPublicationRecoveryBarrier(db, recoveryId);
   if (barrier !== null) {
@@ -393,8 +403,7 @@ export function claimRecoveryAttempt(
 export function scheduleRecoveryRetry(
   db: Database, recoveryId: string, attemptCount: number, nextRetryAt: number, now: number,
 ): ConfigurationRecovery {
-  const recovery = readRecovery(db, recoveryId);
-  if (recovery === null) invalid('recovery was not found');
+  const recovery = requireCurrentRecovery(db, recoveryId);
   requireAttempt(attemptCount);
   requireNow(nextRetryAt);
   if (recovery.state === 'scheduled' && recovery.attempt_count === attemptCount && recovery.next_retry_at === nextRetryAt) return recovery;
@@ -421,8 +430,7 @@ function terminalTransition(
   finalReasonDetail: string | null,
   now: number,
 ): ConfigurationRecovery {
-  const recovery = readRecovery(db, recoveryId);
-  if (recovery === null) invalid('recovery was not found');
+  const recovery = requireCurrentRecovery(db, recoveryId);
   requireAttempt(attemptCount);
   validateTerminalMatrix(state, attemptCount, finalReasonCode, invalid);
   requireDetail(finalReasonDetail);
@@ -461,8 +469,7 @@ export function stopRecovery(
 export function requeueRecovery(
   db: Database, recoveryId: string, attemptCount: number, now: number,
 ): ConfigurationRecovery {
-  const recovery = readRecovery(db, recoveryId);
-  if (recovery === null) invalid('recovery was not found');
+  const recovery = requireCurrentRecovery(db, recoveryId);
   requireAttempt(attemptCount);
   requireNow(now);
   if (attemptCount >= recovery.max_attempts) {
@@ -481,8 +488,8 @@ export function requeueRecovery(
 
 export function verifyRecoveryIntegrity(db: Database, _allowActiveRecoveryDrift = false): void {
   const rows = readRecoveryRows(db, `${RECOVERY_SELECT} ORDER BY recovery_sequence`);
-  const sequences = sqliteAll<{ readonly recovery_sequence: number; readonly created_at: number }, []>(db,
-    'SELECT recovery_sequence,created_at FROM configuration_recoveries ORDER BY recovery_sequence');
+  const sequences = sqliteAll<{ readonly recovery_sequence: number; readonly created_at: number; readonly runtime_epoch: number }, []>(db,
+    'SELECT recovery_sequence,created_at,runtime_epoch FROM configuration_recoveries ORDER BY recovery_sequence');
   if (sequences.length !== rows.length || sequences.some((row, index) => row.recovery_sequence !== index + 1) ||
       sequences.some((row, index) => index > 0 && row.created_at < sequences[index - 1]!.created_at)) {
     corrupt('configuration recovery sequences are not contiguous');
@@ -495,11 +502,11 @@ export function verifyRecoveryIntegrity(db: Database, _allowActiveRecoveryDrift 
     corrupt('configuration recovery sqlite sequence is incoherent');
   }
   // This detects accidental or host-code corruption, not a database owner with write access.
-  const activeByTarget = new Set<number>();
+  const activeByTarget = new Set<string>();
   const currentRevision = sqliteGet<{ readonly active_revision: number }, []>(db,
     'SELECT active_revision FROM configuration_state WHERE id=1')?.active_revision;
   if (currentRevision === undefined) corrupt('configuration state is missing for recovery audit');
-  for (const recovery of rows) {
+  for (const [index, recovery] of rows.entries()) {
     const source = sqliteGet<{
       readonly state: string; readonly error_code: string | null; readonly committed_revision: number;
     }, [string]>(db, 'SELECT state,error_code,committed_revision FROM configuration_operations WHERE mutation_id=?', recovery.source_mutation_id);
@@ -522,7 +529,8 @@ export function verifyRecoveryIntegrity(db: Database, _allowActiveRecoveryDrift 
     const target = sqliteGet<{ readonly revision: number }, [number]>(db,
       'SELECT revision FROM configuration_revisions WHERE revision=?', recovery.target_revision);
     if (target === null) corrupt('configuration recovery target revision is missing');
-    if ((recovery.state === 'scheduled' || recovery.state === 'running') && activeByTarget.has(recovery.target_revision)) {
+    const epochTarget = `${sequences[index]!.runtime_epoch}:${recovery.target_revision}`;
+    if ((recovery.state === 'scheduled' || recovery.state === 'running') && activeByTarget.has(epochTarget)) {
       corrupt('multiple active recoveries target one revision');
     }
     if (recovery.final_reason_code === 'revision_superseded' && recovery.target_revision >= currentRevision) {
@@ -532,6 +540,6 @@ export function verifyRecoveryIntegrity(db: Database, _allowActiveRecoveryDrift 
     if (recovery.target_revision > currentRevision) {
       corrupt('recovery target revision is newer than the active revision');
     }
-    if (recovery.state === 'scheduled' || recovery.state === 'running') activeByTarget.add(recovery.target_revision);
+    if (recovery.state === 'scheduled' || recovery.state === 'running') activeByTarget.add(epochTarget);
   }
 }

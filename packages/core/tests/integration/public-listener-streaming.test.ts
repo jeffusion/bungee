@@ -91,7 +91,7 @@ describe('public listener streaming and admission snapshots', () => {
     expect(releaseCount).toBe(1);
   });
 
-  test('real ingress signed control survives delayed headers and SSE beyond ten seconds while H expires', async () => {
+  test('real signed ingress cuts off pending headers and SSE at the retired admission deadline', async () => {
     const rootKey = new Uint8Array(32).fill(17);
     const instanceId = randomUUID();
     const processInstanceId = randomUUID();
@@ -106,6 +106,7 @@ describe('public listener streaming and admission snapshots', () => {
       supervisionPort: 0,
       acquireLock: async () => ({ path: 'test-ingress-handoff.lock', release: async () => undefined }),
     });
+    const replacementCommits: unknown[] = [];
     const controller = new MasterIngressController({
       rootKey,
       instanceId,
@@ -120,6 +121,22 @@ describe('public listener streaming and admission snapshots', () => {
       entry: 'unused-by-adopted-ingress',
       cwd: process.cwd(),
       leaseDurationMs: 30_000,
+      fetch: async (input, init) => {
+        if (new URL(input instanceof Request ? input.url : input).pathname === '/__supervision/command' && typeof init?.body === 'string') {
+          const request = JSON.parse(init.body);
+          if (request.message.path === '/commit' && request.body.admission?.revision === 2) {
+            replacementCommits.push(request.body);
+            if (replacementCommits.length === 1) throw new Error('commit transmission outcome unknown');
+            if (replacementCommits.length === 2) {
+              const response = await fetch(input, init);
+              expect(response.ok).toBeTrue();
+              await response.arrayBuffer();
+              throw new Error('commit acknowledgement lost after apply');
+            }
+          }
+        }
+        return fetch(input, init);
+      },
       spawn: (() => { throw new Error('existing ingress must be adopted, not spawned'); }) as never,
       processIdentity: {
         capture: async (pid, id) => ({ pid, startToken: 'test-start-token', executable: process.execPath, processInstanceId: id }),
@@ -127,44 +144,29 @@ describe('public listener streaming and admission snapshots', () => {
       },
     });
 
-    let releaseOldHeaders!: () => void;
-    const oldHeaders = new Promise<void>((resolve) => { releaseOldHeaders = resolve; });
-    let releaseOldBody!: () => void;
-    let oldRequestCount = 0;
+    const held = Promise.withResolvers<void>();
+    const released = Promise.withResolvers<void>();
+    const headersAborted = Promise.withResolvers<void>();
+    const streamCancelled = Promise.withResolvers<void>();
     const oldBodies: string[] = [];
-    let heldStarted!: () => void;
-    const heldRequestStarted = new Promise<void>((resolve) => { heldStarted = resolve; });
-    let cancelStarted!: () => void;
-    const cancelRequestStarted = new Promise<void>((resolve) => { cancelStarted = resolve; });
-    let cancelObserved!: () => void;
-    const cancelRequestAborted = new Promise<void>((resolve) => { cancelObserved = resolve; });
     const oldWorker = privateServer(async (request) => {
-      oldRequestCount += 1;
-      const body = await request.text();
-      oldBodies.push(body);
-      if (new URL(request.url).pathname === '/cancel') {
-        cancelStarted();
-        await new Promise<void>((resolve) => request.signal.addEventListener('abort', () => {
-          cancelObserved();
-          resolve();
-        }, { once: true }));
-        throw new Error('request cancelled');
+      oldBodies.push(await request.text());
+      if (new URL(request.url).pathname === '/hold') {
+        request.signal.addEventListener('abort', () => {
+          headersAborted.resolve();
+          released.resolve();
+        }, { once: true });
+        held.resolve();
+        await released.promise;
+        return new Response('late');
       }
-      heldStarted();
-      await oldHeaders;
-      return new Response(new ReadableStream<Uint8Array>({ start(stream) {
-        stream.enqueue(new TextEncoder().encode('data: old-start\n\n'));
-        let finished = false;
-        releaseOldBody = () => {
-          if (finished) return;
-          finished = true;
-          stream.enqueue(new TextEncoder().encode('event: done\ndata: [DONE]\n\n'));
-          stream.close();
-        };
-      } }), { headers: { 'content-type': 'text/event-stream' } });
+      return new Response(new ReadableStream<Uint8Array>({
+        start(stream) { stream.enqueue(new TextEncoder().encode('data: old-start\n\n')); },
+        cancel() { streamCancelled.resolve(); },
+      }), { headers: { 'content-type': 'text/event-stream' } });
     }, transportSecret);
     let newRequestCount = 0;
-    const newWorker = privateServer((request) => {
+    const newWorker = privateServer(() => {
       newRequestCount += 1;
       return new Response('data: new\n\nevent: done\ndata: [DONE]\n\n', {
         headers: { 'content-type': 'text/event-stream' },
@@ -175,51 +177,35 @@ describe('public listener streaming and admission snapshots', () => {
       await controller.connect();
       const initial = await controller.prepare([ingressWorker(0, serverPort(oldWorker), 1)], undefined, 30_000);
       expect(await initial.handoffStatus?.()).toBeNull();
-      await initial.commit();
-      const oldPost = fetch(`http://127.0.0.1:${runtime.publicPort}/hold`, { method: 'POST', body: 'old-once' });
-      const abortController = new AbortController();
-      const cancelledPost = fetch(`http://127.0.0.1:${runtime.publicPort}/cancel`, {
-        method: 'POST', body: 'cancel-once', signal: abortController.signal,
-      });
-      await Promise.all([heldRequestStarted, cancelRequestStarted]);
+      await initial.commit({ plugins: [], routeRequirements: [] });
+      const url = `http://127.0.0.1:${runtime.publicPort}`;
+      const oldPost = fetch(`${url}/hold`, { method: 'POST', body: 'old-once' });
+      const oldStream = await fetch(`${url}/events`, { method: 'POST', body: 'stream-once' });
+      const reader = oldStream.body!.getReader();
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe('data: old-start\n\n');
+      await held.promise;
 
-      const replacement = await controller.prepare([ingressWorker(0, serverPort(newWorker), 2)], undefined, 30);
-      await replacement.commit();
-      expect(await replacement.handoffStatus?.()).toMatchObject({ pending: 2, complete: false });
-      abortController.abort();
-      await expect(cancelledPost).rejects.toBeInstanceOf(Error);
-      await cancelRequestAborted;
-      expect(await replacement.handoffStatus?.()).toMatchObject({ pending: 1, complete: false });
-
-      await new Promise((resolve) => setTimeout(resolve, 40));
-      const expiredHandoff = await replacement.handoffStatus?.();
-      expect(expiredHandoff).toMatchObject({ pending: 1, complete: false, remaining_ms: 0 });
-      await controller.recover();
-      expect(await replacement.handoffStatus?.()).toMatchObject({
-        retired_id: expiredHandoff?.retired_id, pending: 1, complete: false, remaining_ms: 0,
-      });
-      expect((await controller.status()).state).toBe('attached');
-      const newResponse = await fetch(`http://127.0.0.1:${runtime.publicPort}/new`, { method: 'POST', body: 'new-once' });
+      const replacement = await controller.prepare([ingressWorker(0, serverPort(newWorker), 2)], undefined, 300);
+      await replacement.commit({ plugins: [], routeRequirements: [] });
+      expect(replacementCommits).toHaveLength(2);
+      expect(replacementCommits[1]).toEqual(replacementCommits[0]);
+      expect(await controller.queryRuntimeState()).toMatchObject({ version: 2 });
+      const newResponse = await fetch(`${url}/new`, { method: 'POST', body: 'new-once' });
       expect(await newResponse.text()).toBe('data: new\n\nevent: done\ndata: [DONE]\n\n');
-      expect(newRequestCount).toBe(1);
-
-      await new Promise((resolve) => setTimeout(resolve, 11_000));
-      expect(await replacement.handoffStatus?.()).toMatchObject({ pending: 1, complete: false, remaining_ms: 0 });
-      expect((await controller.status()).state).toBe('attached');
-      releaseOldHeaders();
       const oldResponse = await oldPost;
-      const reader = oldResponse.body?.getReader();
-      expect(new TextDecoder().decode((await reader?.read())?.value)).toBe('data: old-start\n\n');
-      expect(await replacement.handoffStatus?.()).toMatchObject({ pending: 0, complete: true });
-      await new Promise((resolve) => setTimeout(resolve, 11_000));
-      releaseOldBody();
-      expect(new TextDecoder().decode((await reader?.read())?.value)).toBe('event: done\ndata: [DONE]\n\n');
-      expect((await reader?.read())?.done).toBeTrue();
-      expect(oldRequestCount).toBe(2);
-      expect(oldBodies.sort()).toEqual(['cancel-once', 'old-once']);
+      expect(oldResponse.status).toBe(503);
+      expect(await oldResponse.json()).toEqual({ error: 'service_unavailable' });
+      await expect(reader.read()).rejects.toBeInstanceOf(Error);
+      await Promise.all([headersAborted.promise, streamCancelled.promise]);
+      const expiredHandoff = await replacement.handoffStatus?.();
+      expect(expiredHandoff).toMatchObject({ pending: 0, complete: true, remaining_ms: 0 });
+      await controller.recover();
+      expect(await replacement.handoffStatus?.()).toEqual(expiredHandoff);
+      expect((await controller.status()).state).toBe('attached');
+      expect(newRequestCount).toBe(1);
+      expect(oldBodies.sort()).toEqual(['old-once', 'stream-once']);
     } finally {
-      releaseOldHeaders();
-      releaseOldBody?.();
+      released.resolve();
       await controller.disconnect();
       await runtime.stop();
       await Promise.all(servers.splice(0).map((server) => server.stop(true)));

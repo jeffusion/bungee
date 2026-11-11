@@ -10,6 +10,7 @@ import { readOperationWorkers } from './operation-records';
 import { validateOperationIdentity } from './operation-relations';
 import { ConfigRepositoryError } from './repository-types';
 import { sqliteGet } from './sqlite-query';
+import { CURRENT_RUNTIME_EPOCH } from './runtime-cutover';
 
 export type CommitDecision =
   | { readonly kind: 'committed'; readonly operation: ConfigurationOperation }
@@ -71,8 +72,8 @@ export function commitTransaction(
   db.run(`INSERT INTO configuration_operations
     (mutation_id,request_hash,expected_revision,committed_revision,kind,state,result_status,error_code,error_detail,
      drain_recovery_generation,last_drain_recovery_previous_generation,plugin_catalog_hash,cancel_requested,
-     prepare_started,target_worker_count,created_at,updated_at)
-    VALUES (?,?,?,?,?,'pending',NULL,NULL,NULL,0,NULL,NULL,0,0,?,?,?)`, [
+     prepare_started,target_worker_count,created_at,updated_at,runtime_epoch)
+    VALUES (?,?,?,?,?,'pending',NULL,NULL,NULL,0,NULL,NULL,0,0,?,?,?,${CURRENT_RUNTIME_EPOCH})`, [
     prepared.mutationId, prepared.requestHash, prepared.expectedRevision, committedRevision,
     prepared.kind, prepared.targetSlots.length, prepared.createdAt, prepared.createdAt,
   ]);

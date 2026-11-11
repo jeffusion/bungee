@@ -59,6 +59,16 @@ The official image executes a release binary under tini. `BUNGEE_INSTALL_ROOT=/u
 
 The dashboard version control checks release metadata and requires confirmation before downloading, installing and restarting. This updates only the container's binary and bundled plugins; it does not pull an image or access the host. Restarting the same container retains the update. Recreating the container, including replacement by Compose, restores the image release while preserving the databases. Choose an image compatible with those databases before recreation or offline recovery. An update failure never automatically rolls back a potentially migrated database; see [binary updates](../architecture/runtime.md#binary-updates).
 
+If an unfinished publication binds the previous plugin catalog, use the stopped-instance cutover before starting the replacement image. Record the full ID of the old container. Stop it and confirm from the Docker host that its PID is zero, that it cannot restart during the cutover, and that no other running instance uses its data mount. Back up the stopped databases. Set the Compose image to the replacement, keeping the data and log mounts and encryption key, then run the offline command with the recorded ID.
+
+```bash
+docker compose run --rm --no-deps --pull never bungee ./docker-entrypoint.sh \
+  --prepare-runtime-upgrade /usr/app/data/bungee.db --stopped-docker-container "$stopped_container_id"
+docker compose up -d --no-deps --pull never bungee
+```
+
+The offline command records the host operator's confirmation under the instance locks. Retrying the same container ID returns the original cutover. Check `/health/data` and a proxy request after starting the replacement.
+
 The public data listener is `0.0.0.0:8088` and is proxy-only. The management
 root is `http://127.0.0.1:8089/`; its API is `/api`, plugin static assets are
 under `/plugins`, and health is `/health`. The design page is
@@ -98,7 +108,8 @@ docker compose exec bungee sh -c 'wget -qO- "http://127.0.0.1:${BUNGEE_MANAGEMEN
 ```
 
 The Docker health check maps wildcard management hosts to a container loopback
-address before connecting. `/health/management` is the container management-readiness check.
+address before connecting. Docker reports the container healthy when both
+`/health/management` and `/health/data` succeed.
 Management APIs are anonymous by default, or require the selected administrator Cookie/Bearer session when 管理认证 is enabled. `/health` reports live, management, data and degraded separately; its 200 requires live and management, not data. `/health/data` returns 503 without a confirmed serving worker.
 
 ## Backup

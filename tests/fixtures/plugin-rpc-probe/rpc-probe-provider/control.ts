@@ -171,4 +171,4 @@ export function createControl(context: any) {
   };
 }
 
-export default { createControl };
+export default { createControl, supportsOnlinePreparation: true };

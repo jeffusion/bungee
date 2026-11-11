@@ -7,6 +7,7 @@ import { ConfigRepositoryError } from './repository-types';
 import { validateMutationId } from './repository-validation';
 import { sqliteAll, sqliteGet } from './sqlite-query';
 import { isLowercaseUuid } from './validation';
+import { CURRENT_RUNTIME_EPOCH, readRuntimeEpoch } from './runtime-cutover';
 
 export type WorkerLaunchIdentity = ConfigProcessIdentity;
 
@@ -58,6 +59,7 @@ type IntentRow = {
   readonly guard_json: string;
   readonly registered_at: number;
   readonly capacity_reclaimed: number;
+  readonly runtime_epoch: number;
 };
 
 type ReservationRow = {
@@ -76,7 +78,7 @@ type LaunchFacts = {
 };
 
 const INTENT_SELECT = `SELECT worker_instance_id,master_generation,worker_slot,
-  allocation_mutation_id,allocation_worker_slot,allocation_attempt_no,guard_json,registered_at,
+  allocation_mutation_id,allocation_worker_slot,allocation_attempt_no,guard_json,registered_at,runtime_epoch,
   EXISTS (SELECT 1 FROM configuration_worker_launch_capacity_reclaims reclaim
     WHERE reclaim.worker_instance_id=configuration_worker_launch_intents.worker_instance_id) AS capacity_reclaimed
   FROM configuration_worker_launch_intents`;
@@ -232,7 +234,8 @@ function requireIntentRow(db: Database, workerInstanceId: string): IntentRow {
   if (typeof workerInstanceId !== 'string' || !isLowercaseUuid(workerInstanceId)) {
     invalid('worker launch instance identity is invalid');
   }
-  const row = sqliteGet<IntentRow, [string]>(db, `${INTENT_SELECT} WHERE worker_instance_id=?`, workerInstanceId);
+  const row = sqliteGet<IntentRow, [string]>(db, `${INTENT_SELECT} WHERE worker_instance_id=?
+    AND runtime_epoch=${CURRENT_RUNTIME_EPOCH}`, workerInstanceId);
   if (row === null) invalidOperation('worker launch intent was not registered');
   return row;
 }
@@ -289,7 +292,7 @@ function requireOpenAllocation(
     `SELECT o.state,o.cancel_requested,w.attempt_no
      FROM configuration_operations o
      JOIN configuration_operation_workers w ON w.mutation_id=o.mutation_id
-     WHERE o.mutation_id=? AND w.worker_slot=?`,
+     WHERE o.mutation_id=? AND w.worker_slot=? AND o.runtime_epoch=${CURRENT_RUNTIME_EPOCH}`,
     allocation.mutation_id, allocation.worker_slot);
   if (authority === null ||
       (authority.state !== 'committed' && authority.state !== 'publishing' && authority.state !== 'draining') ||
@@ -326,6 +329,26 @@ export function writeWorkerLaunchReservation(
     throw new ConfigRepositoryError('invalid_operation', 'worker launch reservation is invalid');
   }
   insertAllocationFact(db, 'reserved', { mutation_id: mutationId, worker_slot: workerSlot, attempt_no: attemptNo }, updatedAt);
+}
+
+/** Bind an already ready process to the publication created by the same CAS. */
+export function bindPreparedWorkerLaunch(
+  db: Database, identity: WorkerLaunchIdentity, guard: ProcessLifetimeGuardFacts | null, allocation: WorkerLaunchAllocation,
+): void {
+  validateIdentity(identity);
+  validateAllocation(allocation, identity);
+  requireOpenAllocation(db, allocation, false);
+  requireReservation(db, allocation);
+  const row = requireIntentRow(db, identity.worker_instance_id);
+  const launch = launchFromRow(db, row);
+  if (launch.allocation !== null || launch.admitted || launch.not_started || launch.exited
+    || row.master_generation !== identity.master_generation || row.worker_slot !== identity.worker_slot
+    || guard === null || canonicalJson(launch.guard) !== canonicalJson(guard)) {
+    invalidOperation('prepared worker launch does not match its live pre-fork intent');
+  }
+  db.run(`UPDATE configuration_worker_launch_intents
+    SET allocation_mutation_id=?,allocation_worker_slot=?,allocation_attempt_no=? WHERE worker_instance_id=?`,
+  [allocation.mutation_id, allocation.worker_slot, allocation.attempt_no, identity.worker_instance_id]);
 }
 
 /**
@@ -392,6 +415,7 @@ export function registerWorkerLaunch(
   const byInstance = sqliteGet<IntentRow, [string]>(db, `${INTENT_SELECT} WHERE worker_instance_id=?`,
     identity.worker_instance_id);
   if (byInstance !== null) {
+    if (byInstance.runtime_epoch !== readRuntimeEpoch(db)) invalidOperation('worker instance belongs to an archived runtime');
     const existing = launchFromRow(db, byInstance);
     if (sameAllocation(existing.allocation, allocation) &&
         existing.identity.master_generation === identity.master_generation &&
@@ -404,7 +428,7 @@ export function registerWorkerLaunch(
 
   db.run(`INSERT INTO configuration_worker_launch_intents
     (worker_instance_id,master_generation,worker_slot,allocation_mutation_id,allocation_worker_slot,
-     allocation_attempt_no,guard_json,registered_at) VALUES (?,?,?,?,?,?,?,?)`,
+     allocation_attempt_no,guard_json,registered_at,runtime_epoch) VALUES (?,?,?,?,?,?,?,?,${CURRENT_RUNTIME_EPOCH})`,
   [identity.worker_instance_id, identity.master_generation, identity.worker_slot,
     allocation?.mutation_id ?? null, allocation?.worker_slot ?? null, allocation?.attempt_no ?? null,
     guardJson, updatedAt]);
@@ -617,8 +641,9 @@ export function readWorkerLaunchInventory(db: Database): readonly UnsettledWorke
   const result: UnsettledWorkerLaunch[] = [];
   const handled = new Set<string>();
   const reservations = sqliteAll<ReservationRow, []>(db,
-    `SELECT mutation_id,worker_slot,attempt_no,recorded_at FROM configuration_worker_launch_facts
-     WHERE kind='reserved' ORDER BY mutation_id,worker_slot,attempt_no`);
+    `SELECT mutation_id,worker_slot,attempt_no,recorded_at FROM configuration_worker_launch_facts f
+     JOIN configuration_operations o USING(mutation_id)
+     WHERE f.kind='reserved' AND o.runtime_epoch=${CURRENT_RUNTIME_EPOCH} ORDER BY mutation_id,worker_slot,attempt_no`);
   for (const reservation of reservations) {
     const allocation: WorkerLaunchAllocation = {
       mutation_id: reservation.mutation_id,
@@ -638,7 +663,8 @@ export function readWorkerLaunchInventory(db: Database): readonly UnsettledWorke
     if (hasFact(db, 'not_started', allocation) || candidateEvidenceSettled(db, allocation)) continue;
     result.push({ kind: 'reservation', allocation });
   }
-  const intents = sqliteAll<IntentRow, []>(db, `${INTENT_SELECT} ORDER BY registered_at,worker_instance_id`);
+  const intents = sqliteAll<IntentRow, []>(db, `${INTENT_SELECT} WHERE runtime_epoch=${CURRENT_RUNTIME_EPOCH}
+    ORDER BY registered_at,worker_instance_id`);
   for (const row of intents) {
     const allocation = rowAllocation(row);
     if (allocation !== null && handled.has(allocationKey(allocation))) continue;

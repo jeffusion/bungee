@@ -1,5 +1,4 @@
 import { ConfigRepository } from '../../src/config-storage/config-repository';
-import type { PreparedCommitCommand } from '../../src/config-storage/prepared-command';
 
 const scope = globalThis as unknown as { onmessage(event: MessageEvent<any>): void; postMessage(value: unknown): void; close(): void };
 let repository: ConfigRepository;
@@ -12,7 +11,7 @@ scope.onmessage = ({ data }) => {
   } else if (data.method === 'commitPrepared') {
     // Durable success followed by lost acknowledgement is deliberately ambiguous
     // to the client. A subsequent open/query must use the original mutation ID.
-    repository.commitPrepared(data.args[0] as PreparedCommitCommand);
+    repository.commitPrepared(...data.args as Parameters<ConfigRepository['commitPrepared']>);
     repository.close();
     scope.close();
   }

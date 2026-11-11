@@ -20,7 +20,7 @@ import {
   requestPublicationCancellation as requestOperationCancellation,
 } from './active-publication';
 import { commitTransaction } from './commit-transaction';
-import { migrateConfigurationDatabase } from './migrations';
+import { migrateConfigurationDatabase, migrateStoppedDockerCutover } from './migrations';
 import {
   beginPublication as beginOperationPublication,
   beginDrainingRecovery as beginOperationDrainingRecovery,
@@ -85,8 +85,10 @@ import type { PreparedCommitCommand } from './prepared-command';
 import { readActiveRevision } from './current-revision';
 import { validateOperationRelations } from './operation-relations';
 import { readSchemaObjectFingerprint } from './schema-fingerprint';
+import { CURRENT_RUNTIME_EPOCH, readRuntimeEpoch } from './runtime-cutover';
 import {
   assertPublicationLaunchDebtSettled,
+  bindPreparedWorkerLaunch,
   readWorkerLaunchInventory,
   readUnsettledWorkerLaunches,
   readWorkerLaunch,
@@ -104,6 +106,12 @@ import {
   type WorkerLaunchIdentity,
 } from './worker-launch-store';
 import type { ProcessLifetimeGuardFacts } from '../supervision/process-lifetime-guard';
+
+export type PreparedConfigurationPublication = {
+  readonly pluginCatalogHash: Sha256Digest;
+  readonly workers: readonly retirementStore.PublicationServingMember[];
+  readonly retired: readonly retirementStore.PublicationRetirementMember[];
+};
 function configureConnection(db: Database): void {
   const encoding = sqliteGet<{ readonly encoding: string }, []>(db, 'PRAGMA encoding')?.encoding;
   if (encoding !== 'UTF-8') {
@@ -120,6 +128,12 @@ function configureConnection(db: Database): void {
   if (journal !== 'delete' || synchronous !== 2 || foreignKeys !== 1 || busyTimeout !== 5000) {
     throw new ConfigRepositoryError('connection_invariant', 'SQLite connection invariants were not applied');
   }
+}
+
+/** Used while the stopped-instance session holds all writer locks. */
+export function prepareConfigurationRuntimeCutover(db: Database, stoppedContainerId: string, now: number) {
+  configureConnection(db);
+  return migrateStoppedDockerCutover(db, stoppedContainerId, now);
 }
 
 function runRepositoryAction<Result>(action: () => Result): Result {
@@ -290,6 +304,10 @@ export class ConfigRepository {
     return this.snapshot;
   }
 
+  getRuntimeEpoch(): number {
+    return runRepositoryAction(() => readRuntimeEpoch(this.db));
+  }
+
   getMenuLayout() {
     return runRepositoryAction(() => withConsistentRead(this.db, () => readMenuLayout(this.db)));
   }
@@ -376,12 +394,18 @@ export class ConfigRepository {
   }
 
   /** Executes a main-thread compiled command in the exclusive storage thread. */
-  commitPrepared(prepared: PreparedCommitCommand): CommitConfigurationResult {
+  commitPrepared(prepared: PreparedCommitCommand, publication?: PreparedConfigurationPublication): CommitConfigurationResult {
     try {
       const decision = this.mutationTransaction(() => {
-        const result = commitTransaction(this.db, prepared, this.options, this.snapshot);
+        let result = commitTransaction(this.db, prepared, this.options, this.snapshot);
         // A committed aggregate explicitly selects plugins, including an empty imported list.
-        if (result.kind === 'committed') settleRequestLogsDefault(this.db, this.options, result.operation.committed_revision);
+        if (result.kind === 'committed') {
+          const { committed_revision: revision } = result.operation;
+          settleRequestLogsDefault(this.db, this.options, revision);
+          if (publication !== undefined) {
+            result = { kind: 'committed', operation: this.bindPreparedPublication(prepared, revision, publication) };
+          }
+        }
         readManagementProtection(this.db);
         return result;
       });
@@ -396,6 +420,36 @@ export class ConfigRepository {
       if (isSqliteBusyError(error)) throw repositoryFailure('configuration commit was blocked by SQLite', error);
       throw new ConfigRepositoryError('repository_failure', 'configuration commit transaction failed', error);
     }
+  }
+
+  private bindPreparedPublication(
+    command: PreparedCommitCommand, revision: number, publication: PreparedConfigurationPublication,
+  ): ConfigurationOperation {
+    const { mutationId, createdAt, contentHash, aggregate, targetSlots } = command;
+    const { pluginCatalogHash, workers, retired } = publication;
+    if (workers.length === 0 || workers.length !== targetSlots.length || workers.some((worker, index) =>
+      worker.identity.worker_slot !== targetSlots[index] || worker.revision !== revision || worker.content_hash !== contentHash
+      || worker.plugin_catalog_hash !== pluginCatalogHash || worker.publication?.mutation_id !== mutationId
+      || worker.publication.attempt_no !== 1 || worker.publication.drain_recovery_generation !== 0)) {
+      throw new ConfigRepositoryError('invalid_operation', 'prepared worker evidence does not match configuration commit');
+    }
+    const instances = new Set(workers.map(worker => worker.identity.worker_instance_id));
+    const owner = claimOperationTarget(this.db, { revision, content_hash: contentHash, aggregate }, pluginCatalogHash, createdAt, instances);
+    if (owner?.operation.mutation_id !== mutationId) {
+      throw new ConfigRepositoryError('invalid_operation', 'prepared configuration could not claim publication');
+    }
+    beginOperationPublication(this.db, mutationId, createdAt);
+    for (const worker of workers) {
+      const slot = worker.identity.worker_slot;
+      beginOperationWorkerAttempt(this.db, mutationId, slot, 0, 'initial', createdAt);
+      bindPreparedWorkerLaunch(this.db, worker.identity, worker.guard, { mutation_id: mutationId, worker_slot: slot, attempt_no: 1 });
+      recordOperationWorkerResult(this.db, mutationId, slot, { kind: 'converged', attempt_no: 1, applied_revision: revision }, createdAt);
+    }
+    const decision = enterOperationPrepare(this.db, mutationId, revision, createdAt);
+    if (decision.kind !== 'granted') throw new ConfigRepositoryError('invalid_operation', 'prepared configuration lost publication authority');
+    retirementStore.freezePublicationServingSet(this.db, mutationId, 0, workers);
+    retirementStore.freezePublicationRetirement(this.db, mutationId, 0, retired, createdAt);
+    return decision.operation;
   }
 
   getOperation(mutationId: string): ConfigurationOperation | null {
@@ -493,7 +547,8 @@ export class ConfigRepository {
   getCurrentOperationState(): ConfigurationOperationState | null {
     return runRepositoryAction(() => withConsistentRead(this.db, () => {
       const revision = readActiveRevision(this.db);
-      const row = sqliteGet<OperationRow, [number]>(this.db, `${OPERATION_SELECT} WHERE committed_revision=?`, revision);
+      const row = sqliteGet<OperationRow, [number]>(this.db, `${OPERATION_SELECT} WHERE committed_revision=?
+        AND (state='pending' OR runtime_epoch=${CURRENT_RUNTIME_EPOCH})`, revision);
       const operation = row === null ? null : operationFromRow(row);
       if (operation === null) return null;
       const workers = readOperationWorkers(this.db, operation.mutation_id);
@@ -697,10 +752,7 @@ export class ConfigRepository {
     return runRepositoryAction(()=>withConsistentRead(this.db,()=>retirementStore.readPublicationRetirementRetry(this.db,...args)));
   }
   requestPublicationRetirementRetry(...args: TailParameters<typeof retirementStore.requestPublicationRetirementRetry>): ReturnType<typeof retirementStore.requestPublicationRetirementRetry> {
-    return runRepositoryAction(()=>this.mutationTransaction(()=>{
-      if(this.snapshot.revision!==args[2]) throw new ConfigRepositoryError('cas_conflict','retirement retry revision changed');
-      return retirementStore.requestPublicationRetirementRetry(this.db,...args);
-    }));
+    return runRepositoryAction(() => this.mutationTransaction(() => retirementStore.requestPublicationRetirementRetry(this.db, ...args)));
   }
 
   markPublicationRetirementReleased(...args: TailParameters<typeof retirementStore.markPublicationRetirementReleased>): ReturnType<typeof retirementStore.markPublicationRetirementReleased> {

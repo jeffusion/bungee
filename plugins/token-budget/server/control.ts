@@ -12,7 +12,7 @@ export function createControl(host:PolicyControlHost):PluginControl {
   const state=host.durableState;let ready=false;
   let cached={version:0,value:{version:0,byKey:{}} as import('@jeffusion/bungee-core/plugin').DurableJson};
   const policy=()=>cached;
-  const refresh=async()=>{cached=await publication(state);};
+  const refresh=async(preparing = false)=>{cached=await publication(state, preparing);};
   let writes:Promise<unknown>=Promise.resolve();
   const serialize=<T>(operation:()=>Promise<T>):Promise<T>=>{const next=writes.catch(()=>undefined).then(operation);writes=next;return next;};
   if (host.services?.rpc) {
@@ -46,7 +46,15 @@ export function createControl(host:PolicyControlHost):PluginControl {
         });
       }catch{return json({error:'token-budget.policy_write_failed'},422);}
     }}],
-    async start(){if(host.signal.aborted)throw new Error('inactive');await recoverPending(state);await refresh();await host.publishPolicy?.(policy());ready=true;},
+    async start() {
+      if (host.signal.aborted) throw new Error('inactive');
+      const recover = () => serialize(async () => { await recoverPending(state); await refresh(); await host.publishPolicy?.(policy()); });
+      if (host.afterActivation) {
+        await refresh(true);
+        host.afterActivation(recover);
+      } else await recover();
+      ready = true;
+    },
     dispose(){ready=false;},
   };
 }
@@ -56,4 +64,4 @@ export async function readResource(resource:string,keyId:string,state:Pick<NonNu
   return {value:ledger.policy,usage:await readUsage(state,keyId)};
 }
 export { recoverUsage } from './ledger';
-export default {createControl,readResource,offlineRecovery:{kind:'plugin-state' as const,recover:recoverUsage}};
+export default {supportsOnlinePreparation: true, createControl,readResource,offlineRecovery:{kind:'plugin-state' as const,recover:recoverUsage}};

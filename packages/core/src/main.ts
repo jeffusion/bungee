@@ -81,12 +81,16 @@ export async function runMain(): Promise<void> {
       if (process.argv.length !== 3) throw new Error('Invalid callback arguments');
       const { oauthCallbackCommand } = await import('./oauth-callback');
       await oauthCallbackCommand();
-    } else if(process.argv.includes('--prepare-runtime-upgrade')) {
+    } else if (process.argv.includes('--prepare-runtime-upgrade')) {
       if (process.env.BUNGEE_INSTALL_ROOT) assertNoUpdate(process.env.BUNGEE_INSTALL_ROOT);
-      const args=process.argv.slice(2);
-      if(args.length!==2||args[0]!=='--prepare-runtime-upgrade'||!args[1]) throw new Error('invalid_runtime_upgrade_arguments');
-      const {prepareRuntimeUpgrade}=await import('./master-runtime/runtime-upgrade');
-      console.log(JSON.stringify(await prepareRuntimeUpgrade(args[1])));
+      const [command, path, flag, containerId, ...extra] = process.argv.slice(2);
+      if (command !== '--prepare-runtime-upgrade' || !path || path.startsWith('--') || extra.length !== 0 ||
+          (flag !== undefined && (flag !== '--stopped-docker-container' || !containerId))) {
+        throw new Error('invalid_runtime_upgrade_arguments');
+      }
+      const { prepareRuntimeUpgrade, prepareStoppedDockerCutover } = await import('./master-runtime/runtime-upgrade');
+      const result = containerId === undefined ? await prepareRuntimeUpgrade(path) : await prepareStoppedDockerCutover(path, containerId);
+      console.log(JSON.stringify(result));
     } else if (process.argv.includes('--recover')) {
       if (process.env.BUNGEE_INSTALL_ROOT) assertNoUpdate(process.env.BUNGEE_INSTALL_ROOT);
       const args = process.argv.slice(2);

@@ -103,6 +103,31 @@ async function invoke(control: PluginControl, handler: string, body?: unknown): 
 }
 
 describe('automatic reset, simulation only', () => {
+  test('candidate preparation preserves revoked records and schedules no credit work before activation', async () => {
+    const store = new MemoryStore();
+    const accounts = new AccountStore(store);
+    await accounts.create('candidate', { accessToken: 'simulation-access', refreshToken: 'simulation-refresh',
+      identity: { accountId: 'simulation-account' }, identityStatus: 'parsed', expiresAt: NOW + 86400_000 });
+    const saved = store.value!;
+    const data = JSON.parse(saved.value);
+    data.accounts[0].status = 'revoked';
+    await store.compareAndSet(ACCOUNT_STORE_KEY, saved.version, JSON.stringify(data));
+    const before = { ...store.value! };
+    const timer = new VirtualTimer();
+    let activate!: () => void | Promise<void>;
+    const control = createControl({ ...controlHost(store), afterActivation: effect => { activate = effect; } },
+      { now: () => NOW, autoResetTimer: timer, fetchImpl: async () => { throw new Error('unexpected credit request'); } });
+    try {
+      await control.start();
+      expect(store.value).toEqual(before);
+      expect(timer.tasks.size).toBe(0);
+      await activate();
+      expect(await accounts.list()).toEqual([]);
+      expect(timer.tasks.size).toBeGreaterThan(0);
+    } finally { await control.dispose(); }
+    expect(timer.tasks.size).toBe(0);
+  });
+
   test('balance trusts the unique longest fresh duration in either position, not five-hour or expired windows', () => {
     const weekly = { usedPercent: 90, windowSeconds: 604800, resetAfterSeconds: 3600, resetAt: NOW + 3600_000 };
     for (const key of ['primary', 'secondary']) {

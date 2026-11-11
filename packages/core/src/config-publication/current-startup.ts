@@ -1,7 +1,7 @@
 import { resolvePublicationPolicy, type Sha256Digest } from '@jeffusion/bungee-types';
 import type { RepositorySnapshot } from '../config-storage/repository-types';
 import { ConfigRepositoryError } from '../config-storage/repository-types';
-import type { StartCurrentConfigWorkerCommand } from './types';
+import type { ConfigPublicationIdentity, StartWorkerCommand } from './types';
 import {
   MasterConfigPublicationError,
   type ConfigPublicationWorkerFactory,
@@ -11,6 +11,7 @@ import {
   type ServingConfigWorker,
   type StartupPublicationOutcome,
   type WorkerAdmissionController,
+  type PreparedWorkerAdmission,
   type CreationPermit,
 } from './coordinator-types';
 import { cleanupConfirmed, OwnedProcessCollection } from './process-cleanup';
@@ -37,6 +38,10 @@ type CurrentStartupOptions = {
   readonly signal?: PublicationCancellationSignal;
   /** Shared creation gate; called immediately before any missing slot is forked. */
   readonly ensureCreationPermitted: () => Promise<CreationPermit>;
+  readonly prospective?: {
+    readonly publication: ConfigPublicationIdentity;
+    publish(workers: readonly ServingConfigWorker[], admission: PreparedWorkerAdmission): Promise<boolean>;
+  };
 };
 
 function processError(error: unknown, slot: number): PublicationFailure {
@@ -52,7 +57,7 @@ function isOutcomeUnknown(error: unknown): boolean {
 }
 
 function isDefinitelyNotCommitted(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && ['invalid_options', 'not_committed', 'rejected'].includes(
+  return typeof error === 'object' && error !== null && ['invalid_options', 'not_committed', 'admission_not_committed', 'rejected'].includes(
     (error as { readonly code?: unknown }).code as string,
   );
 }
@@ -98,16 +103,17 @@ export async function runCurrentStartup(
       for (const identity of allocated) {
         throwIfPublicationCancelled(options.signal);
         const process = await options.workerFactory.spawn(identity);
-        if (existingWorkers.some(({ process: current }) => current === process)
+        if ([...existingWorkers, ...options.retireWorkers].some(({ process: current }) => current === process)
           || spawned.some(({ process: current }) => current === process)) {
           throw new MasterConfigPublicationError('invalid_options', 'spawned worker reuses an existing process object');
         }
-        validateReplacementProcess(process, identity, existingWorkers,
+        validateReplacementProcess(process, identity, [...existingWorkers, ...options.retireWorkers],
           spawned.map(({ process: current }) => current), options.workerCount);
         options.identities.bind(identity, process);
+        const publication = options.prospective ? { ...options.prospective.publication } : null;
         const worker = { process, revision: snapshot.revision,
           content_hash: snapshot.content_hash, plugin_catalog_hash: options.pluginCatalogHash,
-          boot_nonce: null, publication: null } satisfies PendingConfigWorker;
+          boot_nonce: null, publication } satisfies PendingConfigWorker;
         owned.add(process, worker);
         spawned.push(worker);
         throwIfPublicationCancelled(options.signal);
@@ -119,15 +125,17 @@ export async function runCurrentStartup(
   const candidates = startupError === undefined ? spawned : [];
   const waiting = candidates.map((worker) => ({ worker, handle: waitForApply({ process: worker.process,
     expected: { revision: snapshot.revision, contentHash: snapshot.content_hash,
-      pluginCatalogHash: options.pluginCatalogHash, publication: null },
+      pluginCatalogHash: options.pluginCatalogHash, publication: worker.publication },
     scheduler: options.scheduler, timeoutMs: options.applyTimeoutMs }) }));
   const sends = waiting.map(({ worker }) => {
     throwIfPublicationCancelled(options.signal);
-    const message: StartCurrentConfigWorkerCommand = { command: 'start-current-config-worker',
+    const base = {
       ...worker.process.identity, revision: snapshot.revision, content_hash: snapshot.content_hash,
       plugin_catalog_hash: options.pluginCatalogHash, aggregate: snapshot.aggregate,
-      activated_plugin_names: Object.freeze(snapshot.aggregate.plugin_activations.map(({ plugin_name }) => plugin_name)),
-      publication: null };
+      activated_plugin_names: Object.freeze(snapshot.aggregate.plugin_activations.map(({ plugin_name }) => plugin_name)) };
+    const message: StartWorkerCommand = worker.publication === null
+      ? { ...base, command: 'start-current-config-worker', publication: null }
+      : { ...base, command: 'start-config-worker', publication: worker.publication };
     return worker.process.send(message).then(
       () => undefined,
       (error) => {
@@ -140,10 +148,13 @@ export async function runCurrentStartup(
     );
   });
   const decisionsPromise = Promise.allSettled(waiting.map(({ handle }) => handle.result));
-  const decisionsSettled = await Promise.race([
-    decisionsPromise,
-    Promise.all(sends).then(() => decisionsPromise),
-  ]);
+  const stopWaiting = () => {
+    for (const { worker, handle } of waiting) handle.fail(processError(options.signal?.reason, worker.process.slot));
+  };
+  options.signal?.addEventListener('abort', stopWaiting, { once: true });
+  if (options.signal?.aborted) stopWaiting();
+  const decisionsSettled = await Promise.race([decisionsPromise, Promise.all(sends).then(() => decisionsPromise)])
+    .finally(() => options.signal?.removeEventListener('abort', stopWaiting));
   throwIfPublicationCancelled(options.signal);
   const decisions = decisionsSettled.flatMap((settled, index) => {
     if (settled.status === 'fulfilled') {
@@ -171,6 +182,10 @@ export async function runCurrentStartup(
       throwIfPublicationCancelled(options.signal);
     } catch (error) {
       startupError = error;
+    }
+    if (startupError === undefined && options.prospective) {
+      if (await options.prospective.publish(serving, prepared!)) return { kind: 'startup_ready', serving };
+      startupError = new Error('prepared configuration was not committed');
     }
     if (startupError === undefined) {
       try {
@@ -229,11 +244,11 @@ export async function runCurrentStartup(
     if (isPublicationCancelled(error) && admissionCommitMayHaveBeenSent) throw error;
     startupError ??= error;
   }
-  let cancellationAbortError: unknown;
-  if (isPublicationCancelled(startupError) && preparedForCleanup !== null) {
-    try { await preparedForCleanup.abort(); } catch (error) { cancellationAbortError = error; }
-    if (cancellationAbortError !== undefined) {
-      Object.defineProperty(startupError, 'cause', { value: cancellationAbortError });
+  if (preparedForCleanup !== null && (options.prospective || isPublicationCancelled(startupError))) {
+    try { await preparedForCleanup.abort(); }
+    catch (error) {
+      if (isPublicationCancelled(startupError)) Object.defineProperty(startupError, 'cause', { value: error });
+      else startupError = new AggregateError([startupError, error], 'candidate admission abort was not confirmed');
     }
   }
   const cleanup = await owned.cleanup(options.scheduler, options.drainTimeoutMs);

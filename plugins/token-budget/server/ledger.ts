@@ -49,9 +49,12 @@ export async function setPolicy(state:PluginDurableState,keyId:string,policy:unk
   const key=keyRecord(keyId);const old=(await state.get(key)); const ledger=decodeKey(old); ledger.policy=validatePolicy(policy);
   (await commit(state,[{key,expectedVersion:old?.version??0,value:{keyId,ledger:ledger as any}}],true));
 }
-export async function publication(state:PluginDurableState) {
+export async function publication(state:PluginDurableState, preparing = false) {
   const byKey:Record<string,any>={}; const version=(await admissionVersion(state));
-  for(const r of (await state.list())) { if(r.key.startsWith('key:')) { const v=r.value as any; byKey[v.keyId]=(await readKey(state,v.keyId)); } }
+  for (const record of await state.list()) if (record.key.startsWith('key:')) {
+    const {keyId} = record.value as {keyId: string};
+    byKey[keyId] = preparing ? (await pendingRecovery(state, record)).ledger : await readKey(state, keyId);
+  }
   return {version,value:{version,byKey}};
 }
 export async function admissionVersion(state:PluginDurableState):Promise<number> {
@@ -150,20 +153,25 @@ export async function stateRpc(method:string,payload:unknown,ctx:PluginStateRpcC
   if(method==='settle')ledger.collection.moneyStartedAtMs??=Date.now();
   (await commit(state,[{key:attemptKey,expectedVersion:record!.version,value:attempt as any},{key:ledgerKey,expectedVersion:prior?.version??0,value:{keyId,ledger:ledger as any}}],method==='settle' || previouslyUnknown));return attempt;
 }
+async function pendingRecovery(state: PluginDurableState, record: import('@jeffusion/bungee-core/plugin').DurableRecord) {
+  const v=record.value as any,ledger=decodeKey(record);let changed=false;
+  const mutations:DurableMutation[]=[];
+  const keys=new Set([...Object.keys(ledger.unresolved),...Object.keys(ledger.money.unresolved)]);
+  for(const key of keys) {
+    const attemptRecord=(await state.get(key)),attempt=attemptRecord?structuredClone(attemptRecord.value) as unknown as Attempt:null;let attemptChanged=false;
+    if(ledger.unresolved[key]==='pending'){ledger.unresolved[key]='unknown';changed=true;if(attempt){attempt.status='unknown';attemptChanged=true;}}
+    if(ledger.money.unresolved[key]==='pending'||attempt && attempt.costStatus===undefined && ledger.unresolved[key]) {ledger.money.unresolved[key]='unknown';changed=true;ledger.collection.moneyStartedAtMs??=Date.now();if(attempt){attempt.costStatus='unknown';attemptChanged=true;}}
+    if(ledger.unresolved[key]==='unknown'&&attempt?.status==='pending'){attempt.status='unknown';attemptChanged=true;changed=true;}
+    if(attemptChanged && attemptRecord && attempt)mutations.push({key,expectedVersion:attemptRecord.version,value:attempt as any});
+  }
+  if (changed) mutations.push({key:record.key,expectedVersion:record.version,value:{keyId:v.keyId,ledger:ledger as any}});
+  return {ledger, mutations};
+}
+
 export async function recoverPending(state:PluginDurableState) {
-  for(const record of (await state.list())) {
-    if(!record.key.startsWith('key:')) continue;
-    const v=record.value as any,ledger=decodeKey(record);let changed=false;
-    const mutations:DurableMutation[]=[];
-    const keys=new Set([...Object.keys(ledger.unresolved),...Object.keys(ledger.money.unresolved)]);
-    for(const key of keys) {
-      const attemptRecord=(await state.get(key)),attempt=attemptRecord?structuredClone(attemptRecord.value) as unknown as Attempt:null;let attemptChanged=false;
-      if(ledger.unresolved[key]==='pending'){ledger.unresolved[key]='unknown';changed=true;if(attempt){attempt.status='unknown';attemptChanged=true;}}
-      if(ledger.money.unresolved[key]==='pending'||attempt && attempt.costStatus===undefined && ledger.unresolved[key]) {ledger.money.unresolved[key]='unknown';changed=true;ledger.collection.moneyStartedAtMs??=Date.now();if(attempt){attempt.costStatus='unknown';attemptChanged=true;}}
-      if(ledger.unresolved[key]==='unknown'&&attempt?.status==='pending'){attempt.status='unknown';attemptChanged=true;changed=true;}
-      if(attemptChanged && attemptRecord && attempt)mutations.push({key,expectedVersion:attemptRecord.version,value:attempt as any});
-    }
-    if(changed) (await commit(state,[...mutations,{key:record.key,expectedVersion:record.version,value:{keyId:v.keyId,ledger:ledger as any}}],true));
+  for (const record of await state.list()) if (record.key.startsWith('key:')) {
+    const { mutations } = await pendingRecovery(state, record);
+    if (mutations.length) await commit(state, mutations, true);
   }
 }
 

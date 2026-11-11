@@ -68,6 +68,9 @@ export type PluginControlHostOptions = {
   readonly secretStores: SecretStoreFactory;
   readonly storage: Pick<PluginStorageFactory, 'create'> & Partial<Pick<PluginStorageFactory, 'revoke'>>;
   readonly durableState?: (name: string) => PluginDurableState;
+  readonly isPreparing?: (name: string) => boolean;
+  readonly allowPreparedWrites?: (name: string) => boolean;
+  readonly runActivationEffect?: (name: string, effect: () => Promise<void>) => Promise<void>;
   readonly validateRouteReferences?: (name: string, routeIds: readonly string[]) => boolean | Promise<boolean>;
   readonly readResourceExtensions?: (keyId: string) => Promise<unknown>;
   readonly validateKeyPolicyReferences?: (name: string, keyId: string, policy: unknown) => boolean | Promise<boolean>;
@@ -88,6 +91,37 @@ export type BoundControlInvocation = {
 };
 
 type LoadedModule = ControlPlugin;
+
+function protectWrites<T extends object>(source: T, reads: ReadonlySet<PropertyKey>, check: () => void): T {
+  return new Proxy({} as T, {
+    get(_target, property) {
+      const member = Reflect.get(source, property, source);
+      const strict = Reflect.get(source, 'readStrict', source);
+      if (property === 'get' && reads.has('readStrict') && typeof strict === 'function') {
+        return async (key: string) => {
+          const result = await strict.call(source, key);
+          return result.found ? result.value : null;
+        };
+      }
+      if (typeof member !== 'function') {
+        if (typeof member === 'object' && member !== null && (property === 'observation' || property === 'metering')) {
+          return protectWrites(member, NO_READS, check);
+        }
+        return member;
+      }
+      if (property === 'uncached') return () => protectWrites(member.call(source), reads, check);
+      return (...args: unknown[]) => {
+        if (!reads.has(property)) check();
+        return Reflect.apply(member, source, args);
+      };
+    },
+  });
+}
+
+const NO_READS: ReadonlySet<PropertyKey> = new Set();
+const STORAGE_READS = new Set(['get', 'keys', 'readStrict']);
+const DURABLE_READS = new Set(['get', 'list']);
+const SECRET_READS = new Set(['get']);
 
 /**
  * Host-minted invocation frame for one control API / bound-attempt slot. The
@@ -172,6 +206,7 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
   const controlDisposals = new WeakMap<PluginControlHandle, Promise<void>>();
   const serviceDisposals = new WeakMap<PluginControlHandle, Promise<void>>();
   const failedActivationCleanups = new WeakMap<PluginControlHandle, Promise<void>>();
+  const preparedEffects = new WeakMap<PluginControlHandle, () => Promise<void>>();
   const statuses = new Map<string, PluginControlStatus>();
   const lifecycle = new Map<string, Promise<unknown>>();
   const startTimeoutMs = options.startTimeoutMs ?? CONTROL_START_TIMEOUT_MS;
@@ -379,7 +414,14 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
       if (current.artifactIdentity !== identity) {
         throw new PluginControlHostError('restart_required', 'control artifact changed; restart the master');
       }
-      if (current.status === 'ready') return current;
+      if (current.status === 'ready') {
+        if (!options.isPreparing?.(name)) {
+          const activateEffects = preparedEffects.get(current);
+          preparedEffects.delete(current);
+          if (activateEffects) await activateEffects();
+        }
+        return current;
+      }
       if (current.status === 'stopping') throw new PluginControlHostError('timeout', 'previous control instance has not stopped');
       if (current.status === 'degraded' || current.status === 'starting') {
         throw new PluginControlHostError('start_failed', 'previous control instance cannot be replaced');
@@ -423,6 +465,13 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
       throw new PluginControlHostError('start_failed', 'control resources could not be created', error);
     }
     const activation: PendingActivation = { name, lifetime, secretStore: store, storage, services, cancelled: false, revoked: false };
+    let prepared = options.isPreparing?.(name) === true;
+    const effects: Array<() => void | Promise<void>> = [];
+    const assertWritable = () => {
+      if (prepared && !options.allowPreparedWrites?.(name)) {
+        throw new PluginControlHostError('inactive', 'prepared control storage is read-only');
+      }
+    };
     pending.set(name, activation);
     statuses.set(name, 'starting');
     const cleanupFailedActivation = (): void => {
@@ -434,9 +483,12 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
       const loading = options.loadControl?.(record) ?? loadImmutableControlArtifact(record);
       module = await withTimeout(Promise.resolve(loading), startTimeoutMs, 'timeout');
       assertPending(activation);
+      if (prepared && module.supportsOnlinePreparation !== true) {
+        throw new PluginControlHostError('start_failed', 'control plugin does not declare online preparation');
+      }
     } catch (error) {
       cleanupFailedActivation();
-      statuses.set(name, 'degraded');
+      statuses.set(name, prepared ? 'inactive' : 'degraded');
       throw error instanceof PluginControlHostError
         ? error
         : new PluginControlHostError('start_failed', 'control artifact could not be loaded', error);
@@ -449,15 +501,23 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
       ? run()
       : serviceHost.runInInvocation(services, { purpose: 'bootstrap', signal: lifetime.signal, deadlineAt: Date.now() + startTimeoutMs }, run);
     let control: PluginControl | undefined;
+    const durable = options.durableState?.(name);
+    const contextStore = prepared ? protectWrites(store, SECRET_READS, assertWritable) : store;
+    const contextStorage = prepared ? protectWrites(storage, STORAGE_READS, assertWritable) : storage;
+    const contextDurable = prepared && durable ? protectWrites(durable, DURABLE_READS, assertWritable) : durable;
     try {
-      const context: ControlHostContext = Object.freeze({ resolveRpcCallee: readHostRpcCalleeFrame, managementOrigin: options.managementOrigin, trustedSource: options.trustedSource, signal: lifetime.signal, secretStore: store, storage, services,
+      const context: ControlHostContext = Object.freeze({ resolveRpcCallee: readHostRpcCalleeFrame, managementOrigin: options.managementOrigin, trustedSource: options.trustedSource, signal: lifetime.signal, secretStore: contextStore, storage: contextStorage, services,
+        ...(prepared ? { afterActivation: (effect: () => void | Promise<void>) => {
+          if (!prepared || lifetime.signal.aborted || typeof effect !== 'function') throw new PluginControlHostError('inactive', 'online preparation is no longer available');
+          effects.push(effect);
+        } } : {}),
         runAdmissionOperation: options.runAdmissionOperation ? (method: string, payload: unknown, callee: unknown, task: (target: import('../plugin-extensions').AdmissionTarget) => unknown | Promise<unknown>) => options.runAdmissionOperation!(name, method, payload, callee, task) : undefined,
-        durableState: options.durableState?.(name), validateRouteReferences: options.validateRouteReferences ? (routeIds: readonly string[]) => options.validateRouteReferences!(name, routeIds) : undefined, readResourceExtensions: options.readResourceExtensions, validateKeyPolicyReferences: options.validateKeyPolicyReferences ? (keyId: string, policy: unknown) => options.validateKeyPolicyReferences!(name, keyId, policy) : undefined, publishPolicy: options.publishPolicy ? (policy: PluginPolicyPublication) => options.publishPolicy!(name, policy) : undefined });
+        durableState: contextDurable, validateRouteReferences: options.validateRouteReferences ? (routeIds: readonly string[]) => options.validateRouteReferences!(name, routeIds) : undefined, readResourceExtensions: options.readResourceExtensions, validateKeyPolicyReferences: options.validateKeyPolicyReferences ? (keyId: string, policy: unknown) => options.validateKeyPolicyReferences!(name, keyId, policy) : undefined, publishPolicy: options.publishPolicy ? (policy: PluginPolicyPublication) => options.publishPolicy!(name, policy) : undefined });
       control = runBootstrap(() => module.createControl(context));
       assertPending(activation);
     } catch (error) {
       cleanupFailedActivation();
-      statuses.set(name, 'degraded');
+      statuses.set(name, prepared ? 'inactive' : 'degraded');
       // createControl may have returned before activation was cancelled; dispose
       // the produced control exactly once so no handler leaks.
       if (control !== undefined && control !== null && typeof control === 'object') {
@@ -473,7 +533,7 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
     }
     const handle: PluginControlHandle = {
       pluginName: name, artifactIdentity: identity, control, secretStore: store,
-      storage, durableState: options.durableState?.(name), services,
+      storage, durableState: durable, services,
       lifetime, status: 'starting', admission: true,
     };
     handles.set(name, handle);
@@ -487,6 +547,14 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
       if (disposed || lifetime.signal.aborted || !handle.admission) throw new PluginControlHostError('disposed', 'plugin control host is disposed');
       // Publish only after start completed: a started instance is the ready boundary.
       serviceHost.markReady(name, 'global', services);
+      if (prepared) preparedEffects.set(handle, async () => {
+        prepared = false;
+        for (const effect of effects.splice(0)) {
+          if (lifetime.signal.aborted) throw new PluginControlHostError('inactive', 'prepared control was stopped');
+          const run = () => withTimeout(Promise.resolve().then(() => runBootstrap(effect)), startTimeoutMs, 'timeout');
+          await (options.runActivationEffect ? options.runActivationEffect(name, run) : run());
+        }
+      });
       handle.status = 'ready';
       statuses.set(name, 'ready');
       return handle;
@@ -522,7 +590,10 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
       if (revoked) {
         const cleanup = disposeControl(handle);
         failedActivationCleanups.set(handle, cleanup);
-        try { await withTimeout(cleanup, startTimeoutMs, 'timeout'); }
+        try {
+          await withTimeout(cleanup, startTimeoutMs, 'timeout');
+          if (prepared) { handles.delete(name); statuses.set(name, 'inactive'); }
+        }
         catch { /* preserve the original activation failure */ }
       }
       throw error instanceof PluginControlHostError ? error : new PluginControlHostError('start_failed', 'control start failed', error);
@@ -537,6 +608,7 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
     if (handle.status === 'stopping' || handle.status === 'inactive' || handle.status === 'degraded') return;
     handle.status = 'stopping';
     handle.admission = false;
+    preparedEffects.delete(handle);
     options.secretStores.revoke(handle.secretStore);
     options.storage.revoke?.(handle.storage);
     handle.lifetime.abort();
@@ -545,13 +617,18 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
     statuses.set(handle.pluginName, 'stopping');
   }
 
-  async function stopHandle(name: string): Promise<void> {
+  async function stopHandle(name: string, drainInvocations = false): Promise<void> {
     const handle = handles.get(name);
     if (handle === undefined || handle.status === 'inactive') return;
     if (handle.status === 'degraded') {
       const cleanup = failedActivationCleanups.get(handle);
       if (cleanup) await withTimeout(cleanup, startTimeoutMs, 'timeout');
       return;
+    }
+    if (drainInvocations && handle.status === 'ready') {
+      handle.admission = false;
+      // Reconciliation may be triggered by the final settlement of an accepted invocation.
+      await waitForInvocationTasks(handle).catch(() => undefined);
     }
     closeHandle(handle);
     // Real invocations and service calls must fully drain. A timeout means the
@@ -587,7 +664,7 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
     statuses.set(name, 'inactive');
   }
 
-  async function applyDesired(effective: ReadonlySet<string>): Promise<void> {
+  async function applyDesired(effective: ReadonlySet<string>, drainInvocations = false): Promise<void> {
     const initializationOrder = controlInitializationOrder([...effective]);
     // Fail closed: a desired consumer must have every required control-local
     // provider desired too; the authorized set is never expanded silently.
@@ -609,12 +686,13 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
     for (const name of handles.keys()) if (!effective.has(name)) removals.add(name);
     const stop = stopClosure(removals);
     for (const name of consumerFirstOrder(stop)) {
-      try { await serial(name, () => stopHandle(name)); } catch (error) { failures.push(error); }
+      try { await serial(name, () => stopHandle(name, drainInvocations)); } catch (error) { failures.push(error); }
     }
 
     // Activate desired instances provider-first; required providers are desired.
     for (const name of initializationOrder) {
-      if (handles.get(name)?.status === 'ready') continue;
+      const handle = handles.get(name);
+      if (handle?.status === 'ready' && (!preparedEffects.has(handle) || options.isPreparing?.(name))) continue;
       try { await serial(name, () => activateNow(name, effective)); } catch (error) { failures.push(error); }
     }
 
@@ -636,7 +714,7 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
         const record = records.get(name);
         if (record?.controlPath !== undefined && record.manifest.control !== undefined) effective.add(name);
       }
-      await applyDesired(effective);
+      await applyDesired(effective, true);
     });
   }
 
@@ -679,7 +757,8 @@ export function createPluginControlHost(options: PluginControlHostOptions): Plug
   }
 
   function invokeWithSlot<T>(handle: PluginControlHandle, requestSignal: AbortSignal, frame: TrustedControlInvocation, task: (signal: AbortSignal) => Promise<T>): Promise<T> {
-    if (!handle.admission || handle.status !== 'ready' || handle.lifetime.signal.aborted) {
+    if (!handle.admission || handle.status !== 'ready' || handle.lifetime.signal.aborted
+      || (preparedEffects.has(handle) && options.isPreparing?.(handle.pluginName) && !options.allowPreparedWrites?.(handle.pluginName))) {
       return Promise.reject(new PluginControlHostError('inactive', 'plugin control is inactive'));
     }
     if (requestSignal.aborted) return Promise.reject(new PluginControlHostError('deadline', 'control invocation was cancelled'));

@@ -727,17 +727,13 @@ export class SupervisedConfigWorkerFactory implements ConfigPublicationWorkerFac
     } catch { return false; }
     const cleanup = descriptor.cleanup;
     if (descriptor.phase !== 'stopped' || cleanup === undefined || cleanup.cleanup_state !== cleanupState) return false;
-    if (launch.allocation === null) {
-      // A startup launch has no publication; any signed publication in cleanup means
-      // this intent was not the process that performed that start.
-      if (cleanup.publication !== null) return false;
-    } else {
+    if (launch.allocation !== null) {
       if (launch.identity.worker_slot !== launch.allocation.worker_slot
         || cleanup.publication === null
         || cleanup.publication.mutation_id !== launch.allocation.mutation_id
         || cleanup.publication.attempt_no !== launch.allocation.attempt_no) return false;
     }
-    if (cleanupState === 'failed') {
+    if (cleanupState === 'failed' || (launch.allocation === null && cleanup.publication !== null)) {
       const message = descriptor.evidence.message;
       if (message === undefined || !('revision' in message) || identityKey(message) !== identityKey(launch.identity)
         || message.pid !== descriptor.pid || message.boot_nonce !== descriptor.boot_nonce

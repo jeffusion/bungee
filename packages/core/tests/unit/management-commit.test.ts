@@ -5,6 +5,7 @@ import {ConfigRepositoryError,hashConfigurationContent,type ManagementProtection
 import type {ConfigurationAggregate} from '@jeffusion/bungee-types';
 import type {PluginControlHost} from '../../src/plugin-control';
 import type {ManagementProvider} from '../../src/plugin-extensions';
+import {hashConfigurationRequest} from '../../src/config-storage/content-hash';
 const initial:ConfigurationAggregate={logical_configuration:{services:[],routes:[],plugins:[]},plugin_activations:[]};
 const protectedAggregate={...initial,plugin_activations:[{plugin_name:'user-auth'}]};
 const mutationId='9d63fe14-f3ea-4465-a2bb-66ef46f0b1df';
@@ -43,6 +44,35 @@ function fixture() {
  };
 }
 function deferred<T>(){let resolve!:(value:T)=>void;const promise=new Promise<T>(done=>{resolve=done;});return{promise,resolve};}
+
+test('lost prepared CAS response uses the exact stored operation before authorizing cutover',async()=>{
+ const f=fixture(), phases:string[]=[];
+ let stored:Awaited<ReturnType<ConfigControlApiOptions['repository']['getOperationState']>>=null;
+ const api=createConfigControlApi({...f.options,
+  repository:{...f.options.repository,getOperationState:async()=>{if(stored)phases.push('confirmed');return stored;},
+   async commit(command, publication){
+    expect(publication?.workers).toEqual([]);
+    phases.push('CAS');
+    const snapshot=f.persist();
+    stored={operation:{mutation_id:mutationId,committed_revision:snapshot.revision,
+     request_hash:hashConfigurationRequest({kind:command.kind,expected_revision:command.expected_revision,
+      aggregate:command.aggregate,target_worker_slots:command.target_worker_slots,management_provider:'user-auth'})},workers:[]} as typeof stored;
+    throw new ConfigRepositoryError('result_unknown','response lost');
+   }},
+  prepareConfiguration:async(snapshot,_mutationId,_requestSignal,commit)=>{
+   expect(snapshot.revision).toBe(2);
+   phases.push('ready','prepare');
+   const result=await commit({pluginCatalogHash:snapshot.content_hash,workers:[],retired:[]},new AbortController().signal,async()=>true);
+   expect(result).toMatchObject({kind:'duplicate'});
+   phases.push('ingress commit');
+   return result;
+  },
+ });
+ expect((await api.handle(put()))!.status).toBe(202);
+ expect(phases).toEqual(['ready','prepare','CAS','confirmed','ingress commit','confirmed']);
+ expect(f.current().revision).toBe(2);
+ expect(f.auth.selected()).toBe('user-auth');
+});
 
 test('first protection closes anonymous admission before commit and invalidates older authenticated requests',async()=>{
  const f=fixture(),entered=deferred<void>(),finish=deferred<void>();

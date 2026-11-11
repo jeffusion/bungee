@@ -11,10 +11,11 @@ import {
   type PublicationScheduler,
   type ServingConfigWorker,
   type StartupPublicationOutcome,
+  type PreparedWorkerAdmission,
   type WorkerAdmissionController,
 } from './coordinator-types';
 import { OwnedProcessCollection } from './process-cleanup';
-import { runPublication } from './publication-runner';
+import { isPublicationCancelled, runPublication } from './publication-runner';
 import { publicationIdentity, snapshotMessage } from './message-fields';
 import { ProcessIdentityAllocator, validateProcessSet } from './process-identity';
 import { runCurrentStartup } from './current-startup';
@@ -170,11 +171,50 @@ export class MasterConfigPublicationCoordinator {
     }
   }
 
+  async publishPrepared(
+    snapshot: RepositorySnapshot, mutationId: string, oldWorkers: readonly ServingConfigWorker[],
+    commit: (workers: readonly ServingConfigWorker[]) => Promise<ActiveConfigurationPublication | null>,
+    signal?: PublicationCancellationSignal,
+  ): Promise<StartupPublicationOutcome | MasterPublicationOutcome> {
+    this.acquire();
+    try {
+      this.validateServingWorkers(oldWorkers);
+      this.identities.register(oldWorkers);
+      let outcome: MasterPublicationOutcome | null = null;
+      const startup = await runCurrentStartup({
+        workerFactory: this.options.workerFactory, workerCount: this.options.workerCount, scheduler: this.scheduler,
+        applyTimeoutMs: this.options.startupApplyTimeoutMs, drainTimeoutMs: this.options.drainTimeoutMs,
+        identities: this.identities, pluginCatalogHash: this.options.pluginCatalogHash, admission: this.options.admission,
+        retireWorkers: oldWorkers, signal, ensureCreationPermitted: this.options.ensureCreationPermitted,
+        prospective: {
+          publication: { mutation_id: mutationId, attempt_no: 1, drain_recovery_generation: 0 },
+          publish: async (workers, admission) => {
+            const active = await commit(workers);
+            if (active === null) return false;
+            try {
+              outcome = await this.runPublish(active, oldWorkers, signal, undefined, { workers, admission });
+            } catch (error) {
+              if (!isPublicationCancelled(error)) throw error;
+              // The publication runner owns the cohort from here, including uncertain cutover.
+              outcome = { kind: 'outcome_unknown', fatal: false, code: 'control_recovering',
+                error, serving: oldWorkers, pending: [] };
+            }
+            return true;
+          },
+        },
+      }, snapshot, []);
+      return outcome ?? startup;
+    } finally {
+      this.release();
+    }
+  }
+
   private runPublish(
     active: ActiveConfigurationPublication,
     oldWorkers: readonly ServingConfigWorker[],
     signal?: PublicationCancellationSignal,
     updateSignal?: AbortSignal,
+    preparedCandidate?: { readonly workers: readonly ServingConfigWorker[]; readonly admission: PreparedWorkerAdmission },
   ): Promise<MasterPublicationOutcome> {
     if (!exactTargets(active, this.options.workerCount)) {
       return Promise.reject(new MasterConfigPublicationError(
@@ -188,7 +228,7 @@ export class MasterConfigPublicationCoordinator {
       identities: this.identities, oldWorkers, owned: new OwnedProcessCollection(),
       pluginCatalogHash: this.options.pluginCatalogHash, admission: this.options.admission,
       latestRevision: () => this.options.repository.getSnapshot().revision,
-      recoveringMaster: false, signal, updateSignal,
+      recoveringMaster: false, signal, updateSignal, preparedCandidate,
       ensureCreationPermitted: this.options.ensureCreationPermitted }, active, oldWorkers);
   }
 

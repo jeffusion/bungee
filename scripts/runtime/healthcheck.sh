@@ -8,24 +8,21 @@ set -e
 BUNGEE_MANAGEMENT_HOST="${BUNGEE_MANAGEMENT_HOST:-127.0.0.1}"
 BUNGEE_MANAGEMENT_PORT="${BUNGEE_MANAGEMENT_PORT:-8089}"
 case "$BUNGEE_MANAGEMENT_HOST" in
-    0.0.0.0) HEALTH_HOST="127.0.0.1"; CONNECT_HOST="127.0.0.1" ;;
-    ::) HEALTH_HOST="[::1]"; CONNECT_HOST="::1" ;;
-    *:*) HEALTH_HOST="[$BUNGEE_MANAGEMENT_HOST]"; CONNECT_HOST="$BUNGEE_MANAGEMENT_HOST" ;;
-    *) HEALTH_HOST="$BUNGEE_MANAGEMENT_HOST"; CONNECT_HOST="$BUNGEE_MANAGEMENT_HOST" ;;
+    0.0.0.0) HEALTH_HOST="127.0.0.1" ;;
+    ::) HEALTH_HOST="[::1]" ;;
+    *:*) HEALTH_HOST="[$BUNGEE_MANAGEMENT_HOST]" ;;
+    *) HEALTH_HOST="$BUNGEE_MANAGEMENT_HOST" ;;
 esac
-HEALTH_ENDPOINT="http://${HEALTH_HOST}:${BUNGEE_MANAGEMENT_PORT}/health/management"
+HEALTH_BASE="http://${HEALTH_HOST}:${BUNGEE_MANAGEMENT_PORT}/health"
 TIMEOUT=5
 
-# Perform health check using wget (installed in Dockerfile)
-if command -v wget >/dev/null 2>&1; then
-    # Use wget (preferred, lighter than curl)
-    wget --spider --timeout=$TIMEOUT --tries=1 "$HEALTH_ENDPOINT" >/dev/null 2>&1
-    exit $?
-elif command -v curl >/dev/null 2>&1; then
-    # Fallback to curl if available
-    curl -f -s --max-time $TIMEOUT "$HEALTH_ENDPOINT" >/dev/null
-    exit $?
-else
-    # A listening socket is insufficient evidence of management readiness.
-    exit 1
-fi
+for capability in management data; do
+    endpoint="$HEALTH_BASE/$capability"
+    if command -v wget >/dev/null 2>&1; then
+        wget --spider --timeout="$TIMEOUT" --tries=1 "$endpoint" >/dev/null 2>&1
+    elif command -v curl >/dev/null 2>&1; then
+        curl -fs --max-time "$TIMEOUT" "$endpoint" >/dev/null 2>&1
+    else
+        exit 1
+    fi
+done

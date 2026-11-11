@@ -24,4 +24,4 @@ export function createControl(host: ControlHostContext): PluginControl {
     }}],
   };
 }
-export default {createControl} satisfies ControlPlugin;
+export default {supportsOnlinePreparation: true, createControl} satisfies ControlPlugin;

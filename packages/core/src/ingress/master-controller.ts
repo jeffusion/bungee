@@ -1,4 +1,4 @@
-import type { DataAdmissionPublication } from '../data-admission/host';
+import type { CandidateDataAdmission, DataAdmissionPublication } from '../data-admission/host';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
@@ -35,6 +35,8 @@ import {
 import type { SupervisedWorkerRateLimitSession } from '../config-worker/process-environment';
 import { recordShutdownFailure, shutdownElapsedMs, type ShutdownEvidence } from '../master-runtime/shutdown-diagnostics';
 
+type PreparedIngressAdmission = PreparedWorkerAdmission & { commit(dataAdmission?: CandidateDataAdmission): Promise<void> };
+
 export type MasterIngressControllerOptions = {
   readonly rootKey: SupervisionRootKeyMaterial;
   readonly instanceId: string;
@@ -59,7 +61,7 @@ export type MasterIngressControllerOptions = {
   readonly onRecovered?: (event: MasterIngressRecoveryEvent) => Promise<MasterIngressRecoveryResult | void>
     | MasterIngressRecoveryResult | void;
   readonly onNewBootAccepted?: (event: Extract<MasterIngressRecoveryEvent, { readonly kind: 'new_boot' }>) => void;
-  readonly onAdmissionResolved?: (event: { readonly target: AdmissionSet; readonly outcome: 'committed' | 'not_committed' }) => Promise<void> | void;
+  readonly onAdmissionResolved?: (event: { readonly target: AdmissionSet; readonly outcome: 'committed' | 'not_committed'; readonly previousActive: AdmissionSet | null }) => Promise<void> | void;
   /** Injectable exact-process OS operations; production defaults to the real capture/probe primitive. */
   readonly processIdentity?: IngressProcessIdentityControl;
   /** Sleep used between shutdown exit probes; injectable for unit tests. */
@@ -205,7 +207,7 @@ export class MasterIngressController implements WorkerAdmissionController {
   private readonly fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   private readonly stateListeners = new Set<(state: MasterIngressControllerState) => void>();
   private readonly eligibilityListeners = new Set<() => void>();
-  private pendingAdmission: { readonly fingerprint: string; readonly promise: Promise<PreparedWorkerAdmission> } | null = null;
+  private pendingAdmission: { readonly fingerprint: string; readonly promise: Promise<PreparedIngressAdmission> } | null = null;
   private trustedStatus: IngressStatusPayload | null = null;
   private leaseDeadline = 0;
   private trustedStatusAt = -1;
@@ -222,6 +224,7 @@ export class MasterIngressController implements WorkerAdmissionController {
     readonly target: AdmissionSet;
     readonly identity: string;
     readonly previousActive: AdmissionSet | null;
+    readonly dataAdmission?: CandidateDataAdmission;
     pendingResolution: 'committed' | 'not_committed' | null;
     resolutionPromise: Promise<void> | null;
   } | null = null;
@@ -460,7 +463,8 @@ export class MasterIngressController implements WorkerAdmissionController {
   }
 
   prepare(workers: readonly ServingConfigWorker[], signal?: AbortSignal, handoffTimeoutMs?: number, websocketMaxConnections: number | null = DEFAULT_WEBSOCKET_MAX_CONNECTIONS,
-    websocketMaxMessageBytes = DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES, requestLogCollectorEntry?: string): Promise<PreparedWorkerAdmission> {
+    websocketMaxMessageBytes = DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES, requestLogCollectorEntry?: string,
+    preparedPolicy?: CandidateDataAdmission): Promise<PreparedIngressAdmission> {
     this.requireMutation();
     throwIfAborted(signal);
     const handoffBudgetMs = handoffTimeoutMs ?? DEFAULT_PUBLICATION_POLICY.drain_timeout_ms;
@@ -469,11 +473,13 @@ export class MasterIngressController implements WorkerAdmissionController {
     }
     const scope = this.captureAdmissionHandleScope();
     const set = this.toAdmissionSet(workers, websocketMaxConnections, websocketMaxMessageBytes, requestLogCollectorEntry);
-    const fingerprint = canonicalJson({ admission: { ...set, admission_sequence: 0 }, handoff_timeout_ms: handoffBudgetMs });
+    const body = { admission: set, handoff_timeout_ms: handoffBudgetMs,
+      ...(preparedPolicy === undefined ? {} : { dataAdmission: preparedPolicy }) };
+    const fingerprint = canonicalJson({ ...body, admission: { ...set, admission_sequence: 0 } });
     if (this.pendingAdmission?.fingerprint === fingerprint) return this.pendingAdmission.promise;
     this.beginPrepareRecovery(set);
-    let pending: { readonly fingerprint: string; readonly promise: Promise<PreparedWorkerAdmission> };
-    const promise = (async (): Promise<PreparedWorkerAdmission> => {
+    let pending: NonNullable<typeof this.pendingAdmission>;
+    const promise = (async (): Promise<PreparedIngressAdmission> => {
       let previousActive: AdmissionSet | null = null;
       const previousAdmission = (registry: IngressStatusPayload['registry']): AdmissionSet | null => {
         if (registry.active === null || admissionSetIdentity(registry.active) !== admissionSetIdentity(set)) return registry.active;
@@ -485,7 +491,7 @@ export class MasterIngressController implements WorkerAdmissionController {
       const task = this.enqueueTask(async (queueSignal) => {
         try {
           this.assertAdmissionHandleScope(scope);
-          await this.command('/prepare', { admission: set, handoff_timeout_ms: handoffBudgetMs }, scope, queueSignal);
+          await this.command('/prepare', body, scope, queueSignal);
           throwIfAborted(queueSignal);
           previousActive = previousAdmission((await this.statusNow(scope, queueSignal)).registry);
           throwIfAborted(queueSignal);
@@ -525,20 +531,21 @@ export class MasterIngressController implements WorkerAdmissionController {
       }
       let commitPromise: Promise<void> | null = null;
       return {
-        commit: async () => {
+        commit: async (dataAdmission?: CandidateDataAdmission) => {
           const run = async (): Promise<void> => {
             try {
               throwIfAborted(signal);
               this.assertAdmissionHandleScope(scope);
-              this.beginUncertainAdmission(set);
+              this.beginUncertainAdmission(set, dataAdmission);
               const task = this.enqueueTask((queueSignal) => this.commitAdmission(set, scope, queueSignal), signal, this.startupTimeoutMs);
               let outcome: 'committed' | 'not_committed';
               let resolvedByRecovery = false;
               try {
                 outcome = await task.result;
               } catch (cause) {
+                const uncertain = this.uncertainAdmission;
                 if (!(cause instanceof MasterIngressControllerError) || cause.code !== 'control_recovering'
-                  || this.uncertainAdmission?.identity !== admissionSetIdentity(set)) throw cause;
+                  || uncertain?.identity !== admissionSetIdentity(set)) throw cause;
                 const recovery = await this.recoverControl();
                 if (recovery.recovered) {
                   if (recovery.event === 'new_boot') void this.invokeRecovered().catch(() => undefined);
@@ -546,8 +553,11 @@ export class MasterIngressController implements WorkerAdmissionController {
                 }
                 this.assertAdmissionHandleScope(scope);
                 const active = this.trustedStatus?.registry.active;
-                if (active === null || active === undefined || admissionSetIdentity(active) !== admissionSetIdentity(set)) {
+                if (uncertain.pendingResolution === 'not_committed') {
                   throw new MasterIngressControllerError('admission_not_committed', 'ingress commit was not applied; abort is safe');
+                }
+                if (!active || admissionSetIdentity(active) !== uncertain.identity) {
+                  throw new MasterIngressControllerError('outcome_unknown', 'ingress recovery has not confirmed the commit', { cause });
                 }
                 outcome = 'committed';
                 resolvedByRecovery = true;
@@ -570,7 +580,7 @@ export class MasterIngressController implements WorkerAdmissionController {
           return commitPromise;
         },
         abort: async () => {
-          try { this.assertAdmissionHandleScope(scope); await this.abortAdmission(set, scope, signal); }
+          try { this.assertAdmissionHandleScope(scope); await this.abortAdmission(set, scope); }
           finally { if (this.pendingAdmission === pending) this.pendingAdmission = null; }
         },
         handoffStatus: async () => {
@@ -1497,8 +1507,9 @@ export class MasterIngressController implements WorkerAdmissionController {
     throwIfAborted(signal);
     if (this.client === null) throw new MasterIngressControllerError('not_attached', 'ingress controller is not connected');
     const resolvingPreparedAdmission = path === '/commit' && this.uncertainAdmission !== null;
+    const abortingPreparedAdmission = path === '/abort' && scope !== undefined && this.uncertainAdmission === null;
     if (path !== '/shutdown' && path !== '/release-retired' && path !== '/admission/fence'
-      && !resolvingPreparedAdmission && this.state !== 'attached') {
+      && !resolvingPreparedAdmission && !abortingPreparedAdmission && this.state !== 'attached') {
       throw new MasterIngressControllerError('control_recovering', 'ingress mutations are paused');
     }
     try {
@@ -1522,11 +1533,14 @@ export class MasterIngressController implements WorkerAdmissionController {
     this.notifyEligibilityChange();
   }
 
-  private beginUncertainAdmission(set: AdmissionSet): void {
+  private beginUncertainAdmission(set: AdmissionSet, dataAdmission?: CandidateDataAdmission): void {
     const identity = admissionSetIdentity(set);
     if (this.uncertainAdmission !== null) {
       if (this.uncertainAdmission.identity !== identity) {
         throw new MasterIngressControllerError('outcome_unknown', 'a different uncertain admission is already being resolved');
+      }
+      if (JSON.stringify(this.uncertainAdmission.dataAdmission) !== JSON.stringify(dataAdmission)) {
+        throw new MasterIngressControllerError('outcome_unknown', 'uncertain admission policy changed');
       }
       return;
     }
@@ -1534,9 +1548,14 @@ export class MasterIngressController implements WorkerAdmissionController {
       target: set,
       identity,
       previousActive: this.trustedStatus?.registry.active ?? null,
+      ...(dataAdmission === undefined ? {} : { dataAdmission: structuredClone(dataAdmission) }),
       pendingResolution: null,
       resolutionPromise: null,
     };
+  }
+
+  private sendAdmissionCommit(set: AdmissionSet, dataAdmission?: CandidateDataAdmission, scope?: AdmissionHandleScope, signal?: AbortSignal): Promise<unknown> {
+    return this.command('/commit', dataAdmission === undefined ? set : { admission: set, dataAdmission }, scope, signal);
   }
 
   private beginPrepareRecovery(set: AdmissionSet): void {
@@ -1552,10 +1571,11 @@ export class MasterIngressController implements WorkerAdmissionController {
 
   private async commitAdmission(set: AdmissionSet, scope?: AdmissionHandleScope, signal?: AbortSignal): Promise<'committed' | 'not_committed'> {
     if (scope !== undefined) this.assertAdmissionHandleScope(scope);
-    this.beginUncertainAdmission(set);
+    const uncertain = this.uncertainAdmission;
+    if (!uncertain || uncertain.identity !== admissionSetIdentity(set)) this.admissionOutcomeUnknown('ingress commit identity is no longer pending');
     let status: IngressStatusPayload;
     try {
-      await this.command('/commit', set, scope, signal);
+      await this.sendAdmissionCommit(set, uncertain.dataAdmission, scope, signal);
       status = await this.statusNow(scope, signal);
     } catch (cause) {
       throwIfAborted(signal);
@@ -1582,7 +1602,8 @@ export class MasterIngressController implements WorkerAdmissionController {
     if (uncertain.resolutionPromise !== null) return uncertain.resolutionPromise;
     const resolution = (async () => {
       if (scope !== undefined) this.assertAdmissionHandleScope(scope);
-      await this.options.onAdmissionResolved?.({ target: uncertain.target, outcome });
+      const previousActive = outcome === 'not_committed' ? this.trustedStatus?.registry.active ?? uncertain.previousActive : uncertain.previousActive;
+      await this.options.onAdmissionResolved?.({ target: uncertain.target, outcome, previousActive });
       throwIfAborted(signal);
       if (scope !== undefined) this.assertAdmissionHandleScope(scope);
       if (this.uncertainAdmission === uncertain) this.uncertainAdmission = null;
@@ -1616,7 +1637,7 @@ export class MasterIngressController implements WorkerAdmissionController {
         return 'committed';
       }
       if (status.registry.prepared !== null && admissionSetIdentity(status.registry.prepared) === targetIdentity) {
-        try { await this.command('/commit', uncertain.target, scope, signal); }
+        try { await this.sendAdmissionCommit(uncertain.target, uncertain.dataAdmission, scope, signal); }
         catch (cause) { throwIfAborted(signal); await this.statusAfterFailure(cause, scope, signal); }
         throwIfAborted(signal);
         const confirmed = await this.statusNow(scope, signal);
@@ -1650,12 +1671,17 @@ export class MasterIngressController implements WorkerAdmissionController {
           return 'committed';
         }
         if (fenced.registry.prepared !== null && admissionSetIdentity(fenced.registry.prepared) === targetIdentity) {
-          await this.command('/commit', uncertain.target, scope, signal);
+          try { await this.sendAdmissionCommit(uncertain.target, uncertain.dataAdmission, scope, signal); }
+          catch (cause) { throwIfAborted(signal); await this.statusAfterFailure(cause, scope, signal); }
           throwIfAborted(signal);
           const committed = await this.statusNow(scope, signal);
           if (committed.registry.active !== null && admissionSetIdentity(committed.registry.active) === targetIdentity) {
             uncertain.pendingResolution = 'committed';
             return 'committed';
+          }
+          if (committed.registry.prepared === null) {
+            uncertain.pendingResolution = 'not_committed';
+            return 'not_committed';
           }
           this.admissionOutcomeUnknown('prepared ingress commit remains unresolved after fence', committed);
         }
@@ -1752,21 +1778,25 @@ export class MasterIngressController implements WorkerAdmissionController {
 
   private safeToAbort(status: IngressStatusPayload, targetIdentity: string): boolean {
     return status.registry.prepared === null
-      && status.registry.active !== null
-      && admissionSetIdentity(status.registry.active) !== targetIdentity;
+      && [status.registry.active, ...status.registry.retired].every(set => set === null || admissionSetIdentity(set) !== targetIdentity);
   }
 
-  private async abortAdmission(set: AdmissionSet, scope?: AdmissionHandleScope, parentSignal?: AbortSignal): Promise<void> {
+  private async abortAdmission(set: AdmissionSet, scope?: AdmissionHandleScope): Promise<void> {
     await this.enqueue(async (signal) => {
-      try {
-        await this.command('/abort', set, scope, signal);
-      } catch (cause) {
-        throwIfAborted(signal);
-        const status = await this.statusAfterFailure(cause, scope, signal);
-        throwIfAborted(signal);
-        if (!this.safeToAbort(status, admissionSetIdentity(set))) throw cause;
-      }
-    }, parentSignal);
+      const identity = admissionSetIdentity(set);
+      const abort = async () => {
+        try {
+          await this.command('/abort', set, scope, signal);
+          return await this.statusNow(scope, signal);
+        } catch (cause) {
+          throwIfAborted(signal);
+          return this.statusAfterFailure(cause, scope, signal);
+        }
+      };
+      let status = await abort();
+      if (status.registry.prepared && admissionSetIdentity(status.registry.prepared) === identity) status = await abort();
+      if (!this.safeToAbort(status, identity)) this.admissionOutcomeUnknown('ingress abort was not confirmed', status);
+    });
   }
 
   private async statusAfterFailure(cause: unknown, scope?: AdmissionHandleScope, signal?: AbortSignal): Promise<IngressStatusPayload> {

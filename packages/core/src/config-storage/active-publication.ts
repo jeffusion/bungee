@@ -20,6 +20,7 @@ import { ConfigRepositoryError } from './repository-types';
 import { sqliteAll, sqliteGet } from './sqlite-query';
 import { validateOperationIdentity } from './operation-relations';
 import { readUnsettledWorkerLaunches, readWorkerLaunchAllocationFacts } from './worker-launch-store';
+import { CURRENT_RUNTIME_EPOCH } from './runtime-cutover';
 
 type OwnerOperation = Extract<ConfigurationOperation, { readonly state: 'committed' | 'publishing' | 'draining' }>;
 export type PublicationOwner = {
@@ -33,7 +34,8 @@ const CANCELLED_DETAIL = 'publication candidate was cancelled before admission p
 
 /** At most one persistable publication owner exists; unclaimed targets stay pending. */
 export function readPublicationOwner(db: Database): PublicationOwner | null {
-  const rows = sqliteAll<OperationRow, []>(db, `${OPERATION_SELECT} WHERE state IN ${OWNER_STATES}`);
+  const rows = sqliteAll<OperationRow, []>(db, `${OPERATION_SELECT} WHERE state IN ${OWNER_STATES}
+    AND runtime_epoch=${CURRENT_RUNTIME_EPOCH}`);
   if (rows.length > 1) throw new ConfigRepositoryError('schema_corrupt', 'multiple publication owners exist');
   const row = rows[0];
   if (row === undefined) return null;
@@ -99,6 +101,7 @@ function requireLatestAggregate(db: Database, snapshot: RepositorySnapshot, revi
  */
 export function claimPublicationTarget(
   db: Database, snapshot: RepositorySnapshot, pluginCatalogHash: Sha256Digest, updatedAt: number,
+  preparedInstances?: ReadonlySet<string>,
 ): ActiveConfigurationPublication | null {
   if (!validateDigest(pluginCatalogHash)) {
     throw new ConfigRepositoryError('invalid_command', 'publication catalog identity is invalid');
@@ -125,28 +128,27 @@ export function claimPublicationTarget(
       'configuration application is blocked by an unresolved recovery', undefined, recovery);
   }
   const retirement = sqliteGet<{ readonly mutation_id: string }, []>(db,
-    "SELECT mutation_id FROM configuration_retirements WHERE state<>'released' LIMIT 1");
+    `SELECT r.mutation_id FROM configuration_retirements r JOIN configuration_operations o USING(mutation_id)
+    WHERE r.state<>'released' AND o.runtime_epoch=${CURRENT_RUNTIME_EPOCH} LIMIT 1`);
   if (retirement !== null) {
     throw new ConfigRepositoryError('invalid_operation',
       'configuration application is blocked by unresolved worker retirement');
   }
-  if (readUnsettledWorkerLaunches(db).length > 0) {
+  if (readUnsettledWorkerLaunches(db).some(entry => entry.kind !== 'launch'
+    || entry.launch.allocation !== null || !preparedInstances?.has(entry.launch.identity.worker_instance_id))) {
     throw new ConfigRepositoryError('invalid_operation',
       'configuration application is blocked by an unsettled worker launch');
   }
-  const candidateRow = sqliteGet<OperationRow, []>(db,
-    `${OPERATION_SELECT} WHERE state='pending' ORDER BY committed_revision DESC LIMIT 1`);
+  const activeRevision = readActiveRevision(db);
+  db.run(`UPDATE configuration_operations
+    SET state='superseded',result_status=409,error_code='revision_superseded',error_detail=?,
+      updated_at=max(?,updated_at)
+    WHERE state='pending' AND committed_revision<?`, [SUPERSEDED_DETAIL, updatedAt, activeRevision]);
+  const candidateRow = sqliteGet<OperationRow, [number]>(db,
+    `${OPERATION_SELECT} WHERE state='pending' AND committed_revision=?`, activeRevision);
   if (candidateRow === null) return null;
   const candidate = operationFromRow(candidateRow);
   if (candidate.state !== 'pending') throw new ConfigRepositoryError('schema_corrupt', 'pending target state is invalid');
-  const activeRevision = readActiveRevision(db);
-  if (candidate.committed_revision !== activeRevision) {
-    throw new ConfigRepositoryError('schema_corrupt', 'pending target is not the latest revision');
-  }
-  const supersededAt = Math.max(updatedAt, candidate.created_at);
-  db.run(`UPDATE configuration_operations
-    SET state='superseded',result_status=409,error_code='revision_superseded',error_detail=?,updated_at=?
-    WHERE state='pending' AND committed_revision<>?`, [SUPERSEDED_DETAIL, supersededAt, candidate.committed_revision]);
   const aggregate = requireLatestAggregate(db, snapshot, candidate.committed_revision);
   const revision = sqliteGet<{ readonly content_hash: string }, [number]>(db,
     'SELECT content_hash FROM configuration_revisions WHERE revision=?', candidate.committed_revision);
@@ -157,8 +159,8 @@ export function claimPublicationTarget(
     revision: candidate.committed_revision, content_hash: revision.content_hash as Sha256Digest, aggregate,
   }, pluginCatalogHash);
   const claimed = db.run(`UPDATE configuration_operations
-    SET state='committed',plugin_catalog_hash=?,updated_at=?
-    WHERE mutation_id=? AND state='pending'`, [pluginCatalogHash, supersededAt, candidate.mutation_id]);
+    SET state='committed',plugin_catalog_hash=?,updated_at=?,runtime_epoch=${CURRENT_RUNTIME_EPOCH}
+    WHERE mutation_id=? AND state='pending'`, [pluginCatalogHash, Math.max(updatedAt, candidate.updated_at), candidate.mutation_id]);
   if (claimed.changes !== 1) throw new ConfigRepositoryError('repository_failure', 'publication claim lost its target');
   const ownerAfter = readPublicationOwner(db);
   if (ownerAfter === null) throw new ConfigRepositoryError('repository_failure', 'publication claim did not persist');

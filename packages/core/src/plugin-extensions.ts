@@ -64,13 +64,14 @@ export interface IngressPlugin {
     readonly capacity: number;
     policyForKey(policy: DurableJson, keyId: string): DurableJson;
     expiresAt(state: DurableJson): number;
-    reconcile(state: DurableJson, policy: DurableJson, now: number): DurableJson;
+    reconcile(state: DurableJson, policy: DurableJson, now: number,
+      transition?: { readonly previousActivation: number; readonly deferUntilActivation: boolean }): DurableJson;
   };
   authenticate?(request: Request, policy: DurableJson, now: number): DataPrincipal | null;
   resolveIdentity?(target: AdmissionTarget, policy: DurableJson): DataPrincipal;
   /** Pure access decision before preparation/cache reuse; never plans or debits state. */
   authorize?(target: AdmissionTarget, policy: DurableJson): AdmissionDenial | null;
-  plan(target: AdmissionTarget, policy: DurableJson, state: DurableJson): AdmissionPlan;
+  plan(target: AdmissionTarget, policy: DurableJson, state: DurableJson, policyActivatedAt?: number): AdmissionPlan;
   beforeAttempt?(target: AdmissionTarget, snapshot: DurableJson): AdmissionDenial | null;
 }
 export interface IngressPluginModule { createIngress(): IngressPlugin }

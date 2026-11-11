@@ -10,6 +10,7 @@ import { readRepositorySnapshot, verifyRepositoryIntegrity } from './repository-
 import { ConfigRepositoryError, type ConfigRepositoryOptions } from './repository-types';
 import { sqliteGet } from './sqlite-query';
 import { readUnsettledWorkerLaunches } from './worker-launch-store';
+import { CURRENT_RUNTIME_EPOCH } from './runtime-cutover';
 
 const PLUGIN = 'request-logs';
 
@@ -33,11 +34,13 @@ export function applyRequestLogsDefault(
   if (!snapshot.aggregate.plugin_activations.some(activation => activation.plugin_name === PLUGIN)) {
     // Recovery may need to run before the installation catalog is available again.
     const unfinished = sqliteGet<{ unfinished: number }, []>(db, `SELECT 1 AS unfinished FROM configuration_operations
-        WHERE state IN ('committed','publishing','draining') OR (state='pending' AND committed_revision=(
+        WHERE (state IN ('committed','publishing','draining') AND runtime_epoch=${CURRENT_RUNTIME_EPOCH})
+          OR (state='pending' AND committed_revision=(
           SELECT active_revision FROM configuration_state WHERE id=1))
-      UNION ALL SELECT 1 FROM configuration_retirements WHERE state<>'released'
+      UNION ALL SELECT 1 FROM configuration_retirements r JOIN configuration_operations o USING(mutation_id)
+        WHERE r.state<>'released' AND o.runtime_epoch=${CURRENT_RUNTIME_EPOCH}
       UNION ALL SELECT 1 FROM configuration_recoveries WHERE state='stopped' AND recovery_sequence=(
-        SELECT max(recovery_sequence) FROM configuration_recoveries WHERE target_revision=(
+        SELECT max(recovery_sequence) FROM configuration_recoveries WHERE runtime_epoch=${CURRENT_RUNTIME_EPOCH} AND target_revision=(
           SELECT active_revision FROM configuration_state WHERE id=1))
       LIMIT 1`);
     if (unfinished !== null || readPublicationRecoveryBarrier(db) !== null || readUnsettledWorkerLaunches(db).length > 0) return false;
