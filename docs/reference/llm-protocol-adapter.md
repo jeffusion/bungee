@@ -84,9 +84,9 @@ Responses→Gemini 的普通 user 消息同样支持上述内嵌图片，按图�
 
 Responses→Gemini 按出现顺序归集所有 system/developer 消息到 systemInstruction，包括用户消息之后追加的指令。中途指令记录 gemini_mid_conversation_instructions_consolidated；正文与指令各自的相对顺序保留，但指令在原对话中的位置不再保留。规范历史保持原顺序，生成的单工具提示不写入历史。该兼容策略不放宽未知内容、原生密文、工具参数或其它协议对的校验。
 
-Responses→Gemini 将 Codex 注入的 `agent.codex_apps_open_page` 和 `agent.codex_apps_selected_page_part_<序号>_of_<总数>` 快照转成带来源标记的 user 文本。此规则只适用于缺省 `call_id` 且 `output` 为字符串的 `function_call_output`。快照正文按原顺序进入对话和规范历史，记录 `gemini_codex_page_snapshot_as_user_data` 诊断。普通工具结果仍通过 `call_id` 与对应调用配对。
+Responses 转到 Chat Completions 或 Gemini 时，将 Codex 注入的 `agent.codex_apps_open_page` 和 `agent.codex_apps_selected_page_part_<序号>_of_<总数>` 快照转成带来源标记的 user 文本。此规则只适用于缺省 `call_id` 且 `output` 为字符串的 `function_call_output`。快照正文按原顺序进入对话和规范历史，按目标记录 `chat_codex_page_snapshot_as_user_data` 或 `gemini_codex_page_snapshot_as_user_data` 诊断。普通工具结果仍通过 `call_id` 与对应调用配对。
 
-普通文本和推理 Part 的签名及边界通过尾部 reasoning 项的 encrypted_content 携带。`bungee_gemini:` 是网关私有 opaque 格式，包含版本、输出项引用、Part 长度、内容摘要与原始签名，不表示 OpenAI 能解析该数据。流式文本照常发送，晚到签名不修改已发 item_id。客户端须完整回传 output，包括该 reasoning 项，且保留被签名文本与项 ID；回放严格校验引用、内容摘要、编码和资源限额。只对 Responses→Gemini 恢复此格式，原生 OpenAI 密文和 compaction 仍拒绝，不新增持久化存储。
+普通文本和推理 Part 的签名及边界通过尾部 reasoning 项的 encrypted_content 携带。`bungee_gemini:` 是网关私有 opaque 格式，包含版本、输出项引用、Part 长度、内容摘要与原始签名，不表示 OpenAI 能解析该数据。流式文本照常发送，晚到签名不修改已发 item_id。客户端须完整回传 output，包括该 reasoning 项，且保留被签名文本与项 ID。对 Codex 回传的载体，适配器接受 `content: null` 和对象类型的 `internal_chat_message_metadata_passthrough`，从规范历史中移除这两个附加字段；非空 content、非对象元数据和未知字段仍拒绝。回放继续校验引用、内容摘要、编码和资源限额。只对 Responses→Gemini 恢复此格式，原生 OpenAI 密文和 compaction 仍拒绝。
 
 Gemini usageMetadata 的辅助统计（如 promptTokensDetails、cacheTokensDetails、trafficType）不作为正文准入条件。实际消费的核心计数仍严格校验；toolUsePromptTokenCount 计入 input_tokens，thoughtsTokenCount 计入 output_tokens 及 reasoning_tokens，并核对 totalTokenCount。原始细项继续由既有上游计量链路读取，不伪造 Responses 不支持的细分字段。
 
@@ -106,6 +106,8 @@ Gemini usageMetadata 的辅助统计（如 promptTokensDetails、cacheTokensDeta
 `null` 和 `default` 是目录控制值，不是具体强度；toggle 和 budget_tokens 也不能转换成档位。未知模型、缺少有效 effort 元数据、目标协议不能表达 effort 或 reasoning 被限制时，返回空 supportedEfforts。当前消费的 models.dev API 格式没有独立默认等级字段，defaultEffort 保持 null，Codex 目录的 default_reasoning_level 同样为 null，不用具体档位 none 代替未知默认值。目录 capability 与 catalogVersion 来自同一完整快照；adapter 返回独立 rulesVersion，用于会话与出站校验。
 
 显式 effort 按原值写入 Responses 的 reasoning.effort、Chat Completions 的 reasoning_effort、Anthropic Messages 的 output_config.effort 或 Gemini 的 generationConfig.thinkingConfig.thinkingLevel。未选择 effort 时不注入默认等级；适配器不因模型名称自动开启 thinking、adaptive 或设置 budget，推理开关沿用目标端默认行为。Gemini 仅公布目录明确列出的 minimal/low/medium/high 交集，按原值映射 thinkingLevel；none/xhigh/max、toggle 与 budget_tokens 不生成档位，也不换算 budget。
+
+Responses→Gemini 接受仅含 `reasoning.effort` 的 [`configuration_update` 输入项](https://developers.openai.com/api/docs/guides/reasoning#change-reasoning-mid-conversation)。每项都须通过档位映射校验；按历史顺序，最后一项覆盖顶层 effort，用于当前 Gemini 请求及独立适配器的出站校验。更新项按原位置保存在规范历史中，供完整回放及 Codex Router 的引用续聊使用，不作为对话消息发送给 Gemini。生效项记录 `gemini_configuration_effort_update`；`text.format` 等其它更新字段仍拒绝，原生 Responses 继续透传。
 
 有明确目标 profile 的转换请求必须核验 selectedEffort。独立运行的 llm-protocol-adapter 在每次出站时核验实际模型、协议、目录版本、规则版本和出站档位。[Codex Router](../../plugins/codex-router/README.md) 使用转换服务，转换完成后由目标链路的规则和插件决定最终请求。不将不同档位折叠成相近值，也不从档位臆造 thinking.budget_tokens。字段映射依据 [OpenAI Responses](https://platform.openai.com/docs/api-reference/responses)、[Chat Completions](https://platform.openai.com/docs/api-reference/chat/completions)、[Gemini thinking levels](https://ai.google.dev/api/generate-content#ThinkingConfig) 和 [Anthropic effort](https://platform.claude.com/docs/en/build-with-claude/effort) 的协议定义；提供商的额外约束仍需实际验证，不能由兼容协议名称推断全部行为。
 

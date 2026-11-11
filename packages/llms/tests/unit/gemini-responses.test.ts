@@ -18,6 +18,46 @@ const chunk = (parts: unknown[], finishReason?: string) => ({ candidates: [{ ind
 const imageData = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5wAAAABJRU5ErkJggg==';
 const toolImage = { type: 'input_image', image_url: `data:image/png;base64,${imageData}`, detail: 'high' };
 
+test('Gemini applies the latest effort update on signed Codex history and keeps it for the next turn', () => {
+  const open = () => createProtocolSession({ ...context, reasoningPolicy: { effortMap: { high: 'high', medium: 'medium', low: 'low' } } });
+  const reasoning = { effort: 'high' };
+  const seed = open();
+  const first = seed.convertRequest({ input: 'first', reasoning });
+  const [message, carrier] = seed.convertResponse(chunk([{ text: 'signed answer', thoughtSignature: signature }], 'STOP')).output as Record<string, unknown>[];
+  const wrapped = { ...carrier, content: null, internal_chat_message_metadata_passthrough: { turn_id: 'fixture' } };
+  const update = (effort: string) => ({ type: 'configuration_update', reasoning: { effort } });
+  const low = update('low'), medium = update('medium');
+  const input = [...first.canonicalHistory, message!, wrapped, low, { role: 'user', content: 'continue' }, medium];
+  const turn = open();
+  const converted = turn.convertRequest({ input, reasoning });
+  expect(converted.body).toMatchObject({ generationConfig: { thinkingConfig: { thinkingLevel: 'medium' } }, contents: [
+    { role: 'user', parts: [{ text: 'first' }] },
+    { role: 'model', parts: [{ text: 'signed answer', thoughtSignature: signature }] },
+    { role: 'user', parts: [{ text: 'continue' }] },
+  ] });
+  expect(converted.canonicalHistory).toEqual(input.map(item => item === wrapped ? carrier : item));
+  expect(converted.diagnostics).toContainEqual({ param: 'input[5].reasoning.effort', action: 'mapped', reason: 'gemini_configuration_effort_update' });
+  const second = turn.convertResponse(chunk([{ text: 'second answer', thoughtSignature: signature }], 'STOP')).output as Record<string, unknown>[];
+  const replay = open().convertRequest({ input: [...converted.canonicalHistory, ...second, { role: 'user', content: 'again' }], reasoning });
+  expect(replay.body).toMatchObject({ generationConfig: { thinkingConfig: { thinkingLevel: 'medium' } } });
+  expect((replay.body.contents as any[]).filter(c => c.role === 'model').map(c => c.parts[0].thoughtSignature)).toEqual([signature, signature]);
+  expect(input[2]).toHaveProperty('content', null);
+  expect(reasoning.effort).toBe('high');
+
+  const reject = (items: unknown[], error: Record<string, string>) => {
+    expect(() => open().convertRequest({ input: items, reasoning })).toThrow(expect.objectContaining(error));
+  };
+  reject(input.map(item => item === message ? { ...message, content: [{ type: 'output_text', text: 'edited answer' }] } : item), { code: 'unsupported_reasoning' });
+  reject(input.map(item => item === wrapped ? { ...wrapped, content: [] } : item), { code: 'unsupported_reasoning', param: 'input[2].content' });
+  reject(input.map(item => item === wrapped ? { ...wrapped, internal_chat_message_metadata_passthrough: [] } : item),
+    { code: 'invalid_payload', param: 'input[2].internal_chat_message_metadata_passthrough' });
+  reject(input.map(item => item === low ? update('max') : item), { code: 'unsupported_reasoning', param: 'input[3].reasoning.effort' });
+  reject(input.map(item => item === medium ? { ...medium, text: { format: { type: 'json_object' } } } : item),
+    { code: 'unsupported_content', param: 'input[5].text' });
+  reject([...input, { role: 'user', content: [{ type: 'unknown', text: 'unsupported' }] }],
+    { code: 'unsupported_content', param: 'input[6].content[0]' });
+});
+
 const openPageSnapshot = {
   type: 'function_call_output', id: 'fco_open_page', namespace: 'agent', name: 'codex_apps_open_page',
   output: '{"page_id":null}', internal_chat_message_metadata_passthrough: { turn_id: 'turn', create_time: 123 },

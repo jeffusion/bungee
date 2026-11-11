@@ -125,6 +125,18 @@ test('route restrictions remove effort support without inventing a default',()=>
  expect(profile.supportedEfforts).toEqual([]);expect(profile.defaultEffort).toBeNull();expect(profile.wirePolicy).toBeNull();
  expect(profile.codecCapabilities.reasoningEffort).toBe(false);expect(profile.codecCapabilities.anthropicEffort).toBe(false);
 });
+test('Gemini attempt validation pins the history update rather than the baseline effort',()=>{
+ const {service}=fixture([{type:'effort',values:['medium','high']}]);
+ const protocol='gemini_generate_content' as const,model='glm-5.3';
+ const session=service.createSession({sourceProtocol:'responses',targetProtocol:protocol,model,selectedEffort:'high'});
+ const body=session.convertRequest({reasoning:{effort:'high'},input:[
+  {type:'configuration_update',reasoning:{effort:'medium'}},{role:'user',content:'continue'},
+ ]}).body;
+ const attempt={model,protocol,body,url:`https://host.invalid/v1beta/models/${model}:generateContent`};
+ expect(session.validateAttempt(attempt).effort).toBe('medium');
+ expect(()=>session.validateAttempt({...attempt,body:{...body,generationConfig:{thinkingConfig:{thinkingLevel:'high'}}}})).toThrow('Selected reasoning effort');
+ session.dispose();
+});
 test('directory refresh changes new sessions while an active generation pins its snapshot',()=>{
  const {service,load}=fixture();const s=service.createSession({sourceProtocol:'responses',targetProtocol:'chat_completions',model:'glm-5.3-flash'});const body=s.convertRequest({input:'hello',reasoning:{effort:'low'}}).body;
  load(2,[]);expect(s.validateAttempt({model:'glm-5.3-flash',protocol:'chat_completions',body})).toMatchObject({catalogVersion:1});
