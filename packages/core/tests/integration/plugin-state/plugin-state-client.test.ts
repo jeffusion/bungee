@@ -600,11 +600,21 @@ describe('IPC physical progress and orphan resources',()=>{
     await client.close();expect(calls).toBe(0);expect(client.health().closeConfirmed).toBe(true);
   });
   test('close cancels a not started callback even before its business deadline',async()=>{
-    const client=await fault('late-callback');const journal=client.journal({namespace:'rpc.close-callback',privateStateNamespace:'owner'});await journal.status();let calls=0;
+    const client=await fault('close-callback');const journal=client.journal({namespace:'rpc.close-callback',privateStateNamespace:'owner'});await journal.status();let calls=0;
+    const gate=join(dirs.at(-1)!,'close-callback.db.callback');
     const command=execution('closing-owner','none',async()=>{calls++;return {ok:true};});
-    const pending=journal.execute({...command,context:{...command.context,deadlineAt:Date.now()+1000}}).catch(error=>error);
-    await waitForState(()=>client.health().requests.some(request=>request.methodClass==='write'));
-    await client.close();expect(await pending).toMatchObject({code:'unknown'});expect(calls).toBe(0);expect(client.health().closeConfirmed).toBe(true);
+    const pending=journal.execute({...command,context:{...command.context,deadlineAt:Date.now()+30_000}}).catch(error=>error);
+    try {
+      await waitForState(()=>existsSync(`${gate}.ready`));
+      const closing=client.close();
+      writeFileSync(`${gate}.release`,'');
+      await closing;
+      expect(await pending).toMatchObject({code:'unknown'});
+      expect(calls).toBe(0);
+      expect(client.health().closeConfirmed).toBe(true);
+    } finally {
+      writeFileSync(`${gate}.release`,'');
+    }
   });
   test('lost committed ACK preserves operation ID, journal proof and no reexecution',async()=>{
     const client=await fault('drop-write-ack',{requestTimeoutMs:300});let plans=0;

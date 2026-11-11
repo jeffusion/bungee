@@ -6,22 +6,29 @@ const responseIds = new Set<number>();
 let crashId = -1;
 const delayed=new Map<number,number>();
 const dropAcks=new Set<number>();
+const faultModes = [
+  'late-cap', 'late-source', 'late-callback', 'close-callback', 'drop-write-ack', 'drop-probe',
+  'drop-release-ack', 'lost-ack', 'silent-close', 'silent-cap', 'silent-release',
+];
 let faultMode='silent';
 let dropProbes=false;
 let storagePath='';
 let sourceSequence=0;
 const heldSources=new Map<number,number>();
+function holdDelivery(gate:string,message:any):void {
+  writeFileSync(`${gate}.ready`,'');
+  const release=()=>{if(existsSync(`${gate}.release`))post(message);else setTimeout(release,5);};
+  release();
+}
 scope.postMessage = (message:any) => {
   if(message.type==='response' && (responseIds.has(message.id)||dropAcks.has(message.id)))return;
   if(message.type==='response'&&heldSources.has(message.id)){
     const sequence=heldSources.get(message.id)!;heldSources.delete(message.id);
-    const gate=`${storagePath}.source-${sequence}`;
-    writeFileSync(`${gate}.ready`,'');
-    const release=()=>{if(existsSync(`${gate}.release`))post(message);else setTimeout(release,5);};
-    release();return;
+    holdDelivery(`${storagePath}.source-${sequence}`,message);return;
   }
   if(message.type==='response'&&delayed.has(message.id)){const delay=delayed.get(message.id)!;delayed.delete(message.id);setTimeout(()=>post(message),delay);return;}
   if(message.type==='callback'&&faultMode==='late-callback'){setTimeout(()=>post(message),180);return;}
+  if(message.type==='callback'&&faultMode==='close-callback'){holdDelivery(`${storagePath}.callback`,message);return;}
   if(message.type==='response' && message.id===crashId && !message.error){scope.close();return;}
   post(message);
 };
@@ -32,7 +39,7 @@ scope.onmessage = (event:any) => {
   if(request.type==='request') {
     if(request.method==='open') {
       const path=request.args[0] as string;storagePath=path;
-      scope.faultMode=path.includes('late-cap')?'late-cap':path.includes('late-source')?'late-source':path.includes('late-callback')?'late-callback':path.includes('drop-write-ack')?'drop-write-ack':path.includes('drop-probe')?'drop-probe':path.includes('drop-release-ack')?'drop-release-ack':path.includes('lost-ack')?'lost-ack':path.includes('silent-close')?'silent-close':path.includes('silent-cap')?'silent-cap':path.includes('silent-release')?'silent-release':'silent';
+      scope.faultMode = faultModes.find(mode => path.includes(mode)) ?? 'silent';
     }
     faultMode=scope.faultMode;
     if(faultMode==='late-cap'&&['durable','journal'].includes(request.method))delayed.set(request.id,400);
