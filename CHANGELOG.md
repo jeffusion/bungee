@@ -1,3 +1,16 @@
+# [6.16.0](https://github.com/jeffusion/bungee/compare/v6.15.1...v6.16.0) (2026-11-14)
+
+
+### Bug Fixes
+
+* **core:** 停止取消后的 worker 恢复重复入队 ([1228706](https://github.com/jeffusion/bungee/commit/122870653a889e027018be4c1ecd4ce2a04180ac))
+* **gateway:** 补充 Codex WebSocket 生成失败的脱敏诊断 ([96695a3](https://github.com/jeffusion/bungee/commit/96695a3098f408698220d165d6aeaedeec68f295))
+
+
+### Features
+
+* **codex-router:** 支持 Chat 有损续聊与历史协议兼容 ([a135e55](https://github.com/jeffusion/bungee/commit/a135e553e5d98a88d3e82b75092b7e603fc97df5))
+
 ## [6.15.1](https://github.com/jeffusion/bungee/compare/v6.15.0...v6.15.1) (2026-11-11)
 
 
