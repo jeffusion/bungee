@@ -6,8 +6,8 @@ import {createPluginHooks} from '../../../../packages/core/src/hooks';
 const cache=new HistoryCache();const transport=new HistoryTransport(cache);
 async function dispatchPrepared(hooks:any,input:any){const decision=await hooks.onDispatchRequest.promise(input);if(!decision)return decision;const prepared=await decision.prepareRequest({...input,executeAuxiliary:async()=>{throw new Error('unexpected relay');}});return {...decision,...prepared};}
 const caps={status:()=>({version:1}),model:()=>({provider:'p',model:'m',name:'m',contextWindow:32000,outputLimit:4096,toolCall:true,reasoning:false,inputModalities:['text']})};
-async function router(protocol:string,alias='m',principal:any={domain:'data',keyId:'k',credentialVersion:1},catalog=caps){
-  const binding={provider:'p',model:'m',alias,target:{type:'route',id:protocol,protocol}};
+async function router(protocol:string,alias='m',principal:any={domain:'data',keyId:'k',credentialVersion:1},catalog=caps,allowLossyContinuation?:boolean){
+  const binding={provider:'p',model:'m',alias,target:{type:'route',id:protocol,protocol},allowLossyContinuation};
   const handler=new CodexRouterPlugin({models:[binding]});await handler.init( {scope:{type:'route',routeId:'/codex'},services:{consume:(provider:string)=>provider==='llm-protocol-adapter'?conversionService(catalog as any,true):catalog,rpc:{consume:()=>({get:async(input:any)=>transport.get(input),put:async(input:any)=>transport.put(input)})}}} as any);
   const hooks=createPluginHooks();handler.register(hooks);
   const prepare=async(body:any)=>{
@@ -17,6 +17,60 @@ async function router(protocol:string,alias='m',principal:any={domain:'data',key
   };
   return {dispatch:async(body:any)=>(await prepare(body)).decision,prepare};
 }
+test('Chat opt-in continues opaque Codex history while native Responses receives the original input',async()=>{
+  const catalog={...caps,model:()=>({...caps.model(),reasoning:true,reasoningOptionsStatus:'known',reasoningOptions:[{type:'effort',values:['high','max']}]})};
+  const principal={domain:'data',keyId:'lossy-history',credentialVersion:1};
+  const native=await router('responses','m',principal,catalog);
+  const strict=await router('chat_completions','m',principal,catalog);
+  const chat=await router('chat_completions','m',principal,catalog,true);
+  const reasoning={effort:'medium'},tools=[{type:'function',name:'lookup'}];
+  const input=[
+    {role:'user',content:'first'},
+    {type:'reasoning',summary:[{type:'summary_text',text:'Readable summary'}],encrypted_content:'sealed-thought'},
+    {type:'function_call',call_id:'call',name:'lookup',arguments:'{"query":"fixture"}',encrypted_content:'sealed-call'},
+    {type:'function_call_output',call_id:'call',output:'Complete result'},
+    {type:'configuration_update',reasoning:{effort:'max'}},
+    {role:'user',content:'continue'},
+  ];
+  const request={model:'m',input,reasoning,tools};
+  const original=structuredClone(request);
+  await expect(strict.prepare(request)).rejects.toMatchObject({code:'codex_router_unrestorable_history_start_new_conversation'});
+  const converted=await chat.prepare(request);
+  expect(converted.body.reasoning_effort).toBe('max');
+  expect(converted.body.messages).toMatchObject([
+    {role:'user'},
+    {role:'assistant',reasoning_content:'Readable summary',tool_calls:[{id:'call',function:{arguments:'{"query":"fixture"}'}}]},
+    {role:'tool',tool_call_id:'call',content:'Complete result'},
+    {role:'user'},
+  ]);
+  expect(JSON.stringify(converted.body)).not.toContain('sealed-');
+  expect(converted.decision.canonicalInput).toEqual(input);
+  const hooks=createPluginHooks();
+  converted.decision.adapter.register(hooks);
+  const response=await hooks.onResponse.promise(Response.json({}),{bodyHandle:{json:async()=>({choices:[{message:{role:'assistant',content:'Answer'},finish_reason:'stop'}]})}} as any);
+  const {id}=await response.json();
+  const replay=await chat.prepare({model:'m',input:'again',previous_response_id:id,reasoning,tools});
+  expect(replay.body.reasoning_effort).toBe('max');
+  expect(replay.decision.canonicalInput.slice(0,input.length)).toEqual(input);
+  const compacted={...request,input:[...input,{type:'compaction',encrypted_content:'sealed-checkpoint'}]};
+  await expect(strict.prepare(compacted)).rejects.toMatchObject({status:422,code:'codex_router_compaction_unrestorable',details:{
+    param:'input[6]',message:expect.stringContaining('original Responses route'),
+  }});
+  const projected=await chat.prepare(compacted);
+  expect(projected.decision.canonicalInput).toEqual(compacted.input);
+  expect(projected.body.messages.at(-1)).toMatchObject({role:'user',content:expect.stringContaining('compacted and is unavailable')});
+  expect((await native.prepare(compacted)).body).toEqual(compacted);
+  expect(request).toEqual(original);
+});
+
+test('only Chat model bindings accept a boolean lossy continuation setting',()=>{
+  const target={type:'route',id:'t',protocol:'chat_completions'};
+  const binding={provider:'p',model:'m',target};
+  expect(()=>new CodexRouterPlugin({models:[{...binding,allowLossyContinuation:true}]})).not.toThrow();
+  expect(()=>new CodexRouterPlugin({models:[{...binding,allowLossyContinuation:'true'}]})).toThrow('codex_router_invalid_lossy_continuation');
+  expect(()=>new CodexRouterPlugin({models:[{...binding,target:{...target,protocol:'responses'},allowLossyContinuation:true}]})).toThrow('codex_router_invalid_lossy_continuation');
+});
+
 test('Gemini Router continues signed Codex history and keeps the effort update through a response reference',async()=>{
   const catalog={...caps,model:()=>({...caps.model(),reasoning:true,reasoningOptionsStatus:'known',reasoningOptions:[{type:'effort',values:['high','medium']}]})};
   const {prepare}=await router('gemini_generate_content','m',{domain:'data',keyId:'gemini-replay',credentialVersion:1},catalog);

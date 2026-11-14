@@ -49,6 +49,7 @@ export function checkedSignature(value: unknown, maxBytes: number): string {
 }
 
 const envelopePrefix = 'bungee_gemini:';
+export const isGeminiSignatureCarrier = (value: unknown): boolean => typeof value === 'string' && value.startsWith(envelopePrefix);
 export const geminiEnvelopeBytes = (payloadBytes: number): number => envelopePrefix.length + Math.ceil(payloadBytes * 4 / 3);
 type SignedPart = { length: number; hash: string; signature?: string; textAbsent?: boolean };
 type SignedItem = { id: string; thought: boolean; parts: SignedPart[] };
@@ -66,7 +67,7 @@ export function readGeminiSignatures(item: JsonRecord, budget: ResponsesCodecLim
   if (item.type !== 'reasoning' || list(item.summary, 'summary').length) fail('unsupported_reasoning', 'Invalid Gemini signature carrier');
   string(item.id, 'signature item id', true);
   const opaque = bounded(string(item.encrypted_content, 'encrypted_content', true), budget.maxArgumentBytes, 'Gemini signatures');
-  if (!opaque.startsWith(envelopePrefix)) fail('unsupported_reasoning', 'Native encrypted reasoning cannot be restored to Gemini');
+  if (!isGeminiSignatureCarrier(opaque)) fail('unsupported_reasoning', 'Native encrypted reasoning cannot be restored to Gemini');
   const encoded = opaque.slice(envelopePrefix.length), bytes = Buffer.from(encoded, 'base64url');
   if (!encoded || bytes.toString('base64url') !== encoded) fail('unsupported_reasoning', 'Invalid Gemini signature carrier encoding');
   let raw: unknown;

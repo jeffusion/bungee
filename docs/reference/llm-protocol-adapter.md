@@ -60,13 +60,21 @@ Codex Router 负责模型目录替换、绑定选择、dispatch 和 HTTP/WS 传�
 
 转换不会把不可表示的硬约束悄悄删除。工具定义及调用/返回身份、结构化输出、输入顺序、明确历史和终止状态必须保持语义；影响内容或控制语义的未知字段/类型、未解析引用、加密历史、compaction、目标不可表达的格式或角色约束、多个候选不能无损转换时返回具体 param 的错误。生成偏好只有经过校验且有明确省略规则时才可省略，并记录 mapped/omitted 原因；非法值不能当作“未知”继续生成。
 
+Responses → Chat Completions 会话显式启用 `allowLossyContinuation` 时，合法的原生 `compaction` 在对应的 Chat 出站位置映射为一条固定的历史缺失提示，并记录 `chat_compaction_placeholder` 和输入位置。规范历史保留原压缩项。提示不得插入尚未收齐结果的工具批次，配对不完整时返回具体的工具历史错误。此规则不用于原生 Responses 或其他目标协议。
+
+同一有损策略接受 assistant 消息的 `phase` 为 `commentary`、`final_answer` 或 `null`。Chat 出站保留消息内容并省略阶段字段，记录 `chat_assistant_phase_unavailable` 和输入位置。规范历史及原生 Responses 透传保留原值。未知阶段值和非 assistant 消息上的阶段字段仍拒绝。
+
+开启有损续聊时，assistant 的 `output_text` 可携带空的 `logprobs` 数组。Chat 出站只保留正文并记录 `chat_empty_output_logprobs`，非空或类型错误的 `logprobs` 仍拒绝。原生压缩项可携带对象形式的 Codex 私有消息元数据，转换时按其他历史项的规则剔除该元数据，保留原压缩项及密文。
+
 会话目录身份为 `deepseek` 的 Responses→Chat Completions 转换，将出站消息中的 `developer` 角色映射为 `system`，保留各条消息的内容；工具调用期间插入的指令位置按下述 Chat 历史规则处理，规范历史仍保留原角色和顺序。该处理依据 [DeepSeek Chat API](https://api-docs.deepseek.com/api/create-chat-completion) 的角色契约，不匹配具体型号，不增加配置字段，也不改写其他提供商或原生 Responses 透传的角色。独立运行的 llm-protocol-adapter 在出站校验时拒绝不再适用的角色映射，以及最终 DeepSeek 消息中的 `developer` 角色。
 
 Chat Completions 上游 `usage` 及其 details 对象是可扩展的辅助统计，不使用封闭字段名单作为响应准入条件。适配器校验核心 token 计数及实际读取的缓存、推理细项，接受可选细项的缺省或 `null`；未消费的统计字段不参与转换决策，不因其出现而中断正文或完成事件。原始统计仍由既有上游 BodyHandle 观察与计量链路读取，转换不修改该对象，也不向 Responses 输出新增未经目标协议定义的字段；这不表示所有上游统计细分均能无损转换。该边界参考 [OpenAI Chat usage](https://platform.openai.com/docs/api-reference/chat/object) 和 [AI SDK DeepSeek 的开放 usage schema](https://github.com/vercel/ai/blob/39aae5425e9f9a25acce413cc7e6823c2b5a73c5/packages/deepseek/src/chat/deepseek-chat-api-types.ts)，不放宽正文、工具、终态或其他协议的既有校验。
 
 Responses→Chat/Anthropic/Gemini 的已知 `web_search`、`web_search_preview` 声明在 `tool_choice` 缺省、`auto` 或 `none` 时属于明确允许的降级：先校验字段、类型及资源限额，再省略整个搜索声明，记录 `optional_hosted_web_search_unavailable` 和字段位置。不把 OpenAI 缓存搜索改成目标的实时搜索，也不伪造搜索调用或引用。强制搜索及 `required` 继续拒绝；未知搜索参数、非法值、搜索执行历史继续严格报错。普通 function/namespace/custom 工具保持原转换规则，同协议 Responses 保留搜索声明透传。
 
-Responses 的 `include` 接受 `reasoning.encrypted_content` 和 `output.encrypted_content` 两项输出偏好。跨协议转换不生成 OpenAI 原生加密输出，逐项记录 `target_encrypted_output_unavailable` 后省略；未知项返回原始 `include[n]` 路径，输入中的实际密文仍按历史校验规则拒绝。`output.encrypted_content` 用于 [Codex 的输出 token 重放](https://github.com/openai/codex/blob/main/codex-rs/core/src/client.rs)，不构成解密或丢弃已有密文的授权；原生 Responses 透传保持原字段。
+Responses 的 `include` 接受 `reasoning.encrypted_content` 和 `output.encrypted_content` 两项输出偏好。跨协议转换不生成 OpenAI 原生加密输出，逐项记录 `target_encrypted_output_unavailable` 后省略；未知项返回原始 `include[n]` 路径。`output.encrypted_content` 用于 [Codex 的输出 token 重放](https://github.com/openai/codex/blob/main/codex-rs/core/src/client.rs)。原生 Responses 透传保持原字段。
+
+Responses 转 Chat Completions 的会话可由绑定显式启用 `allowLossyContinuation`。转换保留目标可重放的 `summary_text`，省略仅含密文的推理项。带密文的 `function_call` 必须有有效的明文 JSON 对象参数和唯一匹配的 `function_call_output`，完整通过工具历史校验后才省略附带密文。每处省略记录 `chat_opaque_history_content_unavailable` 和原始字段位置，规范历史保留密文。Gemini 签名载体、加密工具参数和未解析引用仍拒绝。
 
 Responses→Chat Completions 的 function/custom 工具结果支持图片投影：保留工具调用及 `tool_call_id`、工具结果中的文本，将 `input_image` 转成随后 user 消息中的 `image_url`，保留图片地址和 `detail`，并标明来源工具与调用 ID。同一批并行调用先输出全部工具结果，再按原顺序附加图片消息；纯图片结果用文本指向随后图片。[Chat 的 tool 消息](https://platform.openai.com/docs/api-reference/chat/create)不能原生表示图片，[DeepSeek 图片输入](https://api-docs.deepseek.com/guides/vision/)也使用 user 消息，因此这是改变图片角色及位置的有损适配，会记录映射诊断，不承诺无损或目标模型具备视觉能力。投影只影响出站正文，规范历史保留原始工具结果，重放时重新生成投影；未知内容、非法图片字段和既有资源限额仍严格校验。Anthropic 的工具结果图片转换不在此支持范围内。
 
@@ -107,7 +115,7 @@ Gemini usageMetadata 的辅助统计（如 promptTokensDetails、cacheTokensDeta
 
 显式 effort 按原值写入 Responses 的 reasoning.effort、Chat Completions 的 reasoning_effort、Anthropic Messages 的 output_config.effort 或 Gemini 的 generationConfig.thinkingConfig.thinkingLevel。未选择 effort 时不注入默认等级；适配器不因模型名称自动开启 thinking、adaptive 或设置 budget，推理开关沿用目标端默认行为。Gemini 仅公布目录明确列出的 minimal/low/medium/high 交集，按原值映射 thinkingLevel；none/xhigh/max、toggle 与 budget_tokens 不生成档位，也不换算 budget。
 
-Responses→Gemini 接受仅含 `reasoning.effort` 的 [`configuration_update` 输入项](https://developers.openai.com/api/docs/guides/reasoning#change-reasoning-mid-conversation)。每项都须通过档位映射校验；按历史顺序，最后一项覆盖顶层 effort，用于当前 Gemini 请求及独立适配器的出站校验。更新项按原位置保存在规范历史中，供完整回放及 Codex Router 的引用续聊使用，不作为对话消息发送给 Gemini。生效项记录 `gemini_configuration_effort_update`；`text.format` 等其它更新字段仍拒绝，原生 Responses 继续透传。
+Responses 转 Gemini 或启用有损续聊的 Chat Completions 时，接受仅含 `reasoning.effort` 的 [`configuration_update` 输入项](https://developers.openai.com/api/docs/guides/reasoning#change-reasoning-mid-conversation)。每项都须通过档位映射校验，最后一项覆盖顶层 effort，用于目标请求及独立适配器的出站校验。更新项按原位置保存在规范历史中，供完整回放及 Codex Router 的引用续聊使用。生效项按目标记录 `gemini_configuration_effort_update` 或 `chat_configuration_effort_update`。转换仍拒绝 `text.format` 等其它更新字段，原生 Responses 继续透传。
 
 有明确目标 profile 的转换请求必须核验 selectedEffort。独立运行的 llm-protocol-adapter 在每次出站时核验实际模型、协议、目录版本、规则版本和出站档位。[Codex Router](../../plugins/codex-router/README.md) 使用转换服务，转换完成后由目标链路的规则和插件决定最终请求。不将不同档位折叠成相近值，也不从档位臆造 thinking.budget_tokens。字段映射依据 [OpenAI Responses](https://platform.openai.com/docs/api-reference/responses)、[Chat Completions](https://platform.openai.com/docs/api-reference/chat/completions)、[Gemini thinking levels](https://ai.google.dev/api/generate-content#ThinkingConfig) 和 [Anthropic effort](https://platform.claude.com/docs/en/build-with-claude/effort) 的协议定义；提供商的额外约束仍需实际验证，不能由兼容协议名称推断全部行为。
 

@@ -3,24 +3,47 @@ import {afterEach,expect,spyOn,test} from 'bun:test';
 import {ScopedPluginRegistry,setScopedPluginRegistry,getScopedPluginRegistry} from '../../src/scoped-plugin-registry';
 import {runGatewayRequest,runGatewayWebSocket} from '../../src/gateway/runtime';
 import type {AccessLogEntry} from '../../src/logger/access-log-writer';
-import {logger} from '../../src/logger';
 import type {FileLogEntry} from '../../src/logger/file-log-writer';
 import type {RequestLoggerDependencies} from '../../src/logger/request-logger';
+import {logger} from '../../src/logger';
 import {createWebSocketBridge,isWebSocketUpgradeRequest} from '../../src/websocket';
+import {setWorkerAdmissionSession} from '../../src/data-admission/worker';
+import {
+  generateWorkerTransportSecret, INTERNAL_DATA_IDENTITY_HEADER, INTERNAL_DATA_IDENTITY_MAC_HEADER,
+  INTERNAL_TRANSPORT_ORIGINAL_URL_HEADER, INTERNAL_TRANSPORT_TOKEN_HEADER, restoreWorkerTransportRequest, signDataIdentity,
+} from '../../src/config-worker/private-transport';
 import capturedBase from '../../../../tests/fixtures/codex-requests/captured-app-base.json';
 import capturedPreferences from '../../../../tests/fixtures/codex-requests/captured-app-preferences.json';
 const path=new URL('../fixtures/codex-dispatch-plugin.ts',import.meta.url).pathname;
 const previous=getScopedPluginRegistry();afterEach(()=>setScopedPluginRegistry(previous));
 async function waitUntil(predicate:()=>boolean){for(let i=0;i<200;i++){if(predicate())return;await Bun.sleep(10);}throw new Error('Timeout');}
-async function setup(endpoints:any[], bindModels=true, logging?:RequestLoggerDependencies){
-  const config:any={logging:{body:{enabled:!!logging?.bodyStorage}},routes:[{id:'e',path:'/codex',websocket:{enabled:true},path_rewrite:{'^/codex':''},plugins:[{name:'codex-router',path,options:{models:!bindModels?[]:endpoints.map((endpoint,index)=>({source:`m${index}`,provider:endpoint.provider??'p',model:endpoint.model ?? `m${index}`,capabilityOverrides:endpoint.capabilityOverrides,target:{type:'route',id:`t${index}`,protocol:endpoint.protocol}}))}}],endpoints:[{target:endpoints[0].target}]},...endpoints.map((endpoint,index)=>({id:`t${index}`,path:`/target${index}`,plugins:endpoint.plugins??[],path_rewrite:{[`^/target${index}`]:''},websocket:{enabled:endpoint.ws===true},endpoints:[{id:`u${index}`,target:endpoint.target}]}))]};
+async function setup(endpoints:any[], bindModels=true, logging?:RequestLoggerDependencies, authenticated=false){
+  const config:any={logging:{body:{enabled:!!logging?.bodyStorage}},routes:[{id:'e',path:'/codex',websocket:{enabled:true},path_rewrite:{'^/codex':''},plugins:[{name:'codex-router',path,options:{models:!bindModels?[]:endpoints.map((endpoint,index)=>({source:`m${index}`,provider:endpoint.provider??'p',model:endpoint.model ?? `m${index}`,capabilityOverrides:endpoint.capabilityOverrides,allowLossyContinuation:endpoint.allowLossyContinuation,target:{type:'route',id:`t${index}`,protocol:endpoint.protocol}}))}}],endpoints:[{target:endpoints[0].target}]},...endpoints.map((endpoint,index)=>({id:`t${index}`,path:`/target${index}`,plugins:endpoint.plugins??[],path_rewrite:{[`^/target${index}`]:''},websocket:{enabled:endpoint.ws===true},endpoints:[{id:`u${index}`,target:endpoint.target}]}))]};
   const registry=new ScopedPluginRegistry(import.meta.dir);expect((await registry.initializeFromConfig(config)).failed).toBe(0);if(logging)registerRequestLogs(registry.getGatewayHooks());setScopedPluginRegistry(registry);
   const bridge=createWebSocketBridge({closeTimeoutMs:200});const completions=new Set<Promise<void>>();
-  const server=Bun.serve({hostname:'127.0.0.1',port:0,websocket:bridge.websocket,async fetch(request,server){if(!isWebSocketUpgradeRequest(request))return runGatewayRequest(request,config,{logging});const result=await runGatewayWebSocket({request,nativeRequest:request,server,config,bridge,servingRevision:1,logging,retain(promise){completions.add(promise);void promise.finally(()=>completions.delete(promise));}});return result.response;}});
+  const transportSecret=authenticated ? generateWorkerTransportSecret() : undefined;
+  const server=Bun.serve({hostname:'127.0.0.1',port:0,websocket:bridge.websocket,async fetch(nativeRequest,server){
+    if(!isWebSocketUpgradeRequest(nativeRequest))return runGatewayRequest(nativeRequest,config,{logging});
+    let request=nativeRequest;
+    if(transportSecret){
+      const wire=JSON.stringify({requestId:crypto.randomUUID(),principal:{domain:'data',keyId:'fixture',credentialVersion:1}});
+      const headers=new Headers(nativeRequest.headers);
+      headers.set(INTERNAL_TRANSPORT_TOKEN_HEADER,transportSecret);
+      headers.set(INTERNAL_TRANSPORT_ORIGINAL_URL_HEADER,nativeRequest.url);
+      headers.set(INTERNAL_DATA_IDENTITY_HEADER,wire);
+      headers.set(INTERNAL_DATA_IDENTITY_MAC_HEADER,signDataIdentity(wire,'GET',nativeRequest.url,transportSecret));
+      const restored=restoreWorkerTransportRequest(new Request(nativeRequest.url,{headers}),transportSecret);
+      if(!restored.ok)throw new Error('Could not restore fixture principal');
+      request=restored.request;
+    }
+    const result=await runGatewayWebSocket({request,nativeRequest,server,config,bridge,servingRevision:1,logging,retain(promise){completions.add(promise);void promise.finally(()=>completions.delete(promise));}});
+    return result.response;
+  }});
   const client=new WebSocket(`ws://127.0.0.1:${server.port}/codex/responses`);const events:any[]=[];
   client.onmessage=event=>events.push(JSON.parse(String(event.data)));
   await new Promise<void>((resolve,reject)=>{client.onopen=()=>resolve();client.onerror=()=>reject(new Error('client connect'));});
-  return {url:`http://127.0.0.1:${server.port}/codex/responses`,client,events,bridge,async terminal(start=0){await waitUntil(()=>events.slice(start).some(e=>['response.completed','response.failed','response.incomplete','error'].includes(e.type)));return events.slice(start);},async close(){client.close();await waitUntil(()=>bridge.stats.connections===0 && completions.size===0);await bridge.stop();server.stop(true);await registry.destroy();}};
+  return {url:`http://127.0.0.1:${server.port}/codex/responses`,client,events,bridge,
+    async terminal(start=0){await waitUntil(()=>events.slice(start).some(e=>['response.completed','response.failed','response.incomplete','error'].includes(e.type)));return events.slice(start);},async close(){client.close();await waitUntil(()=>bridge.stats.connections===0 && completions.size===0);await bridge.stop();server.stop(true);await registry.destroy();}};
 }
 const chat=(text:string)=>[{choices:[{index:0,delta:{content:text},finish_reason:null}]},{choices:[{index:0,delta:{},finish_reason:'stop'}]},{choices:[],usage:{prompt_tokens:2,completion_tokens:1}}];
 const anthropic=(text:string)=>[{type:'message_start',message:{usage:{input_tokens:2,output_tokens:0}}},{type:'content_block_start',index:0,content_block:{type:'text',text:''}},{type:'content_block_delta',index:0,delta:{type:'text_delta',text}},{type:'content_block_stop',index:0},{type:'message_delta',delta:{stop_reason:'end_turn'},usage:{output_tokens:1}},{type:'message_stop'}];
@@ -215,6 +238,122 @@ test('real WS binding protocol selects HTTP conversion on WS-enabled targets; pr
     start=env.events.length;env.client.send(JSON.stringify({type:'response.create',model:'m0',previous_response_id:'missing',input:'next'}));expect((await env.terminal(start)).at(-1).error.code).toContain('history_missing');expect(calls).toHaveLength(2);
   }finally{await env.close();upstream.stop(true);}
 });
+test('authenticated WS resolves opaque cross-model history only through an opted-in Chat binding',async()=>{
+  const calls:any[]=[];
+  const upstream=Bun.serve({hostname:'127.0.0.1',port:0,async fetch(request){
+    calls.push({path:new URL(request.url).pathname,body:await request.json()});
+    return sse(chat('continued'));
+  }});
+  const target=`http://127.0.0.1:${upstream.port}`;
+  const env=await setup([
+    {protocol:'responses',target},
+    {protocol:'chat_completions',target,provider:'zai',model:'glm-5.3',allowLossyContinuation:true},
+    {protocol:'chat_completions',target},
+    {protocol:'responses',target},
+  ],true,undefined,true);
+  const principal={domain:'data',keyId:'fixture',credentialVersion:1};
+  setWorkerAdmissionSession({async admission(operation,payload){
+    if(operation==='inspect')return {policyVersion:1,requirements:{}};
+    if(operation==='authorize')return {policyVersion:1};
+    if(operation==='preview' || operation==='admit')return {version:1,principal,snapshots:{}};
+    if(operation==='release')return null;
+    throw new Error(`Unexpected fixture admission operation: ${operation}`);
+  }});
+  const send=async (body:Record<string,unknown>)=>{
+    const start=env.events.length;
+    env.client.send(JSON.stringify({type:'response.create',...body}));
+    return (await env.terminal(start)).at(-1);
+  };
+  try{
+    const input=[
+      {role:'user',content:'start'},
+      {type:'reasoning',summary:[{type:'summary_text',text:'Readable summary'}],encrypted_content:'fixture-cipher'},
+      {role:'assistant',content:'previous answer'},
+      {type:'configuration_update',reasoning:{effort:'max'}},
+    ];
+    const first=await send({generate:false,model:'m0',input});
+    const previous_response_id=first.response.id;
+    for(const model of ['m2','m3','unbound']) {
+      expect(await send({model,previous_response_id,input:'continue'})).toMatchObject({
+        type:'error',status:422,error:{code:'codex_router_unrestorable_history_start_new_conversation'},
+      });
+    }
+    expect(calls).toHaveLength(0);
+    expect(await send({model:'m1',previous_response_id,input:'continue',reasoning:{effort:'medium'}})).toMatchObject({type:'response.completed'});
+    expect(calls).toEqual([{path:'/v1/chat/completions',body:expect.objectContaining({
+      reasoning_effort:'max',
+      messages:[{role:'user',content:'start'},{role:'assistant',content:'previous answer',reasoning_content:'Readable summary'},{role:'user',content:'continue'}],
+    })}]);
+    const compacted=await send({generate:false,model:'m0',input:[{type:'compaction',encrypted_content:'fixture-compaction'}]});
+    expect(await send({model:'m1',previous_response_id:compacted.response.id,input:'continue'})).toMatchObject({type:'response.completed'});
+    expect(calls[1]).toMatchObject({path:'/v1/chat/completions',body:{messages:[
+      {role:'user',content:expect.stringContaining('compacted and is unavailable')},
+      {role:'user',content:'continue'},
+    ]}});
+  }finally{try {await env.close();} finally {setWorkerAdmissionSession(null);upstream.stop(true);}}
+});
+
+test('Chat accepts compaction and phased assistant history from an unbound native model over HTTP and WS',async()=>{
+  const calls: {path:string;body:any}[]=[];
+  const compacted={type:'compaction',id:'cmp_fixture',encrypted_content:'fixture-opaque-compaction',internal_chat_message_metadata_passthrough:{turn_id:'fixture'}};
+  const retained=Array.from({length:968},(_,index)=>({role:index%2?'user':'assistant',content:`retained message ${index}`}));
+  const input=[
+    ...Array.from({length:28},(_,index)=>({role:index%2?'assistant':'user',content:`visible message ${index}`})),
+    compacted,
+    {type:'function_call',call_id:'lookup-call',name:'lookup',arguments:'{}'},
+    {type:'function_call_output',call_id:'lookup-call',output:'complete fixture result'},
+    ...retained.map((message,index)=>index===54 ? {...message,type:'message',id:'msg_fixture',status:'completed',phase:'commentary',
+      content:[{type:'output_text',text:message.content,annotations:[],logprobs:[]}]} : message),
+    {role:'user',content:'continue'},
+  ];
+  const upstream=Bun.serve({hostname:'127.0.0.1',port:0,async fetch(request){
+    const path=new URL(request.url).pathname;
+    const body=await request.json();
+    calls.push({path,body});
+    if(path==='/responses')return sse([{type:'response.completed',response:{
+      id:'resp_native',object:'response',status:'completed',model:'gpt-fixture',output:[],
+    }}]);
+    if(path==='/v1/chat/completions')return sse(chat('continued'));
+    return new Response(null,{status:404});
+  }});
+  const target=`http://127.0.0.1:${upstream.port}`;
+  const env=await setup([{protocol:'responses',target},{protocol:'chat_completions',target,allowLossyContinuation:true},{protocol:'chat_completions',target}]);
+  const send=async(model:string)=>{
+    const start=env.events.length;
+    env.client.send(JSON.stringify({type:'response.create',model,input}));
+    return (await env.terminal(start)).at(-1);
+  };
+  try {
+    expect(await send('m2')).toMatchObject({
+      type:'error',status:422,error:{code:'codex_router_compaction_unrestorable',param:'input[28]'},
+    });
+    expect(calls).toHaveLength(0);
+    expect(await send('m1')).toMatchObject({type:'response.completed'});
+    const response=await fetch(env.url,{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({model:'m1',input,stream:true})});
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('response.completed');
+    expect(calls.map(call=>call.path)).toEqual(['/v1/chat/completions','/v1/chat/completions']);
+    for(const {body} of calls) {
+      expect(body.messages).toEqual([
+        ...input.slice(0,28),
+        {role:'user',content:expect.stringContaining('compacted and is unavailable')},
+        expect.objectContaining({role:'assistant',tool_calls:[expect.objectContaining({id:'lookup-call'})]}),
+        {role:'tool',tool_call_id:'lookup-call',content:'complete fixture result'},
+        ...retained.map((message,index)=>index===54 ? {...message,content:[{type:'text',text:message.content}]} : message),
+        {role:'user',content:'continue'},
+      ]);
+      expect(JSON.stringify(body)).not.toContain(compacted.encrypted_content);
+      expect(JSON.stringify(body)).not.toMatch(/logprobs|turn_id/);
+    }
+    const native=await fetch(env.url,{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({model:'gpt-fixture',input,stream:true})});
+    expect(native.status).toBe(200);
+    expect(await native.text()).toContain('resp_native');
+    expect(calls[2]).toMatchObject({path:'/responses',body:{model:'gpt-fixture',input}});
+  }finally{await env.close();upstream.stop(true);}
+});
+
 test('WS generation errors retain bounded redacted upstream diagnostics and recover on the same connection',async()=>{
  const longMessage='Tool results must follow tool_calls.\nBearer private-bearer sk-private-key api_key=private-key access_token=private-access\n'+ 'x'.repeat(700);
  const cases=[

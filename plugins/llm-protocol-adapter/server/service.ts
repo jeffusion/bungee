@@ -2,7 +2,7 @@ import { createProtocolSession, describeProtocolConversion, inspectAgentMessages
 import type { ModelIdentityDeclaration, ModelsDevCapabilitiesService } from '../../models-dev/contract';
 import type { CapabilityContext, ConversionService, EffectiveCapabilities, AdapterSession, HistoryClient } from '../contract';
 import {AgentRelay} from './relay';
-export const REASONING_RULES_VERSION = '2026-11-11.1';
+export const REASONING_RULES_VERSION = '2026-11-11.2';
 const concrete = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 // Protocol-level value constraints only; the catalog must explicitly advertise each effort.
 const effortProtocols = new Set(['responses', 'chat_completions', 'anthropic_messages', 'gemini_generate_content']);
@@ -86,7 +86,8 @@ export function conversionService(catalog: ModelsDevCapabilitiesService, worker:
             let catalogVersion = profile?.catalogVersion ?? null;
             let selected = context.selectedEffort, rewrittenDeveloper = false;
             const passthrough = context.sourceProtocol === context.targetProtocol;
-            if (!passthrough && selected !== undefined && (!profile || !profile.supportedEfforts.includes(selected)))
+            const lossyChat = context.sourceProtocol === 'responses' && context.targetProtocol === 'chat_completions' && context.allowLossyContinuation === true;
+            if (!passthrough && !lossyChat && selected !== undefined && (!profile || !profile.supportedEfforts.includes(selected)))
                 fail('reasoning.effort');
             const engine = createProtocolSession({ ...context, capabilities: profile?.codecCapabilities ?? context.capabilities,
                 reasoningPolicy: profile?.wirePolicy ?? context.reasoningPolicy } as ProtocolSessionContext);
@@ -97,7 +98,7 @@ export function conversionService(catalog: ModelsDevCapabilitiesService, worker:
                 convertRequest(raw) {
                     const effort = wireEffort(raw, context.sourceProtocol);
                     if (effort !== undefined) {
-                        if (typeof effort !== 'string' || !passthrough && !profile?.supportedEfforts.includes(effort) || selected !== undefined && selected !== effort)
+                        if (typeof effort !== 'string' || !passthrough && !lossyChat && !profile?.supportedEfforts.includes(effort) || selected !== undefined && selected !== effort)
                             fail('reasoning.effort');
                         selected = effort;
                     }
@@ -106,7 +107,7 @@ export function conversionService(catalog: ModelsDevCapabilitiesService, worker:
                         if (!profile?.supportedEfforts.includes(result.effectiveReasoningEffort))
                             fail('reasoning.effort');
                         selected = result.effectiveReasoningEffort;
-                    }
+                    } else if (lossyChat && selected !== undefined && !profile?.supportedEfforts.includes(selected)) fail('reasoning.effort');
                     rewrittenDeveloper = false;
                     if (deepseekChat)
                         for (const message of chatMessages(result.body))

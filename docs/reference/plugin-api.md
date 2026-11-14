@@ -168,6 +168,8 @@ HTTP 流式协议允许客户端在收到成功终态后直接断开时，观察
 
 准备回调获得可信 principal、固定 servingRevision、取消信号和 `executeAuxiliary`，WS 还提供宿主生成的连接身份及关闭信号。附属请求只能选择当前插件编译配置中已声明的 route/service；不能提供任意地址、凭据或可信身份，也不能再次内部转交或创建附属请求。它复用唯一 Gateway provider 和完整目标插件链，不通过监听端口绕回自身。
 
+同一已认证的 Responses WS 连接切换模型时，宿主可在 Chat Completions 调度的准备回调中提供 `crossModelHistory`，其中 `responseId` 对应当前请求的 `previous_response_id`，`items` 来自该连接的有界历史。准备回调必须解析引用、更新正文并返回 `canonicalInput` 才可发往目标。宿主不将该历史交给未匹配的调度、原生 Responses 目标或附属请求。
+
 附属请求具有独立 requestId、父请求关联、admission、尝试和结算。返回 `kind: response` 时包含 status、共享 BodyHandle、completion、实际模型/upstream 及不透明凭据作用域、dispose；`kind: reused` 返回已授权的复用值及实际目标身份。复用检查在实际凭据与模型解析及只读授权之后、上游连接和预算提交之前执行。调用方必须检查完成状态并释放响应；宿主禁用附属正文日志，保留状态及计量。
 
 显式传入附属 signal 表示取消由共享调用的聚合等待者管理；未传则继承父请求取消。共享调用必须通过公共 `services.runBackground` 保持独立授权帧和租约，不能借用已结束或已取消请求的 RPC 授权。

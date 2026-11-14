@@ -286,6 +286,27 @@ try {
 
   await duplicate.getByRole('button', { name: '移除', exact: true }).click();
   await expect(dialog.getByTestId('plugin-config-save-button')).toBeEnabled();
+
+  const selectAddedProtocol = async (label: string) => {
+    await added.getByRole('combobox', { name: '目标模型协议', exact: true }).click();
+    await page.getByRole('option', { name: label, exact: true }).click();
+  };
+  const lossyContinuation = added.getByRole('checkbox', { name: '允许有损续聊', exact: true });
+  await expect(lossyContinuation).toHaveCount(0);
+  await selectAddedProtocol('Chat Completions');
+  await expect(lossyContinuation).not.toBeChecked();
+  await lossyContinuation.check();
+  await dialog.getByTestId('plugin-config-save-button').click();
+  await page.getByTestId('section-plugins').getByRole('button', { name: '编辑', exact: true }).click();
+  if (!await added.locator('details').evaluate(details => details.open))
+    await added.getByText('能力限制（可选）', { exact: true }).click();
+  await expect(lossyContinuation).toBeChecked();
+  await selectAddedProtocol('Responses');
+  await expect(lossyContinuation).toHaveCount(0);
+  await expect(dialog.getByTestId('plugin-config-save-button')).toBeEnabled();
+  await selectAddedProtocol('Chat Completions');
+  await expect(lossyContinuation).not.toBeChecked();
+
   await dialog.getByRole('button', { name: '取消', exact: true }).click();
   network.assertSettled(); expect(errors).toEqual([]);
 

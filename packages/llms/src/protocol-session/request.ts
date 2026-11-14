@@ -1,7 +1,7 @@
 import { validateAgentMessage } from '../responses-codec/agent-messages';
 import { decodeResponsesRequest, ResponsesCodecError } from '../responses-codec';
 import { argumentObject, atParam, fail, list, record, string, limits, type JsonRecord } from '../responses-codec/common';
-import { decodeGeminiCallId, geminiInlineImage, geminiToolResponse, restoreGeminiHistory } from './gemini';
+import { decodeGeminiCallId, geminiInlineImage, geminiToolResponse, isGeminiSignatureCarrier, restoreGeminiHistory } from './gemini';
 import { fields, integer, bool, textParts } from './validation';
 import { geminiSchemaToJson } from './schema';
 import type { LLMProtocol, ProtocolSessionContext, ProtocolRequestConversion } from './types';
@@ -322,8 +322,9 @@ export function canonicalRequest(raw: unknown, protocol: LLMProtocol, model: str
   }
   return out;
 }
-function validateCanonical(b: JsonRecord, context: ProtocolSessionContext) {
+function validateCanonical(b: JsonRecord, context: ProtocolSessionContext, chatConfigurationUpdates?: Set<JsonRecord>) {
   const responsesToGemini = context.sourceProtocol === 'responses' && context.targetProtocol === 'gemini_generate_content';
+  const allowLossyContinuation = chatConfigurationUpdates !== undefined;
   let configuration: { effort: string; level: string; param: string } | undefined;
   for (const key of ['stream', 'parallel_tool_calls', 'store', 'background'])
     if (b[key] !== undefined)
@@ -354,7 +355,7 @@ function validateCanonical(b: JsonRecord, context: ProtocolSessionContext) {
   const input = typeof b.input === 'string' ? [] : list(b.input, 'input');
   for (const [i, raw] of input.entries()) {
     const t = record(raw, 'input item'), p = `input[${i}]`;
-    if (responsesToGemini && t.type === 'configuration_update') {
+    if ((responsesToGemini || allowLossyContinuation) && t.type === 'configuration_update') {
       fields(t, ['type', 'reasoning'], p, 'unsupported_content');
       const reasoning = atParam(`${p}.reasoning`, () => record(t.reasoning, 'configuration reasoning'));
       fields(reasoning, ['effort'], `${p}.reasoning`, 'unsupported_reasoning');
@@ -362,25 +363,33 @@ function validateCanonical(b: JsonRecord, context: ProtocolSessionContext) {
       const effort = atParam(param, () => string(reasoning.effort, 'configuration effort', true));
       const map = context.reasoningPolicy?.effortMap;
       const level = map && Object.hasOwn(map, effort) ? map[effort] : undefined;
-      if (level === undefined || !['minimal', 'low', 'medium', 'high'].includes(level))
-        fail('unsupported_reasoning', 'Configuration update requires an explicit Gemini level mapping', param);
+      if (typeof level !== 'string' || !level || (responsesToGemini && !['minimal', 'low', 'medium', 'high'].includes(level)))
+        fail('unsupported_reasoning', responsesToGemini
+          ? 'Configuration update requires an explicit Gemini level mapping'
+          : 'Configuration update requires an explicit Chat effort mapping', param);
       configuration = { effort, level, param };
+      chatConfigurationUpdates?.add(t);
       continue;
     }
     if (t.type === 'agent_message') { validateAgentMessage(t, p, context.capabilities?.limits); continue; }
-    const allowed = t.type === 'function_call' ? ['type', 'id', 'status', 'call_id', 'name', 'namespace', 'arguments', 'encrypted_function_args'] : t.type === 'custom_tool_call' ? ['type', 'id', 'status', 'call_id', 'name', 'namespace', 'input'] :
+    if (allowLossyContinuation && isGeminiSignatureCarrier(t.encrypted_content))
+      fail('unsupported_content', 'Gemini signature carriers cannot cross into Chat', `${p}.encrypted_content`);
+    if (allowLossyContinuation && t.type === 'compaction') continue;
+    const allowed = t.type === 'function_call' ? ['type', 'id', 'status', 'call_id', 'name', 'namespace', 'arguments', 'encrypted_function_args', ...(allowLossyContinuation && t.encrypted_content != null ? ['encrypted_content'] : [])] : t.type === 'custom_tool_call' ? ['type', 'id', 'status', 'call_id', 'name', 'namespace', 'input'] :
       t.type === 'function_call_output' || t.type === 'custom_tool_call_output' ? ['type', 'id', 'call_id', 'output', 'is_error'] : t.type === 'reasoning' ? ['type', 'id', 'status', 'summary', 'content', 'encrypted_content', 'internal_chat_message_metadata_passthrough'] :
         t.type === 'additional_tools' ? ['type', 'id', 'role', 'tools'] : ['type', 'id', 'status', 'role', 'content', 'internal_chat_message_metadata_passthrough'];
-    fields(t, [...allowed,'internal_chat_message_metadata_passthrough'], p, 'unsupported_content');
+    const assistantPhase = allowLossyContinuation && (t.type === undefined || t.type === 'message') && t.role === 'assistant';
+    fields(t, [...allowed,'internal_chat_message_metadata_passthrough', ...(assistantPhase ? ['phase'] : [])], p, 'unsupported_content');
     if (t.is_error !== undefined)
       bool(t.is_error, `${p}.is_error`);
-    if (t.type === 'reasoning')
-      for (const [j, part] of list(t.summary, 'summary').entries())
-        fields(record(part, 'summary'), ['type', 'text'], `${p}.summary[${j}]`, 'unsupported_reasoning');
+    if (t.type === 'reasoning' && !(allowLossyContinuation && t.encrypted_content != null && t.summary === undefined))
+      for (const [j, part] of atParam(`${p}.summary`, () => list(t.summary, 'summary')).entries())
+        atParam(`${p}.summary[${j}]`, () => fields(record(part, 'summary'), ['type', 'text'], `${p}.summary[${j}]`, 'unsupported_reasoning'));
     if (Array.isArray(t.content))
       for (const [j, part] of t.content.entries()) {
         const c = record(part, 'part');
-        fields(c, c.type === 'input_image' ? ['type', 'image_url', 'detail'] : c.type === 'refusal' ? ['type', 'refusal'] : ['type', 'text', 'annotations'], `${p}.content[${j}]`, 'unsupported_content');
+        fields(c, c.type === 'input_image' ? ['type', 'image_url', 'detail'] : c.type === 'refusal' ? ['type', 'refusal'] :
+          ['type', 'text', 'annotations', ...(assistantPhase && c.type === 'output_text' ? ['logprobs'] : [])], `${p}.content[${j}]`, 'unsupported_content');
         if (context.sourceProtocol === 'responses' && context.targetProtocol === 'gemini_generate_content' && t.role === 'user' && c.type === 'input_image') {
           atParam(`${p}.content[${j}].image_url`, () => string(c.image_url, 'image URL', true));
           if (c.detail !== undefined && (typeof c.detail !== 'string' || !['auto', 'low', 'high'].includes(c.detail)))
@@ -457,12 +466,14 @@ export function convertProtocolRequest(raw: unknown, context: ProtocolSessionCon
   const b = canonicalRequest(raw, context.sourceProtocol, context.model);
   const target = context.targetProtocol;
   const responsesToGemini = context.sourceProtocol === 'responses' && target === 'gemini_generate_content';
+  const allowLossyContinuation = context.sourceProtocol === 'responses' && target === 'chat_completions' && context.allowLossyContinuation === true;
   const pageSnapshotDiagnostics: ProtocolRequestConversion['diagnostics'] = [];
   if (context.sourceProtocol === 'responses' && (target === 'chat_completions' || target === 'gemini_generate_content') && Array.isArray(b.input))
     b.input = b.input.map((item, index) => projectCodexPageSnapshot(item, index, target, pageSnapshotDiagnostics));
   const originalInput = b.input;
   if(context.streaming!==undefined){bool(context.streaming,'context.streaming');if(b.stream!==undefined&&b.stream!==context.streaming)fail('invalid_payload','Request stream mode disagrees with transport context','stream');b.stream=context.streaming;}
-  const configuration = validateCanonical(b, context);
+  const chatConfigurationUpdates = allowLossyContinuation ? new Set<JsonRecord>() : undefined;
+  const configuration = validateCanonical(b, context, chatConfigurationUpdates);
   const geminiHistory = responsesToGemini ? restoreGeminiHistory(b.input, limits(context.capabilities?.limits)) : undefined;
   if (geminiHistory) b.input = geminiHistory.input;
   const cap = { ...context.capabilities, agentMessageDelivery: context.agentMessageDelivery ?? context.capabilities?.agentMessageDelivery, omitOptionalWebSearch: true, preserveToolIdentityDescription: true, preserveRefusalContent: true }, policy = context.reasoningPolicy;
@@ -480,12 +491,14 @@ export function convertProtocolRequest(raw: unknown, context: ProtocolSessionCon
     fail('unsupported_reasoning', 'Thinking mode requires an explicit target wire policy', 'thinking');
   let mappedEffort: string | undefined;
   if (reasoning?.effort !== undefined) {
-    const effort = string(reasoning.effort, 'reasoning.effort', true);
-    mappedEffort = policy?.effortMap?.[effort];
-    if (mappedEffort === undefined && policy?.anthropicThinkingBudget === undefined && policy?.geminiThinkingBudget === undefined && policy?.geminiThinkingLevel === undefined)
-      fail('unsupported_reasoning', 'Reasoning effort requires an explicit verified wire mapping', 'reasoning.effort');
-    if (mappedEffort !== undefined)
-      string(mappedEffort, 'reasoningPolicy.effortMap', true);
+    const effort = atParam('reasoning.effort', () => string(reasoning.effort, 'reasoning.effort', true));
+    if (!allowLossyContinuation || !configuration) {
+      mappedEffort = policy?.effortMap?.[effort];
+      if (mappedEffort === undefined && policy?.anthropicThinkingBudget === undefined && policy?.geminiThinkingBudget === undefined && policy?.geminiThinkingLevel === undefined)
+        fail('unsupported_reasoning', 'Reasoning effort requires an explicit verified wire mapping', 'reasoning.effort');
+      if (mappedEffort !== undefined)
+        string(mappedEffort, 'reasoningPolicy.effortMap', true);
+    }
   }
   if (configuration) mappedEffort = configuration.level;
   if (sourceThinking !== undefined && reasoning?.effort === undefined && policy?.targetEffort !== undefined)
@@ -545,7 +558,7 @@ export function convertProtocolRequest(raw: unknown, context: ProtocolSessionCon
   else if (target === 'chat_completions') {
     if (reasoning?.effort !== undefined || mappedEffort !== undefined) {
       if (!cap.reasoningEffort)
-        fail('unsupported_reasoning', 'Target effort capability is required', 'reasoning.effort');
+        fail('unsupported_reasoning', 'Target effort capability is required', configuration?.param ?? 'reasoning.effort');
       b.reasoning = { ...reasoning, effort: mappedEffort };
       if (mappedEffort === undefined)
         fail('unsupported_reasoning', 'Chat requires a target effort mapping', 'reasoning.effort');
@@ -559,7 +572,7 @@ export function convertProtocolRequest(raw: unknown, context: ProtocolSessionCon
     b.reasoning = { ...reasoning, effort: undefined };
   let decoded;
   try {
-    decoded = decodeResponsesRequest(b, decodingTarget, { ...cap, reasoningHistory: target !== 'anthropic_messages' && cap.reasoningHistory === true, reasoningEffort: target === 'chat_completions' && cap.reasoningEffort === true, anthropicThinkingBudget: undefined }, { preserveContentOrder: target === 'gemini_generate_content', toolOutputImages: responsesToGemini });
+    decoded = decodeResponsesRequest(b, decodingTarget, { ...cap, reasoningHistory: target !== 'anthropic_messages' && cap.reasoningHistory === true, reasoningEffort: target === 'chat_completions' && cap.reasoningEffort === true, anthropicThinkingBudget: undefined }, { preserveContentOrder: target === 'gemini_generate_content', toolOutputImages: responsesToGemini, allowLossyContinuation, chatConfigurationUpdates });
   } catch (error) {
     if (geminiHistory && error instanceof ResponsesCodecError && error.param !== undefined)
       throw new ResponsesCodecError(error.code, error.message, geminiHistory.sourceParam(error.param));
@@ -568,7 +581,7 @@ export function convertProtocolRequest(raw: unknown, context: ProtocolSessionCon
   const diagnostics = decoded.diagnostics;
   if (geminiHistory) for (const diagnostic of diagnostics) diagnostic.param = geminiHistory.sourceParam(diagnostic.param);
   diagnostics.push(...pageSnapshotDiagnostics);
-  if (configuration) diagnostics.push({ param: configuration.param, action: 'mapped', reason: 'gemini_configuration_effort_update' });
+  if (configuration) diagnostics.push({ param: configuration.param, action: 'mapped', reason: responsesToGemini ? 'gemini_configuration_effort_update' : 'chat_configuration_effort_update' });
   if (target === 'gemini_generate_content' && decoded.body.parallel_tool_calls === true) {
     delete decoded.body.parallel_tool_calls;
     diagnostics.push({ param: 'parallel_tool_calls', action: 'omitted', reason: 'gemini_parallel_tool_calls_allowed' });
