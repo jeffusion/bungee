@@ -133,7 +133,8 @@ export class MasterRuntimeSupervisor {
   }
 
   private scheduleRepair(): void {
-    if (this.repairing || this.phase !== 'started' || this.recoveryGateActive()) return;
+    if (this.repairing || this.phase !== 'started' || this.recoveryGateActive()
+      || this.options.ingressBootRecoveryGate?.signal.aborted) return;
     this.repairing = true;
     const queued = this.options.publicationTasks.enqueueRecovery(async () => {
       try {

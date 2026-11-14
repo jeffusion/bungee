@@ -93,6 +93,7 @@ type RecoveryGateFixture = MasterRuntimeIngressBootRecoveryGate & {
   readonly releaseCount: number;
   activate(): number;
   release(generation?: number): void;
+  cancel(): void;
 };
 
 function recoveryGateFixture(): RecoveryGateFixture {
@@ -124,6 +125,10 @@ function recoveryGateFixture(): RecoveryGateFixture {
       for (const listener of [...listeners]) {
         try { listener(); } catch { /* gate release isolates listeners */ }
       }
+    },
+    cancel() {
+      active = false;
+      controller.abort('master recovery stopped');
     },
     get listeners() { return listeners; },
     get releaseCount() { return releaseCount; },
