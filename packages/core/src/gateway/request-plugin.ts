@@ -63,6 +63,7 @@ export interface HandleRequestRuntimeContext {
   onCompletion?:(completion:Promise<RawResponseCompletion>)=>void;
   /** Host-only session context, never accepted from client fields. */
   transport?: 'websocket';
+  webSocketRequestId?: string;
   websocketBridge?: import('../websocket').WebSocketBridge;
   skipEntryRate?: boolean;
   /** Host session receives the codec's logical history without re-reading the request body. */
@@ -418,6 +419,7 @@ async function executeHttpRequestInternal(
   const url = new URL(req.url);
   const reqLogger = createRequestLogger(req,runtimeContext?.auxiliary ? {parentRequestId:runtimeContext.auxiliary.parentRequestId} : undefined);
   const requestLog = reqLogger.getRequestInfo();
+  if (runtimeContext?.webSocketRequestId) requestLog.requestId = runtimeContext.webSocketRequestId;
 
   const startTime = Date.now();
   const trustedIdentity = getTrustedDataIdentity(req);
