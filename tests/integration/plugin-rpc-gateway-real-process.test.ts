@@ -26,6 +26,7 @@ import { Database } from 'bun:sqlite';
 import { once } from 'node:events';
 import { captureProcessIdentity, probeProcessIdentity, probeProcessInstance } from '../../packages/core/src/master-runtime/process-identity';
 import { ConfigRepository } from '../../packages/core/src/config-storage';
+import { hashConfigurationContent } from '../../packages/core/src/config-storage/content-hash';
 import { buildPluginManifestCatalog } from '../../packages/core/src/plugin-manifest-catalog';
 import {
   cleanupGatewayFixture,
@@ -515,6 +516,33 @@ describe('plugin RPC gateway real-process integration (control provider ↔ supe
       }
       await waitUntil(async () => (await Promise.all(servingWorkers.map(worker => probeProcessInstance(worker.pid, worker.worker_instance_id))))
         .every(state => state === 'dead'), 'old budget workers did not physically exit', 15_000);
+
+      // With token-budget stopped, route protection itself must reject these writes.
+      const configUrl = `${management}/api/config`;
+      const { body: beforeProtectionChecks } = await requestJson(configUrl, {}, currentFixture);
+      const snapshot = beforeProtectionChecks as { revision: number; config: typeof aggregate };
+      const unprotected = { ...snapshot.config, plugin_activations: snapshot.config.plugin_activations.filter(
+        ({ plugin_name }) => plugin_name !== 'key-access',
+      ) };
+      const envelope = { format: 'bungee-config-snapshot', format_version: 1, schema_version: 1,
+        exported_at: Date.now(), source_revision: snapshot.revision,
+        content_hash: hashConfigurationContent(unprotected), aggregate: unprotected };
+      const rejectedWrites = [
+        ['/api/routes/duplicate', 'POST', { path: '/budget-rpc' }, 'route_copy_protected'],
+        ['/api/plugins/key-access/disable', 'POST', { expected_revision: snapshot.revision }, 'protected_routes_require_plugin'],
+        ['/api/config', 'PUT', { expected_revision: snapshot.revision, aggregate: unprotected }, 'protected_routes_require_plugin'],
+        ['/api/config/import', 'POST', { expected_revision: snapshot.revision, envelope: { ...envelope, envelope_hash: hashConfigurationContent(envelope) } },
+          'protected_routes_require_plugin'],
+      ] as const;
+      for (const [path, method, body, error] of rejectedWrites) {
+        const rejected = await fetch(`${management}${path}`, { method, headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ mutation_id: randomUUID(), ...body }), signal: AbortSignal.timeout(5_000),
+        });
+        const rejection = await rejected.json();
+        expect(rejected.status, path).toBe(422);
+        expect(rejection, path).toMatchObject({ error });
+      }
+      expect((await requestJson(configUrl, {}, currentFixture)).body).toEqual(beforeProtectionChecks);
 
       // ---- resuming the budget keeps the durable ledger but not the revoked key.
       const beforeEnable = await requestJson(`${management}/api/config`, {}, currentFixture);
