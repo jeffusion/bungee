@@ -180,6 +180,40 @@ describe('MasterRuntime worker supervision', () => {
     expect(fixture.repairCalls).toHaveLength(2);
   });
 
+  test('does not enqueue worker repair again after recovery is cancelled', async () => {
+    const fixture = supervisionFixture(undefined, { recoveryGate: true });
+    const repairEntered = deferred();
+    const finishRepair = deferred();
+    let enqueues = 0;
+    fixture.setRecoveryEnqueue((task) => {
+      enqueues += 1;
+      if (enqueues === 1) return task();
+      // Bound the loop on regression so that assertions and cleanup can run.
+      return Promise.resolve({ kind: 'fatal', error: new Error('unexpected repair enqueue') });
+    });
+    fixture.setRepair(async ({ survivors }) => {
+      repairEntered.resolve();
+      await finishRepair.promise;
+      return { kind: 'startup_failed', failures: [], serving: survivors };
+    });
+    await fixture.runtime.start();
+    try {
+      fixture.pool.unavailable(fixture.initial[0]);
+      await repairEntered.promise;
+      fixture.gate!.cancel();
+      finishRepair.resolve();
+      await settle();
+      expect(enqueues).toBe(1);
+
+      fixture.pool.unavailable(fixture.initial[1]);
+      await settle();
+
+      expect(enqueues).toBe(1);
+    } finally {
+      await fixture.runtime.shutdown().catch(() => undefined);
+    }
+  });
+
   test('coalesces duplicate release notifications for one generation', async () => {
     const fixture = supervisionFixture(undefined, { recoveryGate: true });
     const generation = fixture.gate!.activate();
