@@ -965,8 +965,9 @@ export async function executeForward(
         if (waitsForStreamTeardown) attemptController.abort('attempt cleanup');
       } catch (error) {
         if (error instanceof AttemptCleanupError) throw error;
-        logger.warn({requestId,error:sanitizeError(error,credentialSecrets).message},'Attempt resource cancellation failed');
-        throw new AttemptCleanupError('upstream attempt cleanup failed', { cause: sanitizeError(error, credentialSecrets) });
+        const cause = attemptOptions?.websocketBridge ? undefined : sanitizeError(error,credentialSecrets);
+        logger.warn({requestId,...(cause && {error:cause.message})},'Attempt resource cancellation failed');
+        throw new AttemptCleanupError('upstream attempt cleanup failed', cause && {cause});
       } finally {
         if (timer) clearTimeout(timer);
       }

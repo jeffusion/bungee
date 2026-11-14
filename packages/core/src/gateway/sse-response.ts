@@ -76,7 +76,7 @@ export function sharedSSEResponse(input:ReadableStream<Uint8Array>,handle:BodyHa
       }catch(error){
         // A determined processing failure must survive even a rejecting or
         // indefinitely pending native cancellation. Explicit cancel still awaits it.
-        controller.error(error instanceof BodyProcessingError && [408,413,503].includes(error.status)?error:new BodyProcessingError(502,'invalid_response_body'));
+        controller.error(error instanceof BodyProcessingError && [408,413,503].includes(error.status)?error:BodyProcessingError.wrap(502,'invalid_response_body',error));
         void cancel(error).catch(()=>undefined);
       }
     },

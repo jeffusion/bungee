@@ -1,8 +1,19 @@
 import { Readable } from 'node:stream';
 import { constants, createGunzip, createZstdDecompress } from 'node:zlib';
 
+const diagnosticCauses = new WeakMap<BodyProcessingError, unknown>();
+export function getBodyProcessingDiagnosticCause(error: BodyProcessingError): unknown {
+  return diagnosticCauses.get(error);
+}
+
 export class BodyProcessingError extends Error {
   constructor(readonly status: number, readonly code: string, readonly limitBytes?: number, readonly receivedBytes?: number) { super(code); this.name = 'BodyProcessingError'; }
+  static wrap(status: number, code: string, cause: unknown): BodyProcessingError {
+    const error = new BodyProcessingError(status, code);
+    // The exception passed to hooks must not expose raw parser input.
+    diagnosticCauses.set(error, cause);
+    return error;
+  }
 }
 import type { BodyConsumer, BodyEvent, BodyHandle, BodyViewIdentity } from './body-contracts';
 import { bodyMetrics, bodyResources, DEFAULT_BODY_PARSER_BYTES } from './body-resources';
@@ -330,7 +341,7 @@ export class BodySource {
       if(bytes.byteLength>this.maxBytes)throw new BodyProcessingError(413,'decoded_body_too_large',this.maxBytes,bytes.byteLength);
       if(!bytes.byteLength && emptyObject)return freezeBodyValue({});
       try{bodyMetrics.jsonParses++;const value=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));this.hold(bytes.byteLength*2);return freezeBodyValue(value);}
-      catch(error){if(error instanceof BodyProcessingError)throw error;throw new BodyProcessingError(400,'invalid_json_body');}
+      catch(error){if(error instanceof BodyProcessingError)throw error;throw BodyProcessingError.wrap(400,'invalid_json_body',error);}
     })();this.jsonOptional=optional;this.jsonPromise=work;void work.catch(()=>{if(this.jsonPromise===work)this.jsonPromise=undefined;});}
     return this.jsonPromise;
   }

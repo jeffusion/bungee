@@ -1,8 +1,9 @@
 import { registerRequestLogs } from '../helpers/request-log';
-import {afterEach,expect,test} from 'bun:test';
+import {afterEach,expect,spyOn,test} from 'bun:test';
 import {ScopedPluginRegistry,setScopedPluginRegistry,getScopedPluginRegistry} from '../../src/scoped-plugin-registry';
 import {runGatewayRequest,runGatewayWebSocket} from '../../src/gateway/runtime';
 import type {AccessLogEntry} from '../../src/logger/access-log-writer';
+import {logger} from '../../src/logger';
 import type {FileLogEntry} from '../../src/logger/file-log-writer';
 import type {RequestLoggerDependencies} from '../../src/logger/request-logger';
 import {createWebSocketBridge,isWebSocketUpgradeRequest} from '../../src/websocket';
@@ -26,6 +27,7 @@ const anthropic=(text:string)=>[{type:'message_start',message:{usage:{input_toke
 function sse(events:any[]){return new Response(events.map(e=>`data: ${JSON.stringify(e)}\n\n`).join(''),{headers:{'content-type':'text/event-stream'}});}
 test('provider extensions survive HTTP JSON and WS SSE while invalid upstream output returns structured 502',async()=>{
  let calls=0;
+ const files: FileLogEntry[] = [];
  const upstream=Bun.serve({hostname:'127.0.0.1',port:0,async fetch(request){
   calls++;const body=await request.json();
   const invalid=body.messages.some((message:any)=>JSON.stringify(message.content).includes('invalid-output'));
@@ -37,8 +39,9 @@ test('provider extensions survive HTTP JSON and WS SSE while invalid upstream ou
    {request_id:'trace',choices:[],usage:{prompt_tokens:2,completion_tokens:1}}]);
  }});
  const env=await setup([{protocol:'chat_completions',provider:'zai',model:'glm-5.3-flash',target:`http://127.0.0.1:${upstream.port}`}],true,{
-  accessLogWriter:{write(){},updateResponseBodyId(){},updateProtocolOutcome(){},updateTransportOutcome(){}},fileLogWriter:{write(){}},
+  accessLogWriter:{write(){},updateResponseBodyId(){},updateProtocolOutcome(){},updateTransportOutcome(){}},fileLogWriter:{write(entry){files.push(structuredClone(entry));}},
  });
+ const diagnostics = spyOn(console, 'error').mockImplementation(() => {});
  try{
   for(const invalid of [false,true]) {
    const input=invalid?'invalid-output':'hello';
@@ -54,11 +57,96 @@ test('provider extensions survive HTTP JSON and WS SSE while invalid upstream ou
   }
   let start=env.events.length;env.client.send(JSON.stringify({type:'response.create',model:'m0',input:'invalid-stream'}));
   const failed=await env.terminal(start);
-  expect(failed.at(-1)).toMatchObject({type:'error',status:502});expect(failed.some(event=>event.type==='response.completed')).toBe(false);
+  expect(failed.at(-1)).toMatchObject({type:'error',status:502,error:{code:'codex_router_generation_failed'}});
+  expect(failed.some(event=>event.type==='response.completed')).toBe(false);
+  const failedOperations = () => files.filter(entry=>entry.transportType==='websocket' && entry.protocolCode==='upstream_protocol_error');
+  await waitUntil(()=>failedOperations().length===2);
+  const failures = diagnostics.mock.calls.flatMap(([line]) =>
+    typeof line === 'string' && line.startsWith('{"event":"codex_router_generation_failed"') ? [JSON.parse(line)] : []);
+  expect(failures).toEqual([{
+    event:'codex_router_generation_failed',requestId:failedOperations().at(-1)!.requestId,stage:'response_sse',
+    exceptions:[
+      {name:'BodyProcessingError',code:'invalid_response_body',message:'invalid_response_body'},
+      {name:'DataAdmissionError',code:'llm_adapter_unsupported_content',message:'llm_adapter_unsupported_content'},
+    ],
+  }]);
   start=env.events.length;env.client.send(JSON.stringify({type:'response.create',model:'m0',input:'recover'}));
   expect((await env.terminal(start)).at(-1).type).toBe('response.completed');
   expect(calls).toBe(6);
- }finally{await env.close();upstream.stop(true);}
+ }finally{diagnostics.mockRestore();await env.close();upstream.stop(true);}
+});
+test('unexpected upstream stream errors keep safe codes without logging opaque exception text',async()=>{
+  const originalFetch = globalThis.fetch;
+  const diagnostics = spyOn(console, 'error').mockImplementation(() => {});
+  const warnings = spyOn(logger, 'warn');
+  const secret = 'synthetic raw tool output and credential qjvh2PLqQ9iRQx';
+  let failStream!: (reason: Error) => void;
+  globalThis.fetch = Object.assign(() => Promise.resolve(new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      failStream = reason => controller.error(reason);
+      controller.enqueue(new TextEncoder().encode('data: {"type":"response.created","response":{"id":"resp_fixture","object":"response","status":"in_progress","output":[]}}\n\n'));
+    },
+  }), {headers:{'content-type':'text/event-stream'}})), {preconnect(){}}) as typeof fetch;
+  const env = await setup([{protocol:'responses',target:'http://unused.test'}]);
+  try {
+    env.client.send(JSON.stringify({type:'response.create',model:'m0',input:secret}));
+    await waitUntil(()=>env.events.some(event=>event.type==='response.created'));
+    failStream(Object.assign(new TypeError(secret, {cause:new Error(secret)}), {code:'ECONNRESET'}));
+    const failed = (await env.terminal()).at(-1);
+    expect(failed).toMatchObject({type:'error',status:502,error:{code:'codex_router_generation_failed'}});
+    const line = diagnostics.mock.calls.find(([value]) =>
+      typeof value === 'string' && value.startsWith('{"event":"codex_router_generation_failed"'))?.[0] as string;
+    expect(line).toBeDefined();
+    expect(JSON.parse(line)).toMatchObject({
+      stage:'response_sse',
+      exceptions:expect.arrayContaining([
+        {name:'TypeError',code:'ECONNRESET',message:'[REDACTED]'},
+        {name:'Error',message:'[REDACTED]'},
+      ]),
+    });
+    expect(line).not.toContain(secret);
+    expect(JSON.stringify(failed)).not.toContain(secret);
+  } finally {
+    try {
+      await env.close();
+      expect(JSON.stringify(warnings.mock.calls)).not.toContain(secret);
+    } finally {
+      warnings.mockRestore();
+      diagnostics.mockRestore();
+      globalThis.fetch = originalFetch;
+    }
+  }
+});
+
+test('native Responses diagnostics distinguish a truncated stream from an invalid frame',async()=>{
+  let failUpstream: ((invalid: boolean) => void) | undefined;
+  const upstream = Bun.serve({hostname:'127.0.0.1',port:0,fetch(request,server){
+    if (server.upgrade(request)) return;
+    return new Response('WS required',{status:400});
+  },websocket:{message(socket){
+    failUpstream = invalid => { if (invalid) socket.send('invalid-json'); else socket.close(1000); };
+    socket.send(JSON.stringify({type:'response.created',response:{id:'resp_fixture',object:'response',status:'in_progress',output:[]}}));
+  }}});
+  const env = await setup([{protocol:'responses',target:`http://127.0.0.1:${upstream.port}`,ws:true}]);
+  const diagnostics = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    for (const invalid of [false, true]) {
+      const start = env.events.length;
+      env.client.send(JSON.stringify({type:'response.create',model:'m0',input:'hello'}));
+      await waitUntil(()=>env.events.slice(start).some(event=>event.type==='response.created'));
+      failUpstream!(invalid);
+      expect((await env.terminal(start)).at(-1)).toMatchObject({type:'error',status:502,error:{code:'codex_router_generation_failed'}});
+    }
+    const failures = diagnostics.mock.calls.flatMap(([line]) =>
+      typeof line === 'string' && line.startsWith('{"event":"codex_router_generation_failed"') ? [JSON.parse(line)] : []);
+    expect(failures.map(failure=>failure.stage)).toEqual(['response_sse','response_sse']);
+    expect(failures[0].exceptions).toContainEqual({name:'Error',message:'WebSocket Responses stream truncated before terminal event'});
+    expect(failures[1].exceptions).toContainEqual({name:'Error',message:'Invalid JSON WebSocket Responses event'});
+  } finally {
+    diagnostics.mockRestore();
+    await env.close();
+    upstream.stop(true);
+  }
 });
 test('Responses logs distinguish client HTTP POST from a WebSocket operation on the same path',async()=>{
   const access=new Map<string,AccessLogEntry>(),files:FileLogEntry[]=[],calls:any[]=[];

@@ -29,7 +29,7 @@ export function controlledBodyHandle(source:BodySource,input:ReadableStream<Uint
     decoded:(consumer?:BodyConsumer)=>{consumer=consumerWithSignal(consumer);return read(consumer,()=>handle.decoded(consumer));},
     json:(consumer?:BodyConsumer,emptyObject?:boolean)=>{consumer=consumerWithSignal(consumer);return read(consumer,()=>handle.json(consumer,emptyObject)).catch(error=>{
       if(consumer?.mandatory!==false && handle.identity.direction==='response' && error instanceof BodyProcessingError && error.status===400)
-        throw new BodyProcessingError(502,'invalid_response_body');
+        throw BodyProcessingError.wrap(502,'invalid_response_body',error);
       throw error;
     });},
     events:(consumer?:BodyConsumer)=>{

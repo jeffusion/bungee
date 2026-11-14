@@ -135,10 +135,10 @@ export class WebSocketGatewayPlugin implements Plugin {
         const response = await bridge.upgradeSession(nativeRequest, server, {
           signal,
           onMessage: (transport, message) => {
-            if (!protocolObservers) return session.onMessage(transport, message);
             const operationId = randomUUID();
+            if (!protocolObservers) return session.onMessage(transport, message, operationId);
             observeProtocolMessage('client', message, operationId);
-            const handling = session.onMessage(transport, message, (value, hostedErrorOutcome) => {
+            const handling = session.onMessage(transport, message, operationId, (value, hostedErrorOutcome) => {
               observeProtocolMessage('upstream', createWebSocketMessageView(value), operationId, { hostedErrorOutcome });
             });
             return handling?.finally(() => {
