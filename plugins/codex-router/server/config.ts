@@ -20,6 +20,7 @@ export interface ModelBinding {
   sourceProtocol?: 'responses';
   alias?: string;
   target: { type: 'route' | 'service'; id: string; protocol: LLMProtocol };
+  allowLossyContinuation?: boolean;
   capabilityOverrides?: { contextWindow?: number; tools?: boolean; reasoning?: boolean; images?: boolean; allowedTools?: string };
 }
 /** The model in the client request; model itself is the upstream destination. */
@@ -30,7 +31,7 @@ export function parseBindings(value: unknown): readonly ModelBinding[] {
   const ids = new Set<string>();
   return Object.freeze(value.map(entry => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)
-      || Object.keys(entry).some(key => !['provider','model','source','sourceProvider','sourceProtocol','alias','target','capabilityOverrides'].includes(key))
+      || Object.keys(entry).some(key => !['provider','model','source','sourceProvider','sourceProtocol','alias','target','capabilityOverrides','allowLossyContinuation'].includes(key))
       || (entry.source !== undefined && entry.alias !== undefined)
       || (entry.sourceProvider !== undefined && entry.source === undefined)) throw new Error('codex_router_invalid_bindings');
     for (const text of [entry.provider, entry.model, ...(entry.source === undefined ? [] : [entry.source]), ...(entry.sourceProvider === undefined ? [] : [entry.sourceProvider]), ...(entry.alias === undefined ? [] : [entry.alias])]) {
@@ -42,6 +43,8 @@ export function parseBindings(value: unknown): readonly ModelBinding[] {
       || Object.keys(target).some(key => !['type','id','protocol'].includes(key))) throw new Error('codex_router_invalid_target');
     if (target.protocol === undefined) throw new Error('codex_router_target_protocol_required');
     if (!['responses','chat_completions','anthropic_messages','gemini_generate_content'].includes(target.protocol)) throw new Error('codex_router_target_protocol_invalid');
+    if (entry.allowLossyContinuation !== undefined && (typeof entry.allowLossyContinuation !== 'boolean' || target.protocol !== 'chat_completions'))
+      throw new Error('codex_router_invalid_lossy_continuation');
     const publicId = bindingSource(entry);
     if (ids.has(publicId)) throw new Error('codex_router_model_conflict');
     ids.add(publicId);

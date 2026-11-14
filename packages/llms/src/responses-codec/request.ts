@@ -1,4 +1,5 @@
 import { validateAgentMessage, validateEncryptedFunctionArgs } from './agent-messages';
+import { isGeminiSignatureCarrier } from '../protocol-session/gemini';
 import { OpenAIProtocolConversion } from '../providers/openai/protocol-conversion';
 import { isCollaborationFunction, argumentObject, atParam, bounded, fail, limits, list, record, serialized, string,
   type JsonRecord, type ResponsesCodecCapabilities, type ResponsesConversionDiagnostic, type ResponsesProtocol, type ResponsesToolName, type ResponsesToolNames } from './common';
@@ -22,8 +23,14 @@ function definitionKey(value: unknown): string {
 }
 
 /** Converts only self-contained history. Reference resolution belongs to the caller. */
-export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol, capabilities: ResponsesCodecCapabilities = {}, options: { preserveContentOrder?: boolean; toolOutputImages?: boolean } = {}): DecodedResponsesRequest {
+export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol, capabilities: ResponsesCodecCapabilities = {}, options: {
+  preserveContentOrder?: boolean;
+  toolOutputImages?: boolean;
+  allowLossyContinuation?: boolean;
+  chatConfigurationUpdates?: ReadonlySet<JsonRecord>;
+} = {}): DecodedResponsesRequest {
   const body = record(raw, 'Responses request');
+  const allowLossyContinuation = protocol === 'chat_completions' && options.allowLossyContinuation === true;
   if (capabilities.agentMessageDelivery !== undefined && capabilities.agentMessageDelivery !== 'plaintext') fail('invalid_payload', 'Unknown agent message delivery policy', 'agentMessageDelivery');
   const budget = limits(capabilities.limits);
   serialized(body, budget.maxRequestBytes, 'request');
@@ -39,7 +46,7 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
   if (body.n !== undefined && body.n !== 1) fail('unsupported_request', 'Only one response candidate is supported');
   if (body.truncation !== undefined && body.truncation !== 'disabled') fail('unsupported_request', 'Automatic input truncation cannot be represented');
   // This asks for encrypted output if available; it does not supply opaque input history.
-  // Converted providers return no encrypted output. Actual encrypted input remains rejected below.
+  // Converted providers return no encrypted output.
   const diagnostics: ResponsesConversionDiagnostic[] = [];
   if (body.include !== undefined) atParam('include', () => {
     for (const [index, field] of list(body.include, 'include').entries()) {
@@ -58,6 +65,7 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
   const byOriginal = new Map<string, string>();
   const definitions = new Map<string, string>();
   let examinedTools = 0;
+  let hasCompaction = false;
   const tools: JsonRecord[] = [];
   const identity = (name: string, namespace?: string) => JSON.stringify([namespace ?? null, name]);
   const register = (name: string, namespace: string | undefined, custom: boolean): string => {
@@ -143,6 +151,27 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
   // are declarations, not messages. Use this codec's existing reversible name authority.
   for (const [index, rawItem] of input.entries()) atParam(`input[${index}]`, () => {
     const item = record(rawItem, 'input item');
+    if (Object.hasOwn(item, 'phase')) {
+      const param = `input[${index}].phase`;
+      if (!allowLossyContinuation || (item.type !== undefined && item.type !== 'message') || item.role !== 'assistant')
+        fail('unsupported_content', 'Message phase requires opted-in Chat assistant history', param);
+      if (item.phase !== null && item.phase !== 'commentary' && item.phase !== 'final_answer')
+        fail('invalid_payload', 'Invalid assistant message phase', param);
+      diagnostics.push({ param, action: 'omitted', reason: 'chat_assistant_phase_unavailable' });
+    }
+    if (allowLossyContinuation && item.type === 'compaction') {
+      const path = `input[${index}]`;
+      for (const key of Object.keys(item))
+        if (!['type', 'id', 'created_by', 'encrypted_content', 'internal_chat_message_metadata_passthrough'].includes(key))
+          fail('unsupported_content', 'Unknown compaction field', `${path}.${key}`);
+      const param = `${path}.encrypted_content`;
+      const encryptedContent = atParam(param, () => string(item.encrypted_content, 'compaction encrypted content', true));
+      if (!encryptedContent.trim()) fail('invalid_payload', 'Compaction encrypted content must be non-empty', param);
+      if (isGeminiSignatureCarrier(encryptedContent)) fail('unsupported_content', 'Gemini signature carriers cannot cross into Chat', param);
+      if (item.id != null) atParam(`${path}.id`, () => string(item.id, 'compaction id', true));
+      if (item.created_by !== undefined) atParam(`${path}.created_by`, () => string(item.created_by, 'compaction created_by', true));
+      hasCompaction = true;
+    }
     if (item.type !== 'additional_tools') {
       if(item.internal_chat_message_metadata_passthrough!==undefined) {
         record(item.internal_chat_message_metadata_passthrough,'message metadata');
@@ -174,6 +203,12 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
       const partPath = `${path}[${index}]`;
       atParam(partPath, () => {
         const part = record(rawPart, 'content part');
+        if (Object.hasOwn(part, 'logprobs')) {
+          const param = `${partPath}.logprobs`;
+          if (!allowLossyContinuation || role !== 'assistant' || part.type !== 'output_text' || !Array.isArray(part.logprobs) || part.logprobs.length !== 0)
+            fail('unsupported_content', 'Only empty assistant output log probabilities can be omitted', param);
+          diagnostics.push({ param, action: 'omitted', reason: 'chat_empty_output_logprobs' });
+        }
         if (part.type === 'input_text' || part.type === 'output_text' || part.type === 'text') string(part.text, 'content text');
         else if (part.type === 'refusal' && role === 'assistant') {
           string(part.refusal,'refusal');
@@ -211,6 +246,8 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
   let messageParam = 'instructions';
   const callIds = new Set<string>();
   const callToolNames = new Map<string, string>();
+  const callsAwaitingResult = new Map<string, { param: string; outputType: string }>();
+  let encryptedToolBatch: string | undefined;
   const answered = new Set<string>();
   const deferredInstructions: { message: JsonRecord; param: string }[] = [];
   const normalizeChatHistory = protocol === 'chat_completions' && !options.preserveContentOrder;
@@ -227,15 +264,38 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
       addMessage({ role: 'user', content: [{ type: 'text', text: `Images returned by tool ${JSON.stringify(name)} (call ${JSON.stringify(callId)}):` }, ...images] });
     projectedToolImages.length = 0;
   };
+  const checkPendingToolHistory = (item: JsonRecord, toolOutput: boolean): void => {
+    const message = item.type === undefined || item.type === 'message';
+    const instruction = message && (item.role === 'system' || item.role === 'developer');
+    const toolCall = item.type === 'function_call' || item.type === 'custom_tool_call';
+    if (hasCompaction && toolOutput && callsAwaitingResult.size && pendingReasoning)
+      fail('invalid_tool_history', 'Attach the reasoning summary before the Chat tool results', messageParam);
+    if (toolOutput || instruction) return;
+    if (deferredInstructions.length)
+      fail('invalid_tool_history', 'Only instructions and tool results may follow a deferred instruction until all tool results arrive', messageParam);
+    if (encryptedToolBatch && !(toolCall && chat.at(-1)?.role === 'assistant'))
+      fail('invalid_tool_history', 'Complete the encrypted tool batch before another turn or reasoning item', messageParam);
+    if (hasCompaction && callsAwaitingResult.size &&
+        !(normalizeChatHistory && chat.at(-1)?.role === 'assistant' &&
+          (toolCall || item.type === 'reasoning' || (message && item.role === 'assistant'))))
+      fail('invalid_tool_history', 'Complete the Chat tool batch before another message', messageParam);
+  };
   if (body.instructions !== undefined) addMessage({ role: 'system', content: string(body.instructions, 'instructions') });
   for (const [inputIndex, rawItem] of input.entries()) atParam(`input[${inputIndex}]`, () => {
     messageParam = `input[${inputIndex}]`;
     const item = record(rawItem, 'input item');
-    if (item.type !== 'function_call_output' && item.type !== 'custom_tool_call_output') flushToolImages();
-    if (item.type === 'additional_tools') return;
-    if (deferredInstructions.length && item.type !== 'function_call_output' && item.type !== 'custom_tool_call_output'
-      && !((item.type === undefined || item.type === 'message') && (item.role === 'system' || item.role === 'developer')))
-      fail('invalid_tool_history', 'Only instructions and tool results may follow a deferred instruction until all tool results arrive', messageParam);
+    const toolOutput = item.type === 'function_call_output' || item.type === 'custom_tool_call_output';
+    if (!toolOutput) flushToolImages();
+    if (item.type === 'additional_tools' ||
+      (allowLossyContinuation && item.type === 'configuration_update' && options.chatConfigurationUpdates?.has(item))) return;
+    if (item.type !== 'reasoning') checkPendingToolHistory(item, toolOutput);
+    if (allowLossyContinuation && item.type === 'compaction') {
+      if (callIds.size !== answered.size) fail('invalid_tool_history', 'Compaction cannot split a Chat tool batch', messageParam);
+      if (pendingReasoning) fail('unsupported_reasoning', 'Reasoning must precede an assistant item', messageParam);
+      addMessage({ role: 'user', content: '[Earlier conversation context was compacted and is unavailable. Continue from the visible messages and ask for any details you need.]' });
+      diagnostics.push({ param: messageParam, action: 'mapped', reason: 'chat_compaction_placeholder' });
+      return;
+    }
     if (item.type === 'agent_message') {
       validateAgentMessage(item, messageParam, capabilities.limits);
       if (capabilities.agentMessageDelivery !== 'plaintext') fail('unsupported_content', 'Agent messages require explicit plaintext delivery', messageParam);
@@ -244,14 +304,29 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
       diagnostics.push({ param: messageParam, action: 'mapped', reason: 'agent_message_plaintext_delivery' });
       return;
     }
-    if (item.encrypted_content != null) fail('unsupported_content', 'Encrypted content cannot cross protocols', `${messageParam}.encrypted_content`);
+    const encrypted = item.encrypted_content != null;
+    if (encrypted) {
+      const param = `${messageParam}.encrypted_content`;
+      if (!allowLossyContinuation || (item.type !== 'reasoning' && item.type !== 'function_call'))
+        fail('unsupported_content', 'Encrypted content cannot cross protocols', param);
+      atParam(param, () => string(item.encrypted_content, 'encrypted content', true));
+      diagnostics.push({ param, action: 'omitted', reason: 'chat_opaque_history_content_unavailable' });
+    }
     if (item.type === 'compaction') fail('unsupported_content', 'Encrypted reasoning and compaction cannot be restored');
     if (item.type === 'item_reference') fail('unresolved_reference', 'Input item references must be resolved before conversion');
     if (item.type === 'reasoning') {
+      if (item.content != null && !(encrypted && Array.isArray(item.content) && !item.content.length))
+        fail('unsupported_reasoning', 'Reasoning content requires an explicit history mapping', `${messageParam}.content`);
+      const summaryParam = `${messageParam}.summary`;
+      const summary = encrypted && item.summary === undefined ? [] : atParam(summaryParam, () => list(item.summary, 'reasoning summary'));
+      const text = summary.map((part, index) => atParam(`${summaryParam}[${index}]`, () => {
+        const p = record(part, 'reasoning summary');
+        if (p.type !== 'summary_text') fail('unsupported_reasoning', 'Unknown reasoning summary');
+        return string(p.text, 'summary text');
+      })).join('');
+      if (encrypted && !text) return;
+      checkPendingToolHistory(item, false);
       if (protocol !== 'chat_completions' || !(capabilities.reasoningHistory || capabilities.reasoningEffort)) fail('unsupported_reasoning', 'Reasoning history requires an explicit compatible reasoning capability');
-      if (item.content != null) fail('unsupported_reasoning', 'Reasoning content requires an explicit history mapping', `${messageParam}.content`);
-      const summary = list(item.summary, 'reasoning summary');
-      const text = summary.map(part => { const p = record(part, 'reasoning summary'); if (p.type !== 'summary_text') fail('unsupported_reasoning', 'Unknown reasoning summary'); return string(p.text, 'summary text'); }).join('');
       if (options.preserveContentOrder) addMessage({ role: 'assistant', content: null, reasoning_content: text, ...(item.id === undefined ? {} : { id: string(item.id, 'item.id', true) }) });
       else pendingReasoning += text;
       return;
@@ -259,14 +334,27 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     if (item.type === 'function_call' || item.type === 'custom_tool_call') {
       const custom = item.type === 'custom_tool_call';
       validateEncryptedFunctionArgs(item, capabilities.agentMessageDelivery, messageParam);
+      if (encrypted && item.status !== undefined && item.status !== 'completed')
+        fail('invalid_tool_history', 'Encrypted tool history requires a completed function call', `${messageParam}.status`);
       const id = string(item.call_id, 'call_id', true);
       if (callIds.has(id)) fail('invalid_tool_history', 'Duplicate tool call identifier');
+      const previous = chat.at(-1);
+      if (encrypted && callIds.size !== answered.size) {
+        const adjacent = previous?.role === 'assistant' ? (previous.tool_calls as JsonRecord[] | undefined)?.length ?? 0 : 0;
+        if (adjacent !== callIds.size - answered.size)
+          fail('invalid_tool_history', 'Encrypted function call cannot join a split tool batch', `${messageParam}.call_id`);
+      }
       callIds.add(id);
-      const args = custom ? JSON.stringify({ input: string(item.input, 'custom input') }) : string(item.arguments, 'arguments');
-      bounded(args, budget.maxArgumentBytes, 'arguments'); argumentObject(args);
+      if (hasCompaction || encrypted)
+        callsAwaitingResult.set(id, { param: `${messageParam}.call_id`, outputType: custom ? 'custom_tool_call_output' : 'function_call_output' });
+      if (encrypted) encryptedToolBatch ??= `${messageParam}.call_id`;
+      const args = atParam(encrypted ? `${messageParam}.arguments` : messageParam, () => {
+        const text = custom ? JSON.stringify({ input: string(item.input, 'custom input') }) : string(item.arguments, 'arguments');
+        bounded(text, budget.maxArgumentBytes, 'arguments'); argumentObject(text);
+        return text;
+      });
       const call = { id, type: 'function', function: { name: resolve(item, custom), arguments: args } };
       callToolNames.set(id, String(item.name));
-      const previous = chat.at(-1);
       if (previous?.role === 'assistant' && !options.preserveContentOrder) {
         previous.tool_calls = [...(previous.tool_calls as JsonRecord[] ?? []), call];
         if (pendingReasoning)
@@ -278,6 +366,10 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     if (item.type === 'function_call_output' || item.type === 'custom_tool_call_output') {
       const id = string(item.call_id, 'call_id', true);
       if (!callIds.has(id) || answered.has(id)) fail('invalid_tool_history', 'Unmatched or duplicate tool result');
+      const pending = callsAwaitingResult.get(id);
+      if (pending && item.type !== pending.outputType)
+        fail('invalid_tool_history', 'Tool result type must match the corresponding call', `${messageParam}.type`);
+      callsAwaitingResult.delete(id);
       answered.add(id);
       if (Array.isArray(item.output) && item.output.length > budget.maxItems
         && item.output.some(part => part && typeof part === 'object' && (part as JsonRecord).type === 'input_image'))
@@ -297,6 +389,7 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
       }
       addMessage({ role: 'tool', tool_call_id: id, content: output, ...(item.is_error === true ? { is_error: true } : {}) });
       if (callIds.size === answered.size) {
+        encryptedToolBatch = undefined;
         for (const instruction of deferredInstructions) {
           messageParam = instruction.param;
           addMessage(instruction.message);
@@ -328,6 +421,10 @@ export function decodeResponsesRequest(raw: unknown, protocol: ResponsesProtocol
     }
     addMessage(message);
   });
+  const missingResult = callsAwaitingResult.values().next().value;
+  if (missingResult) fail('invalid_tool_history', 'Tool call requires a matching result', missingResult.param);
+  if (encryptedToolBatch)
+    fail('invalid_tool_history', 'All calls in the encrypted tool batch require matching results', encryptedToolBatch);
   if (pendingReasoning) fail('unsupported_reasoning', 'Orphan reasoning history cannot be represented');
   if (deferredInstructions.length) fail('invalid_tool_history', 'Deferred instructions require all pending tool results', deferredInstructions[0].param);
   flushToolImages(true);

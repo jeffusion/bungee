@@ -43,7 +43,8 @@
     catch (cause) {
       const code = cause instanceof Error ? cause.message : '';
       error = t(code === 'codex_router_model_conflict' ? 'modelConflict'
-        : code === 'codex_router_invalid_allowed_tools' ? 'allowedToolsInvalid' : 'bindingInvalid');
+        : code === 'codex_router_invalid_allowed_tools' ? 'allowedToolsInvalid'
+        : code === 'codex_router_invalid_lossy_continuation' ? 'lossyContinuationInvalid' : 'bindingInvalid');
     }
     untrack(() => onvalidate?.(error));
   });
@@ -58,6 +59,8 @@
       if (i !== index) return binding;
       const next = { ...binding, ...patch };
       if (mode(index) === 'add') next.source = next.model;
+      if (next.target.protocol !== 'chat_completions' || next.allowLossyContinuation === undefined)
+        delete next.allowLossyContinuation;
       return next;
     }));
   }
@@ -214,6 +217,12 @@
                   bind:value={() => binding.capabilityOverrides?.allowedTools ?? '', next => limit(index, 'allowedTools', next || undefined)} />
                 <p id={`${id}-allowed-tools-hint`} class="text-xs text-zinc-400">{t('allowedToolsHint')}</p>
               </div>
+              {#if binding.target.protocol === 'chat_completions'}
+                <div class="space-y-1.5">
+                  <BCheckbox label={t('allowLossyContinuation')} bind:checked={() => binding.allowLossyContinuation === true, checked => update(index, { allowLossyContinuation: checked ? true : undefined })} />
+                  <p class="text-xs text-zinc-400">{t('allowLossyContinuationHint')}</p>
+                </div>
+              {/if}
             </div>
           </details>
         </div>

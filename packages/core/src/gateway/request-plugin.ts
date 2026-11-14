@@ -65,6 +65,7 @@ export interface HandleRequestRuntimeContext {
   transport?: 'websocket';
   webSocketRequestId?: string;
   websocketBridge?: import('../websocket').WebSocketBridge;
+  crossModelHistory?: import('./contracts').DispatchRequestPreparationInput['crossModelHistory'];
   skipEntryRate?: boolean;
   /** Host session receives the codec's logical history without re-reading the request body. */
   onCanonicalInput?: (input: readonly unknown[]) => void;
@@ -996,6 +997,12 @@ async function executeHttpRequestInternal(
       const locked=resolveDispatchTarget(config,entryRoute,runtimeContext.auxiliary.target,dispatchContext,'responses');
       dispatch={route:locked,effective:resolveEffectiveRoute(config,locked),context:dispatchContext,target:runtimeContext.auxiliary.target,entryRouteId:entryRoute.id??entryRoute.path,protocol:'responses'};
     }else dispatch=requireGatewayResult(await (requestRegistry ? requestRegistry.runWithRequestLeases(ownerLeases,dispatchWork) : dispatchWork()), 'onGatewayDispatch');
+    const crossModelHistory = runtimeContext?.crossModelHistory;
+    if (crossModelHistory && (runtimeContext?.transport !== 'websocket' || !runtimeContext.webSocketConnection ||
+      !trustedIdentity || trustedIdentity.principal.domain === 'anonymous' ||
+      !dispatch.target || dispatch.protocol !== 'chat_completions' || !dispatch.prepareRequest ||
+      dispatch.context.body?.previous_response_id !== crossModelHistory.responseId))
+      throw new DataAdmissionError(422, 'codex_router_unrestorable_history_start_new_conversation');
     if (dispatch.canonicalInput) runtimeContext?.onCanonicalInput?.(dispatch.canonicalInput);
     if (dispatch.diagnostics?.length) reqLogger.addStep('codex_router_conversion',{requestId,protocol:dispatch.protocol,diagnostics:dispatch.diagnostics});
     route = dispatch.route;
@@ -1026,8 +1033,9 @@ async function executeHttpRequestInternal(
         model:typeof dispatch.context.body?.model==='string'?dispatch.context.body.model:null,body:dispatch.context.body,transport:runtimeContext?.transport},processingSignal);
       if(dispatch.prepareRequest){
         const preparation=()=>dispatch.prepareRequest!({context:dispatch.context,principal:trustedIdentity?.principal,servingRevision:runtimeContext?.servingRevision,webSocketConnection:runtimeContext?.webSocketConnection,signal:processingSignal,
+          ...(crossModelHistory ? {crossModelHistory: structuredClone(crossModelHistory)} : {}),
           executeAuxiliary:async input=>{
-            const result=await executeAuxiliaryRequest(req,config,entryRoute,{...runtimeContext,parentRequestId:requestId},input,processingSignal,requestRegistry?.getDeclaredDispatchTargets(entryRoute.path)??[]);
+            const result=await executeAuxiliaryRequest(req,config,entryRoute,{...runtimeContext,crossModelHistory:undefined,parentRequestId:requestId},input,processingSignal,requestRegistry?.getDeclaredDispatchTargets(entryRoute.path)??[]);
             // An explicit signal transfers cancellation to an aggregate caller; its own
             // request still owns admission, route deadlines and independent owner leases.
             if(result.kind==='response' && !input.signal){if(finalized)result.dispose();else auxiliaryDisposers.add(result.dispose);}
@@ -1035,6 +1043,8 @@ async function executeHttpRequestInternal(
           }});
         const prepared=await (requestRegistry?requestRegistry.runWithRequestLeases(ownerLeases,preparation):preparation());
         processingSignal.throwIfAborted();
+        if(crossModelHistory && (!prepared.canonicalInput || dispatch.context.body?.previous_response_id !== undefined))
+          throw new DataAdmissionError(422, 'codex_router_unrestorable_history_start_new_conversation');
         dispatch={...dispatch,...prepared};requestSnapshot.body=dispatch.context.body;
         if(prepared.canonicalInput)runtimeContext?.onCanonicalInput?.(prepared.canonicalInput);
         if(prepared.diagnostics?.length)reqLogger.addStep('dispatch_conversion',{requestId,protocol:dispatch.protocol,diagnostics:prepared.diagnostics});

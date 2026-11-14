@@ -164,6 +164,13 @@
             "required": true
           },
           {
+            "name": "allowLossyContinuation",
+            "type": "boolean",
+            "label": "editor.allowLossyContinuation",
+            "description": "editor.allowLossyContinuationHint",
+            "required": false
+          },
+          {
             "name": "capabilityOverrides",
             "type": "json",
             "label": "editor.advanced"
@@ -271,7 +278,10 @@
       "editor.replaceModel": "替换模型",
       "editor.addReplacement": "添加模型替换",
       "editor.bindingInvalid": "请填写有效的模型、转发目标和协议。",
-      "editor.modelConflict": "模型绑定重复，请修改模型或移除重复绑定。"
+      "editor.modelConflict": "模型绑定重复，请修改模型或移除重复绑定。",
+      "editor.allowLossyContinuation": "允许有损续聊",
+      "editor.allowLossyContinuationHint": "保留可读历史和完整的工具调用结果。发往 Chat 的请求会省略不兼容的密文，并用提示标记无法读取的原生压缩历史。",
+      "editor.lossyContinuationInvalid": "仅目标协议为 Chat Completions 时支持开启有损续聊。"
     },
     "en": {
       "editor.loaded": "Loaded",
@@ -335,7 +345,10 @@
       "editor.replaceModel": "Replace model",
       "editor.addReplacement": "Add model replacement",
       "editor.bindingInvalid": "Select valid models, a forwarding target and a protocol.",
-      "editor.modelConflict": "Duplicate model binding. Change the model or remove the duplicate."
+      "editor.modelConflict": "Duplicate model binding. Change the model or remove the duplicate.",
+      "editor.allowLossyContinuation": "Allow lossy continuation",
+      "editor.allowLossyContinuationHint": "Keep readable history and complete tool results. Outgoing Chat requests omit incompatible encrypted data and mark unreadable native compaction with a placeholder.",
+      "editor.lossyContinuationInvalid": "Lossy continuation is only supported when the target protocol is Chat Completions."
     }
   },
   "uiExtensionMode": "none"

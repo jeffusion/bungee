@@ -50,6 +50,8 @@ export type GatewayAuxiliaryResult =
   | {readonly kind:'reused'; readonly value:unknown; readonly identity:GatewayAuxiliaryIdentity};
 export type ExecuteGatewayAuxiliary = (input:GatewayAuxiliaryRequest)=>Promise<GatewayAuxiliaryResult>;
 export interface DispatchRequestPreparationInput {
+  /** Bounded history from the same authenticated WebSocket connection after a model switch. */
+  readonly crossModelHistory?: { readonly responseId: string; readonly items: readonly unknown[] };
   readonly webSocketConnection?:{readonly id:string;readonly signal:AbortSignal};
   readonly context:import('../hooks').MutableRequestContext; readonly principal?:import('../plugin-extensions').DataPrincipal;
   readonly servingRevision?:number; readonly signal:AbortSignal; readonly executeAuxiliary:ExecuteGatewayAuxiliary;

@@ -21,6 +21,8 @@ export interface ProtocolSessionCapabilities extends ResponsesCodecCapabilities 
 export interface ProtocolSessionContext {
   /** Request-scoped opt-in; absence preserves strict collaboration handling. */
   agentMessageDelivery?: ResponsesCodecCapabilities['agentMessageDelivery'];
+  /** Allows partial replay of opaque Responses history into Chat Completions. */
+  allowLossyContinuation?: boolean;
   sourceProtocol: LLMProtocol;
   targetProtocol: LLMProtocol;
   /** Target model; caller owns routing and source URL validation. */

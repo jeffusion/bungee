@@ -9,6 +9,7 @@ import {BodyBufferLease,BodyProcessingError,bodySourceFor,getBodyProcessingDiagn
 import {controlledBodyHandle} from './controlled-views';
 import type {BodyHandle} from './body-contracts';
 import {DataAdmissionError, type DataAdmissionErrorDetails} from '../data-admission/errors';
+import type {DispatchRequestPreparationInput} from './contracts';
 
 interface History {model:string;items:unknown[];bytes:number;expires:number}
 type HostedErrorOutcome = 'failed' | 'cancelled';
@@ -133,13 +134,15 @@ export class ResponsesWebSocketSession {
       let logicalInput=typeof body.input==='string'?[{role:'user',content:body.input}]:body.input;
       if(!Array.isArray(logicalInput))throw new DataAdmissionError(422,'codex_router_invalid_history');
       let completeHistory=true;
+      let crossModelHistory: DispatchRequestPreparationInput['crossModelHistory'];
       if(body.previous_response_id){
         const previous=this.history.get(body.previous_response_id);
         if(previous && previous.expires>Date.now()){
           if(previous.items.some((item:any)=>item?.encrypted_content || item?.type==='compaction')){
             const identity=getTrustedDataIdentity(this.input.request);
-            if(previous.model!==body.model || !identity || identity.principal.domain==='anonymous')throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
-            // Retain the reference so the plugin verifies cached provider/endpoint origin.
+            if(!identity || identity.principal.domain==='anonymous')throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
+            if(previous.model!==body.model)crossModelHistory={responseId:body.previous_response_id,items:previous.items};
+            // Retain the reference for provider/endpoint verification or an opted-in Chat conversion.
             completeHistory=false;
           }else {logicalInput=[...previous.items,...logicalInput];body.input=logicalInput;delete body.previous_response_id;}
         }else {
@@ -165,7 +168,7 @@ export class ResponsesWebSocketSession {
       const request=new Request(this.input.request.url,{method:'POST',headers,body:JSON.stringify(body),signal});
       deriveWorkerRequestIdentity(this.input.request,request,requestId);
       stage = 'gateway_request';
-      const response=await runWithGatewayHooks(this.hooks,()=>runGatewayRequest(request,this.input.config,{servingRevision:this.input.servingRevision,webSocketConnection:{id:this.connectionId,signal:session.signal},transport:'websocket',webSocketRequestId:requestId,websocketBridge:this.input.bridge,skipEntryRate:true,onCanonicalInput(input){logicalInput=[...input];}}));
+      const response=await runWithGatewayHooks(this.hooks,()=>runGatewayRequest(request,this.input.config,{servingRevision:this.input.servingRevision,webSocketConnection:{id:this.connectionId,signal:session.signal},transport:'websocket',webSocketRequestId:requestId,websocketBridge:this.input.bridge,skipEntryRate:true,crossModelHistory,onCanonicalInput(input){logicalInput=[...input];if(crossModelHistory)completeHistory=true;}}));
       stage = 'response_body';
       source=createBodySource(response.body,this.input.bridge.limits.maxMessageBytes,response.headers.get('content-encoding')??'',signal,{requestId,attemptId:requestId,direction:'response',stage:'client-response',version:1,contentType:response.headers.get('content-type')??'',contentEncoding:response.headers.get('content-encoding')??''});
       const wire=response.body && bodySourceFor(response.body)===source ? response.body : source.take() as ReadableStream<Uint8Array>|null;

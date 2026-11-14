@@ -48,24 +48,26 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       this.catalogRequests.delete(context.requestId);
       if (!targets.some(target => target.type === binding.target.type && target.id === binding.target.id)) throw new DataAdmissionError(422,'codex_router_target_unavailable');
       const protocol = binding.target.protocol;
+      const allowLossyContinuation = protocol === 'chat_completions' && binding.allowLossyContinuation === true;
       const capabilities=this.conversion.resolveCapabilities({provider:binding.provider,model:binding.model,targetProtocol:protocol,restrictions:binding.capabilityOverrides});
       if(!capabilities || capabilities.contextWindow === null || !capabilities.inputModalities.includes('text'))throw new DataAdmissionError(503,'codex_router_model_unavailable');
       context.body={...context.body,model:binding.model};
-      return {target:binding.target,protocol,prepareRequest:async ({context,principal,servingRevision,signal,executeAuxiliary,webSocketConnection}:DispatchRequestPreparationInput)=>{
+      return {target:binding.target,protocol,prepareRequest:async ({context,principal,servingRevision,signal,executeAuxiliary,webSocketConnection,crossModelHistory}:DispatchRequestPreparationInput)=>{
       const entryScope=createHash('sha256').update(JSON.stringify([context.routeId,servingRevision ?? null,this.bindings,this.relay])).digest('hex');
       const scope=principal?.domain !== 'anonymous' && principal?.keyId ? createHash('sha256').update(JSON.stringify([principal,entryScope])).digest('hex') : null;
       let input=structuredClone(context.body);
       let requiredUpstreamId:string|undefined;
-      let opaqueRestored=false;
       if(input.previous_response_id){
         if(!scope)throw new DataAdmissionError(422,'codex_router_history_identity_required');
-        const prior=await this.history.get({scope,id:input.previous_response_id},{signal});
+        const prior=protocol==='chat_completions' && crossModelHistory && crossModelHistory.responseId===input.previous_response_id
+          ? {items:crossModelHistory.items}
+          : await this.history.get({scope,id:input.previous_response_id},{signal});
         if(!prior)throw new DataAdmissionError(422,'codex_router_history_missing_start_new_conversation');
         const delta=typeof input.input === 'string' ? [{role:'user',content:input.input}] : input.input;
         if(!Array.isArray(delta))throw new DataAdmissionError(422,'codex_router_invalid_history');
-        if(protocol!=='gemini_generate_content' && prior.items.some((item:any)=>item.encrypted_content || item.type==='compaction')){
-          if(protocol!=='responses' || JSON.stringify(prior.target)!==JSON.stringify(binding.target) || prior.origin?.provider!==binding.provider || prior.origin?.model!==binding.model || !prior.origin?.upstreamId)throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
-          requiredUpstreamId=prior.origin.upstreamId;opaqueRestored=true;
+        if(protocol==='responses' && prior.items.some((item:any)=>item.encrypted_content || item.type==='compaction')){
+          if(JSON.stringify(prior.target)!==JSON.stringify(binding.target) || prior.origin?.provider!==binding.provider || prior.origin?.model!==binding.model || !prior.origin?.upstreamId)throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
+          requiredUpstreamId=prior.origin.upstreamId;
         }
         input.input=[...prior.items,...delta];delete input.previous_response_id;
       }
@@ -73,7 +75,14 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       input.model=binding.model;
       let logicalInput=typeof input.input === 'string' ? [{role:'user',content:input.input}] : input.input;
       if(!Array.isArray(logicalInput))throw new DataAdmissionError(422,'codex_router_invalid_history');
-      if(protocol!=='responses' && protocol!=='gemini_generate_content' && !opaqueRestored && logicalInput.some((item:any)=>item?.encrypted_content || item?.type==='compaction'))throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
+      if(protocol==='chat_completions' && !allowLossyContinuation){
+        const compacted = logicalInput.findIndex((item:any)=>item?.type==='compaction');
+        if(compacted !== -1)throw new DataAdmissionError(422,'codex_router_compaction_unrestorable',undefined,{
+          param:`input[${compacted}]`,
+          message:'This Chat target cannot restore a native compaction item. Switch back to the original Responses route, or start a new conversation with a readable summary.',
+        });
+      }
+      if(protocol!=='responses' && protocol!=='gemini_generate_content' && !allowLossyContinuation && logicalInput.some((item:any)=>item?.encrypted_content || item?.type==='compaction'))throw new DataAdmissionError(422,'codex_router_unrestorable_history_start_new_conversation');
       const hasTools=input.tools?.length || logicalInput.some((item:any)=>(item?.type==='additional_tools' || item?.type==='tool_search_output') && item.tools?.length);
       if(hasTools && (!capabilities.toolCall || binding.capabilityOverrides?.tools===false))throw new DataAdmissionError(422,'codex_router_tools_unsupported');
       const allowedTools=binding.capabilityOverrides?.tools===false ? undefined : binding.capabilityOverrides?.allowedTools?.trim();
@@ -94,7 +103,7 @@ export const CodexRouterPlugin = definePlugin(class implements Plugin {
       }
       let diagnostics;
       let session;
-      try {session=this.conversion.createSession({sourceProtocol:'responses',targetProtocol:protocol,model:binding.model,responseModel:bindingSource(binding),provider:binding.provider,profile:capabilities,restrictions:binding.capabilityOverrides,selectedEffort:input.reasoning?.effort,...(protocol!=='responses'?{agentMessageDelivery:'plaintext' as const}:{})});} catch(error) {const e=error as any;if(typeof e.code==='string')throw new DataAdmissionError(422,`llm_adapter_${e.code}`,undefined,{message:e.message,param:e.param});throw error;}
+      try {session=this.conversion.createSession({sourceProtocol:'responses',targetProtocol:protocol,model:binding.model,responseModel:bindingSource(binding),provider:binding.provider,profile:capabilities,restrictions:binding.capabilityOverrides,selectedEffort:input.reasoning?.effort,allowLossyContinuation,...(protocol!=='responses'?{agentMessageDelivery:'plaintext' as const}:{})});} catch(error) {const e=error as any;if(typeof e.code==='string')throw new DataAdmissionError(422,`llm_adapter_${e.code}`,undefined,{message:e.message,param:e.param});throw error;}
       try {
         const decoded=session.convertRequest(input);context.body=structuredClone(decoded.body);
         if(protocol!=='responses')logicalInput=structuredClone(decoded.canonicalHistory);

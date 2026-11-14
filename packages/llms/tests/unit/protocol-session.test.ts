@@ -49,7 +49,7 @@ function code(fn: () => unknown, value: string, param?: string) {
   }
 }
 describe('pure protocol sessions, local fixtures for the complete declared matrix', () => {
-  test('description exposes 4 passthrough, 11 conversions, 1 unsupported pair', () => { const d = describeProtocolConversion(); expect(d.rulesVersion).toBe('1.0.5'); expect(d.matrix.filter(x => x.mode === 'convert')).toHaveLength(11); expect(d.matrix.filter(x => x.mode === 'passthrough')).toHaveLength(4); expect(d.matrix.filter(x => x.mode === 'unsupported')).toHaveLength(1); });
+  test('description exposes 4 passthrough, 11 conversions, 1 unsupported pair', () => { const d = describeProtocolConversion(); expect(d.rulesVersion).toBe('1.0.6'); expect(d.matrix.filter(x => x.mode === 'convert')).toHaveLength(11); expect(d.matrix.filter(x => x.mode === 'passthrough')).toHaveLength(4); expect(d.matrix.filter(x => x.mode === 'unsupported')).toHaveLength(1); });
   for (const source of LLM_PROTOCOLS)
     for (const target of LLM_PROTOCOLS) {
       const pair = describeProtocolConversion().matrix.find(x => x.sourceProtocol === source && x.targetProtocol === target)!;
@@ -575,6 +575,219 @@ test('Chat assistant merge preserves earlier reasoning when a later call joins t
  expect(messages.map(message=>message.role)).toEqual(['user','assistant','tool']);
  expect(messages[1]).toMatchObject({content:'AB',reasoning_content:'R1R2',tool_calls:[{id:'call'}]});
  expect(converted.canonicalHistory).toEqual(input);
+});
+
+test('Responses opaque history is only projected into Chat on opt-in, with original history retained', () => {
+  const input = [
+    { role: 'user', content: 'start' },
+    { type: 'reasoning', id: 'r1', encrypted_content: 'sealed-reasoning', content: null, summary: [{ type: 'summary_text', text: 'readable summary' }] },
+    { type: 'configuration_update', reasoning: { effort: 'high' } },
+    { type: 'function_call', call_id: 'call', name: 'f', arguments: '{"q":1}', status: 'completed', encrypted_content: 'sealed-function' },
+    { type: 'function_call_output', call_id: 'call', output: 'tool result' },
+    { type: 'configuration_update', reasoning: { effort: 'low' } },
+    { type: 'reasoning', encrypted_content: 'sealed-only', content: [] },
+    { role: 'user', content: 'continue' },
+  ];
+  const raw = { model, input };
+  const snapshot = structuredClone(raw);
+  const chat = ctx('responses', 'chat_completions');
+  code(() => createProtocolSession(chat).convertRequest(raw), 'unsupported_content', 'input[2].reasoning');
+  code(() => createProtocolSession({ ...chat, allowLossyContinuation: false }).convertRequest({ input: [input[1]] }),
+    'unsupported_content', 'input[0].encrypted_content');
+  const native = createProtocolSession({ ...ctx('responses', 'responses'), allowLossyContinuation: true }).convertRequest(raw);
+  expect(native.body).toBe(raw);
+  expect(native.diagnostics).toEqual([]);
+
+  const context: ProtocolSessionContext = {
+    ...chat, allowLossyContinuation: true, capabilities: { reasoningEffort: true },
+    reasoningPolicy: { effortMap: { high: 'high', low: 'medium' } },
+  };
+  const converted = createProtocolSession(context).convertRequest(raw);
+  const messages = converted.body.messages as unknown[];
+  expect(messages).toEqual([
+    { role: 'user', content: 'start' },
+    { role: 'assistant', content: null, reasoning_content: 'readable summary', tool_calls: [
+      { id: 'call', type: 'function', function: { name: 'bungee_tool_0', arguments: '{"q":1}' } },
+    ] },
+    { role: 'tool', tool_call_id: 'call', content: 'tool result' },
+    { role: 'user', content: 'continue' },
+  ]);
+  expect(converted.body.reasoning_effort).toBe('medium');
+  expect(converted.effectiveReasoningEffort).toBe('low');
+  expect(converted.diagnostics.filter(d => d.action === 'omitted').map(d => d.param))
+    .toEqual(['input[1].encrypted_content', 'input[3].encrypted_content', 'input[6].encrypted_content']);
+  expect(converted.diagnostics).toContainEqual({ param: 'input[5].reasoning.effort', action: 'mapped', reason: 'chat_configuration_effort_update' });
+  expect(converted.canonicalHistory).toEqual(snapshot.input);
+  expect(raw).toEqual(snapshot);
+  expect(createProtocolSession(context).convertRequest({ input: converted.canonicalHistory }).body).toEqual(converted.body);
+  expect(createProtocolSession(context).convertRequest({ ...raw, reasoning: { effort: 'xhigh' } }).body.reasoning_effort).toBe('medium');
+  code(() => createProtocolSession(context).convertRequest({ ...raw, reasoning: { effort: false } }),
+    'invalid_payload', 'reasoning.effort');
+
+  code(() => createProtocolSession({ ...context, reasoningPolicy: { effortMap: { low: 'medium' } } }).convertRequest(raw),
+    'unsupported_reasoning', 'input[2].reasoning.effort');
+  code(() => createProtocolSession({ ...context, capabilities: {} }).convertRequest(raw),
+    'unsupported_reasoning', 'input[5].reasoning.effort');
+  code(() => createProtocolSession(context).convertRequest({
+    input: [{ type: 'configuration_update', reasoning: { effort: 'low' }, text: { format: { type: 'json_object' } } }],
+  }), 'unsupported_content', 'input[0].text');
+});
+
+test('Chat opt-in omits only opaque reasoning without readable text', () => {
+  const context = { ...ctx('responses', 'chat_completions'), allowLossyContinuation: true, capabilities: {} };
+  const opaque = { type: 'reasoning', encrypted_content: 'sealed', summary: [] };
+  const summary = [{ type: 'summary_text', text: 'readable' }];
+  const next = { role: 'user', content: 'next' };
+  const convert = (...input: unknown[]) => createProtocolSession(context).convertRequest({ input });
+  expect(convert(opaque, next).body.messages).toEqual([next]);
+  code(() => convert({ ...opaque, summary }, next), 'unsupported_reasoning', 'input[0]');
+  code(() => createProtocolSession({ ...context, capabilities: { reasoningHistory: true } }).convertRequest({ input: [{ ...opaque, summary }, next] }),
+    'unsupported_reasoning', 'input[1]');
+  code(() => convert({ ...opaque, summary: null }), 'invalid_payload', 'input[0].summary');
+  code(() => convert({ ...opaque, summary: [{ type: 'unknown', text: 'readable' }] }), 'unsupported_reasoning', 'input[0].summary[0]');
+  code(() => convert({ ...opaque, content: [{ type: 'reasoning_text', text: 'raw' }] }), 'unsupported_reasoning', 'input[0].content');
+  code(() => convert({ ...opaque, encrypted_content: '' }), 'invalid_payload', 'input[0].encrypted_content');
+  code(() => convert({ ...opaque, encrypted_content: 'bungee_gemini:opaque' }), 'unsupported_content', 'input[0].encrypted_content');
+  code(() => convert({ type: 'item_reference', id: 'opaque' }), 'unresolved_reference', 'input[0]');
+  code(() => createProtocolSession({ ...context, targetProtocol: 'anthropic_messages' }).convertRequest({ input: [opaque, next] }),
+    'unsupported_content', 'input[0].encrypted_content');
+});
+
+test('Responses compaction is projected at its original position only for opted-in Chat', () => {
+  const chat = ctx('responses', 'chat_completions');
+  const context = { ...chat, allowLossyContinuation: true };
+  const start = { role: 'user', content: 'start' };
+  const compaction = { type: 'compaction', id: 'cmp_first', encrypted_content: 'sealed-first', created_by: 'actor' };
+  const call = { type: 'function_call', call_id: 'call', name: 'f', arguments: '{}' };
+  const result = { type: 'function_call_output', call_id: 'call', output: 'done' };
+  const second = { type: 'compaction', id: null, encrypted_content: 'sealed-second' };
+  const next = { role: 'user', content: 'next' };
+  const raw = { model, input: [start, compaction, call, result, second, next] };
+  const snapshot = structuredClone(raw);
+  const convert = (...input: unknown[]) => createProtocolSession(context).convertRequest({ input });
+  const converted = createProtocolSession(context).convertRequest(raw);
+  const placeholder = { role: 'user', content: '[Earlier conversation context was compacted and is unavailable. Continue from the visible messages and ask for any details you need.]' };
+  expect(converted.body.messages).toEqual([
+    start, placeholder,
+    { role: 'assistant', content: null, tool_calls: [{ id: 'call', type: 'function', function: { name: 'bungee_tool_0', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: 'call', content: 'done' }, placeholder, next,
+  ]);
+  expect(converted.diagnostics).toEqual([1, 4].map(index => ({ param: `input[${index}]`, action: 'mapped', reason: 'chat_compaction_placeholder' })));
+  expect(converted.canonicalHistory).toEqual(snapshot.input);
+  expect(raw).toEqual(snapshot);
+  expect(convert(...converted.canonicalHistory).body).toEqual(converted.body);
+  expect(convert({ type: 'compaction', encrypted_content: 'sealed' }, next).body.messages).toEqual([placeholder, next]);
+
+  const native = createProtocolSession({ ...context, targetProtocol: 'responses' }).convertRequest(raw);
+  expect(native.body).toBe(raw);
+  expect(native.diagnostics).toEqual([]);
+  code(() => createProtocolSession(chat).convertRequest(raw), 'unsupported_content', 'input[1].encrypted_content');
+  for (const targetProtocol of ['gemini_generate_content', 'anthropic_messages'] as const)
+    code(() => createProtocolSession({ ...context, targetProtocol }).convertRequest(raw), 'unsupported_content', 'input[1].encrypted_content');
+  for (const encrypted_content of [undefined, null, '', ' ', []])
+    code(() => convert({ ...compaction, encrypted_content }), 'invalid_payload', 'input[0].encrypted_content');
+  code(() => convert({ ...compaction, encrypted_content: 'bungee_gemini:opaque' }), 'unsupported_content', 'input[0].encrypted_content');
+  code(() => convert({ ...compaction, summary: 'untrusted' }), 'unsupported_content', 'input[0].summary');
+  code(() => convert({ ...compaction, id: 7 }), 'invalid_payload', 'input[0].id');
+  code(() => convert({ ...compaction, created_by: {} }), 'invalid_payload', 'input[0].created_by');
+  code(() => convert(call, compaction, result), 'invalid_tool_history', 'input[1]');
+  code(() => convert(compaction, call, next, result), 'invalid_tool_history', 'input[2]');
+  expect((convert(compaction, call, { role: 'assistant', content: 'Running the tool.' },
+    { role: 'developer', content: 'Keep the results.' }, result).body.messages as { role: string }[]).map(message => message.role))
+    .toEqual(['user', 'assistant', 'tool', 'developer']);
+  const reasoning = { type: 'reasoning', summary: [{ type: 'summary_text', text: 'Tool rationale' }] };
+  const assistant = { role: 'assistant', content: 'Running the tool.' };
+  const withReasoning = (...input: unknown[]) => createProtocolSession({
+    ...context, capabilities: { reasoningHistory: true },
+  }).convertRequest({ input });
+  expect(withReasoning(compaction, call, reasoning, assistant, result).body.messages).toMatchObject([
+    placeholder, { ...assistant, reasoning_content: 'Tool rationale', tool_calls: [{ id: 'call' }] },
+    { role: 'tool', tool_call_id: 'call', content: 'done' },
+  ]);
+  code(() => withReasoning(compaction, call, reasoning, result, assistant), 'invalid_tool_history', 'input[3]');
+  code(() => convert(compaction, call), 'invalid_tool_history', 'input[1].call_id');
+  code(() => convert(compaction, result), 'invalid_tool_history', 'input[1]');
+  code(() => convert(compaction, call, { ...result, type: 'custom_tool_call_output' }), 'invalid_tool_history', 'input[2].type');
+});
+
+test('Chat opt-in preserves assistant message phase in canonical history only', () => {
+  const chat = ctx('responses', 'chat_completions');
+  const context = { ...chat, allowLossyContinuation: true };
+  const input = (['commentary', 'final_answer', null] as const).flatMap((phase, index) => [
+    { role: 'user', content: 'Continue' },
+    { type: 'message', role: 'assistant', phase, content: [{ type: 'output_text', text: `reply ${index}` }] },
+  ]);
+  const request = { model, input };
+  const converted = createProtocolSession(context).convertRequest(request);
+  expect(converted.body.messages).toEqual(input.map((item, index) => item.role === 'user' ? item : {
+    role: 'assistant', content: [{ type: 'text', text: `reply ${(index - 1) / 2}` }],
+  }));
+  expect(converted.canonicalHistory).toEqual(input);
+  expect(converted.diagnostics).toEqual([1, 3, 5].map(index => ({
+    param: `input[${index}].phase`, action: 'omitted', reason: 'chat_assistant_phase_unavailable',
+  })));
+  expect(createProtocolSession({ ...context, targetProtocol: 'responses' }).convertRequest(request).body).toBe(request);
+  code(() => createProtocolSession(chat).convertRequest(request), 'unsupported_content', 'input[1].phase');
+  const assistant = input[1]!;
+  code(() => createProtocolSession(context).convertRequest({ input: [{ ...assistant, phase: 'unknown' }] }),
+    'invalid_payload', 'input[0].phase');
+  code(() => createProtocolSession(context).convertRequest({ input: [{ ...assistant, role: 'user' }] }),
+    'unsupported_content', 'input[0].phase');
+});
+
+test('Chat opt-in omits empty output logprobs and compaction metadata only', () => {
+  const chat = ctx('responses', 'chat_completions');
+  const context = { ...chat, allowLossyContinuation: true };
+  const compacted = { type: 'compaction', encrypted_content: 'fixture-opaque', internal_chat_message_metadata_passthrough: { turn_id: 'fixture' } };
+  const part = { type: 'output_text', text: 'Visible answer', annotations: [], logprobs: [] };
+  const message = { type: 'message', role: 'assistant', content: [part] };
+  const request = { model, input: [compacted, message] };
+  const converted = createProtocolSession(context).convertRequest(request);
+  expect(converted.body.messages).toMatchObject([
+    { role: 'user', content: expect.stringContaining('compacted and is unavailable') },
+    { role: 'assistant', content: [{ type: 'text', text: 'Visible answer' }] },
+  ]);
+  expect(JSON.stringify(converted.body)).not.toMatch(/logprobs|fixture-opaque|turn_id/);
+  expect(converted.canonicalHistory).toEqual([{ type: 'compaction', encrypted_content: 'fixture-opaque' }, message]);
+  expect(converted.diagnostics).toContainEqual({ param: 'input[1].content[0].logprobs', action: 'omitted', reason: 'chat_empty_output_logprobs' });
+  expect(createProtocolSession({ ...context, targetProtocol: 'responses' }).convertRequest(request).body).toBe(request);
+  code(() => createProtocolSession(chat).convertRequest({ input: [message] }), 'unsupported_content', 'input[0].content[0].logprobs');
+  for (const logprobs of [[{ token: 'Visible', logprob: -1 }], null, {}])
+    code(() => createProtocolSession(context).convertRequest({ input: [{ ...message, content: [{ ...part, logprobs }] }] }),
+      'unsupported_content', 'input[0].content[0].logprobs');
+  code(() => createProtocolSession(context).convertRequest({ input: [{ ...compacted, internal_chat_message_metadata_passthrough: [] }] }),
+    'invalid_payload', 'input[0]');
+});
+
+test('Chat opt-in requires complete cleartext arguments and a matching function result', () => {
+  const context = { ...ctx('responses', 'chat_completions'), allowLossyContinuation: true, agentMessageDelivery: 'plaintext' as const };
+  const call = { type: 'function_call', call_id: 'call', name: 'f', arguments: '{}', encrypted_content: 'sealed' };
+  const result = { type: 'function_call_output', call_id: 'call', output: 'done' };
+  const convert = (...input: unknown[]) => createProtocolSession(context).convertRequest({ input });
+  expect(convert(call, result).canonicalHistory).toEqual([call, result]);
+  code(() => convert(call), 'invalid_tool_history', 'input[0].call_id');
+  code(() => convert(call, { ...result, type: 'custom_tool_call_output' }), 'invalid_tool_history', 'input[1].type');
+  code(() => convert(call, result, result), 'invalid_tool_history', 'input[2]');
+  code(() => convert(call, { role: 'user', content: 'next' }, result), 'invalid_tool_history', 'input[1]');
+  code(() => convert(call, { type: 'reasoning', summary: [{ type: 'summary_text', text: 'unattached' }] }, result, { role: 'assistant', content: 'next' }),
+    'invalid_tool_history', 'input[1]');
+  const instruction = { role: 'developer', content: 'Instruction' };
+  const opaque = { type: 'reasoning', encrypted_content: 'sealed-only', summary: [] };
+  expect((convert(call, instruction, opaque, result).body.messages as Array<{ role: string }>).map(message => message.role))
+    .toEqual(['assistant', 'tool', 'developer']);
+  const plain = { type: 'function_call', call_id: 'plain', name: 'f', arguments: '{}' };
+  const plainResult = { ...result, call_id: 'plain' };
+  code(() => convert(call, plain, result), 'invalid_tool_history', 'input[0].call_id');
+  expect((convert(call, plain, result, plainResult).body.messages as Array<{ role: string }>).map(message => message.role))
+    .toEqual(['assistant', 'tool', 'tool']);
+  code(() => convert(call, call, result), 'invalid_tool_history', 'input[1]');
+  code(() => convert({ ...call, arguments: undefined }, result), 'invalid_payload', 'input[0].arguments');
+  code(() => convert({ ...call, arguments: '{' }, result), 'invalid_tool_arguments', 'input[0].arguments');
+  code(() => convert({ ...call, arguments: '[]' }, result), 'invalid_payload', 'input[0].arguments');
+  code(() => convert({ ...call, status: 'in_progress' }, result), 'invalid_tool_history', 'input[0].status');
+  code(() => convert({ ...call, name: 'send_message', namespace: 'collaboration', encrypted_function_args: ['message'] }, result),
+    'unsupported_content', 'input[0].encrypted_function_args');
+  code(() => convert({ ...call, signature: 'sealed' }, result), 'unsupported_content', 'input[0].signature');
 });
 
 test('Chat JSON tolerates choice metadata and retains strict tool-call indexes', () => {
