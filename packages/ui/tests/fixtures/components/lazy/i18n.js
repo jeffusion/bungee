@@ -1,1 +1,0 @@
-import { writable } from 'svelte/store'; export const _ = writable(key => key);

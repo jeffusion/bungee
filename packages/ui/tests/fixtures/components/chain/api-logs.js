@@ -1,1 +1,0 @@
-export const getChainDetail = () => new Promise(resolve => { window.resolveDetail = resolve; });

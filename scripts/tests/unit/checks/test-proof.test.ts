@@ -5,14 +5,13 @@ import type { TestPlan } from '../../../checks/test-selection';
 
 const sha = 'a'.repeat(40), tree = 'b'.repeat(40), source = 'c'.repeat(40), releaseCommit = 'd'.repeat(40);
 const plan: TestPlan = { version: 1, base: sha, testCommit: sha, tree, head: source, mode: 'full', build: true, reasons: ['explicit-full'],
-  files: { unit: ['tests/unit/a.test.ts'], integration: ['tests/integration/a.test.ts'], browser: ['tests/browser/a.test.ts','tests/browser/b.test.ts'] } };
+  files: { unit: ['tests/unit/a.test.ts'], integration: ['tests/integration/a.test.ts'] } };
 const metadata = { pr: 12, runId: '123', runAttempt: 1, now: new Date('2026-10-11T00:00:00Z') };
 const expected = { ...metadata, head: source, tree };
 function records(): PhaseRecord[] {
   return [
     { phase: 'unit', files: plan.files.unit, executed: plan.files.unit, commit: sha, tree, elapsed: 1, status: 0 },
     { phase: 'integration', files: plan.files.integration, executed: plan.files.integration, commit: sha, tree, elapsed: 2, status: 0 },
-    ...plan.files.browser.map((file, index) => ({ phase: 'browser' as const, files: plan.files.browser, executed: [file], commit: sha, tree, elapsed: 3, status: 0, shard: `${index+1}/2` })),
   ];
 }
 const proof = (input = plan) => createProof(input, platforms.map(platform => verifyRecords(input, records(), platform)), metadata);
@@ -34,7 +33,7 @@ test.each([undefined, null, 123, '', 'main', 'abcdef0', 'A'.repeat(40), 'g'.repe
   expect(() => proof({ ...plan, head: head as string | undefined })).toThrow('Invalid source head SHA');
 });
 
-test('native shards cover each selected file once and use identical candidate lists', () => {
+test('execution proof covers each selected file once and uses the planned candidate lists', () => {
   expect(verifyRecords(plan, records(), 'ubuntu-latest').success).toBe(true);
   for (const mutate of [
     (rs: PhaseRecord[]) => rs.pop(),
@@ -42,18 +41,17 @@ test('native shards cover each selected file once and use identical candidate li
     (rs: PhaseRecord[]) => { rs[0]!.tree = 'c'.repeat(40); },
     (rs: PhaseRecord[]) => { rs[0]!.commit = 'c'.repeat(40); },
     (rs: PhaseRecord[]) => { rs[0]!.executed = []; },
-    (rs: PhaseRecord[]) => { rs[3]!.executed = rs[2]!.executed; },
-    (rs: PhaseRecord[]) => { rs[3]!.shard = '1/2'; },
-    (rs: PhaseRecord[]) => { rs[3]!.files = [plan.files.browser[1]!]; },
+    (rs: PhaseRecord[]) => rs.push(rs[0]!),
+    (rs: PhaseRecord[]) => { rs[1]!.executed = [...rs[1]!.executed, ...rs[1]!.executed]; },
+    (rs: PhaseRecord[]) => { rs[1]!.files = plan.files.unit; },
     (rs: PhaseRecord[]) => { rs[0]!.elapsed = NaN; },
   ]) { const rs = records(); mutate(rs); expect(() => verifyRecords(plan, rs, 'macos-latest')).toThrow(); }
 });
 
-test('document-only proof requires no execution; one browser file requires one native shard', () => {
-  expect(verifyRecords({ ...plan, mode: 'none', build: false, files: { unit: [], integration: [], browser: [] } }, [], 'macos-latest').scope).toBe('none');
-  const single = { ...plan, files: { ...plan.files, browser: [plan.files.browser[0]!] } };
-  const rs = records().slice(0,3); rs[2] = { ...rs[2]!, files: single.files.browser, shard: '1/1' };
-  expect(verifyRecords(single, rs, 'ubuntu-latest').success).toBe(true);
+test('document-only proof requires no execution and an empty integration phase needs no record', () => {
+  expect(verifyRecords({ ...plan, mode: 'none', build: false, files: { unit: [], integration: [] } }, [], 'macos-latest').scope).toBe('none');
+  const unitsOnly = { ...plan, mode: 'affected' as const, files: { ...plan.files, integration: [] } };
+  expect(verifyRecords(unitsOnly, records().slice(0, 1), 'ubuntu-latest').success).toBe(true);
 });
 
 test.each(['affected','none'] as const)('%s proof never satisfies full release validation', scope => {

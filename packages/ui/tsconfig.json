@@ -112,9 +112,6 @@
     "src/**/*.ts",
     "src/**/*.js",
     "src/**/*.svelte",
-    "../../plugins/*/ui/**/*.svelte",
-    "tests/**/*.ts",
-    "tests/**/*.svelte",
-    "../../plugins/*/tests/unit/ui/**/*.ts"
+    "../../plugins/*/ui/**/*.svelte"
   ]
 }

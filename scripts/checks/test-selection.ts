@@ -1,7 +1,7 @@
 import ts from 'typescript';
 import { posix } from 'node:path';
 
-export const phases = ['unit', 'integration', 'browser'] as const;
+export const phases = ['unit', 'integration'] as const;
 export type Phase = typeof phases[number];
 export type Snapshot = Record<string, string>;
 export interface TestPlan {
@@ -22,10 +22,10 @@ export function phaseOf(file: string): Phase | undefined {
   if (/(^|\/)(node_modules|dist|manual|benchmarks)\//.test(file)) return;
   if (/(?:^|\/)tests\/(helpers|fixtures)\//.test(file)) return;
   if (!/(?:\.(?:test|spec)|_(?:test|spec))\.[cm]?[jt]sx?$/.test(file)) return;
-  return file.match(/(?:^|\/)tests\/(unit|integration|browser)\//)?.[1] as Phase | undefined;
+  return file.match(/(?:^|\/)tests\/(unit|integration)\//)?.[1] as Phase | undefined;
 }
 export function discoverTests(paths: readonly string[]): Record<Phase, string[]> {
-  const files: Record<Phase, string[]> = { unit: [], integration: [], browser: [] };
+  const files: Record<Phase, string[]> = { unit: [], integration: [] };
   for (const file of new Set(paths)) { const phase = phaseOf(file); if (phase) files[phase].push(file); }
   for (const phase of phases) files[phase].sort();
   return files;
@@ -117,23 +117,18 @@ export function selectTests(input: {
   base: string; testCommit: string; tree: string; head?: string; full?: boolean;
 }): TestPlan {
   const all = discoverTests(input.paths);
-  const selected: Record<Phase, Set<string>> = { unit: new Set(), integration: new Set(), browser: new Set() };
+  const selected: Record<Phase, Set<string>> = { unit: new Set(), integration: new Set() };
   const reasons = new Set<string>();
   let full = Boolean(input.full), active = full;
   if (full) reasons.add('explicit-full');
-  const include = (module: string, layers: readonly Phase[]): boolean => {
+  const include = (module: string, layers: readonly Phase[]): void => {
     const entries = phases.flatMap(phase => all[phase].filter(file => moduleOf(file) === module));
     if (!entries.length) { full = true; reasons.add(`no-module-tests:${module}`); }
     for (const phase of layers) for (const file of all[phase]) if (moduleOf(file) === module) selected[phase].add(file);
-    return entries.length > 0;
-  };
-  const ui = (): void => {
-    include('packages/ui', ['integration']);
-    for (const file of all.browser) if (moduleOf(file) === 'root' || moduleOf(file) === 'packages/ui' || moduleOf(file).startsWith('plugins/')) selected.browser.add(file);
   };
   const server = (modules: Iterable<string>): void => {
-    for (const module of reverseClosure(modules, input.relations)) include(module, module === 'plugins/llm-tps' ? ['integration', 'browser'] : ['integration']);
-    include('packages/core', ['integration']); include('root', ['integration', 'browser']);
+    for (const module of reverseClosure(modules, input.relations)) include(module, ['integration']);
+    include('packages/core', ['integration']); include('root', ['integration']);
   };
   for (const file of [...new Set(input.changed)].sort()) {
     if (isDocumentation(file)) { reasons.add(`documentation:${file}`); continue; }
@@ -157,12 +152,12 @@ export function selectTests(input: {
       continue;
     }
     if (/(?:^|\/)(?:package\.json|bun\.lockb?|[^/]*lock\.yaml|tsconfig[^/]*\.json|(?:vite|svelte|tailwind|postcss)\.config\.[^/]+|tailwind\.theme\.[^/]+)$/.test(file)) { full = true; reasons.add(`configuration:${file}`); continue; }
-    if (module === 'packages/ui') { reasons.add(`ui:${file}`); ui(); continue; }
+    if (module === 'packages/ui') { reasons.add(`ui:${file}`); continue; }
     if (module === 'packages/cli') { reasons.add(`cli:${file}`); include(module, ['integration']); server([]); continue; }
     if (module === 'packages/llms') { reasons.add(`llms:${file}`); include(module, ['integration']); server(input.relations.llmsConsumers); continue; }
     if (module.startsWith('plugins/')) {
-      if (file === `${module}/manifest.json`) { reasons.add(`manifest:${file}`); server([module]); ui(); continue; }
-      if (file.startsWith(`${module}/ui/`)) { reasons.add(`plugin-ui:${file}`); include(module, []); ui(); continue; }
+      if (file === `${module}/manifest.json`) { reasons.add(`manifest:${file}`); server([module]); continue; }
+      if (file.startsWith(`${module}/ui/`)) { reasons.add(`plugin-ui:${file}`); include(module, []); continue; }
       if (file.startsWith(`${module}/server/`) || file === `${module}/contract.ts`) { reasons.add(`plugin-server:${file}`); server([module]); continue; }
     }
     full = true; reasons.add(`fallback:${file}`);

@@ -1,1 +1,0 @@
-<script>let { name } = $props();</script><p data-page>{name}</p>

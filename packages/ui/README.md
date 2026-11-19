@@ -26,8 +26,8 @@ Access `/#/design` in the browser to view the live design system showcase, inclu
 
 ## Testing & CI
 - **Business logic**: Unit tests cover validation, API contracts, authentication state, publication recovery and data isolation.
-- **Business workflows**: After building, run `bun run test:browser` from the repository root to verify authentication, configuration publication, account bindings and failure recovery. Automated tests do not lock styling, layout, animation, focus or translated copy.
-- **Visual review**: Use `/#/design` and the [design review workflow](./docs/INDUSTRIAL_DESIGN_SYSTEM.md#8-required-testing-checklist) when changing presentation. See the [testing guide](../../docs/guides/development.md#6-testing-strategy) for local commands and CI scope.
+- **Business workflows**: Review the affected interactions manually after building. Use isolated fixtures to verify authentication, configuration publication, account bindings and failure recovery where applicable.
+- **Visual review**: Use `/#/design` and the [design review workflow](./docs/INDUSTRIAL_DESIGN_SYSTEM.md#8-manual-ui-review) when changing presentation. See the [testing guide](../../docs/guides/development.md#6-testing-strategy) for local commands and CI scope.
 
 ## Configuration
 - **Theme**: Defined in `tailwind.theme.js`.

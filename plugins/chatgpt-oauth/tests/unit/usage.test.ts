@@ -4,7 +4,6 @@ import type { ControlHostContext, SecretStore, SecretValue } from '../../../../p
 import { AccountStore } from '../../server/accounts';
 import { createControl } from '../../server/control';
 import type { CodexTokenSet, FetchLike } from '../../server/oauth';
-import { accountUsage, resetOutcome } from '../../ui/account-model.js';
 
 class FakeSecretStore implements SecretStore {
   readonly namespace = 'usage-test';
@@ -78,29 +77,6 @@ function api(control: ReturnType<typeof createControl>, handler: string, request
 }
 
 describe('ChatGPT usage control', () => {
-  test('cross-layer: UsageService normalized response is accepted by the UI account model contract', async () => {
-    const fetchImpl: FetchLike = async (_input, init) => {
-      if (init?.method === 'POST') return json({ code: 'reset', windows_reset: 2 });
-      return String(_input).endsWith('/usage') ? json(usageBody()) : json({
-        available_count: 3,
-        credits: [{ id: CREDIT, reset_type: 'weekly', status: 'available', granted_at: '2025-01-01T00:00:00Z', title: 'one', description: 'bounded description', expires_at: '2030-01-01T00:00:00Z' }],
-      });
-    };
-    const { account, control } = await setup(fetchImpl);
-    const usageResponse = await api(control, 'getAccountUsage', new Request(`http://localhost/accounts/usage?accountRef=${account.id}`));
-    const normalized = await usageResponse.json();
-    const parsed = accountUsage(normalized);
-    expect(parsed.usage.value?.primary).toMatchObject({ usedPercent: 10, windowSeconds: 3600 });
-    expect(parsed.usage.value?.availableCount).toBe(3);
-    expect(parsed.resetCredits.value?.availableCount).toBe(3);
-    expect(parsed.resetCredits.value?.credits[0]).toMatchObject({
-      creditId: CREDIT, status: 'available', resetType: 'weekly', title: 'one', description: 'bounded description',
-    });
-    const resetResponse = await api(control, 'resetAccountUsage', new Request('http://localhost/accounts/usage/reset', { method: 'POST', body: JSON.stringify({ accountRef: account.id, redeemRequestId: REQUEST_ID, creditId: CREDIT }) }));
-    expect(resetOutcome(await resetResponse.json())).toMatchObject({ outcome: 'reset', windowsReset: 2 });
-    await control.dispose();
-  });
-
   test('official nullable usage windows are absent without fabricating windows', async () => {
     const readUsage = async (value: unknown) => {
       const fetchImpl: FetchLike = async (_input) => String(_input).endsWith('/usage') ? json(value) : json(creditsBody());

@@ -889,7 +889,7 @@ unsaved-changes guard. Keep all styles component-owned or existing utilities.
   and `nx-label-sm` for metadata, not form titles. See the form text roles in §2.3.
 - **Match status colour to canonical meaning:** orange = primary /
   focus, emerald = ok, amber = caution, red = fault, sky = info.
-- **Test in the real browser with Playwright before declaring done.**
+- **Review affected pages in a real browser.**
   See §8.
 - **Guard every `$_()` call with `$isLoading`.** See §7.
 - **For new pages: open `/#/design` first** to see what's available.
@@ -980,52 +980,17 @@ fires, i18n has resolved. But if you do something synchronous in
 
 ---
 
-## 8. Required testing checklist
+## 8. Manual UI review
 
-Before declaring any UI change "done":
+1. Build with `bun run build:ui` from the repository root and resolve build warnings.
+2. Open the affected pages with an isolated local service and exercise the changed workflows.
+3. Check the browser console and network panel for errors. Confirm rendered content, layout and interaction states.
+4. Capture screenshots of the affected views and relevant hover or focus states. Store evidence outside the repository.
+5. For theme changes, review the design system at `/#/design`.
 
-1. **Build cleanly.** `cd packages/ui && bun run build` — no warnings.
-2. **Render in a real browser.** HTTP 200 from `curl` is *not enough*;
-   JS errors and i18n races don't show up in HTTP status.
-3. **Use Playwright headless to take a screenshot** of the affected
-   page(s). Use the maintained smoke or package-local browser tests; for a focused check:
-   ```js
-   const page = await ctx.newPage();
-   page.on('pageerror', (e) => errors.push(e.message));
-   await page.goto(URL, { waitUntil: 'networkidle' });
-   await page.screenshot({ path: '/tmp/shot.png' });
-   ```
-4. **Verify the rendered text and DOM are present.** Empty body =
-   crash; check `await page.locator('body').innerText()` is non-empty.
-5. **Verify zero `pageerror` / console errors / failed network
-   requests.**
-6. **If hover / interactive state was changed:** trigger it with
-   Playwright's `.hover()` / `.focus()` and screenshot both states.
-7. **If `data-theme` or `app.css` changed:** spot-check the design
-   system page `/#/design` — it visualises everything in one shot.
+### 8.1 Automated regression scope
 
-### 8.1 CI Integration & Smoke Tests
-
-Automated frontend checks protect core business logic and workflows: validation,
-authentication and session changes, configuration publication and recovery, account
-bindings, request contracts and data isolation. Run `bun run test:browser` after
-building current artifacts. CI selects browser files by module on Linux/macOS;
-full regression remains required before release. See the
-[development testing guide](../../../docs/guides/development.md#6-testing-strategy).
-
-Do not assert CSS, dimensions, responsive layouts, animations, focus, translated
-wording or display formatting in automated tests. Use the browser review workflow
-above for presentation changes. Labels may locate controls; they are not immutable
-copy contracts.
-
-Built-page tests serve current `dist` through the owned static runtime; component
-hosts use the existing Vite configuration with private caches. A file owns its
-service and browser, with a fresh context per test. Wait for business requests and
-state transitions to complete instead of fixed preparation delays. Browser errors,
-failed requests and cleanup failures must fail the check. Screenshots may support
-manual diagnosis without becoming automated acceptance criteria.
-
-Keep component tests under `tests/browser/`, pure logic under `tests/unit/`, and loaded hosts under `tests/fixtures/`. Test behavior through normal module imports or real rendering; never extract component source and execute it. Evidence belongs outside versioned source.
+CI builds the UI and runs unit and integration tests for business rules, service contracts and process behavior. Use the manual checklist for rendered pages and component interactions. See the [development testing guide](../../../docs/guides/development.md#6-testing-strategy).
 
 ---
 

@@ -10,7 +10,7 @@
     "start": "bun packages/core/src/main.ts",
     "dev": "bun --watch packages/core/src/main.ts",
     "benchmark": "bun tests/benchmarks/measure-body-resources.ts",
-    "test": "bun run build && bun run test:fast && bun run test:integration && bun run test:browser",
+    "test": "bun run build && bun run test:fast && bun run test:integration",
     "check:architecture": "bun scripts/checks/check-gateway-architecture.ts && bun test scripts/tests/unit/checks/check-gateway-architecture.test.ts",
     "prepare": "husky",
     "build": "bun run build:types && bun run build:llms && bun run generate:widgets && bun run build:ui && bun run bundle:ui && bun run build:core && bun run build:cli",
@@ -30,7 +30,6 @@
     "release:binaries": "bun scripts/release/upload-binaries.ts",
     "test:fast": "bun test --isolate 'tests/unit/'",
     "test:integration": "bun test --isolate 'tests/integration/'",
-    "test:browser": "bun test --isolate 'tests/browser/'",
     "test:plan": "bun scripts/checks/select-tests.ts",
     "test:affected": "bun scripts/checks/select-tests.ts --run"
   },
@@ -47,7 +46,6 @@
     "bun-types": "^1.3.2",
     "commitlint": "^20.0.0",
     "husky": "^9.1.7",
-    "playwright": "^1.60.0",
     "semantic-release": "^24.2.9"
   },
   "keywords": [

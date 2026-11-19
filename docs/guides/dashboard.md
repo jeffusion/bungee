@@ -186,14 +186,7 @@ Keyboard: arrow keys on a card handle move it; Shift + arrows resize it. Ctrl/Cm
 + Z undoes a change, and Ctrl/Cmd + S saves. Leaving with an unsaved draft asks
 whether to discard it.
 
-For the dashboard interaction checks, start the UI dev server on port 5185 and
-run `bun run --cwd packages/ui test:dashboard`. Override the URL with
-`DASHBOARD_BASE_URL` if needed; screenshots are written to
-`DASHBOARD_EVIDENCE_DIR` (default `/tmp/bungee-dashboard-evidence`). These checks
-mock management APIs and do not modify a running Bungee configuration.
-Use `bun run --cwd packages/ui test:dashboard --preview` to capture the default
-dashboard without the synthetic plugin used by the interaction checks. The
-preview still uses mock statistics and configuration data.
+Review dashboard interactions with the [manual UI checklist](../../packages/ui/docs/INDUSTRIAL_DESIGN_SYSTEM.md#8-manual-ui-review) using an isolated local service.
 
 ---
 
