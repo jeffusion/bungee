@@ -1,3 +1,10 @@
+## [6.16.1](https://github.com/jeffusion/bungee/compare/v6.16.0...v6.16.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* **core:** 避免退役控制应答等待描述文件落盘 ([ec4002c](https://github.com/jeffusion/bungee/commit/ec4002c29b1d0ca7c64a232a3f351ea8cbd5c042))
+
 # [6.16.0](https://github.com/jeffusion/bungee/compare/v6.15.1...v6.16.0) (2026-11-14)
 
 
