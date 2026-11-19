@@ -542,7 +542,8 @@ export class WorkerSupervisionHttpServer {
     this.frozen = false;
     this.scheduleLease(message.lease_expires_at);
     this.publishAuthorityIfChanged();
-    await this.refreshDescriptorBestEffort();
+    // Retiring workers persist their terminal evidence separately from live lease responses.
+    if (this.phase !== 'draining') await this.refreshDescriptorBestEffort();
     return this.statusResponse({ controller_epoch: message.controller_epoch, controller_id: message.controller_id }, message.request_id);
   }
 
@@ -564,7 +565,7 @@ export class WorkerSupervisionHttpServer {
       if (message.path === '/shutdown') {
         // The signed ACK is created before the callback can close the control listener.
         setTimeout(() => { void Promise.resolve(this.onShutdown?.()).catch(() => undefined); }, 0);
-      } else {
+      } else if (message.path === '/start') {
         await this.refreshDescriptorBestEffort();
       }
       return response;
