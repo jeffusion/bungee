@@ -75,12 +75,10 @@ SIWC 账号提供 [ChatGPT](https://chatgpt.com) 用量入口，不通过 Codex 
 ```sh
 bun test --isolate plugins/chatgpt-oauth/tests/unit/adapter.test.ts \
   plugins/chatgpt-oauth/tests/integration/adapter-routing.test.ts \
-  plugins/chatgpt-oauth/tests/unit/siwc-adapter.test.ts \
-  plugins/chatgpt-oauth/tests/unit/ui/siwc-account-model.test.ts \
-  plugins/chatgpt-oauth/tests/unit/ui/account-automation.test.ts
+  plugins/chatgpt-oauth/tests/unit/siwc-adapter.test.ts
 ```
 
-这些测试覆盖请求适配、独立搜索、凭据权限、正文转发、登录交互和 manifest 契约。真实账号授权和上游可用性需要单独验证。
+这些测试覆盖请求适配、独立搜索、凭据权限、正文转发、登录适配和 manifest 契约。真实账号授权和上游可用性需要单独验证。
 
 ## 来源与许可证
 

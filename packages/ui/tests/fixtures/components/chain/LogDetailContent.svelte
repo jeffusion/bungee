@@ -1,1 +1,0 @@
-<script>export let log; export let showHeader; export let embedded;</script><div data-detail={log.requestId}>测试详情（无真实日志正文）</div>

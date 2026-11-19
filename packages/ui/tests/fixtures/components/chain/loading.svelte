@@ -1,1 +1,0 @@
-<span data-loading>loading</span>

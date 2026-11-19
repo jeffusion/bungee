@@ -143,6 +143,6 @@ Responses 转 Gemini 或启用有损续聊的 Chat Completions 时，接受仅�
 
 ## 验证入口
 
-本地协议、作用域、公共服务、历史 RPC 和隔离 Gateway 测试位于各模块的 `tests/unit`、`tests/integration`。表单验证位于 `packages/ui/tests/browser`。执行 `bun run test:affected --base origin/main` 与 `bun run check:architecture`；完整回归使用 `bun run test`。测试入口负责先构建再运行所需检查，流程见[开发指南](../guides/development.md)。
+本地协议、作用域、公共服务、历史 RPC 和隔离 Gateway 测试位于各模块的 `tests/unit`、`tests/integration`。执行 `bun run test:affected --base origin/main` 与 `bun run check:architecture`；完整回归使用 `bun run test`。测试入口负责先构建再运行所需检查，流程见[开发指南](../guides/development.md)。
 
 隔离进程与 mock 上游的通过结果不代表真实提供商或 Codex Desktop 已验收；真实验收需单独核验模型、协议、工具执行和出站参数。

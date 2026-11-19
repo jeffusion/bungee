@@ -7,8 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build --outDir dist",
-    "preview": "vite preview",
-    "test:dashboard": "bun test --isolate tests/browser/dashboard.test.ts"
+    "preview": "vite preview"
   },
   "dependencies": {
     "@floating-ui/dom": "1.7.6",

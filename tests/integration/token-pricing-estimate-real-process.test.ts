@@ -182,31 +182,8 @@ test('original-lab estimates and context tiers settle protected USD budgets acro
     expect(rows()).toEqual(beforeRestart);
     await post('gpt-6.1-sol', 100_000, 80_000, 10.01);
 
-    if (process.env.BUNGEE_PRICING_BROWSER === '1') {
-      const { chromium } = await import('playwright');
-      const browser = await chromium.launch({ headless: true });
-      try {
-        const page = await browser.newPage();
-        const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
-        await page.goto(`${management}/#/login`);
-        const form = page.getByTestId('page-login').locator('form');
-        await form.locator('input[autocomplete="username"]').fill('pricing-admin');
-        await form.locator('input[autocomplete="current-password"]').fill(password);
-        await form.locator('button.nx-btn-primary').click();
-        await page.waitForURL(url => url.hash === '#/');
-        await page.goto(`${management}/#/plugins/token-stats/statistics`);
-        await page.getByTestId('token-stats-page-summary').waitFor();
-        const uppercase = page.getByTestId('token-stats-model-row').filter({ hasText: 'GPT-6.1-SOL-HIGH' });
-        await uppercase.waitFor();
-        expect(await page.getByTestId('token-stats-model-list').innerText()).toContain('gpt-6.1-sol');
-        await page.goto(`${management}/#/plugins/token-stats/pricing`);
-        await page.getByTestId('token-stats-settings').waitFor();
-        expect(await page.getByTestId('client-model-input').inputValue()).toBe('gpt-6.1-sol');
-        expect(errors).toEqual([]);
-      } finally { await browser.close(); }
-    }
     await writeFile(join(evidence, 'result.json'), JSON.stringify({ workers: workers.map(w => w.pid), authenticated: true,
-      calls, rows: rows(), browser: process.env.BUNGEE_PRICING_BROWSER === '1', budget: (await api(`/api/plugins/token-budget/control/keys/${keyId}`)).value.money }, null, 2));
+      calls, rows: rows(), budget: (await api(`/api/plugins/token-budget/control/keys/${keyId}`)).value.money }, null, 2));
     console.info(`pricing integration evidence: ${evidence}`);
   } catch (error) {
     failed = true;

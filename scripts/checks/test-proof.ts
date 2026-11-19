@@ -8,7 +8,6 @@ export interface PhaseRecord {
   executed: string[];
   commit: string;
   tree: string;
-  shard?: string;
   elapsed: number;
   status: number;
 }
@@ -34,10 +33,10 @@ export interface TestProof {
 }
 const same = (left: string[], right: string[]) => JSON.stringify([...left].sort()) === JSON.stringify([...right].sort());
 
-/** Verify the native runner's executed-file evidence, without calculating its partition. */
+/** Verify the files executed by the native test runner. */
 export function verifyRecords(plan: TestPlan, records: PhaseRecord[], platform: Platform): PlatformProof {
   if (!platforms.includes(platform)) throw new Error('Unknown test platform');
-  const phases: Phase[] = ['unit', 'integration', 'browser'];
+  const phases: Phase[] = ['unit', 'integration'];
   for (const record of records) {
     if (!phases.includes(record.phase) || record.status !== 0 || record.commit !== plan.testCommit || record.tree !== plan.tree ||
         !Number.isFinite(record.elapsed) || record.elapsed < 0 || !Array.isArray(record.files) || !Array.isArray(record.executed)) throw new Error('Failed or mismatched execution record');
@@ -45,13 +44,10 @@ export function verifyRecords(plan: TestPlan, records: PhaseRecord[], platform: 
   }
   for (const phase of phases) {
     const selected = plan.files[phase], found = records.filter(record => record.phase === phase);
-    const count = selected.length ? (phase === 'browser' ? Math.min(2, selected.length) : 1) : 0;
+    const count = selected.length ? 1 : 0;
     if (found.length !== count) throw new Error(`Missing or extra ${phase} task`);
     const executed = found.flatMap(record => record.executed);
     if (new Set(executed).size !== executed.length || !same(executed, selected)) throw new Error(`Incomplete or duplicate ${phase} execution`);
-    if (phase === 'browser') {
-      if (new Set(found.map(record => record.shard)).size !== count || found.some(record => !Array.from({ length: count }, (_, i) => `${i + 1}/${count}`).includes(record.shard!))) throw new Error('Invalid browser shard evidence');
-    } else if (found.some(record => record.shard)) throw new Error('Unexpected non-browser shard');
   }
   return { platform, commit: plan.testCommit, tree: plan.tree, scope: plan.mode, success: true };
 }

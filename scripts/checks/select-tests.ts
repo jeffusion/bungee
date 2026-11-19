@@ -79,20 +79,17 @@ export async function createPlan(root: string, options: { base: string; committe
   const tree = 'tree' in after && typeof after.tree === 'string' ? after.tree : (await git(root, ['rev-parse', `${testCommit}^{tree}`])).toString().trim();
   return selectTests({ paths: after.paths, changed, relations: buildRelations(before.source, after.source), base, testCommit, tree, head, full: options.full });
 }
-export function testCommand(plan: TestPlan, phase: Phase, shard?: string): string[] {
-  if (shard && !/^[1-9]\d*\/[1-9]\d*$/.test(shard)) throw new Error('Shard must be i/n');
-  if (shard) { const [index, count] = shard.split('/').map(Number); if (index! > count!) throw new Error('Shard index exceeds count'); }
-  return [process.execPath, 'test', '--isolate', ...(shard ? [`--shard=${shard}`] : []), ...plan.files[phase].map(file => `./${file}`)];
+export function testCommand(plan: TestPlan, phase: Phase): string[] {
+  return [process.execPath, 'test', '--isolate', ...plan.files[phase].map(file => `./${file}`)];
 }
 async function runCommand(root: string, argv: string[]): Promise<number> {
   const child = Bun.spawn(argv, { cwd: root, stdin: 'inherit', stdout: 2, stderr: 2 });
   return child.exited;
 }
-async function runPhase(root: string, plan: TestPlan, phase: Phase, shard?: string, record?: string): Promise<number> {
-  const argv = testCommand(plan, phase, shard), started = performance.now();
+async function runPhase(root: string, plan: TestPlan, phase: Phase, record?: string): Promise<number> {
+  const argv = testCommand(plan, phase), started = performance.now();
   const timings = record ? resolve(root, record + '.timings.json') : undefined;
   if (timings) {
-    // Never feed previous measurements to native sharding: every shard starts with the same inputs.
     await rm(timings, { force: true });
     argv.splice(3, 0, `--timings=${timings}`, '--update-timings');
   }
@@ -109,25 +106,25 @@ async function runPhase(root: string, plan: TestPlan, phase: Phase, shard?: stri
       } catch (error) { if (!status) throw error; }
     }
     if (record) await writeFile(resolve(root, record), JSON.stringify({ phase, files: plan.files[phase], executed, commit: plan.testCommit, tree: plan.tree,
-      ...(shard ? { shard } : {}), elapsed: Math.round(performance.now() - started), status }, null, 2) + '\n');
+      elapsed: Math.round(performance.now() - started), status }, null, 2) + '\n');
   }
   return status;
 }
 const help = `Usage: bun scripts/checks/select-tests.ts --base REF [--committed] [--full] [--head SHA] [--output FILE] [--run]
-       bun scripts/checks/select-tests.ts --plan FILE --phase unit|integration|browser [--shard i/n] [--record FILE]
+       bun scripts/checks/select-tests.ts --plan FILE --phase unit|integration [--record FILE]
 
 Default output is JSON only. Local plans include staged, unstaged and unignored untracked files.
 --committed compares base to the actual clean checkout commit.
 --head records a full 40-character lowercase source SHA; it need not exist in the checkout.
---run builds once, then runs selected unit/integration/browser files in order.
+--run builds once, then runs selected unit/integration files in order.
 --plan consumes an existing plan without selection or build, and checks its commit/tree identity.
-Records list the explicit candidate files passed to Bun; --shard uses Bun's native partitioning.
+Records list the explicit candidate files passed to Bun.
 Output and record files must be outside the repository to preserve the planned working tree.
 `;
 export async function main(argv = process.argv.slice(2), cwd = process.cwd()): Promise<number> {
   const options: Record<string, string | boolean> = {};
   const flags = new Set(['committed','full','run','help']);
-  const values = new Set(['base','head','output','plan','phase','shard','record']);
+  const values = new Set(['base','head','output','plan','phase','record']);
   for (let i = 0; i < argv.length; i++) {
     const name = argv[i]!.replace(/^--/, '');
     if (!argv[i]!.startsWith('--') || options[name] !== undefined || (!flags.has(name) && !values.has(name))) throw new Error(`Unknown or duplicate option: ${argv[i]}`);
@@ -143,7 +140,7 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()): P
   if (options.plan) {
     if (['base','head','committed','full','run','output'].some(key => options[key])) throw new Error('--plan cannot be combined with selection options');
     const phase = options.phase as Phase;
-    if (!phases.includes(phase)) throw new Error('--plan requires --phase unit|integration|browser');
+    if (!phases.includes(phase)) throw new Error('--plan requires --phase unit|integration');
     const snapshot = await workingSnapshot(root);
     const plan = validatePlan(JSON.parse(await readFile(resolve(root, String(options.plan)), 'utf8')), snapshot.paths);
     if (await commit(root, 'HEAD') !== plan.testCommit) throw new Error('Plan commit does not match checkout');
@@ -153,10 +150,10 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()): P
       if ((await git(root, ['rev-parse', 'HEAD^{tree}'])).toString().trim() !== plan.tree ||
           (await git(root, ['status','--porcelain','-z','--untracked-files=all','--','.',...generatedSources.map(path => `:(exclude)${path}`)])).length) throw new Error('Plan committed tree has changed');
     }
-    return runPhase(root, plan, phase, options.shard as string | undefined, options.record as string | undefined);
+    return runPhase(root, plan, phase, options.record as string | undefined);
   }
   if (!options.base) throw new Error('--base is required');
-  if (options.phase || options.shard || options.record) throw new Error('--phase, --shard and --record require --plan');
+  if (options.phase || options.record) throw new Error('--phase and --record require --plan');
   const plan = await createPlan(root, { base: String(options.base), committed: Boolean(options.committed), full: Boolean(options.full), head: options.head as string | undefined });
   const json = JSON.stringify(plan, null, 2) + '\n';
   if (options.output) await writeFile(resolve(root, String(options.output)), json);

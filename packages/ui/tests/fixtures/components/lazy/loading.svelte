@@ -1,1 +1,0 @@
-<div role="status">Loading</div>
