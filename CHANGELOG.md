@@ -1,3 +1,10 @@
+## [6.16.2](https://github.com/jeffusion/bungee/compare/v6.16.1...v6.16.2) (2026-11-27)
+
+
+### Bug Fixes
+
+* **token-stats:** 查询时估算缺失费用 ([0e16848](https://github.com/jeffusion/bungee/commit/0e1684847971ec52babdea1c495698676c1dfb91))
+
 ## [6.16.1](https://github.com/jeffusion/bungee/compare/v6.16.0...v6.16.1) (2026-11-19)
 
 
