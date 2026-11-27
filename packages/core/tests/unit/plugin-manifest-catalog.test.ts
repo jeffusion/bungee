@@ -67,6 +67,7 @@ describe('PluginManifestCatalog filesystem snapshot', () => {
       'llm-tps',
       'model-mapping',
       'models-dev',
+      'request-body-redaction',
       'request-logs',
       'signature-repair',
       'token-budget',

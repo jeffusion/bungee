@@ -8,7 +8,7 @@ const BUILTIN_PLUGIN_NAMES = [
   'anthropic-request-sanitizer', 'anthropic-tool-name-transformer',
   'chatgpt-oauth', 'codex-router', 'deepseek-reasoning-fix',
   'key-access', 'key-rate-limit', 'llm-protocol-adapter', 'llm-tps', 'model-mapping', 'models-dev',
-  'request-logs', 'signature-repair', 'token-budget', 'token-metering', 'token-stats', 'user-auth',
+  'request-body-redaction', 'request-logs', 'signature-repair', 'token-budget', 'token-metering', 'token-stats', 'user-auth',
 ];
 
 describe('builtin plugin manifests', () => {

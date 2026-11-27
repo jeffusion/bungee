@@ -4,8 +4,9 @@ import { LLM_TPS_UPSTREAM_HOST } from './llm-tps-upstream-host';
 import { ACCESS_BASELINE } from './baseline';
 import { ACCESS_LOG_TRANSPORT_TYPE } from './access-log-transport-type';
 import { ACCESS_LOG_RECORD_IDENTITY } from './access-log-record-identity';
+import { REQUEST_BODY_REDACTION_STATS } from './request-body-redaction-stats';
 import type { Migration } from './migration.types';
 /** Frozen baseline and consecutive incremental migrations. */
-export const migrations: readonly Migration[] = [ACCESS_BASELINE, LLM_TPS_SAMPLES, LLM_TPS_MODEL, LLM_TPS_UPSTREAM_HOST, ACCESS_LOG_TRANSPORT_TYPE, ACCESS_LOG_RECORD_IDENTITY];
+export const migrations: readonly Migration[] = [ACCESS_BASELINE, LLM_TPS_SAMPLES, LLM_TPS_MODEL, LLM_TPS_UPSTREAM_HOST, ACCESS_LOG_TRANSPORT_TYPE, ACCESS_LOG_RECORD_IDENTITY, REQUEST_BODY_REDACTION_STATS];
 export type { Migration, MigrationResult, MigrationRecord } from './migration.types';
 export { MigrationManager } from './migration-manager';

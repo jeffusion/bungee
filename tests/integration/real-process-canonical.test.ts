@@ -1665,6 +1665,121 @@ async function cleanupDirect(children: readonly ChildProcess[], upstream: Return
   if (errors.length > 0) throw new AggregateError(errors, 'canonical test cleanup failed');
 }
 
+test('request-body-redaction transforms JSON before it reaches the upstream', async () => {
+  const lease = await reservePortBlock();
+  const root = makeCanonicalTempDir('bungee-body-redaction', { daemonSafe: true });
+  const children: ChildProcess[] = [];
+  let upstream: ReturnType<typeof Bun.serve> | undefined;
+  const received: { body: unknown; encoding: string | null }[] = [];
+  try {
+    upstream = Bun.serve({
+      hostname: '127.0.0.1', port: 0,
+      async fetch(request) {
+        if (request.method !== 'POST') return new Response(null, { status: 405 });
+        received.push({ body: await request.json(), encoding: request.headers.get('content-encoding') });
+        return Response.json({ object: 'chat.completion' });
+      },
+    });
+    const fixture = await makeFixture(root, 'redaction', upstream.port!);
+    const plugin = 'request-body-redaction';
+    await cp(resolve(import.meta.dir, `../../packages/core/dist/plugins/${plugin}`), join(fixture.pluginsPath, plugin), { recursive: true });
+    const child = spawnCore(fixture, lease, 1, {
+      HOME: fixture.root, USERPROFILE: fixture.root,
+      DATA_DIR: join(fixture.root, 'data'),
+      BUNGEE_FILE_LOG_DIR: join(fixture.root, 'logs'),
+      BUNGEE_BODY_LOG_DIR: join(fixture.root, 'bodies'),
+      BUNGEE_HEADER_LOG_DIR: join(fixture.root, 'headers'),
+    });
+    children.push(child);
+    await waitForFixturePublication({
+      base: `http://127.0.0.1:${lease.base}`, revision: 1,
+      childExited: () => child.exitCode !== null || child.signalCode !== null,
+    });
+    const config = aggregate(upstream.port!, '/unbound');
+    const unbound = config.logical_configuration.routes[0]!;
+    const candidate: ConfigurationAggregate = {
+      ...config,
+      plugin_activations: [{ plugin_name: plugin }],
+      logical_configuration: {
+        ...config.logical_configuration,
+        routes: [unbound, ...[
+          { path: '/redacted', rules: [
+            { type: 'literal', pattern: 'case.sensitive' },
+            { type: 'regex', pattern: '(?i)acct-[0-9]+', replacement: '$1' },
+            { type: 'literal', pattern: '[REDACTED] remove-me', replacement: '' },
+          ] },
+          { path: '/invalid', rules: [{ type: 'regex', pattern: '(' }] },
+        ].map(({ path, rules }, index) => ({
+          ...unbound, id: randomUUID(), position: index + 2, path,
+          service_references: unbound.service_references.map(reference => ({ ...reference, id: randomUUID() })),
+          plugins: [{ id: randomUUID(), position: 1, name: plugin, enabled: true, options: { rules } }],
+        }))],
+      },
+    };
+    const mutationId = randomUUID();
+    const saved = await fetch(`http://127.0.0.1:${lease.base}/api/config`, {
+      method: 'PUT', headers: configurationHeaders(),
+      body: JSON.stringify({ expected_revision: 1, aggregate: candidate, mutation_id: mutationId }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    const savedBody = await saved.text();
+    if (saved.status !== 202) throw new Error(`redaction configuration not accepted: ${saved.status} ${savedBody}`);
+    await awaitConverged(lease.base, mutationId);
+
+    const statsUrl = `http://127.0.0.1:${lease.base}/api/plugins/${plugin}/control/stats`;
+    const readStats = async (signal: AbortSignal) => {
+      const response = await fetch(statsUrl, { signal });
+      const stats = await response.json();
+      expect({ status: response.status, stats }).toMatchObject({ status: 200 });
+      return stats;
+    };
+    expect(await readStats(AbortSignal.timeout(5_000))).toEqual({
+      processedRequests: 0, redactedRequests: 0, replacements: 0, reportingIncomplete: false,
+    });
+
+    const post = (route: string, body: BodyInit, encoding?: string) => fetch(`http://127.0.0.1:${lease.base + 1}${route}/v1/chat/completions`, {
+      method: 'POST', body, signal: AbortSignal.timeout(5_000),
+      headers: { ...configurationHeaders(), ...(encoding ? { 'content-encoding': encoding } : {}) },
+    });
+    const body = '{"model":"local-test","messages":[{"role":"user","content":"🔒 case.sensitive case.sensitive Acct-123 acct-456"}],"metadata":{"case.sensitive":[7,true,null,"case.sensitive remove-me","caseXsensitive","Case.sensitive"],"__proto__":"case.sensitive"}}';
+    const redacted = await post('/redacted', Bun.gzipSync(body), 'gzip');
+    expect(redacted.status).toBe(200);
+    expect(await redacted.json()).toEqual({ object: 'chat.completion' });
+    expect(received).toEqual([{ encoding: null, body: JSON.parse(
+      '{"model":"local-test","messages":[{"role":"user","content":"🔒 [REDACTED] [REDACTED] $1 $1"}],"metadata":{"case.sensitive":[7,true,null,"","caseXsensitive","Case.sensitive"],"__proto__":"[REDACTED]"}}',
+    ) }]);
+
+    const passthrough = await post('/unbound', body);
+    expect(passthrough.status).toBe(200);
+    await passthrough.text();
+    expect(received[1]).toEqual({ body: JSON.parse(body), encoding: null });
+
+    for (const [route, input, status, error] of [
+      ['/invalid', body, 503, 'invalid_redaction_rules'],
+      ['/redacted', 'case.sensitive', 400, 'invalid_json_body'],
+    ] as const) {
+      const rejected = await post(route, input);
+      expect(rejected.status).toBe(status);
+      expect(await rejected.json()).toMatchObject({ error });
+    }
+    const unmatched = '{"model":"local-test","messages":[{"role":"user","content":"public text"}]}';
+    const unchanged = await post('/redacted', unmatched);
+    expect(unchanged.status).toBe(200);
+    await unchanged.text();
+    expect(received).toHaveLength(3);
+    expect(received[2]).toEqual({ body: JSON.parse(unmatched), encoding: null });
+
+    const expectedStats = {
+      processedRequests: 2, redactedRequests: 1, replacements: 7, reportingIncomplete: false,
+    };
+    await waitUntil(async signal => (await readStats(signal)).processedRequests >= expectedStats.processedRequests,
+      'redaction stats did not record both completed runs', { timeoutMs: 5_000 });
+    expect(await readStats(AbortSignal.timeout(5_000))).toEqual(expectedStats);
+  } finally {
+    await cleanupDirect(children, upstream, root, lease);
+  }
+}, { timeout: 90_000 });
+
 test.each(['publication', 'startup'] as const)('cold startup serves after an admitted %s worker left unreleased cleanup', async (origin) => {
   const root = makeCanonicalTempDir('bungee-canonical-failed-cleanup', { daemonSafe: true });
   const { lease, upstream, managedUpstream, fixture, daemon } = await createUnownedCoreSetup(root, reservePortBlock, () => 'recovered');
