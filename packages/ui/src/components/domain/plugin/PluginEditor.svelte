@@ -24,7 +24,10 @@
   let availablePlugins = $state<PluginSchema[]>([]);
   let globalPluginNames = $state(new Set<string>());
   let visiblePlugins = $derived((plugins ?? []).map((plugin, index) => ({ plugin, index }))
-    .filter(({ plugin }) => scope === 'global' || !globalPluginNames.has(typeof plugin === 'string' ? plugin : plugin.name)));
+    .filter(({ plugin }) => {
+      const name = typeof plugin === 'string' ? plugin : plugin.name;
+      return name !== 'request-body-redaction' && (scope === 'global' || !globalPluginNames.has(name));
+    }));
   let showAddDialog = $state(false);
   let selectedPluginName = $state<string | null>(null);
   let editingPluginIndex = $state<number | null>(null);
@@ -36,7 +39,7 @@
       const [schemas, catalog] = await Promise.all([
         PluginsAPI.getEnabledSchemas(scope || 'route'), PluginsAPI.list(),
       ]);
-      availablePlugins = Object.values(schemas);
+      availablePlugins = Object.values(schemas).filter(plugin => plugin.name !== 'request-body-redaction');
       globalPluginNames = new Set(catalog.filter(plugin => plugin.runtimeScope === 'global').map(plugin => plugin.name));
 
       if (availablePlugins.length === 0) {

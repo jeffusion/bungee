@@ -1,0 +1,48 @@
+{
+  "name": "request-body-redaction",
+  "version": "1.0.0",
+  "builtin": true,
+  "schemaVersion": 3,
+  "artifactKind": "runtime-plugin",
+  "main": "server/index.ts",
+  "runtimeScope": "scoped",
+  "capabilities": ["hooks", "api", "nativeWidgetsStatic", "dynamicRuntimeLoad", "controlPlane"],
+  "control": { "entry": "server/control.ts", "rpc": [] },
+  "uiExtensionMode": "native-static",
+  "engines": { "bungee": "^6.0.0" },
+  "metadata": {
+    "name": "metadata.name",
+    "description": "plugin.description",
+    "icon": "shield"
+  },
+  "ui": {
+    "components": [{ "name": "RequestBodyRedactionPage", "entry": "ui/RequestBodyRedactionPage.svelte" }]
+  },
+  "contributes": {
+    "api": [{ "path": "/stats", "methods": ["GET"], "capability": "logs.read", "handler": "getStats", "execution": "control" }],
+    "navigation": [{ "label": "metadata.name", "path": "/settings", "target": "header", "icon": "shield", "component": "RequestBodyRedactionPage", "layout": "standalone" }]
+  },
+  "configSchema": [
+    {
+      "name": "rules",
+      "type": "json",
+      "label": "config.rules.label",
+      "description": "config.rules.description",
+      "default": []
+    }
+  ],
+  "translations": {
+    "en": {
+      "metadata.name": "Request Redaction",
+      "plugin.description": "Redact JSON request bodies before forwarding",
+      "config.rules.label": "Redaction rules",
+      "config.rules.description": "Ordered JSON array of rules: type (literal or regex), pattern, and optional replacement (default: [REDACTED])."
+    },
+    "zh-CN": {
+      "metadata.name": "请求脱敏",
+      "plugin.description": "转发前脱敏 JSON 请求正文",
+      "config.rules.label": "脱敏规则",
+      "config.rules.description": "按序执行的 JSON 规则数组：type（literal 或 regex）、pattern、可选 replacement（默认 [REDACTED]）。"
+    }
+  }
+}
