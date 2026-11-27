@@ -2,9 +2,11 @@ import type { Database } from 'bun:sqlite';
 import type { PluginStorage, PluginObservationStorage, TokenStatsAttempt, TokenStatsGroupBy, TokenStatsMeteringStorage,
   TokenStatsMetricName, TokenStatsSnapshotMetrics, TokenStatsValueSource, TokenStatsRange } from '@jeffusion/bungee-core/plugin';
 import { TOKEN_STATS_RETENTION_MS, TOKEN_STATS_RANGES, tokenStatsWindow } from '@jeffusion/bungee-core/plugin';
+import type { ModelsDevModelMatch } from '../../models-dev/contract';
+import { costNanoUsdOf, costOf } from './pricing';
 
 /** Explicit assembly for legacy fixtures and embedders; the host never checks a business name. */
-export function withTokenStatsMetering<T extends PluginStorage>(storage: T): T & { metering: TokenStatsMeteringStorage } {
+export function withTokenStatsMetering<T extends PluginStorage>(storage: T): T & { metering: SQLiteTokenStatsMetering } {
   if (!storage.observation) throw new Error('token-stats metering storage is required');
   return Object.assign(storage, { metering: new SQLiteTokenStatsMetering(storage.observation) });
 }
@@ -22,6 +24,16 @@ const TOKEN_STATS_BUSY_TIMEOUT_MS = 5;
 const EMPTY_METRICS: Record<TokenStatsMetricName, number> = Object.fromEntries(
   TOKEN_STATS_METRICS.map((name) => [name, 0]),
 ) as Record<TokenStatsMetricName, number>;
+
+type WindowQuery = Parameters<TokenStatsMeteringStorage['queryWindowSnapshot']>[0];
+type QueryPricing = {
+  throughRow: number;
+  prices: readonly (readonly [string, ModelsDevModelMatch])[];
+};
+type UnpricedUsage = Pick<TokenStatsAttempt, 'model' | 'input_tokens' | 'output_tokens' | 'cache_read_tokens' | 'cache_write_tokens'> & {
+  bucketStartMs: number | null;
+};
+const PRICEABLE_USAGE = `cost_usd IS NULL AND input_tokens IS NOT NULL AND output_tokens IS NOT NULL AND model <> 'unknown'`;
 
 export class SQLiteTokenStatsMetering implements TokenStatsMeteringStorage {
   constructor(private readonly observation: PluginObservationStorage) {}
@@ -53,13 +65,23 @@ export class SQLiteTokenStatsMetering implements TokenStatsMeteringStorage {
     });
   }
 
-  async queryWindowSnapshot(input: {
-    asOfMs: number;
-    range: TokenStatsRange;
-    groupBy: TokenStatsGroupBy;
-    timeZone?: string;
-    keyId?: string;
-  }): Promise<{
+  async queryPricingModels(input: WindowQuery): Promise<{ models: string[]; throughRow: number }> {
+    const window = queryBounds(input);
+    return this.observation.withDatabase((db) => db.transaction(() => {
+      // Do not include newly inserted rows between the model lookup and the priced query.
+      const { throughRow } = db.query<{ throughRow: number }, []>(
+        'SELECT COALESCE(MAX(rowid), 0) AS throughRow FROM token_stats_attempts',
+      ).get()!;
+      const { index, where, params } = attemptWindow({ ...window, throughRow });
+      const rows = db.query<{ model: string }, (number | string)[]>(`
+        SELECT DISTINCT model FROM token_stats_attempts INDEXED BY ${index}
+        WHERE ${where} AND ${PRICEABLE_USAGE}
+      `).all(...params);
+      return { models: rows.map(row => row.model), throughRow };
+    }).deferred());
+  }
+
+  async queryWindowSnapshot(input: WindowQuery & { pricing?: QueryPricing }): Promise<{
     all: TokenStatsSnapshotMetrics;
     data: Array<{ dimension: string; bucketStartMs?: number; metrics: TokenStatsSnapshotMetrics }>;
     bucketMs?: number;
@@ -67,17 +89,37 @@ export class SQLiteTokenStatsMetering implements TokenStatsMeteringStorage {
     bucketEndMs?: number;
     present: boolean;
   }> {
+    const window = queryBounds(input);
+    const { bucketMs, bucketStarts, bucketEndMs } = window;
+    const pricing = input.pricing;
+    const { sql, params, missingSql } = buildTokenStatsWindowSnapshotQuery({ ...window, throughRow: pricing?.throughRow });
     return this.observation.withDatabase((db) => {
-      validateTokenStatsTimestamp(input.asOfMs, 'asOfMs');
-      if (!(TOKEN_STATS_RANGES as readonly string[]).includes(input.range)) throw new Error('invalid token-stats range');
-      if (!['model', 'time'].includes(input.groupBy)) throw new Error('invalid token-stats groupBy');
-      const window = tokenStatsWindow(input.range, input.asOfMs, input.timeZone);
-      const startMs = Math.max(window.startMs, Date.now() - TOKEN_STATS_RETENTION_MS);
-      const bucketMs = input.groupBy === 'time' ? window.bucketMs : undefined;
-      const bucketStarts = input.groupBy === 'time' ? window.bucketStarts : undefined;
-      const bucketEndMs = input.groupBy === 'time' ? window.bucketEndMs : undefined;
-      const { sql, params } = buildTokenStatsWindowSnapshotQuery({ ...window, startMs, groupBy: input.groupBy, bucketMs, bucketStarts, keyId: input.keyId });
-      const rows = db.query<Record<string, number | string | null>, (number | string)[]>(sql).all(...params);
+      const read = () => {
+        const rows = db.query<Record<string, number | string | null>, (number | string)[]>(sql).all(...params);
+        if (!pricing?.prices.length) return rows;
+        const prices = new Map(pricing.prices);
+        const missing = db.query<UnpricedUsage, (number | string)[]>(missingSql)
+          .iterate(...params, JSON.stringify([...prices.keys()]));
+        const byGroup = new Map<string, number>();
+        let total: number | undefined;
+        for (const row of missing) {
+          const nano = costNanoUsdOf(costOf(prices.get(row.model)!, {
+            inputTokens: row.input_tokens ?? undefined, outputTokens: row.output_tokens ?? undefined,
+            cacheReadTokens: row.cache_read_tokens ?? undefined, cacheWriteTokens: row.cache_write_tokens ?? undefined,
+          }));
+          if (nano === null) continue;
+          const cost = nano / 1e9;
+          total = (total ?? 0) + cost;
+          const key = JSON.stringify([row.model, row.bucketStartMs]);
+          byGroup.set(key, (byGroup.get(key) ?? 0) + cost);
+        }
+        for (const row of rows) {
+          const extra = row.kind === 'all' ? total : byGroup.get(JSON.stringify([row.dimension, row.bucketStartMs]));
+          if (extra !== undefined) row.estimatedCostUsd = Number(row.estimatedCostUsd ?? 0) + extra;
+        }
+        return rows;
+      };
+      const rows = pricing?.prices.length ? db.transaction(read).deferred() : read();
       const allRow = rows.find((row) => row.kind === 'all');
       const dataRows = rows.filter((row) => row.kind === 'data');
       const metrics = (row: Record<string, number | string | null> | undefined): TokenStatsSnapshotMetrics => {
@@ -124,6 +166,34 @@ export class SQLiteTokenStatsMetering implements TokenStatsMeteringStorage {
 
 }
 
+function queryBounds(input: WindowQuery) {
+  validateTokenStatsTimestamp(input.asOfMs, 'asOfMs');
+  if (!(TOKEN_STATS_RANGES as readonly string[]).includes(input.range)) throw new Error('invalid token-stats range');
+  if (!['model', 'time'].includes(input.groupBy)) throw new Error('invalid token-stats groupBy');
+  const window = tokenStatsWindow(input.range, input.asOfMs, input.timeZone);
+  return {
+    ...window,
+    startMs: Math.max(window.startMs, Date.now() - TOKEN_STATS_RETENTION_MS),
+    groupBy: input.groupBy,
+    bucketMs: input.groupBy === 'time' ? window.bucketMs : undefined,
+    bucketStarts: input.groupBy === 'time' ? window.bucketStarts : undefined,
+    bucketEndMs: input.groupBy === 'time' ? window.bucketEndMs : undefined,
+    keyId: input.keyId,
+  };
+}
+
+function attemptWindow(input: { startMs: number; endMs: number; keyId?: string; throughRow?: number }) {
+  const { startMs, endMs, keyId, throughRow } = input;
+  if (keyId !== undefined && (typeof keyId !== 'string' || !keyId || keyId.length > 128)) throw new Error('invalid token-stats keyId');
+  if (throughRow !== undefined && (!Number.isSafeInteger(throughRow) || throughRow < 0)) throw new Error('invalid token-stats row boundary');
+  const keyFilter = keyId === undefined ? '' : keyId === '__unattributed__' ? ' AND key_id IS NULL' : ' AND key_id = ?';
+  return {
+    index: keyId === undefined ? 'idx_token_stats_attempts_finished' : 'idx_token_stats_attempts_key_finished',
+    where: `finished_at_ms >= ? AND finished_at_ms < ?${keyFilter}${throughRow === undefined ? '' : ' AND rowid <= ?'}`,
+    params: [startMs, endMs, ...(keyId !== undefined && keyId !== '__unattributed__' ? [keyId] : []), ...(throughRow === undefined ? [] : [throughRow])],
+  };
+}
+
 export function buildTokenStatsWindowSnapshotQuery(input: {
   startMs: number;
   endMs: number;
@@ -131,7 +201,8 @@ export function buildTokenStatsWindowSnapshotQuery(input: {
   bucketMs?: number;
   bucketStarts?: readonly number[];
   keyId?: string;
-}): { sql: string; params: (number | string)[] } {
+  throughRow?: number;
+}): { sql: string; missingSql: string; params: (number | string)[] } {
   const metrics = (alias: string) => `
     COALESCE(SUM(CASE WHEN ${alias}.input_source = 'usage' THEN ${alias}.input_tokens ELSE 0 END), 0) AS officialInputTokens,
     COALESCE(SUM(CASE WHEN ${alias}.output_source = 'usage' THEN ${alias}.output_tokens ELSE 0 END), 0) AS officialOutputTokens,
@@ -159,9 +230,7 @@ export function buildTokenStatsWindowSnapshotQuery(input: {
     || input.bucketStarts.some((start, i, starts) => !Number.isSafeInteger(start) || start < 0 || i > 0 && start <= starts[i - 1]!))) {
     throw new Error('invalid token-stats bucketStarts');
   }
-  if (input.keyId !== undefined && (typeof input.keyId !== 'string' || !input.keyId || input.keyId.length > 128)) throw new Error('invalid token-stats keyId');
-  const keyFilter = input.keyId === undefined ? '' : input.keyId === '__unattributed__' ? ' AND key_id IS NULL' : ' AND key_id = ?';
-  const index = input.keyId === undefined ? 'idx_token_stats_attempts_finished' : 'idx_token_stats_attempts_key_finished';
+  const { index, where, params } = attemptWindow(input);
   const origin = input.bucketStarts?.[0] ?? 0;
   const uniform = !input.bucketStarts || input.bucketStarts.every((start, i) => start === origin + i * input.bucketMs!);
   const bucketStart = input.groupBy !== 'time' ? 'NULL' : uniform
@@ -176,14 +245,19 @@ export function buildTokenStatsWindowSnapshotQuery(input: {
     sql: `
       WITH window_rows AS MATERIALIZED (
         SELECT * FROM token_stats_attempts INDEXED BY ${index}
-        WHERE finished_at_ms >= ? AND finished_at_ms < ?${keyFilter}
+        WHERE ${where}
       )
       SELECT 'all' AS kind, 'all' AS dimension, NULL AS bucketStartMs, ${metrics('attempt')}, (COUNT(*) > 0) AS present
       FROM window_rows AS attempt
       ${grouped}
       ORDER BY kind, bucketStartMs, dimension
     `,
-    params: [input.startMs, input.endMs, ...(input.keyId !== undefined && input.keyId !== '__unattributed__' ? [input.keyId] : [])],
+    missingSql: `
+      SELECT model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, ${bucketStart} AS bucketStartMs
+      FROM token_stats_attempts AS attempt INDEXED BY ${index}
+      WHERE ${where} AND ${PRICEABLE_USAGE} AND model IN (SELECT value FROM json_each(?))
+    `,
+    params,
   };
 }
 

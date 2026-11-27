@@ -28,7 +28,7 @@ function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
-function costOf(match: ModelsDevModelMatch, input: TokenStatsPricingInput): number | null {
+export function costOf(match: ModelsDevModelMatch, input: TokenStatsPricingInput): number | null {
   const inputTokens = input.inputTokens;
   const outputTokens = input.outputTokens;
   if (!isNonNegativeInteger(inputTokens) || !isNonNegativeInteger(outputTokens)) return null;
@@ -52,6 +52,12 @@ function costOf(match: ModelsDevModelMatch, input: TokenStatsPricingInput): numb
     + cacheWrites * cacheWrite;
   const cost = total / TOKENS_PER_UNIT;
   return Number.isFinite(cost) && cost >= 0 ? cost : null;
+}
+
+export function costNanoUsdOf(cost: number | null): number | null {
+  if (cost === null || !Number.isFinite(cost) || cost < 0) return null;
+  const nano = Math.round(cost * 1e9);
+  return Number.isSafeInteger(nano) ? nano : null;
 }
 
 /**
