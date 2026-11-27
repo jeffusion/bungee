@@ -1,5 +1,8 @@
 import { initializeTokenStatsTestDatabase } from '../../../../packages/core/tests/helpers/token-stats-database';
 import { fileURLToPath } from 'node:url';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { withTokenStatsMetering } from '../../server/storage';
 type StatsTestStorage = ReturnType<typeof withTokenStatsMetering<SQLitePluginStorage>>;
 import { readFileSync } from 'node:fs';
@@ -19,6 +22,10 @@ import { createControl } from '../../server/control';
 import { TokenStatsRepository } from '../../server/repository';
 import { TokenStatsPricing } from '../../server/pricing';
 import { rawCatalogService } from '../helpers/catalog-service';
+import { createAsyncMasterStats, migrateAccessDatabaseAsync } from '../../../../packages/core/src/master-runtime/observability-client';
+import { MODELS_DEV_CATALOG_SERVICE_ID } from '../../../models-dev/contract';
+import { buildCatalogIndex } from '../../../models-dev/server/catalog';
+import { CatalogView, catalogServiceOf } from '../../../models-dev/server/local';
 
 const databases: Database[] = [];
 const providers = new Map<InstanceType<typeof TokenStatsPlugin>, InstanceType<typeof TokenMeteringPlugin>>();
@@ -144,6 +151,77 @@ describe('token-stats control artifact', () => {
       }
     } finally { control.dispose(); }
   });
+
+  test('reports price only missing amounts at query time without writing back to access storage', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'bungee-token-stats-query-'));
+    const path = join(root, 'access.db');
+    let observer: Awaited<ReturnType<typeof createAsyncMasterStats>> | undefined;
+    let control: ReturnType<typeof createControl> | undefined;
+    try {
+      const plugins = await PluginManifestCatalog.build({ scanDirectories: [fileURLToPath(new URL('../../..', import.meta.url))] });
+      await migrateAccessDatabaseAsync(path);
+      observer = await createAsyncMasterStats(path);
+      await observer.registerObservationAdapter!('token-stats', plugins.get('token-stats')!.controlPath!);
+      const metering = observer.observationAdapter!('token-stats')! as unknown as StatsTestStorage['metering'];
+      const storage = Object.assign(createStorage(), { metering });
+      await new TokenStatsRepository(storage).configureMappings([
+        { source: 'alias', provider: 'openai', model: 'gpt-4o-mini' },
+      ]);
+      const view = new CatalogView();
+      const updatePrice = (input: number) => {
+        const shared = { id: 'shared', name: 'Shared', cost: { input, output: 6 } };
+        view.apply(buildCatalogIndex({ version: input, fetchedAt: Date.now(), catalog: {
+          xai: { id: 'xai', models: { shared, 'grok-4.7': {
+            id: 'grok-4.7', name: 'Grok 4.7', cost: { input, output: 6, cache_read: 0.5 },
+          } } },
+          openai: { ...costCatalog.openai, models: { ...costCatalog.openai.models, shared } },
+        } }));
+      };
+      const services = new PluginServiceHost();
+      services.createContext('models-dev').publish(MODELS_DEV_CATALOG_SERVICE_ID, 1, catalogServiceOf(view));
+      services.markReady('models-dev');
+      const context = { ...host(storage), services: services.createContext('token-stats', 'global', { 'models-dev': '^1.0.0' }) };
+      control = createControl(context);
+      const now = Date.now() - 1000;
+      for (const [id, model, cost, output, key] of [
+        ['live', 'grok-4.7', null, 100_000, 'key-a'],
+        ['zero', 'grok-4.7', 0, 100_000, 'key-a'],
+        ['stored', 'gpt-4o-mini', 7, 100_000, 'key-a'],
+        ['alias', 'alias', null, 100_000, 'key-a'],
+        ['ambiguous', 'shared', null, 100_000, 'key-a'],
+        ['unknown-usage', 'openai:gpt-4o-mini', null, null, 'key-a'],
+        ['other-key', 'grok-4.7', null, 100_000, 'key-b'],
+      ] as const) {
+        await metering.recordAttempt({
+          ...attemptRow(id, now), model, key_id: key, cost_usd: cost,
+          input_tokens: 1_000_000, input_source: 'usage', cache_read_tokens: 250_000,
+          output_tokens: output, output_source: output === null ? 'unknown' : 'usage',
+        });
+      }
+      for (const [inputPrice, expected] of [[2, 2.225], [4, 3.725]] as const) {
+        updatePrice(inputPrice);
+        for (const groupBy of ['model', 'time']) {
+          const response = await invoke(control, new Request(`http://localhost/stats?range=1h&groupBy=${groupBy}&keyId=key-a`), context);
+          expect(response.status).toBe(200);
+          const report = await response.json();
+          expect(report.upstreamAttempts).toBe(6);
+          expect(report.estimatedCostUsd).toBeCloseTo(8.2 + expected, 12);
+          expect(Object.fromEntries(report.data.map((row: { dimension: string; estimatedCostUsd: number | null }) =>
+            [row.dimension, row.estimatedCostUsd]))).toEqual({
+            'grok-4.7': expected, 'gpt-4o-mini': 7, alias: 1.2, shared: null, 'openai:gpt-4o-mini': null,
+          });
+        }
+      }
+      const db = new Database(path, { readonly: true });
+      try {
+        expect(db.query('SELECT attempt_id, cost_usd FROM token_stats_attempts WHERE cost_usd IS NOT NULL ORDER BY attempt_id').all())
+          .toEqual([{ attempt_id: 'stored', cost_usd: 7 }, { attempt_id: 'zero', cost_usd: 0 }]);
+      } finally { db.close(); }
+    } finally {
+      control?.dispose();
+      try { await observer?.close(); } finally { await rm(root, { recursive: true, force: true }); }
+    }
+  }, 20_000);
 
   test('accepts the host plugin config constructor shape and initializes without network access', async () => {
     const storage = createStorage();

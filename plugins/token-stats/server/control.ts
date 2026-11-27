@@ -194,8 +194,10 @@ class TokenStatsControl implements PluginControl {
         }
         const range = rawRange ?? '24h';
         const groupBy = (rawGroupBy ?? 'model') as GroupByDimension;
+        let catalog: ModelsDevCatalogService | undefined;
+        try { catalog = this.catalogService(); } catch { /* Stored costs remain available without the optional catalog. */ }
         const payload = await abortable(
-          this.repository.query(range, groupBy, Date.now(), timeZone, keyId),
+          this.repository.query(range, groupBy, Date.now(), timeZone, keyId, catalog),
           context.requestSignal,
           context.signal,
         );
@@ -282,5 +284,6 @@ export default { supportsOnlinePreparation: true, createControl } satisfies Cont
 export function createObservationAdapter(observation: import('@jeffusion/bungee-core/plugin').PluginObservationStorage) {
   const leaf = new SQLiteTokenStatsMetering(observation);
   return Object.freeze({recordAttempt: leaf.recordAttempt.bind(leaf), queryWindowSnapshot: leaf.queryWindowSnapshot.bind(leaf),
+    queryPricingModels: leaf.queryPricingModels.bind(leaf),
     listClientModels: leaf.listClientModels.bind(leaf)});
 }

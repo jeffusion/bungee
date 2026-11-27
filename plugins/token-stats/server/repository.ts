@@ -7,6 +7,7 @@ import type {
   TokenStatsRange,
 } from '@jeffusion/bungee-core/plugin';
 import type { CanonicalTokenAccountingEventV2 } from '@jeffusion/bungee-llms/plugin-api';
+import type { ModelsDevCatalogService, ModelsDevModelMatch } from '../../models-dev/contract';
 // The control artifact needs only authority names, not the worker conversion runtime.
 const TOKEN_ACCOUNTING_AUTHORITIES = ['official', 'local', 'heuristic', 'partial', 'none'] as const satisfies readonly CanonicalTokenAccountingEventV2['inputAuthority'][];
 import { SQLiteTokenStatsMetering } from './storage';
@@ -210,7 +211,7 @@ export function attemptRowFromEvent(
 }
 
 export class TokenStatsRepository {
-  private readonly metering: TokenStatsMeteringStorage;
+  private readonly metering: TokenStatsMeteringStorage & Partial<Pick<SQLiteTokenStatsMetering, 'queryPricingModels'>>;
 
   constructor(private readonly storage: PluginStorage) {
     if (!storage.metering && !storage.observation) throw new TokenStatsRepositoryError('token-stats metering storage is required');
@@ -229,13 +230,30 @@ export class TokenStatsRepository {
     return true;
   }
 
-  async query(range: string, groupBy: GroupByDimension, asOfMs = Date.now(), timeZone?: string, keyId?: string): Promise<AggregateDto> {
+  async query(range: string, groupBy: GroupByDimension, asOfMs = Date.now(), timeZone?: string, keyId?: string, catalog?: ModelsDevCatalogService): Promise<AggregateDto> {
     if (!(TOKEN_STATS_RANGES as readonly string[]).includes(range)) throw new TokenStatsRepositoryError('invalid token-stats range');
     if (groupBy !== 'model' && groupBy !== 'time') {
       throw new TokenStatsRepositoryError('invalid token-stats groupBy');
     }
     if (!Number.isSafeInteger(asOfMs) || asOfMs < 0) throw new TokenStatsRepositoryError('invalid token-stats asOfMs');
-    const snapshot = await this.metering.queryWindowSnapshot({ asOfMs, range: range as TokenStatsRange, groupBy, timeZone, keyId });
+    const window = { asOfMs, range: range as TokenStatsRange, groupBy, timeZone, keyId };
+    let input: Parameters<SQLiteTokenStatsMetering['queryWindowSnapshot']>[0] = window;
+    if (catalog && this.metering.queryPricingModels) {
+      const mappings = await this.mappings().catch(() => undefined);
+      if (mappings) {
+        const { models, throughRow } = await this.metering.queryPricingModels(window);
+        const bySource = new Map(mappings.map(mapping => [mapping.source, mapping]));
+        const prices: Array<[string, ModelsDevModelMatch]> = [];
+        for (const model of models) {
+          const mapped = bySource.get(model);
+          // Stored wire protocol is not a pricing provider. Only resolve explicit mappings or exact catalog matches.
+          const price = catalog.resolveModel(mapped ? { model: mapped.model, pricingProvider: mapped.provider } : { model });
+          if (price !== null) prices.push([model, price]);
+        }
+        input = { ...window, pricing: { throughRow, prices } };
+      }
+    }
+    const snapshot = await this.metering.queryWindowSnapshot(input);
     const total = metricsToDto(snapshot.all);
     const { inputTokens, outputTokens, ...summary } = total;
     return {

@@ -7,7 +7,7 @@ import {
 } from '@jeffusion/bungee-core/plugin';
 import { withReportingWriteTimeout } from './storage';
 import { TokenStatsRepository, REPORTING_INCOMPLETE_KEY } from './repository';
-import { TokenStatsPricing } from './pricing';
+import { costNanoUsdOf, TokenStatsPricing } from './pricing';
 import type { PriceModelMapping } from './model-mappings';
 import { MODELS_DEV_CATALOG_CONTRACT_VERSION, MODELS_DEV_CATALOG_SERVICE_ID, type ModelsDevCatalogService } from '../../models-dev/contract';
 
@@ -50,8 +50,7 @@ export class TokenStatsPricingService implements TokenPricingService {
         inputTokens: row.input_tokens ?? undefined, outputTokens: row.output_tokens ?? undefined,
         cacheReadTokens: result.cacheReadTokens, cacheWriteTokens: result.cacheWriteTokens,
       });
-      const nano = raw === null || !Number.isFinite(raw) || raw < 0 ? null : Math.round(raw * 1e9);
-      const costNanoUsd = nano !== null && Number.isSafeInteger(nano) && nano >= 0 ? nano : null;
+      const costNanoUsd = costNanoUsdOf(raw);
       return Object.freeze({ costNanoUsd, costUsd: costNanoUsd === null ? null : costNanoUsd / 1e9 });
     });
     this.results.set(key, pending);
